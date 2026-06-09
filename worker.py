@@ -70,6 +70,8 @@ def process_job(job_data):
     recording_url = job_data.get('recording_url')
     call_duration_seconds = job_data.get('call_duration_seconds', 0)
     billed_minutes = job_data.get('billed_minutes', 0)
+    caller_id = job_data.get('caller_id', '')
+    call_dropped = job_data.get('call_dropped', False)
 
     log.info(f"Processing call {call_id} for agent {agent_name}")
 
@@ -90,7 +92,7 @@ def process_job(job_data):
         # Run AI analysis
         log.info(f"Running AI analysis...")
         from ai_engine import analyze_call as run_analysis
-        result = run_analysis(audio_path, agent_name, call_id)
+        result = run_analysis(audio_path, agent_name, call_id, caller_id=caller_id, call_dropped=call_dropped)
 
         # Save full results to Postgres
         conn = get_db()
@@ -98,13 +100,16 @@ def process_job(job_data):
 
         c.execute('''
             UPDATE calls SET
-                duration=%s, overall_score=%s, emotion=%s, status=%s,
+                duration=%s, overall_score=%s, confidence=%s, emotion=%s, status=%s,
                 flags=%s, scorecard=%s, transcript=%s, summary=%s,
-                agent_extension=%s
+                agent_extension=%s, emotion_delta=%s, requires_human_review=%s,
+                human_review_reason=%s, age_concern=%s, coaching_notes=%s,
+                call_dropped=%s, callback_made=%s, callback_call_id=%s
             WHERE call_id=%s
         ''', (
             result.get('duration', '--'),
             result['overall_score'],
+            result.get('confidence', 100),
             result['emotion'],
             result['status'],
             result['flags'],
@@ -112,6 +117,14 @@ def process_job(job_data):
             result.get('transcript', ''),
             result.get('summary', ''),
             agent_extension,
+            json.dumps(result.get('emotion_delta', {})),
+            result.get('requires_human_review', False),
+            result.get('human_review_reason', ''),
+            json.dumps(result.get('age_concern', {})),
+            result.get('coaching_notes', ''),
+            result.get('call_dropped', False),
+            result.get('is_callback', False),
+            result.get('original_call_id', ''),
             call_id
         ))
 

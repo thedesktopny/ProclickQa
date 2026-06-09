@@ -65,17 +65,28 @@ def init_db():
             call_id TEXT,
             agent_name TEXT,
             agent_extension TEXT,
+            account_worked TEXT,
+            line_issues TEXT DEFAULT 'none',
             duration TEXT,
             call_duration_seconds INTEGER DEFAULT 0,
             billed_minutes INTEGER DEFAULT 0,
             overall_score INTEGER,
+            confidence INTEGER DEFAULT 100,
             emotion TEXT,
+            emotion_delta TEXT,
             status TEXT,
             flags INTEGER DEFAULT 0,
             scorecard TEXT,
             transcript TEXT,
             recording_url TEXT,
             summary TEXT,
+            call_dropped BOOLEAN DEFAULT FALSE,
+            callback_made BOOLEAN DEFAULT FALSE,
+            callback_call_id TEXT,
+            requires_human_review BOOLEAN DEFAULT FALSE,
+            human_review_reason TEXT,
+            age_concern TEXT,
+            coaching_notes TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -486,6 +497,8 @@ def analyze_call():
         recording_url = data.get('recording_url', '')
         call_duration_seconds = data.get('call_duration_seconds', 0)
         billed_minutes = data.get('billed_minutes', 0)
+        caller_id = data.get('caller_id', '')
+        call_dropped = data.get('call_dropped', False)
 
         # Format duration as MM:SS for display
         if call_duration_seconds:
@@ -504,12 +517,12 @@ def analyze_call():
         conn = get_db()
         c = conn.cursor()
         c.execute('''
-            INSERT INTO calls (call_id, agent_name, agent_extension, recording_url, 
-                             call_duration_seconds, billed_minutes, duration, status, overall_score, flags)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO calls (call_id, agent_name, agent_extension, caller_id, recording_url,
+                             call_duration_seconds, billed_minutes, duration, call_dropped, status, overall_score, flags)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT DO NOTHING
-        ''', (call_id, agent_name, agent_extension, recording_url,
-              call_duration_seconds, billed_minutes, duration_display, 'Processing', 0, 0))
+        ''', (call_id, agent_name, agent_extension, caller_id, recording_url,
+              call_duration_seconds, billed_minutes, duration_display, call_dropped, 'Processing', 0, 0))
         conn.commit()
         conn.close()
 
@@ -521,7 +534,11 @@ def analyze_call():
                 'call_id': call_id,
                 'agent_name': agent_name,
                 'agent_extension': agent_extension,
-                'recording_url': recording_url
+                'recording_url': recording_url,
+                'call_duration_seconds': call_duration_seconds,
+                'billed_minutes': billed_minutes,
+                'caller_id': caller_id,
+                'call_dropped': call_dropped
             })
             r.lpush('voiceguard:calls', job)
             return jsonify({
@@ -546,7 +563,7 @@ def analyze_call():
 
             try:
                 urllib.request.urlretrieve(recording_url, audio_path)
-                result = run_analysis(audio_path, agent_name, call_id)
+                result = run_analysis(audio_path, agent_name, call_id, caller_id=caller_id, call_dropped=call_dropped)
             finally:
                 try:
                     os.remove(audio_path)
@@ -556,14 +573,27 @@ def analyze_call():
             conn = get_db()
             c = conn.cursor()
             c.execute('''
-                UPDATE calls SET duration=%s, overall_score=%s, emotion=%s, status=%s,
-                    flags=%s, scorecard=%s, transcript=%s, summary=%s
+                UPDATE calls SET duration=%s, overall_score=%s, confidence=%s, emotion=%s, 
+                    status=%s, flags=%s, scorecard=%s, transcript=%s, summary=%s,
+                    emotion_delta=%s, requires_human_review=%s, human_review_reason=%s,
+                    age_concern=%s, coaching_notes=%s, call_dropped=%s,
+                    callback_made=%s, callback_call_id=%s
                 WHERE call_id=%s
             ''', (
                 result.get('duration', '--'), result['overall_score'],
-                result['emotion'], result['status'], result['flags'],
+                result.get('confidence', 100), result['emotion'],
+                result['status'], result['flags'],
                 json.dumps(result.get('scorecard', {})),
-                result.get('transcript', ''), result.get('summary', ''), call_id
+                result.get('transcript', ''), result.get('summary', ''),
+                json.dumps(result.get('emotion_delta', {})),
+                result.get('requires_human_review', False),
+                result.get('human_review_reason', ''),
+                json.dumps(result.get('age_concern', {})),
+                result.get('coaching_notes', ''),
+                result.get('call_dropped', False),
+                result.get('is_callback', False),
+                result.get('original_call_id', ''),
+                call_id
             ))
             conn.commit()
             conn.close()
