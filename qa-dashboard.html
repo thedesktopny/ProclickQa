@@ -1,0 +1,1633 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VoiceGuard QA Dashboard</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg: #0B0E1A;
+    --surface: #131729;
+    --surface2: #1C2240;
+    --border: #252D4A;
+    --accent: #4F6EF7;
+    --accent2: #7C3AED;
+    --green: #10D48E;
+    --yellow: #F5A623;
+    --red: #F24E4E;
+    --text: #E8EAFF;
+    --text2: #8B93C4;
+    --text3: #4F5880;
+  }
+
+  body {
+    font-family: 'Inter', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    display: flex;
+    min-height: 100vh;
+    font-size: 13px;
+  }
+
+  /* SIDEBAR */
+  .sidebar {
+    width: 220px;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    padding: 24px 0;
+    position: fixed;
+    height: 100vh;
+    z-index: 100;
+  }
+
+  .logo {
+    padding: 0 20px 28px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 20px;
+  }
+
+  .logo-mark {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .logo-icon {
+    width: 28px;
+    height: 28px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+  }
+
+  .logo-sub {
+    font-size: 10px;
+    color: var(--text3);
+    margin-top: 2px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .nav-section {
+    padding: 0 12px;
+    margin-bottom: 8px;
+  }
+
+  .nav-label {
+    font-size: 10px;
+    color: var(--text3);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 0 8px;
+    margin-bottom: 6px;
+  }
+
+  .nav-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 12px;
+    border-radius: 8px;
+    color: var(--text2);
+    cursor: pointer;
+    transition: all 0.15s;
+    font-size: 13px;
+    font-weight: 500;
+    margin-bottom: 2px;
+  }
+
+  .nav-item:hover { background: var(--surface2); color: var(--text); }
+  .nav-item.active { background: rgba(79,110,247,0.15); color: var(--accent); }
+  .nav-item .icon { font-size: 15px; width: 18px; text-align: center; }
+
+  .nav-badge {
+    margin-left: auto;
+    background: var(--red);
+    color: white;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 10px;
+  }
+
+  .sidebar-footer {
+    margin-top: auto;
+    padding: 16px 20px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .avatar {
+    width: 32px;
+    height: 32px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 12px;
+  }
+
+  .user-info { flex: 1; }
+  .user-name { font-size: 12px; font-weight: 600; }
+  .user-role { font-size: 10px; color: var(--text3); }
+
+  /* MAIN CONTENT */
+  .main {
+    margin-left: 220px;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* TOP BAR */
+  .topbar {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 16px 28px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky;
+    top: 0;
+    z-index: 50;
+  }
+
+  .page-title {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 18px;
+    font-weight: 600;
+  }
+
+  .topbar-right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .date-filter {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text2);
+    padding: 7px 14px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-family: 'Inter', sans-serif;
+    cursor: pointer;
+  }
+
+  .btn {
+    padding: 8px 16px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    border: none;
+    font-family: 'Inter', sans-serif;
+  }
+
+  .btn-primary {
+    background: var(--accent);
+    color: white;
+  }
+
+  .btn-outline {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text2);
+  }
+
+  /* PAGE SECTIONS */
+  .page { display: none; padding: 28px; }
+  .page.active { display: block; }
+
+  /* STAT CARDS */
+  .stats-row {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+
+  .stat-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .stat-card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+  }
+
+  .stat-card.blue::before { background: var(--accent); }
+  .stat-card.green::before { background: var(--green); }
+  .stat-card.yellow::before { background: var(--yellow); }
+  .stat-card.red::before { background: var(--red); }
+
+  .stat-label {
+    font-size: 11px;
+    color: var(--text3);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 10px;
+  }
+
+  .stat-value {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 32px;
+    font-weight: 700;
+    line-height: 1;
+    margin-bottom: 8px;
+  }
+
+  .stat-value.blue { color: var(--accent); }
+  .stat-value.green { color: var(--green); }
+  .stat-value.yellow { color: var(--yellow); }
+  .stat-value.red { color: var(--red); }
+
+  .stat-change {
+    font-size: 11px;
+    color: var(--text3);
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .stat-change .up { color: var(--green); }
+  .stat-change .down { color: var(--red); }
+
+  /* GRID LAYOUT */
+  .grid-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+
+  .grid-3-1 {
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+
+  .card-header {
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .card-title {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 14px;
+    font-weight: 600;
+  }
+
+  .card-body { padding: 20px; }
+
+  /* SCORE BARS */
+  .score-item {
+    margin-bottom: 16px;
+  }
+
+  .score-row {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 6px;
+    font-size: 12px;
+  }
+
+  .score-label { color: var(--text2); }
+  .score-pct { font-weight: 600; }
+
+  .score-bar {
+    height: 6px;
+    background: var(--surface2);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+
+  .score-fill {
+    height: 100%;
+    border-radius: 3px;
+    transition: width 0.6s ease;
+  }
+
+  /* CALL TABLE */
+  .table-wrap { overflow-x: auto; }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+
+  thead tr {
+    border-bottom: 1px solid var(--border);
+  }
+
+  th {
+    text-align: left;
+    padding: 12px 16px;
+    font-size: 11px;
+    color: var(--text3);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 500;
+  }
+
+  tbody tr {
+    border-bottom: 1px solid var(--border);
+    transition: background 0.1s;
+  }
+
+  tbody tr:hover { background: var(--surface2); cursor: pointer; }
+  tbody tr:last-child { border-bottom: none; }
+
+  td {
+    padding: 13px 16px;
+    font-size: 12px;
+    color: var(--text2);
+  }
+
+  td.agent { color: var(--text); font-weight: 500; }
+
+  /* BADGES */
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 8px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 600;
+  }
+
+  .badge-green { background: rgba(16,212,142,0.12); color: var(--green); }
+  .badge-yellow { background: rgba(245,166,35,0.12); color: var(--yellow); }
+  .badge-red { background: rgba(242,78,78,0.12); color: var(--red); }
+  .badge-blue { background: rgba(79,110,247,0.12); color: var(--accent); }
+
+  /* SCORE CIRCLE */
+  .score-circle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 38px;
+    height: 38px;
+    border-radius: 50%;
+    font-weight: 700;
+    font-size: 13px;
+    font-family: 'Space Grotesk', sans-serif;
+  }
+
+  .sc-green { background: rgba(16,212,142,0.15); color: var(--green); border: 1.5px solid rgba(16,212,142,0.3); }
+  .sc-yellow { background: rgba(245,166,35,0.15); color: var(--yellow); border: 1.5px solid rgba(245,166,35,0.3); }
+  .sc-red { background: rgba(242,78,78,0.15); color: var(--red); border: 1.5px solid rgba(242,78,78,0.3); }
+
+  /* AGENT RANKING */
+  .agent-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .agent-item:last-child { border-bottom: none; }
+
+  .agent-rank {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--text3);
+    width: 24px;
+    text-align: center;
+  }
+
+  .agent-rank.top { color: var(--yellow); }
+
+  .agent-avatar {
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+
+  .agent-details { flex: 1; }
+  .agent-name { font-weight: 600; font-size: 13px; color: var(--text); }
+  .agent-calls { font-size: 11px; color: var(--text3); margin-top: 2px; }
+
+  .agent-score-bar {
+    width: 80px;
+    height: 6px;
+    background: var(--surface2);
+    border-radius: 3px;
+    overflow: hidden;
+    margin-bottom: 4px;
+  }
+
+  .agent-score-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-align: right;
+  }
+
+  /* FLAGS */
+  .flag-item {
+    display: flex;
+    gap: 12px;
+    padding: 14px 0;
+    border-bottom: 1px solid var(--border);
+    align-items: flex-start;
+  }
+
+  .flag-item:last-child { border-bottom: none; }
+
+  .flag-icon {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    flex-shrink: 0;
+  }
+
+  .flag-icon.red { background: rgba(242,78,78,0.12); }
+  .flag-icon.yellow { background: rgba(245,166,35,0.12); }
+
+  .flag-text { flex: 1; }
+  .flag-title { font-size: 12px; font-weight: 600; color: var(--text); margin-bottom: 3px; }
+  .flag-desc { font-size: 11px; color: var(--text3); line-height: 1.5; }
+  .flag-time { font-size: 10px; color: var(--text3); margin-top: 4px; }
+
+  /* RULES ENGINE */
+  .rule-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border);
+    transition: background 0.1s;
+  }
+
+  .rule-item:hover { background: var(--surface2); }
+  .rule-item:last-child { border-bottom: none; }
+
+  .rule-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .rule-text { flex: 1; font-size: 13px; color: var(--text2); line-height: 1.4; }
+  .rule-text strong { color: var(--text); font-weight: 500; }
+
+  .rule-category {
+    font-size: 10px;
+    padding: 3px 8px;
+    border-radius: 6px;
+    font-weight: 600;
+  }
+
+  .toggle {
+    width: 36px;
+    height: 20px;
+    border-radius: 10px;
+    background: var(--green);
+    position: relative;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
+  .toggle::after {
+    content: '';
+    position: absolute;
+    width: 14px;
+    height: 14px;
+    background: white;
+    border-radius: 50%;
+    top: 3px;
+    right: 3px;
+    transition: right 0.2s;
+  }
+
+  .toggle.off { background: var(--border); }
+  .toggle.off::after { right: 19px; }
+
+  /* ADD RULE FORM */
+  .add-rule-form {
+    background: var(--surface2);
+    border: 1px dashed var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    margin: 16px;
+  }
+
+  .form-row { display: flex; gap: 12px; align-items: flex-end; }
+
+  .form-group { flex: 1; }
+
+  .form-label {
+    font-size: 11px;
+    color: var(--text3);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 6px;
+    display: block;
+  }
+
+  .form-input, .form-select {
+    width: 100%;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 9px 12px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-family: 'Inter', sans-serif;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+
+  .form-input:focus, .form-select:focus { border-color: var(--accent); }
+  .form-input::placeholder { color: var(--text3); }
+
+  /* CALL DETAIL */
+  .call-meta {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+
+  .meta-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    text-align: center;
+  }
+
+  .meta-val {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 22px;
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+
+  .meta-lbl { font-size: 11px; color: var(--text3); }
+
+  .criteria-list { display: flex; flex-direction: column; gap: 10px; }
+
+  .criteria-item {
+    background: var(--surface2);
+    border-radius: 10px;
+    padding: 14px 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .criteria-name { flex: 1; font-size: 13px; font-weight: 500; }
+  .criteria-evidence { font-size: 11px; color: var(--text3); line-height: 1.4; margin-top: 3px; }
+
+  .criteria-score {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 18px;
+    font-weight: 700;
+    min-width: 40px;
+    text-align: right;
+  }
+
+  /* MINI CHART */
+  .chart-area {
+    height: 140px;
+    display: flex;
+    align-items: flex-end;
+    gap: 6px;
+    padding: 0 4px;
+  }
+
+  .bar-group {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .bar {
+    width: 100%;
+    border-radius: 4px 4px 0 0;
+    min-height: 4px;
+  }
+
+  .bar-lbl { font-size: 10px; color: var(--text3); }
+
+  /* EMOTION METER */
+  .emotion-row {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+
+  .emotion-card {
+    flex: 1;
+    background: var(--surface2);
+    border-radius: 10px;
+    padding: 14px;
+    text-align: center;
+  }
+
+  .emotion-emoji { font-size: 24px; margin-bottom: 6px; }
+  .emotion-label { font-size: 11px; color: var(--text3); }
+  .emotion-pct { font-family: 'Space Grotesk', sans-serif; font-size: 18px; font-weight: 700; }
+
+  /* TRANSCRIPT */
+  .transcript-box {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    max-height: 220px;
+    overflow-y: auto;
+    font-size: 12px;
+    line-height: 1.7;
+  }
+
+  .t-agent { color: var(--accent); font-weight: 600; }
+  .t-customer { color: var(--green); font-weight: 600; }
+  .t-highlight { background: rgba(242,78,78,0.2); border-radius: 3px; padding: 0 3px; color: var(--red); }
+
+  /* SCROLLBAR */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  /* NOTIFICATION DOT */
+  .notif-dot {
+    width: 7px;
+    height: 7px;
+    background: var(--red);
+    border-radius: 50%;
+    position: absolute;
+    top: 6px;
+    right: 6px;
+  }
+
+  .section-title {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 15px;
+    font-weight: 600;
+    margin-bottom: 16px;
+    color: var(--text);
+  }
+
+  .alert-bar {
+    background: rgba(242,78,78,0.08);
+    border: 1px solid rgba(242,78,78,0.2);
+    border-radius: 10px;
+    padding: 12px 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+
+  .alert-bar .icon { font-size: 18px; }
+  .alert-bar .text { font-size: 12px; color: var(--text2); flex: 1; }
+  .alert-bar .text strong { color: var(--red); }
+</style>
+</head>
+<body>
+
+<!-- SIDEBAR -->
+<aside class="sidebar">
+  <div class="logo">
+    <div class="logo-mark">
+      <div class="logo-icon">🎧</div>
+      VoiceGuard
+    </div>
+    <div class="logo-sub">QA Intelligence Platform</div>
+  </div>
+
+  <div class="nav-section">
+    <div class="nav-label">Main</div>
+    <div class="nav-item active" onclick="showPage('dashboard')">
+      <span class="icon">📊</span> Dashboard
+    </div>
+    <div class="nav-item" onclick="showPage('calls')">
+      <span class="icon">📞</span> Call Review
+      <span class="nav-badge">12</span>
+    </div>
+    <div class="nav-item" onclick="showPage('call-detail')">
+      <span class="icon">🔍</span> Call Detail
+    </div>
+    <div class="nav-item" onclick="showPage('agents')">
+      <span class="icon">👥</span> Agents
+    </div>
+  </div>
+
+  <div class="nav-section" style="margin-top:12px;">
+    <div class="nav-label">Configuration</div>
+    <div class="nav-item" onclick="showPage('rules')">
+      <span class="icon">⚙️</span> Rules Engine
+    </div>
+    <div class="nav-item" onclick="showPage('alerts')">
+      <span class="icon">🚨</span> Alerts
+      <span class="nav-badge">3</span>
+    </div>
+  </div>
+
+  <div class="sidebar-footer">
+    <div class="avatar">DV</div>
+    <div class="user-info">
+      <div class="user-name">David</div>
+      <div class="user-role">Admin</div>
+    </div>
+  </div>
+</aside>
+
+<!-- MAIN -->
+<main class="main">
+
+  <!-- ===== PAGE: DASHBOARD ===== -->
+  <div class="page active" id="page-dashboard">
+    <div class="topbar">
+      <div class="page-title">Overview Dashboard</div>
+      <div class="topbar-right">
+        <select class="date-filter"><option>Last 7 days</option><option>Last 30 days</option><option>This month</option></select>
+        <button class="btn btn-primary">Export Report</button>
+      </div>
+    </div>
+    <div style="padding:28px;">
+
+      <div class="alert-bar">
+        <span class="icon">🚨</span>
+        <span class="text"><strong>3 critical flags</strong> detected today — 2 agents used forbidden language, 1 agent did not confirm order before completing purchase.</span>
+        <button class="btn btn-outline" onclick="showPage('alerts')">View Alerts</button>
+      </div>
+
+      <div class="stats-row">
+        <div class="stat-card blue">
+          <div class="stat-label">Calls Analyzed Today</div>
+          <div class="stat-value blue" id="stat-calls">—</div>
+          <div class="stat-change"><span class="up">↑ 12%</span> vs yesterday</div>
+        </div>
+        <div class="stat-card green">
+          <div class="stat-label">Avg QA Score</div>
+          <div class="stat-value green" id="stat-score">—</div>
+          <div class="stat-change"><span class="up">↑ 3pts</span> this week</div>
+        </div>
+        <div class="stat-card yellow">
+          <div class="stat-label">Needs Coaching</div>
+          <div class="stat-value yellow" id="stat-coaching">—</div>
+          <div class="stat-change">agents below 70%</div>
+        </div>
+        <div class="stat-card red">
+          <div class="stat-label">Critical Flags</div>
+          <div class="stat-value red" id="stat-flags">—</div>
+          <div class="stat-change"><span class="down">↑ 2</span> from yesterday</div>
+        </div>
+      </div>
+
+      <div class="grid-3-1">
+        <!-- Score breakdown -->
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">QA Category Scores — This Week</span>
+            <span class="badge badge-blue">All Agents</span>
+          </div>
+          <div class="card-body">
+            <div class="score-item">
+              <div class="score-row"><span class="score-label">Accuracy of Information</span><span class="score-pct" style="color:var(--green)">91%</span></div>
+              <div class="score-bar"><div class="score-fill" style="width:91%;background:var(--green)"></div></div>
+            </div>
+            <div class="score-item">
+              <div class="score-row"><span class="score-label">Customer Service Quality</span><span class="score-pct" style="color:var(--green)">87%</span></div>
+              <div class="score-bar"><div class="score-fill" style="width:87%;background:var(--green)"></div></div>
+            </div>
+            <div class="score-item">
+              <div class="score-row"><span class="score-label">Appropriate Actions Taken</span><span class="score-pct" style="color:var(--yellow)">76%</span></div>
+              <div class="score-bar"><div class="score-fill" style="width:76%;background:var(--yellow)"></div></div>
+            </div>
+            <div class="score-item">
+              <div class="score-row"><span class="score-label">Compliance & Call Handling</span><span class="score-pct" style="color:var(--yellow)">79%</span></div>
+              <div class="score-bar"><div class="score-fill" style="width:79%;background:var(--yellow)"></div></div>
+            </div>
+            <div class="score-item">
+              <div class="score-row"><span class="score-label">Customer Emotion (Positive)</span><span class="score-pct" style="color:var(--green)">83%</span></div>
+              <div class="score-bar"><div class="score-fill" style="width:83%;background:var(--accent)"></div></div>
+            </div>
+            <div class="score-item" style="margin-bottom:0">
+              <div class="score-row"><span class="score-label">Rules Engine Pass Rate</span><span class="score-pct" style="color:var(--red)">68%</span></div>
+              <div class="score-bar"><div class="score-fill" style="width:68%;background:var(--red)"></div></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Top flags -->
+        <div class="card">
+          <div class="card-header"><span class="card-title">Top Flags Today</span></div>
+          <div class="card-body" style="padding:12px 16px;">
+            <div class="flag-item">
+              <div class="flag-icon red">🚫</div>
+              <div class="flag-text">
+                <div class="flag-title">Forbidden word used</div>
+                <div class="flag-desc">Agent Sarah K. used restricted language during call #4821</div>
+                <div class="flag-time">2 hours ago</div>
+              </div>
+            </div>
+            <div class="flag-item">
+              <div class="flag-icon red">💳</div>
+              <div class="flag-text">
+                <div class="flag-title">No price confirmation</div>
+                <div class="flag-desc">Order placed without reading total to customer</div>
+                <div class="flag-time">3 hours ago</div>
+              </div>
+            </div>
+            <div class="flag-item">
+              <div class="flag-icon yellow">😤</div>
+              <div class="flag-text">
+                <div class="flag-title">Customer anger detected</div>
+                <div class="flag-desc">Tone escalated — agent did not acknowledge</div>
+                <div class="flag-time">5 hours ago</div>
+              </div>
+            </div>
+            <div class="flag-item">
+              <div class="flag-icon yellow">🔁</div>
+              <div class="flag-text">
+                <div class="flag-title">"Sir" overuse detected</div>
+                <div class="flag-desc">Agent used "sir" 14 times — feels robotic</div>
+                <div class="flag-time">6 hours ago</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Call volume chart -->
+      <div class="card" style="margin-bottom:24px;">
+        <div class="card-header">
+          <span class="card-title">Call Volume & Avg Score — Last 7 Days</span>
+        </div>
+        <div class="card-body">
+          <div class="chart-area">
+            <div class="bar-group">
+              <div class="bar" style="height:60%;background:linear-gradient(180deg,var(--accent),rgba(79,110,247,0.3))"></div>
+              <div class="bar-lbl">Mon</div>
+            </div>
+            <div class="bar-group">
+              <div class="bar" style="height:75%;background:linear-gradient(180deg,var(--accent),rgba(79,110,247,0.3))"></div>
+              <div class="bar-lbl">Tue</div>
+            </div>
+            <div class="bar-group">
+              <div class="bar" style="height:85%;background:linear-gradient(180deg,var(--accent),rgba(79,110,247,0.3))"></div>
+              <div class="bar-lbl">Wed</div>
+            </div>
+            <div class="bar-group">
+              <div class="bar" style="height:70%;background:linear-gradient(180deg,var(--accent),rgba(79,110,247,0.3))"></div>
+              <div class="bar-lbl">Thu</div>
+            </div>
+            <div class="bar-group">
+              <div class="bar" style="height:90%;background:linear-gradient(180deg,var(--green),rgba(16,212,142,0.3))"></div>
+              <div class="bar-lbl">Fri</div>
+            </div>
+            <div class="bar-group">
+              <div class="bar" style="height:55%;background:linear-gradient(180deg,var(--accent),rgba(79,110,247,0.3))"></div>
+              <div class="bar-lbl">Sat</div>
+            </div>
+            <div class="bar-group">
+              <div class="bar" style="height:80%;background:linear-gradient(180deg,var(--accent),rgba(79,110,247,0.3))"></div>
+              <div class="bar-lbl">Sun</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ===== PAGE: CALL REVIEW ===== -->
+  <div class="page" id="page-calls">
+    <div class="topbar">
+      <div class="page-title">Call Review</div>
+      <div class="topbar-right">
+        <select class="date-filter"><option>All calls</option><option>Flagged only</option><option>Needs review</option></select>
+        <input class="date-filter" placeholder="🔍 Search agent or call ID..." style="width:220px;">
+      </div>
+    </div>
+    <div style="padding:28px;">
+      <div class="card">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Call ID</th>
+                <th>Agent</th>
+                <th>Date & Time</th>
+                <th>Duration</th>
+                <th>Customer Emotion</th>
+                <th>QA Score</th>
+                <th>Flags</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="calls-tbody">
+              <tr onclick="showPage('call-detail')">
+                <td>#4821</td>
+                <td class="agent">Sarah K.</td>
+                <td>Jun 8 · 9:14am</td>
+                <td>8:32</td>
+                <td>😤 Frustrated</td>
+                <td><div class="score-circle sc-red">61%</div></td>
+                <td><span class="badge badge-red">2 Flags</span></td>
+                <td><span class="badge badge-red">Critical</span></td>
+              </tr>
+              <tr onclick="showPage('call-detail')">
+                <td>#4820</td>
+                <td class="agent">Moshe L.</td>
+                <td>Jun 8 · 9:02am</td>
+                <td>5:18</td>
+                <td>😊 Satisfied</td>
+                <td><div class="score-circle sc-green">92%</div></td>
+                <td><span class="badge badge-green">None</span></td>
+                <td><span class="badge badge-green">Passed</span></td>
+              </tr>
+              <tr onclick="showPage('call-detail')">
+                <td>#4819</td>
+                <td class="agent">Rachel B.</td>
+                <td>Jun 8 · 8:47am</td>
+                <td>12:05</td>
+                <td>😐 Neutral</td>
+                <td><div class="score-circle sc-yellow">74%</div></td>
+                <td><span class="badge badge-yellow">1 Flag</span></td>
+                <td><span class="badge badge-yellow">Review</span></td>
+              </tr>
+              <tr onclick="showPage('call-detail')">
+                <td>#4818</td>
+                <td class="agent">Yosef M.</td>
+                <td>Jun 8 · 8:31am</td>
+                <td>6:44</td>
+                <td>😊 Satisfied</td>
+                <td><div class="score-circle sc-green">88%</div></td>
+                <td><span class="badge badge-green">None</span></td>
+                <td><span class="badge badge-green">Passed</span></td>
+              </tr>
+              <tr onclick="showPage('call-detail')">
+                <td>#4817</td>
+                <td class="agent">Devorah S.</td>
+                <td>Jun 8 · 8:15am</td>
+                <td>3:52</td>
+                <td>😤 Angry</td>
+                <td><div class="score-circle sc-red">55%</div></td>
+                <td><span class="badge badge-red">3 Flags</span></td>
+                <td><span class="badge badge-red">Critical</span></td>
+              </tr>
+              <tr onclick="showPage('call-detail')">
+                <td>#4816</td>
+                <td class="agent">Avi R.</td>
+                <td>Jun 8 · 7:58am</td>
+                <td>9:21</td>
+                <td>😊 Happy</td>
+                <td><div class="score-circle sc-green">96%</div></td>
+                <td><span class="badge badge-green">None</span></td>
+                <td><span class="badge badge-green">Passed</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== PAGE: CALL DETAIL ===== -->
+  <div class="page" id="page-call-detail">
+    <div class="topbar">
+      <div class="page-title">
+        <span style="color:var(--text3);cursor:pointer" onclick="showPage('calls')">← Call Review</span>
+        <span style="color:var(--text3);margin:0 8px">/</span> Call #4821 — Sarah K.
+      </div>
+      <div class="topbar-right">
+        <span class="badge badge-red" style="font-size:12px;padding:6px 12px;">⚠ Critical</span>
+        <button class="btn btn-outline">Send to Coaching</button>
+      </div>
+    </div>
+    <div style="padding:28px;">
+
+      <div class="call-meta">
+        <div class="meta-card">
+          <div class="meta-val" style="color:var(--red)">61%</div>
+          <div class="meta-lbl">Overall QA Score</div>
+        </div>
+        <div class="meta-card">
+          <div class="meta-val">8:32</div>
+          <div class="meta-lbl">Call Duration</div>
+        </div>
+        <div class="meta-card">
+          <div class="meta-val">2</div>
+          <div class="meta-lbl">Flags Raised</div>
+        </div>
+        <div class="meta-card">
+          <div class="meta-val" style="color:var(--red)">😤</div>
+          <div class="meta-lbl">Customer Left Frustrated</div>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <!-- Scorecard -->
+        <div class="card">
+          <div class="card-header"><span class="card-title">AI Scorecard Breakdown</span></div>
+          <div class="card-body">
+            <div class="criteria-list">
+              <div class="criteria-item">
+                <div style="flex:1">
+                  <div class="criteria-name">Accuracy of Information</div>
+                  <div class="criteria-evidence">Agent correctly found the product and price on Amazon ✓</div>
+                </div>
+                <div class="criteria-score" style="color:var(--green)">90%</div>
+              </div>
+              <div class="criteria-item">
+                <div style="flex:1">
+                  <div class="criteria-name">Customer Service Quality</div>
+                  <div class="criteria-evidence">Tone was rushed, did not acknowledge customer frustration when raised</div>
+                </div>
+                <div class="criteria-score" style="color:var(--red)">48%</div>
+              </div>
+              <div class="criteria-item">
+                <div style="flex:1">
+                  <div class="criteria-name">Appropriate Actions</div>
+                  <div class="criteria-evidence">Confirmed order before placing ✓. Did not read total price aloud ✗</div>
+                </div>
+                <div class="criteria-score" style="color:var(--yellow)">65%</div>
+              </div>
+              <div class="criteria-item">
+                <div style="flex:1">
+                  <div class="criteria-name">Compliance & Handling</div>
+                  <div class="criteria-evidence">Did not verify customer identity at start of call ✗</div>
+                </div>
+                <div class="criteria-score" style="color:var(--red)">50%</div>
+              </div>
+              <div class="criteria-item">
+                <div style="flex:1">
+                  <div class="criteria-name">Rules Engine — All Rules</div>
+                  <div class="criteria-evidence">Used forbidden word once · "Sir" used 11 times · Did not say closing statement</div>
+                </div>
+                <div class="criteria-score" style="color:var(--red)">40%</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Emotion + Transcript -->
+        <div style="display:flex;flex-direction:column;gap:16px;">
+          <div class="card">
+            <div class="card-header"><span class="card-title">Emotion Analysis (Audio)</span></div>
+            <div class="card-body">
+              <div class="emotion-row">
+                <div class="emotion-card">
+                  <div class="emotion-emoji">😰</div>
+                  <div class="emotion-pct" style="color:var(--yellow)">38%</div>
+                  <div class="emotion-label">Agent Stress</div>
+                </div>
+                <div class="emotion-card">
+                  <div class="emotion-emoji">😤</div>
+                  <div class="emotion-pct" style="color:var(--red)">64%</div>
+                  <div class="emotion-label">Customer Frustration</div>
+                </div>
+                <div class="emotion-card">
+                  <div class="emotion-emoji">⏩</div>
+                  <div class="emotion-pct" style="color:var(--yellow)">High</div>
+                  <div class="emotion-label">Agent Speed</div>
+                </div>
+              </div>
+              <div style="font-size:11px;color:var(--text3);background:var(--surface2);padding:10px 12px;border-radius:8px;line-height:1.6;">
+                📍 <strong style="color:var(--text2)">Key moment at 5:47</strong> — Customer raised voice asking about the total price. Agent continued without acknowledging frustration.
+              </div>
+            </div>
+          </div>
+
+          <div class="card" style="flex:1">
+            <div class="card-header"><span class="card-title">Transcript Excerpt</span><span style="font-size:11px;color:var(--text3)">Flagged moments highlighted</span></div>
+            <div class="card-body">
+              <div class="transcript-box">
+                <div style="margin-bottom:8px"><span class="t-agent">Agent:</span> Hello, how can I help you today?</div>
+                <div style="margin-bottom:8px"><span class="t-customer">Customer:</span> Hi yes I need to order something from Amazon, a blender.</div>
+                <div style="margin-bottom:8px"><span class="t-agent">Agent:</span> Sure <span class="t-highlight">sir</span>, let me look that up for you <span class="t-highlight">sir</span>.</div>
+                <div style="margin-bottom:8px"><span class="t-customer">Customer:</span> And how much does it cost?</div>
+                <div style="margin-bottom:8px"><span class="t-agent">Agent:</span> It's $49.99 <span class="t-highlight">sir</span>, should I go ahead?</div>
+                <div style="margin-bottom:8px"><span class="t-customer">Customer:</span> Wait, what about shipping? I want the total.</div>
+                <div style="margin-bottom:8px"><span class="t-agent">Agent:</span> <span class="t-highlight">Don't worry about it</span>, I'll just place it now.</div>
+                <div style="margin-bottom:8px"><span class="t-customer">Customer:</span> <em>No wait — I need to know the total first!</em></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ===== PAGE: AGENTS ===== -->
+  <div class="page" id="page-agents">
+    <div class="topbar">
+      <div class="page-title">Agent Performance</div>
+      <div class="topbar-right">
+        <select class="date-filter"><option>This week</option><option>This month</option><option>All time</option></select>
+      </div>
+    </div>
+    <div style="padding:28px;">
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-header"><span class="card-title">Agent Leaderboard</span><span class="badge badge-yellow">⭐ Top Performers</span></div>
+          <div class="card-body" style="padding:8px 16px;">
+            <div class="agent-item">
+              <div class="agent-rank top">1</div>
+              <div class="agent-avatar" style="background:linear-gradient(135deg,#F5A623,#E8890C)">AR</div>
+              <div class="agent-details">
+                <div class="agent-name">Avi R.</div>
+                <div class="agent-calls">142 calls this week</div>
+              </div>
+              <div>
+                <div class="agent-score-bar"><div class="score-fill" style="width:96%;height:100%;background:var(--green)"></div></div>
+                <div class="agent-score-label" style="color:var(--green)">96%</div>
+              </div>
+            </div>
+            <div class="agent-item">
+              <div class="agent-rank top">2</div>
+              <div class="agent-avatar" style="background:linear-gradient(135deg,#4F6EF7,#7C3AED)">ML</div>
+              <div class="agent-details">
+                <div class="agent-name">Moshe L.</div>
+                <div class="agent-calls">138 calls this week</div>
+              </div>
+              <div>
+                <div class="agent-score-bar"><div class="score-fill" style="width:92%;height:100%;background:var(--green)"></div></div>
+                <div class="agent-score-label" style="color:var(--green)">92%</div>
+              </div>
+            </div>
+            <div class="agent-item">
+              <div class="agent-rank">3</div>
+              <div class="agent-avatar" style="background:linear-gradient(135deg,#10D48E,#059669)">RB</div>
+              <div class="agent-details">
+                <div class="agent-name">Rachel B.</div>
+                <div class="agent-calls">119 calls this week</div>
+              </div>
+              <div>
+                <div class="agent-score-bar"><div class="score-fill" style="width:88%;height:100%;background:var(--green)"></div></div>
+                <div class="agent-score-label" style="color:var(--green)">88%</div>
+              </div>
+            </div>
+            <div class="agent-item">
+              <div class="agent-rank">4</div>
+              <div class="agent-avatar" style="background:linear-gradient(135deg,#8B93C4,#4F5880)">YM</div>
+              <div class="agent-details">
+                <div class="agent-name">Yosef M.</div>
+                <div class="agent-calls">127 calls this week</div>
+              </div>
+              <div>
+                <div class="agent-score-bar"><div class="score-fill" style="width:84%;height:100%;background:var(--green)"></div></div>
+                <div class="agent-score-label" style="color:var(--green)">84%</div>
+              </div>
+            </div>
+            <div class="agent-item">
+              <div class="agent-rank">5</div>
+              <div class="agent-avatar" style="background:linear-gradient(135deg,#F5A623,#D97706)">DS</div>
+              <div class="agent-details">
+                <div class="agent-name">Devorah S.</div>
+                <div class="agent-calls">98 calls this week</div>
+              </div>
+              <div>
+                <div class="agent-score-bar"><div class="score-fill" style="width:74%;height:100%;background:var(--yellow)"></div></div>
+                <div class="agent-score-label" style="color:var(--yellow)">74%</div>
+              </div>
+            </div>
+            <div class="agent-item">
+              <div class="agent-rank" style="color:var(--red)">!</div>
+              <div class="agent-avatar" style="background:linear-gradient(135deg,#F24E4E,#B91C1C)">SK</div>
+              <div class="agent-details">
+                <div class="agent-name">Sarah K.</div>
+                <div class="agent-calls">104 calls this week · <span style="color:var(--red)">Needs coaching</span></div>
+              </div>
+              <div>
+                <div class="agent-score-bar"><div class="score-fill" style="width:61%;height:100%;background:var(--red)"></div></div>
+                <div class="agent-score-label" style="color:var(--red)">61%</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header"><span class="card-title">Team Weakness Areas</span></div>
+          <div class="card-body">
+            <div class="score-item">
+              <div class="score-row"><span class="score-label">Compliance — Price Confirmation</span><span class="score-pct" style="color:var(--red)">62%</span></div>
+              <div class="score-bar"><div class="score-fill" style="width:62%;background:var(--red)"></div></div>
+            </div>
+            <div class="score-item">
+              <div class="score-row"><span class="score-label">Rules Engine Pass Rate</span><span class="score-pct" style="color:var(--red)">68%</span></div>
+              <div class="score-bar"><div class="score-fill" style="width:68%;background:var(--red)"></div></div>
+            </div>
+            <div class="score-item">
+              <div class="score-row"><span class="score-label">Empathy When Customer Upset</span><span class="score-pct" style="color:var(--yellow)">71%</span></div>
+              <div class="score-bar"><div class="score-fill" style="width:71%;background:var(--yellow)"></div></div>
+            </div>
+            <div class="score-item">
+              <div class="score-row"><span class="score-label">Identity Verification</span><span class="score-pct" style="color:var(--yellow)">75%</span></div>
+              <div class="score-bar"><div class="score-fill" style="width:75%;background:var(--yellow)"></div></div>
+            </div>
+            <div class="score-item" style="margin-bottom:0">
+              <div class="score-row"><span class="score-label">Closing Statement Delivered</span><span class="score-pct" style="color:var(--yellow)">78%</span></div>
+              <div class="score-bar"><div class="score-fill" style="width:78%;background:var(--yellow)"></div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== PAGE: RULES ENGINE ===== -->
+  <div class="page" id="page-rules">
+    <div class="topbar">
+      <div class="page-title">Rules Engine</div>
+      <div class="topbar-right">
+        <span style="font-size:12px;color:var(--text3)">24 active rules · Applied to every call</span>
+      </div>
+    </div>
+    <div style="padding:28px;">
+
+      <!-- Add rule -->
+      <div class="card" style="margin-bottom:20px;">
+        <div class="card-header"><span class="card-title">➕ Add New Rule</span><span style="font-size:11px;color:var(--text3)">Write in plain English — AI will understand</span></div>
+        <div class="add-rule-form" style="margin:0;border-radius:0;border:none;background:transparent;padding:20px;">
+          <div class="form-row">
+            <div class="form-group" style="flex:2">
+              <label class="form-label">Rule Description</label>
+              <input id="new-rule-desc" class="form-input" placeholder='e.g. "Agent should not overuse the word sir" or "Agent must confirm order total before placing"' />
+            </div>
+            <div class="form-group" style="flex:0.6">
+              <label class="form-label">Category</label>
+              <select id="new-rule-cat" class="form-select">
+                <option>Forbidden Words</option>
+                <option>Required Phrases</option>
+                <option>Behavior</option>
+                <option>Compliance</option>
+                <option>Sequence</option>
+              </select>
+            </div>
+            <div class="form-group" style="flex:0.4">
+              <label class="form-label">Severity</label>
+              <select id="new-rule-sev" class="form-select">
+                <option>Critical</option>
+                <option>Warning</option>
+                <option>Info</option>
+              </select>
+            </div>
+            <button id="add-rule-btn" class="btn btn-primary" onclick="addRule()" style="align-self:flex-end;white-space:nowrap">Save Rule</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Rules list -->
+      <div class="card" id="rules-list">
+        <div class="card-header">
+          <span class="card-title">Active Rules</span>
+          <div style="display:flex;gap:8px;">
+            <span class="badge badge-red">Critical</span>
+            <span class="badge badge-yellow">Warning</span>
+            <span class="badge badge-blue">Info</span>
+          </div>
+        </div>
+
+        <div class="rule-item">
+          <div class="rule-dot" style="background:var(--red)"></div>
+          <div class="rule-text"><strong>Forbidden language</strong> — Agent must never use inappropriate, offensive, or sexual language of any kind</div>
+          <span class="rule-category badge badge-red">Forbidden</span>
+          <div class="toggle"></div>
+        </div>
+        <div class="rule-item">
+          <div class="rule-dot" style="background:var(--red)"></div>
+          <div class="rule-text"><strong>Price confirmation</strong> — Agent must read the total price including shipping out loud before placing any order</div>
+          <span class="rule-category badge badge-red">Compliance</span>
+          <div class="toggle"></div>
+        </div>
+        <div class="rule-item">
+          <div class="rule-dot" style="background:var(--red)"></div>
+          <div class="rule-text"><strong>Customer verbal approval</strong> — Agent must receive explicit verbal confirmation from customer before completing any purchase or action</div>
+          <span class="rule-category badge badge-red">Compliance</span>
+          <div class="toggle"></div>
+        </div>
+        <div class="rule-item">
+          <div class="rule-dot" style="background:var(--yellow)"></div>
+          <div class="rule-text"><strong>"Sir" overuse</strong> — Agent should not overuse the word "sir" — using it too frequently sounds robotic and impersonal</div>
+          <span class="rule-category badge badge-yellow">Behavior</span>
+          <div class="toggle"></div>
+        </div>
+        <div class="rule-item">
+          <div class="rule-dot" style="background:var(--yellow)"></div>
+          <div class="rule-text"><strong>Empathy requirement</strong> — If a customer sounds frustrated or upset, agent must acknowledge their feelings before continuing</div>
+          <span class="rule-category badge badge-yellow">Behavior</span>
+          <div class="toggle"></div>
+        </div>
+        <div class="rule-item">
+          <div class="rule-dot" style="background:var(--yellow)"></div>
+          <div class="rule-text"><strong>Identity verification</strong> — Agent must verify the customer's identity at the start of every call before accessing any account</div>
+          <span class="rule-category badge badge-yellow">Compliance</span>
+          <div class="toggle"></div>
+        </div>
+        <div class="rule-item">
+          <div class="rule-dot" style="background:var(--accent)"></div>
+          <div class="rule-text"><strong>Logout confirmation</strong> — Agent must verbally confirm "I have logged out of your account" before ending any call where account access occurred</div>
+          <span class="rule-category badge badge-blue">Compliance</span>
+          <div class="toggle"></div>
+        </div>
+        <div class="rule-item">
+          <div class="rule-dot" style="background:var(--accent)"></div>
+          <div class="rule-text"><strong>Closing statement</strong> — Agent must ask "Is there anything else I can help you with today?" before ending the call</div>
+          <span class="rule-category badge badge-blue">Required</span>
+          <div class="toggle"></div>
+        </div>
+        <div class="rule-item">
+          <div class="rule-dot" style="background:var(--accent)"></div>
+          <div class="rule-text"><strong>No competitor criticism</strong> — If a customer mentions a competitor, agent must not speak negatively about them</div>
+          <span class="rule-category badge badge-blue">Behavior</span>
+          <div class="toggle"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== PAGE: ALERTS ===== -->
+  <div class="page" id="page-alerts">
+    <div class="topbar">
+      <div class="page-title">Live Alerts</div>
+      <div class="topbar-right">
+        <span class="badge badge-red" style="font-size:12px;padding:6px 14px;">3 Unresolved</span>
+        <button class="btn btn-outline">Mark All Resolved</button>
+      </div>
+    </div>
+    <div style="padding:28px;">
+      <div class="card">
+        <div class="flag-item" style="padding:18px 20px;">
+          <div class="flag-icon red" style="width:40px;height:40px;font-size:18px">🚫</div>
+          <div class="flag-text">
+            <div class="flag-title" style="font-size:13px;">CRITICAL — Forbidden word detected</div>
+            <div class="flag-desc">Agent <strong style="color:var(--text)">Sarah K.</strong> used a forbidden word during call #4821. Rule: "Agent must never use inappropriate or sexual language." The word was used at timestamp 3:41.</div>
+            <div class="flag-time">Today at 9:22am · Call #4821</div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:8px;">
+            <button class="btn btn-outline" onclick="showPage('call-detail')">View Call</button>
+            <button class="btn btn-outline">Resolve</button>
+          </div>
+        </div>
+        <div class="flag-item" style="padding:18px 20px;">
+          <div class="flag-icon red" style="width:40px;height:40px;font-size:18px">💳</div>
+          <div class="flag-text">
+            <div class="flag-title" style="font-size:13px;">CRITICAL — Order placed without price confirmation</div>
+            <div class="flag-desc">Agent <strong style="color:var(--text)">Devorah S.</strong> placed an Amazon order without reading the total price to the customer first. Rule: "Agent must confirm total including shipping before any purchase."</div>
+            <div class="flag-time">Today at 8:18am · Call #4817</div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:8px;">
+            <button class="btn btn-outline">View Call</button>
+            <button class="btn btn-outline">Resolve</button>
+          </div>
+        </div>
+        <div class="flag-item" style="padding:18px 20px;border-bottom:none;">
+          <div class="flag-icon yellow" style="width:40px;height:40px;font-size:18px">😤</div>
+          <div class="flag-text">
+            <div class="flag-title" style="font-size:13px;">WARNING — Customer anger not acknowledged</div>
+            <div class="flag-desc">Agent <strong style="color:var(--text)">Rachel B.</strong> continued the call without addressing customer frustration. Rule: "If a customer sounds frustrated, agent must acknowledge before moving forward."</div>
+            <div class="flag-time">Today at 8:49am · Call #4819</div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:8px;">
+            <button class="btn btn-outline">View Call</button>
+            <button class="btn btn-outline">Resolve</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<script>
+function showPage(id) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.getElementById('page-' + id).classList.add('active');
+  const map = { dashboard: 0, calls: 1, 'call-detail': 2, agents: 3, rules: 4, alerts: 5 };
+  const items = document.querySelectorAll('.nav-item');
+  if (map[id] !== undefined) items[map[id]].classList.add('active');
+}
+
+// ─── API LAYER ───────────────────────────────────────────────────────────────
+const API = {
+  async get(path) { const r = await fetch(path); return r.json(); },
+  async post(path, data) {
+    const r = await fetch(path, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data) });
+    return r.json();
+  },
+  async del(path) { const r = await fetch(path, { method:'DELETE' }); return r.json(); }
+};
+
+let rules = [], calls = [], stats = {}, isAdmin = false;
+
+document.addEventListener('DOMContentLoaded', async () => {
+  await checkAuth();
+  await loadStats();
+  await loadRules();
+  await loadCalls();
+  renderDashboard();
+  renderRules();
+  renderCalls();
+});
+
+async function checkAuth() {
+  try { const r = await API.get('/api/auth-check'); isAdmin = r.authenticated; } catch(e) {}
+}
+
+function showLoginModal() { document.getElementById('login-modal').style.display = 'flex'; }
+function hideLoginModal() { document.getElementById('login-modal').style.display = 'none'; }
+
+async function doLogin() {
+  const u = document.getElementById('login-user').value;
+  const p = document.getElementById('login-pass').value;
+  const res = await API.post('/api/login', { username: u, password: p });
+  if (res.success) {
+    isAdmin = true; hideLoginModal(); renderRules();
+    showToast('✅ Logged in as Admin');
+  } else {
+    document.getElementById('login-err').textContent = 'Invalid username or password';
+  }
+}
+
+async function loadStats() { try { stats = await API.get('/api/stats'); } catch(e) {} }
+async function loadRules() { try { rules = await API.get('/api/rules'); } catch(e) { rules = []; } }
+async function loadCalls() { try { calls = await API.get('/api/calls'); } catch(e) { calls = []; } }
+
+function renderDashboard() {
+  const set = (id, val) => { const el = document.getElementById(id); if(el) el.textContent = val; };
+  set('stat-calls', stats.total_calls || 0);
+  set('stat-score', (stats.avg_score || 0) + '%');
+  set('stat-coaching', stats.needs_coaching || 0);
+  set('stat-flags', stats.critical_flags || 0);
+}
+
+function renderRules() {
+  const container = document.getElementById('rules-list');
+  if (!container) return;
+  if (rules.length === 0) {
+    container.innerHTML = '<div style="padding:24px;text-align:center;color:var(--text3)">No rules yet. Add your first rule above.</div>';
+    return;
+  }
+  container.innerHTML = rules.map(rule => {
+    const sc = rule.severity === 'Critical' ? 'badge-red' : rule.severity === 'Warning' ? 'badge-yellow' : 'badge-blue';
+    const dc = rule.severity === 'Critical' ? 'var(--red)' : rule.severity === 'Warning' ? 'var(--yellow)' : 'var(--accent)';
+    return `
+      <div class="rule-item" id="rule-${rule.id}">
+        <div class="rule-dot" style="background:${dc}"></div>
+        <div class="rule-text">${rule.description}</div>
+        <span class="rule-category badge ${sc}">${rule.category}</span>
+        <div class="toggle ${rule.active ? '' : 'off'}" onclick="toggleRule(${rule.id})" title="${rule.active ? 'Active' : 'Inactive'}"></div>
+        ${isAdmin ? `<button onclick="deleteRule(${rule.id})" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:16px;padding:4px 8px" title="Delete">🗑</button>` : ''}
+      </div>`;
+  }).join('');
+}
+
+function renderCalls() {
+  const tbody = document.getElementById('calls-tbody');
+  if (!tbody) return;
+  if (calls.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:32px;color:var(--text3)">No calls yet — they will appear here once analyzed.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = calls.map(call => {
+    const sc = call.overall_score >= 80 ? 'sc-green' : call.overall_score >= 70 ? 'sc-yellow' : 'sc-red';
+    const stc = call.status === 'Critical' ? 'badge-red' : call.status === 'Passed' ? 'badge-green' : 'badge-yellow';
+    const fc = call.flags >= 2 ? 'badge-red' : call.flags === 1 ? 'badge-yellow' : 'badge-green';
+    return `
+      <tr onclick="showPage('call-detail')">
+        <td>#${call.call_id || call.id}</td>
+        <td class="agent">${call.agent_name || 'Unknown'}</td>
+        <td>${formatDate(call.created_at)}</td>
+        <td>${call.duration || '--'}</td>
+        <td>${call.emotion || '😐 Neutral'}</td>
+        <td><div class="score-circle ${sc}">${call.overall_score || 0}%</div></td>
+        <td><span class="badge ${fc}">${call.flags || 0} Flag${call.flags !== 1 ? 's' : ''}</span></td>
+        <td><span class="badge ${stc}">${call.status || 'Review'}</span></td>
+      </tr>`;
+  }).join('');
+}
+
+async function addRule() {
+  if (!isAdmin) { showLoginModal(); return; }
+  const desc = document.getElementById('new-rule-desc');
+  const cat = document.getElementById('new-rule-cat');
+  const sev = document.getElementById('new-rule-sev');
+  if (!desc.value.trim()) { showToast('⚠️ Please enter a rule description', true); return; }
+  const btn = document.getElementById('add-rule-btn');
+  btn.textContent = 'Saving...'; btn.disabled = true;
+  const rule = await API.post('/api/rules', { description: desc.value.trim(), category: cat.value, severity: sev.value });
+  if (rule.id) {
+    rules.push(rule); renderRules(); desc.value = '';
+    showToast('✅ Rule saved successfully');
+    await loadStats(); renderDashboard();
+  } else { showToast('❌ Failed to save rule', true); }
+  btn.textContent = 'Save Rule'; btn.disabled = false;
+}
+
+async function toggleRule(id) {
+  if (!isAdmin) { showLoginModal(); return; }
+  const updated = await API.post(`/api/rules/${id}/toggle`, {});
+  const idx = rules.findIndex(r => r.id === id);
+  if (idx !== -1) { rules[idx] = updated; renderRules(); }
+}
+
+async function deleteRule(id) {
+  if (!isAdmin) { showLoginModal(); return; }
+  if (!confirm('Delete this rule? This cannot be undone.')) return;
+  await API.del(`/api/rules/${id}`);
+  rules = rules.filter(r => r.id !== id);
+  renderRules(); showToast('🗑 Rule deleted');
+}
+
+function showToast(msg, isError = false) {
+  let t = document.getElementById('toast');
+  if (!t) {
+    t = document.createElement('div'); t.id = 'toast';
+    t.style.cssText = 'position:fixed;bottom:24px;right:24px;padding:12px 20px;border-radius:10px;font-size:13px;font-weight:600;z-index:9999;transition:opacity 0.3s;box-shadow:0 4px 20px rgba(0,0,0,0.4)';
+    document.body.appendChild(t);
+  }
+  t.textContent = msg;
+  t.style.background = isError ? 'var(--red)' : 'var(--green)';
+  t.style.color = 'white'; t.style.opacity = '1';
+  clearTimeout(t._t); t._t = setTimeout(() => { t.style.opacity = '0'; }, 3000);
+}
+
+function formatDate(str) {
+  if (!str) return '--';
+  const d = new Date(str);
+  return d.toLocaleDateString() + ' · ' + d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+}
+</script>
+
+<!-- LOGIN MODAL -->
+<div id="login-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:9999;align-items:center;justify-content:center;">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:32px;width:360px;">
+    <div style="font-family:'Space Grotesk',sans-serif;font-size:20px;font-weight:700;margin-bottom:8px;">🔐 Admin Login</div>
+    <div style="font-size:12px;color:var(--text3);margin-bottom:24px;">Only admins can add or edit rules</div>
+    <div style="margin-bottom:12px;">
+      <label style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.08em;display:block;margin-bottom:6px;">Username</label>
+      <input id="login-user" class="form-input" placeholder="Enter username" style="width:100%" />
+    </div>
+    <div style="margin-bottom:16px;">
+      <label style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.08em;display:block;margin-bottom:6px;">Password</label>
+      <input id="login-pass" type="password" class="form-input" placeholder="Enter password" style="width:100%" onkeydown="if(event.key==='Enter')doLogin()" />
+    </div>
+    <div id="login-err" style="color:var(--red);font-size:12px;margin-bottom:12px;"></div>
+    <div style="display:flex;gap:10px;">
+      <button class="btn btn-primary" onclick="doLogin()" style="flex:1">Login</button>
+      <button class="btn btn-outline" onclick="hideLoginModal()" style="flex:1">Cancel</button>
+    </div>
+  </div>
+</div>
+</body>
+</html>
