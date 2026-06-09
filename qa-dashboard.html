@@ -3,739 +3,175 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>VoiceGuard QA Dashboard</title>
+<title>VoiceGuard QA</title>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap');
-
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-
-  :root {
-    --bg: #0B0E1A;
-    --surface: #131729;
-    --surface2: #1C2240;
-    --border: #252D4A;
-    --accent: #4F6EF7;
-    --accent2: #7C3AED;
-    --green: #10D48E;
-    --yellow: #F5A623;
-    --red: #F24E4E;
-    --text: #E8EAFF;
-    --text2: #8B93C4;
-    --text3: #4F5880;
-  }
-
-  body {
-    font-family: 'Inter', sans-serif;
-    background: var(--bg);
-    color: var(--text);
-    display: flex;
-    min-height: 100vh;
-    font-size: 13px;
-  }
-
-  /* SIDEBAR */
-  .sidebar {
-    width: 220px;
-    background: var(--surface);
-    border-right: 1px solid var(--border);
-    display: flex;
-    flex-direction: column;
-    padding: 24px 0;
-    position: fixed;
-    height: 100vh;
-    z-index: 100;
-  }
-
-  .logo {
-    padding: 0 20px 28px;
-    border-bottom: 1px solid var(--border);
-    margin-bottom: 20px;
-  }
-
-  .logo-mark {
-    font-family: 'Space Grotesk', sans-serif;
-    font-size: 18px;
-    font-weight: 700;
-    color: var(--text);
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .logo-icon {
-    width: 28px;
-    height: 28px;
-    background: linear-gradient(135deg, var(--accent), var(--accent2));
-    border-radius: 8px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 14px;
-  }
-
-  .logo-sub {
-    font-size: 10px;
-    color: var(--text3);
-    margin-top: 2px;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-  }
-
-  .nav-section {
-    padding: 0 12px;
-    margin-bottom: 8px;
-  }
-
-  .nav-label {
-    font-size: 10px;
-    color: var(--text3);
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    padding: 0 8px;
-    margin-bottom: 6px;
-  }
-
-  .nav-item {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 9px 12px;
-    border-radius: 8px;
-    color: var(--text2);
-    cursor: pointer;
-    transition: all 0.15s;
-    font-size: 13px;
-    font-weight: 500;
-    margin-bottom: 2px;
-  }
-
-  .nav-item:hover { background: var(--surface2); color: var(--text); }
-  .nav-item.active { background: rgba(79,110,247,0.15); color: var(--accent); }
-  .nav-item .icon { font-size: 15px; width: 18px; text-align: center; }
-
-  .nav-badge {
-    margin-left: auto;
-    background: var(--red);
-    color: white;
-    font-size: 10px;
-    font-weight: 600;
-    padding: 2px 6px;
-    border-radius: 10px;
-  }
-
-  .sidebar-footer {
-    margin-top: auto;
-    padding: 16px 20px;
-    border-top: 1px solid var(--border);
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
-
-  .avatar {
-    width: 32px;
-    height: 32px;
-    background: linear-gradient(135deg, var(--accent), var(--accent2));
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-weight: 700;
-    font-size: 12px;
-  }
-
-  .user-info { flex: 1; }
-  .user-name { font-size: 12px; font-weight: 600; }
-  .user-role { font-size: 10px; color: var(--text3); }
-
-  /* MAIN CONTENT */
-  .main {
-    margin-left: 220px;
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-  }
-
-  /* TOP BAR */
-  .topbar {
-    background: var(--surface);
-    border-bottom: 1px solid var(--border);
-    padding: 16px 28px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    position: sticky;
-    top: 0;
-    z-index: 50;
-  }
-
-  .page-title {
-    font-family: 'Space Grotesk', sans-serif;
-    font-size: 18px;
-    font-weight: 600;
-  }
-
-  .topbar-right {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-  }
-
-  .date-filter {
-    background: var(--surface2);
-    border: 1px solid var(--border);
-    color: var(--text2);
-    padding: 7px 14px;
-    border-radius: 8px;
-    font-size: 12px;
-    font-family: 'Inter', sans-serif;
-    cursor: pointer;
-  }
-
-  .btn {
-    padding: 8px 16px;
-    border-radius: 8px;
-    font-size: 12px;
-    font-weight: 600;
-    cursor: pointer;
-    border: none;
-    font-family: 'Inter', sans-serif;
-  }
-
-  .btn-primary {
-    background: var(--accent);
-    color: white;
-  }
-
-  .btn-outline {
-    background: transparent;
-    border: 1px solid var(--border);
-    color: var(--text2);
-  }
-
-  /* PAGE SECTIONS */
-  .page { display: none; padding: 28px; }
-  .page.active { display: block; }
-
-  /* STAT CARDS */
-  .stats-row {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 16px;
-    margin-bottom: 24px;
-  }
-
-  .stat-card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 20px;
-    position: relative;
-    overflow: hidden;
-  }
-
-  .stat-card::before {
-    content: '';
-    position: absolute;
-    top: 0; left: 0; right: 0;
-    height: 2px;
-  }
-
-  .stat-card.blue::before { background: var(--accent); }
-  .stat-card.green::before { background: var(--green); }
-  .stat-card.yellow::before { background: var(--yellow); }
-  .stat-card.red::before { background: var(--red); }
-
-  .stat-label {
-    font-size: 11px;
-    color: var(--text3);
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    margin-bottom: 10px;
-  }
-
-  .stat-value {
-    font-family: 'Space Grotesk', sans-serif;
-    font-size: 32px;
-    font-weight: 700;
-    line-height: 1;
-    margin-bottom: 8px;
-  }
-
-  .stat-value.blue { color: var(--accent); }
-  .stat-value.green { color: var(--green); }
-  .stat-value.yellow { color: var(--yellow); }
-  .stat-value.red { color: var(--red); }
-
-  .stat-change {
-    font-size: 11px;
-    color: var(--text3);
-    display: flex;
-    align-items: center;
-    gap: 4px;
-  }
-
-  .stat-change .up { color: var(--green); }
-  .stat-change .down { color: var(--red); }
-
-  /* GRID LAYOUT */
-  .grid-2 {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 16px;
-    margin-bottom: 24px;
-  }
-
-  .grid-3-1 {
-    display: grid;
-    grid-template-columns: 2fr 1fr;
-    gap: 16px;
-    margin-bottom: 24px;
-  }
-
-  .card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    overflow: hidden;
-  }
-
-  .card-header {
-    padding: 16px 20px;
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-
-  .card-title {
-    font-family: 'Space Grotesk', sans-serif;
-    font-size: 14px;
-    font-weight: 600;
-  }
-
-  .card-body { padding: 20px; }
-
-  /* SCORE BARS */
-  .score-item {
-    margin-bottom: 16px;
-  }
-
-  .score-row {
-    display: flex;
-    justify-content: space-between;
-    margin-bottom: 6px;
-    font-size: 12px;
-  }
-
-  .score-label { color: var(--text2); }
-  .score-pct { font-weight: 600; }
-
-  .score-bar {
-    height: 6px;
-    background: var(--surface2);
-    border-radius: 3px;
-    overflow: hidden;
-  }
-
-  .score-fill {
-    height: 100%;
-    border-radius: 3px;
-    transition: width 0.6s ease;
-  }
-
-  /* CALL TABLE */
-  .table-wrap { overflow-x: auto; }
-
-  table {
-    width: 100%;
-    border-collapse: collapse;
-  }
-
-  thead tr {
-    border-bottom: 1px solid var(--border);
-  }
-
-  th {
-    text-align: left;
-    padding: 12px 16px;
-    font-size: 11px;
-    color: var(--text3);
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    font-weight: 500;
-  }
-
-  tbody tr {
-    border-bottom: 1px solid var(--border);
-    transition: background 0.1s;
-  }
-
-  tbody tr:hover { background: var(--surface2); cursor: pointer; }
-  tbody tr:last-child { border-bottom: none; }
-
-  td {
-    padding: 13px 16px;
-    font-size: 12px;
-    color: var(--text2);
-  }
-
-  td.agent { color: var(--text); font-weight: 500; }
-
-  /* BADGES */
-  .badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 3px 8px;
-    border-radius: 6px;
-    font-size: 11px;
-    font-weight: 600;
-  }
-
-  .badge-green { background: rgba(16,212,142,0.12); color: var(--green); }
-  .badge-yellow { background: rgba(245,166,35,0.12); color: var(--yellow); }
-  .badge-red { background: rgba(242,78,78,0.12); color: var(--red); }
-  .badge-blue { background: rgba(79,110,247,0.12); color: var(--accent); }
-
-  /* SCORE CIRCLE */
-  .score-circle {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 38px;
-    height: 38px;
-    border-radius: 50%;
-    font-weight: 700;
-    font-size: 13px;
-    font-family: 'Space Grotesk', sans-serif;
-  }
-
-  .sc-green { background: rgba(16,212,142,0.15); color: var(--green); border: 1.5px solid rgba(16,212,142,0.3); }
-  .sc-yellow { background: rgba(245,166,35,0.15); color: var(--yellow); border: 1.5px solid rgba(245,166,35,0.3); }
-  .sc-red { background: rgba(242,78,78,0.15); color: var(--red); border: 1.5px solid rgba(242,78,78,0.3); }
-
-  /* AGENT RANKING */
-  .agent-item {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 12px 0;
-    border-bottom: 1px solid var(--border);
-  }
-
-  .agent-item:last-child { border-bottom: none; }
-
-  .agent-rank {
-    font-family: 'Space Grotesk', sans-serif;
-    font-size: 16px;
-    font-weight: 700;
-    color: var(--text3);
-    width: 24px;
-    text-align: center;
-  }
-
-  .agent-rank.top { color: var(--yellow); }
-
-  .agent-avatar {
-    width: 34px;
-    height: 34px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-weight: 700;
-    font-size: 12px;
-    flex-shrink: 0;
-  }
-
-  .agent-details { flex: 1; }
-  .agent-name { font-weight: 600; font-size: 13px; color: var(--text); }
-  .agent-calls { font-size: 11px; color: var(--text3); margin-top: 2px; }
-
-  .agent-score-bar {
-    width: 80px;
-    height: 6px;
-    background: var(--surface2);
-    border-radius: 3px;
-    overflow: hidden;
-    margin-bottom: 4px;
-  }
-
-  .agent-score-label {
-    font-size: 11px;
-    font-weight: 600;
-    text-align: right;
-  }
-
-  /* FLAGS */
-  .flag-item {
-    display: flex;
-    gap: 12px;
-    padding: 14px 0;
-    border-bottom: 1px solid var(--border);
-    align-items: flex-start;
-  }
-
-  .flag-item:last-child { border-bottom: none; }
-
-  .flag-icon {
-    width: 32px;
-    height: 32px;
-    border-radius: 8px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 14px;
-    flex-shrink: 0;
-  }
-
-  .flag-icon.red { background: rgba(242,78,78,0.12); }
-  .flag-icon.yellow { background: rgba(245,166,35,0.12); }
-
-  .flag-text { flex: 1; }
-  .flag-title { font-size: 12px; font-weight: 600; color: var(--text); margin-bottom: 3px; }
-  .flag-desc { font-size: 11px; color: var(--text3); line-height: 1.5; }
-  .flag-time { font-size: 10px; color: var(--text3); margin-top: 4px; }
-
-  /* RULES ENGINE */
-  .rule-item {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 14px 16px;
-    border-bottom: 1px solid var(--border);
-    transition: background 0.1s;
-  }
-
-  .rule-item:hover { background: var(--surface2); }
-  .rule-item:last-child { border-bottom: none; }
-
-  .rule-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }
-
-  .rule-text { flex: 1; font-size: 13px; color: var(--text2); line-height: 1.4; }
-  .rule-text strong { color: var(--text); font-weight: 500; }
-
-  .rule-category {
-    font-size: 10px;
-    padding: 3px 8px;
-    border-radius: 6px;
-    font-weight: 600;
-  }
-
-  .toggle {
-    width: 36px;
-    height: 20px;
-    border-radius: 10px;
-    background: var(--green);
-    position: relative;
-    cursor: pointer;
-    flex-shrink: 0;
-  }
-
-  .toggle::after {
-    content: '';
-    position: absolute;
-    width: 14px;
-    height: 14px;
-    background: white;
-    border-radius: 50%;
-    top: 3px;
-    right: 3px;
-    transition: right 0.2s;
-  }
-
-  .toggle.off { background: var(--border); }
-  .toggle.off::after { right: 19px; }
-
-  /* ADD RULE FORM */
-  .add-rule-form {
-    background: var(--surface2);
-    border: 1px dashed var(--border);
-    border-radius: 12px;
-    padding: 20px;
-    margin: 16px;
-  }
-
-  .form-row { display: flex; gap: 12px; align-items: flex-end; }
-
-  .form-group { flex: 1; }
-
-  .form-label {
-    font-size: 11px;
-    color: var(--text3);
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    margin-bottom: 6px;
-    display: block;
-  }
-
-  .form-input, .form-select {
-    width: 100%;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    color: var(--text);
-    padding: 9px 12px;
-    border-radius: 8px;
-    font-size: 13px;
-    font-family: 'Inter', sans-serif;
-    outline: none;
-    transition: border-color 0.15s;
-  }
-
-  .form-input:focus, .form-select:focus { border-color: var(--accent); }
-  .form-input::placeholder { color: var(--text3); }
-
-  /* CALL DETAIL */
-  .call-meta {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 16px;
-    margin-bottom: 24px;
-  }
-
-  .meta-card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 16px;
-    text-align: center;
-  }
-
-  .meta-val {
-    font-family: 'Space Grotesk', sans-serif;
-    font-size: 22px;
-    font-weight: 700;
-    margin-bottom: 4px;
-  }
-
-  .meta-lbl { font-size: 11px; color: var(--text3); }
-
-  .criteria-list { display: flex; flex-direction: column; gap: 10px; }
-
-  .criteria-item {
-    background: var(--surface2);
-    border-radius: 10px;
-    padding: 14px 16px;
-    display: flex;
-    align-items: center;
-    gap: 12px;
-  }
-
-  .criteria-name { flex: 1; font-size: 13px; font-weight: 500; }
-  .criteria-evidence { font-size: 11px; color: var(--text3); line-height: 1.4; margin-top: 3px; }
-
-  .criteria-score {
-    font-family: 'Space Grotesk', sans-serif;
-    font-size: 18px;
-    font-weight: 700;
-    min-width: 40px;
-    text-align: right;
-  }
-
-  /* MINI CHART */
-  .chart-area {
-    height: 140px;
-    display: flex;
-    align-items: flex-end;
-    gap: 6px;
-    padding: 0 4px;
-  }
-
-  .bar-group {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 4px;
-  }
-
-  .bar {
-    width: 100%;
-    border-radius: 4px 4px 0 0;
-    min-height: 4px;
-  }
-
-  .bar-lbl { font-size: 10px; color: var(--text3); }
-
-  /* EMOTION METER */
-  .emotion-row {
-    display: flex;
-    gap: 12px;
-    margin-bottom: 16px;
-  }
-
-  .emotion-card {
-    flex: 1;
-    background: var(--surface2);
-    border-radius: 10px;
-    padding: 14px;
-    text-align: center;
-  }
-
-  .emotion-emoji { font-size: 24px; margin-bottom: 6px; }
-  .emotion-label { font-size: 11px; color: var(--text3); }
-  .emotion-pct { font-family: 'Space Grotesk', sans-serif; font-size: 18px; font-weight: 700; }
-
-  /* TRANSCRIPT */
-  .transcript-box {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 16px;
-    max-height: 220px;
-    overflow-y: auto;
-    font-size: 12px;
-    line-height: 1.7;
-  }
-
-  .t-agent { color: var(--accent); font-weight: 600; }
-  .t-customer { color: var(--green); font-weight: 600; }
-  .t-highlight { background: rgba(242,78,78,0.2); border-radius: 3px; padding: 0 3px; color: var(--red); }
-
-  /* SCROLLBAR */
-  ::-webkit-scrollbar { width: 6px; height: 6px; }
-  ::-webkit-scrollbar-track { background: var(--bg); }
-  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-
-  /* NOTIFICATION DOT */
-  .notif-dot {
-    width: 7px;
-    height: 7px;
-    background: var(--red);
-    border-radius: 50%;
-    position: absolute;
-    top: 6px;
-    right: 6px;
-  }
-
-  .section-title {
-    font-family: 'Space Grotesk', sans-serif;
-    font-size: 15px;
-    font-weight: 600;
-    margin-bottom: 16px;
-    color: var(--text);
-  }
-
-  .alert-bar {
-    background: rgba(242,78,78,0.08);
-    border: 1px solid rgba(242,78,78,0.2);
-    border-radius: 10px;
-    padding: 12px 16px;
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    margin-bottom: 20px;
-  }
-
-  .alert-bar .icon { font-size: 18px; }
-  .alert-bar .text { font-size: 12px; color: var(--text2); flex: 1; }
-  .alert-bar .text strong { color: var(--red); }
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+*{margin:0;padding:0;box-sizing:border-box;}
+:root{
+  --bg:#0B0E1A;--surface:#131729;--surface2:#1C2240;--border:#252D4A;
+  --accent:#4F6EF7;--accent2:#7C3AED;--green:#10D48E;--yellow:#F5A623;
+  --red:#F24E4E;--purple:#8B5CF6;--cyan:#06B6D4;
+  --text:#E8EAFF;--text2:#8B93C4;--text3:#4F5880;
+}
+body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);display:flex;min-height:100vh;font-size:13px;}
+/* SIDEBAR */
+.sidebar{width:220px;background:var(--surface);border-right:1px solid var(--border);display:flex;flex-direction:column;padding:24px 0;position:fixed;height:100vh;z-index:100;}
+.logo{padding:0 20px 28px;border-bottom:1px solid var(--border);margin-bottom:20px;}
+.logo-mark{font-family:'Space Grotesk',sans-serif;font-size:18px;font-weight:700;display:flex;align-items:center;gap:8px;}
+.logo-icon{width:28px;height:28px;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:14px;}
+.logo-sub{font-size:10px;color:var(--text3);margin-top:2px;letter-spacing:0.08em;text-transform:uppercase;}
+.nav-section{padding:0 12px;margin-bottom:8px;}
+.nav-label{font-size:10px;color:var(--text3);letter-spacing:0.1em;text-transform:uppercase;padding:0 8px;margin-bottom:6px;}
+.nav-item{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:8px;color:var(--text2);cursor:pointer;font-size:13px;font-weight:500;margin-bottom:2px;transition:all 0.15s;}
+.nav-item:hover{background:var(--surface2);color:var(--text);}
+.nav-item.active{background:rgba(79,110,247,0.15);color:var(--accent);}
+.nav-item .icon{font-size:15px;width:18px;text-align:center;}
+.nav-badge{margin-left:auto;background:var(--red);color:white;font-size:10px;font-weight:600;padding:2px 6px;border-radius:10px;}
+.sidebar-footer{margin-top:auto;padding:16px 20px;border-top:1px solid var(--border);display:flex;align-items:center;gap:10px;}
+.avatar{width:32px;height:32px;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;}
+.user-name{font-size:12px;font-weight:600;}
+.user-role{font-size:10px;color:var(--text3);}
+/* MAIN */
+.main{margin-left:220px;flex:1;display:flex;flex-direction:column;}
+.topbar{background:var(--surface);border-bottom:1px solid var(--border);padding:16px 28px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:50;}
+.page-title{font-family:'Space Grotesk',sans-serif;font-size:18px;font-weight:600;}
+.topbar-right{display:flex;align-items:center;gap:12px;}
+.date-filter{background:var(--surface2);border:1px solid var(--border);color:var(--text2);padding:7px 14px;border-radius:8px;font-size:12px;font-family:'Inter',sans-serif;cursor:pointer;outline:none;}
+.btn{padding:8px 16px;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;border:none;font-family:'Inter',sans-serif;}
+.btn-primary{background:var(--accent);color:white;}
+.btn-outline{background:transparent;border:1px solid var(--border);color:var(--text2);}
+.btn-sm{padding:5px 10px;font-size:11px;}
+/* PAGES */
+.page{display:none;padding:28px;}
+.page.active{display:block;}
+/* CARDS */
+.stats-row{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:24px;}
+.stat-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px;position:relative;overflow:hidden;}
+.stat-card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;}
+.stat-card.blue::before{background:var(--accent);}
+.stat-card.green::before{background:var(--green);}
+.stat-card.yellow::before{background:var(--yellow);}
+.stat-card.red::before{background:var(--red);}
+.stat-card.purple::before{background:var(--purple);}
+.stat-card.cyan::before{background:var(--cyan);}
+.stat-label{font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:10px;}
+.stat-value{font-family:'Space Grotesk',sans-serif;font-size:32px;font-weight:700;line-height:1;margin-bottom:8px;}
+.stat-value.blue{color:var(--accent);}
+.stat-value.green{color:var(--green);}
+.stat-value.yellow{color:var(--yellow);}
+.stat-value.red{color:var(--red);}
+.stat-value.purple{color:var(--purple);}
+.stat-value.cyan{color:var(--cyan);}
+.stat-change{font-size:11px;color:var(--text3);}
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:24px;}
+.grid-3-1{display:grid;grid-template-columns:2fr 1fr;gap:16px;margin-bottom:24px;}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:12px;overflow:hidden;}
+.card-header{padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;}
+.card-title{font-family:'Space Grotesk',sans-serif;font-size:14px;font-weight:600;}
+.card-body{padding:20px;}
+/* SCORE BARS */
+.score-item{margin-bottom:16px;}
+.score-row{display:flex;justify-content:space-between;margin-bottom:6px;font-size:12px;}
+.score-label{color:var(--text2);}
+.score-pct{font-weight:600;}
+.score-bar{height:6px;background:var(--surface2);border-radius:3px;overflow:hidden;}
+.score-fill{height:100%;border-radius:3px;}
+/* TABLE */
+.table-wrap{overflow-x:auto;}
+table{width:100%;border-collapse:collapse;}
+thead tr{border-bottom:1px solid var(--border);}
+th{text-align:left;padding:12px 14px;font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.08em;font-weight:500;white-space:nowrap;}
+tbody tr{border-bottom:1px solid var(--border);transition:background 0.1s;}
+tbody tr:hover{background:var(--surface2);cursor:pointer;}
+tbody tr:last-child{border-bottom:none;}
+td{padding:12px 14px;font-size:12px;color:var(--text2);}
+td.agent{color:var(--text);font-weight:500;}
+/* BADGES */
+.badge{display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:6px;font-size:11px;font-weight:600;}
+.badge-green{background:rgba(16,212,142,0.12);color:var(--green);}
+.badge-yellow{background:rgba(245,166,35,0.12);color:var(--yellow);}
+.badge-red{background:rgba(242,78,78,0.12);color:var(--red);}
+.badge-blue{background:rgba(79,110,247,0.12);color:var(--accent);}
+.badge-purple{background:rgba(139,92,246,0.12);color:var(--purple);}
+.badge-cyan{background:rgba(6,182,212,0.12);color:var(--cyan);}
+.badge-gray{background:rgba(79,88,128,0.2);color:var(--text3);}
+/* SCORE CIRCLE */
+.score-circle{display:inline-flex;align-items:center;justify-content:center;width:38px;height:38px;border-radius:50%;font-weight:700;font-size:13px;font-family:'Space Grotesk',sans-serif;}
+.sc-green{background:rgba(16,212,142,0.15);color:var(--green);border:1.5px solid rgba(16,212,142,0.3);}
+.sc-yellow{background:rgba(245,166,35,0.15);color:var(--yellow);border:1.5px solid rgba(245,166,35,0.3);}
+.sc-red{background:rgba(242,78,78,0.15);color:var(--red);border:1.5px solid rgba(242,78,78,0.3);}
+.sc-gray{background:rgba(79,88,128,0.15);color:var(--text3);border:1.5px solid rgba(79,88,128,0.3);}
+/* AGENT CARDS */
+.agents-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px;margin-bottom:24px;}
+.agent-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px;}
+.agent-avatar{width:48px;height:48px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:16px;flex-shrink:0;}
+/* FLAGS */
+.flag-item{display:flex;gap:12px;padding:14px 0;border-bottom:1px solid var(--border);align-items:flex-start;}
+.flag-item:last-child{border-bottom:none;}
+.flag-icon{width:32px;height:32px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;}
+.flag-icon.red{background:rgba(242,78,78,0.12);}
+.flag-icon.yellow{background:rgba(245,166,35,0.12);}
+.flag-icon.blue{background:rgba(79,110,247,0.12);}
+.flag-title{font-size:12px;font-weight:600;color:var(--text);margin-bottom:3px;}
+.flag-desc{font-size:11px;color:var(--text3);line-height:1.5;}
+.flag-time{font-size:10px;color:var(--text3);margin-top:4px;}
+/* RULES */
+.rule-item{display:flex;align-items:center;gap:12px;padding:14px 16px;border-bottom:1px solid var(--border);transition:background 0.1s;}
+.rule-item:hover{background:var(--surface2);}
+.rule-item:last-child{border-bottom:none;}
+.rule-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;}
+.rule-text{flex:1;font-size:13px;color:var(--text2);line-height:1.4;}
+.toggle{width:36px;height:20px;border-radius:10px;background:var(--green);position:relative;cursor:pointer;flex-shrink:0;}
+.toggle::after{content:'';position:absolute;width:14px;height:14px;background:white;border-radius:50%;top:3px;right:3px;transition:right 0.2s;}
+.toggle.off{background:var(--border);}
+.toggle.off::after{right:19px;}
+/* FORM */
+.form-label{font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.08em;display:block;margin-bottom:6px;}
+.form-input,.form-select{width:100%;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:9px 12px;border-radius:8px;font-size:13px;font-family:'Inter',sans-serif;outline:none;transition:border-color 0.15s;}
+.form-input:focus,.form-select:focus{border-color:var(--accent);}
+.form-input::placeholder{color:var(--text3);}
+/* CALL DETAIL */
+.call-meta{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:20px;}
+.meta-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px;text-align:center;}
+.meta-val{font-family:'Space Grotesk',sans-serif;font-size:20px;font-weight:700;margin-bottom:4px;}
+.meta-lbl{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;}
+.criteria-item{background:var(--surface2);border-radius:10px;padding:14px 16px;display:flex;align-items:flex-start;gap:12px;margin-bottom:10px;}
+.criteria-name{font-size:13px;font-weight:500;margin-bottom:3px;}
+.criteria-evidence{font-size:11px;color:var(--text3);line-height:1.4;}
+.criteria-score{font-family:'Space Grotesk',sans-serif;font-size:18px;font-weight:700;min-width:44px;text-align:right;flex-shrink:0;}
+/* TRANSCRIPT */
+.transcript-box{background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:16px;max-height:220px;overflow-y:auto;font-size:12px;line-height:1.7;}
+.t-agent{color:var(--accent);font-weight:600;}
+.t-customer{color:var(--green);font-weight:600;}
+.t-highlight{background:rgba(242,78,78,0.2);border-radius:3px;padding:0 3px;color:var(--red);}
+/* CHART */
+.chart-area{height:140px;display:flex;align-items:flex-end;gap:6px;padding:0 4px;}
+.bar-group{flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;}
+.bar{width:100%;border-radius:4px 4px 0 0;min-height:4px;}
+.bar-lbl{font-size:10px;color:var(--text3);}
+/* EMOTION */
+.emotion-row{display:flex;gap:12px;margin-bottom:16px;}
+.emotion-card{flex:1;background:var(--surface2);border-radius:10px;padding:14px;text-align:center;}
+.emotion-emoji{font-size:24px;margin-bottom:6px;}
+.emotion-label{font-size:11px;color:var(--text3);}
+.emotion-pct{font-family:'Space Grotesk',sans-serif;font-size:18px;font-weight:700;}
+/* ALERT BAR */
+.alert-bar{background:rgba(242,78,78,0.08);border:1px solid rgba(242,78,78,0.2);border-radius:10px;padding:12px 16px;display:flex;align-items:center;gap:12px;margin-bottom:20px;}
+/* MODAL */
+.modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:9999;align-items:center;justify-content:center;}
+.modal-box{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:32px;width:460px;max-height:90vh;overflow-y:auto;}
+.modal-title{font-family:'Space Grotesk',sans-serif;font-size:20px;font-weight:700;margin-bottom:24px;}
+/* BILLING TABLE */
+.billing-diff-pos{color:var(--yellow);}
+.billing-diff-neg{color:var(--green);}
+/* NOTES */
+.notes-box{background:var(--surface2);border-radius:10px;padding:14px;font-size:12px;line-height:1.6;color:var(--text2);border-left:3px solid var(--accent);}
+/* EMOTION ARROW */
+.emotion-arrow{display:flex;align-items:center;gap:8px;padding:10px 14px;background:var(--surface2);border-radius:8px;font-size:12px;}
+/* SCROLLBAR */
+::-webkit-scrollbar{width:6px;height:6px;}
+::-webkit-scrollbar-track{background:var(--bg);}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px;}
 </style>
 </head>
 <body>
@@ -743,1009 +179,1032 @@
 <!-- SIDEBAR -->
 <aside class="sidebar">
   <div class="logo">
-    <div class="logo-mark">
-      <div class="logo-icon">🎧</div>
-      VoiceGuard
-    </div>
+    <div class="logo-mark"><div class="logo-icon">🎧</div>VoiceGuard</div>
     <div class="logo-sub">QA Intelligence Platform</div>
   </div>
-
   <div class="nav-section">
     <div class="nav-label">Main</div>
-    <div class="nav-item active" onclick="showPage('dashboard')">
-      <span class="icon">📊</span> Dashboard
-    </div>
-    <div class="nav-item" onclick="showPage('calls')">
-      <span class="icon">📞</span> Call Review
-      <span class="nav-badge">12</span>
-    </div>
-    <div class="nav-item" onclick="showPage('call-detail')">
-      <span class="icon">🔍</span> Call Detail
-    </div>
-    <div class="nav-item" onclick="showPage('agents')">
-      <span class="icon">👥</span> Agents
-    </div>
+    <div class="nav-item active" onclick="showPage('dashboard')"><span class="icon">📊</span>Dashboard</div>
+    <div class="nav-item" onclick="showPage('calls')"><span class="icon">📞</span>Call Review<span class="nav-badge" id="nb-review">0</span></div>
+    <div class="nav-item" onclick="showPage('human-review')"><span class="icon">👁</span>Human Review<span class="nav-badge" id="nb-human">0</span></div>
+    <div class="nav-item" onclick="showPage('agents')"><span class="icon">👥</span>Agents</div>
   </div>
-
   <div class="nav-section" style="margin-top:12px;">
-    <div class="nav-label">Configuration</div>
-    <div class="nav-item" onclick="showPage('rules')">
-      <span class="icon">⚙️</span> Rules Engine
-    </div>
-    <div class="nav-item" onclick="showPage('alerts')">
-      <span class="icon">🚨</span> Alerts
-      <span class="nav-badge">3</span>
-    </div>
+    <div class="nav-label">Analytics</div>
+    <div class="nav-item" onclick="showPage('analytics')"><span class="icon">📈</span>Trends</div>
+    <div class="nav-item" onclick="showPage('billing')"><span class="icon">💰</span>Billing</div>
+    <div class="nav-item" onclick="showPage('notes')"><span class="icon">📝</span>Notes Quality</div>
   </div>
-
+  <div class="nav-section" style="margin-top:12px;">
+    <div class="nav-label">Config</div>
+    <div class="nav-item" onclick="showPage('rules')"><span class="icon">⚙️</span>Rules Engine</div>
+    <div class="nav-item" onclick="showPage('alerts')"><span class="icon">🚨</span>Alerts<span class="nav-badge" id="nb-alerts">0</span></div>
+  </div>
   <div class="sidebar-footer">
     <div class="avatar">DV</div>
-    <div class="user-info">
-      <div class="user-name">David</div>
-      <div class="user-role">Admin</div>
-    </div>
+    <div><div class="user-name">David</div><div class="user-role">Admin</div></div>
   </div>
 </aside>
 
-<!-- MAIN -->
 <main class="main">
 
-  <!-- ===== PAGE: DASHBOARD ===== -->
-  <div class="page active" id="page-dashboard">
-    <div class="topbar">
-      <div class="page-title">Overview Dashboard</div>
-      <div class="topbar-right">
-        <select class="date-filter"><option>Last 7 days</option><option>Last 30 days</option><option>This month</option></select>
-        <button class="btn btn-primary">Export Report</button>
-      </div>
-    </div>
-    <div style="padding:28px;">
-
-      <div class="alert-bar">
-        <span class="icon">🚨</span>
-        <span class="text"><strong>3 critical flags</strong> detected today — 2 agents used forbidden language, 1 agent did not confirm order before completing purchase.</span>
-        <button class="btn btn-outline" onclick="showPage('alerts')">View Alerts</button>
-      </div>
-
-      <div class="stats-row">
-        <div class="stat-card blue">
-          <div class="stat-label">Calls Analyzed Today</div>
-          <div class="stat-value blue" id="stat-calls">—</div>
-          <div class="stat-change"><span class="up">↑ 12%</span> vs yesterday</div>
-        </div>
-        <div class="stat-card green">
-          <div class="stat-label">Avg QA Score</div>
-          <div class="stat-value green" id="stat-score">—</div>
-          <div class="stat-change"><span class="up">↑ 3pts</span> this week</div>
-        </div>
-        <div class="stat-card yellow">
-          <div class="stat-label">Needs Coaching</div>
-          <div class="stat-value yellow" id="stat-coaching">—</div>
-          <div class="stat-change">agents below 70%</div>
-        </div>
-        <div class="stat-card red">
-          <div class="stat-label">Critical Flags</div>
-          <div class="stat-value red" id="stat-flags">—</div>
-          <div class="stat-change"><span class="down">↑ 2</span> from yesterday</div>
-        </div>
-      </div>
-
-      <div class="grid-3-1">
-        <!-- Score breakdown -->
-        <div class="card">
-          <div class="card-header">
-            <span class="card-title">QA Category Scores — This Week</span>
-            <span class="badge badge-blue">All Agents</span>
-          </div>
-          <div class="card-body">
-            <div class="score-item">
-              <div class="score-row"><span class="score-label">Accuracy of Information</span><span class="score-pct" style="color:var(--green)">91%</span></div>
-              <div class="score-bar"><div class="score-fill" style="width:91%;background:var(--green)"></div></div>
-            </div>
-            <div class="score-item">
-              <div class="score-row"><span class="score-label">Customer Service Quality</span><span class="score-pct" style="color:var(--green)">87%</span></div>
-              <div class="score-bar"><div class="score-fill" style="width:87%;background:var(--green)"></div></div>
-            </div>
-            <div class="score-item">
-              <div class="score-row"><span class="score-label">Appropriate Actions Taken</span><span class="score-pct" style="color:var(--yellow)">76%</span></div>
-              <div class="score-bar"><div class="score-fill" style="width:76%;background:var(--yellow)"></div></div>
-            </div>
-            <div class="score-item">
-              <div class="score-row"><span class="score-label">Compliance & Call Handling</span><span class="score-pct" style="color:var(--yellow)">79%</span></div>
-              <div class="score-bar"><div class="score-fill" style="width:79%;background:var(--yellow)"></div></div>
-            </div>
-            <div class="score-item">
-              <div class="score-row"><span class="score-label">Customer Emotion (Positive)</span><span class="score-pct" style="color:var(--green)">83%</span></div>
-              <div class="score-bar"><div class="score-fill" style="width:83%;background:var(--accent)"></div></div>
-            </div>
-            <div class="score-item" style="margin-bottom:0">
-              <div class="score-row"><span class="score-label">Rules Engine Pass Rate</span><span class="score-pct" style="color:var(--red)">68%</span></div>
-              <div class="score-bar"><div class="score-fill" style="width:68%;background:var(--red)"></div></div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Top flags -->
-        <div class="card">
-          <div class="card-header"><span class="card-title">Top Flags Today</span></div>
-          <div class="card-body" style="padding:12px 16px;">
-            <div class="flag-item">
-              <div class="flag-icon red">🚫</div>
-              <div class="flag-text">
-                <div class="flag-title">Forbidden word used</div>
-                <div class="flag-desc">Agent Sarah K. used restricted language during call #4821</div>
-                <div class="flag-time">2 hours ago</div>
-              </div>
-            </div>
-            <div class="flag-item">
-              <div class="flag-icon red">💳</div>
-              <div class="flag-text">
-                <div class="flag-title">No price confirmation</div>
-                <div class="flag-desc">Order placed without reading total to customer</div>
-                <div class="flag-time">3 hours ago</div>
-              </div>
-            </div>
-            <div class="flag-item">
-              <div class="flag-icon yellow">😤</div>
-              <div class="flag-text">
-                <div class="flag-title">Customer anger detected</div>
-                <div class="flag-desc">Tone escalated — agent did not acknowledge</div>
-                <div class="flag-time">5 hours ago</div>
-              </div>
-            </div>
-            <div class="flag-item">
-              <div class="flag-icon yellow">🔁</div>
-              <div class="flag-text">
-                <div class="flag-title">"Sir" overuse detected</div>
-                <div class="flag-desc">Agent used "sir" 14 times — feels robotic</div>
-                <div class="flag-time">6 hours ago</div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Call volume chart -->
-      <div class="card" style="margin-bottom:24px;">
-        <div class="card-header">
-          <span class="card-title">Call Volume & Avg Score — Last 7 Days</span>
-        </div>
-        <div class="card-body">
-          <div class="chart-area">
-            <div class="bar-group">
-              <div class="bar" style="height:60%;background:linear-gradient(180deg,var(--accent),rgba(79,110,247,0.3))"></div>
-              <div class="bar-lbl">Mon</div>
-            </div>
-            <div class="bar-group">
-              <div class="bar" style="height:75%;background:linear-gradient(180deg,var(--accent),rgba(79,110,247,0.3))"></div>
-              <div class="bar-lbl">Tue</div>
-            </div>
-            <div class="bar-group">
-              <div class="bar" style="height:85%;background:linear-gradient(180deg,var(--accent),rgba(79,110,247,0.3))"></div>
-              <div class="bar-lbl">Wed</div>
-            </div>
-            <div class="bar-group">
-              <div class="bar" style="height:70%;background:linear-gradient(180deg,var(--accent),rgba(79,110,247,0.3))"></div>
-              <div class="bar-lbl">Thu</div>
-            </div>
-            <div class="bar-group">
-              <div class="bar" style="height:90%;background:linear-gradient(180deg,var(--green),rgba(16,212,142,0.3))"></div>
-              <div class="bar-lbl">Fri</div>
-            </div>
-            <div class="bar-group">
-              <div class="bar" style="height:55%;background:linear-gradient(180deg,var(--accent),rgba(79,110,247,0.3))"></div>
-              <div class="bar-lbl">Sat</div>
-            </div>
-            <div class="bar-group">
-              <div class="bar" style="height:80%;background:linear-gradient(180deg,var(--accent),rgba(79,110,247,0.3))"></div>
-              <div class="bar-lbl">Sun</div>
-            </div>
-          </div>
-        </div>
-      </div>
-
+<!-- ===== DASHBOARD ===== -->
+<div class="page active" id="page-dashboard">
+  <div class="topbar">
+    <div class="page-title">Overview Dashboard</div>
+    <div class="topbar-right">
+      <select class="date-filter"><option>Last 7 days</option><option>Last 30 days</option><option>This month</option></select>
+      <button class="btn btn-primary" onclick="exportReport()">Export Report</button>
     </div>
   </div>
-
-  <!-- ===== PAGE: CALL REVIEW ===== -->
-  <div class="page" id="page-calls">
-    <div class="topbar">
-      <div class="page-title">Call Review</div>
-      <div class="topbar-right">
-        <select class="date-filter"><option>All calls</option><option>Flagged only</option><option>Needs review</option></select>
-        <input class="date-filter" placeholder="🔍 Search agent or call ID..." style="width:220px;">
-      </div>
+  <div style="padding:28px;">
+    <div id="alert-bar-container"></div>
+    <div class="stats-row" style="grid-template-columns:repeat(6,1fr);">
+      <div class="stat-card blue"><div class="stat-label">Total Calls</div><div class="stat-value blue" id="stat-calls">—</div><div class="stat-change">All time</div></div>
+      <div class="stat-card green"><div class="stat-label">Avg QA Score</div><div class="stat-value green" id="stat-score">—</div><div class="stat-change">All agents</div></div>
+      <div class="stat-card yellow"><div class="stat-label">Needs Coaching</div><div class="stat-value yellow" id="stat-coaching">—</div><div class="stat-change">Below 70%</div></div>
+      <div class="stat-card red"><div class="stat-label">Critical Flags</div><div class="stat-value red" id="stat-flags">—</div><div class="stat-change">Total flagged</div></div>
+      <div class="stat-card purple"><div class="stat-label">Human Review</div><div class="stat-value purple" id="stat-review">—</div><div class="stat-change">Needs attention</div></div>
+      <div class="stat-card cyan"><div class="stat-label">Unresolved Drops</div><div class="stat-value cyan" id="stat-drops">—</div><div class="stat-change">No callback</div></div>
     </div>
-    <div style="padding:28px;">
+    <div class="grid-3-1">
       <div class="card">
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Call ID</th>
-                <th>Agent</th>
-                <th>Date & Time</th>
-                <th>Duration</th>
-                <th>Customer Emotion</th>
-                <th>QA Score</th>
-                <th>Flags</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody id="calls-tbody">
-              <tr onclick="showPage('call-detail')">
-                <td>#4821</td>
-                <td class="agent">Sarah K.</td>
-                <td>Jun 8 · 9:14am</td>
-                <td>8:32</td>
-                <td>😤 Frustrated</td>
-                <td><div class="score-circle sc-red">61%</div></td>
-                <td><span class="badge badge-red">2 Flags</span></td>
-                <td><span class="badge badge-red">Critical</span></td>
-              </tr>
-              <tr onclick="showPage('call-detail')">
-                <td>#4820</td>
-                <td class="agent">Moshe L.</td>
-                <td>Jun 8 · 9:02am</td>
-                <td>5:18</td>
-                <td>😊 Satisfied</td>
-                <td><div class="score-circle sc-green">92%</div></td>
-                <td><span class="badge badge-green">None</span></td>
-                <td><span class="badge badge-green">Passed</span></td>
-              </tr>
-              <tr onclick="showPage('call-detail')">
-                <td>#4819</td>
-                <td class="agent">Rachel B.</td>
-                <td>Jun 8 · 8:47am</td>
-                <td>12:05</td>
-                <td>😐 Neutral</td>
-                <td><div class="score-circle sc-yellow">74%</div></td>
-                <td><span class="badge badge-yellow">1 Flag</span></td>
-                <td><span class="badge badge-yellow">Review</span></td>
-              </tr>
-              <tr onclick="showPage('call-detail')">
-                <td>#4818</td>
-                <td class="agent">Yosef M.</td>
-                <td>Jun 8 · 8:31am</td>
-                <td>6:44</td>
-                <td>😊 Satisfied</td>
-                <td><div class="score-circle sc-green">88%</div></td>
-                <td><span class="badge badge-green">None</span></td>
-                <td><span class="badge badge-green">Passed</span></td>
-              </tr>
-              <tr onclick="showPage('call-detail')">
-                <td>#4817</td>
-                <td class="agent">Devorah S.</td>
-                <td>Jun 8 · 8:15am</td>
-                <td>3:52</td>
-                <td>😤 Angry</td>
-                <td><div class="score-circle sc-red">55%</div></td>
-                <td><span class="badge badge-red">3 Flags</span></td>
-                <td><span class="badge badge-red">Critical</span></td>
-              </tr>
-              <tr onclick="showPage('call-detail')">
-                <td>#4816</td>
-                <td class="agent">Avi R.</td>
-                <td>Jun 8 · 7:58am</td>
-                <td>9:21</td>
-                <td>😊 Happy</td>
-                <td><div class="score-circle sc-green">96%</div></td>
-                <td><span class="badge badge-green">None</span></td>
-                <td><span class="badge badge-green">Passed</span></td>
-              </tr>
-            </tbody>
-          </table>
+        <div class="card-header"><span class="card-title">QA Category Scores</span><span class="badge badge-blue">All Agents</span></div>
+        <div class="card-body" id="category-scores-container">
+          <div style="color:var(--text3);font-size:12px;">Loading...</div>
         </div>
       </div>
-    </div>
-  </div>
-
-  <!-- ===== PAGE: CALL DETAIL ===== -->
-  <div class="page" id="page-call-detail">
-    <div class="topbar">
-      <div class="page-title">
-        <span style="color:var(--text3);cursor:pointer" onclick="showPage('calls')">← Call Review</span>
-        <span style="color:var(--text3);margin:0 8px">/</span> Call #4821 — Sarah K.
-      </div>
-      <div class="topbar-right">
-        <span class="badge badge-red" style="font-size:12px;padding:6px 12px;">⚠ Critical</span>
-        <button class="btn btn-outline">Send to Coaching</button>
-      </div>
-    </div>
-    <div style="padding:28px;">
-
-      <div class="call-meta">
-        <div class="meta-card">
-          <div class="meta-val" style="color:var(--red)">61%</div>
-          <div class="meta-lbl">Overall QA Score</div>
-        </div>
-        <div class="meta-card">
-          <div class="meta-val">8:32</div>
-          <div class="meta-lbl">Call Duration</div>
-        </div>
-        <div class="meta-card">
-          <div class="meta-val">2</div>
-          <div class="meta-lbl">Flags Raised</div>
-        </div>
-        <div class="meta-card">
-          <div class="meta-val" style="color:var(--red)">😤</div>
-          <div class="meta-lbl">Customer Left Frustrated</div>
-        </div>
-      </div>
-
-      <!-- Audio Player -->
-      <div class="card" style="margin-bottom:20px;" id="audio-player-card">
-        <div class="card-header">
-          <span class="card-title">🎧 Call Recording</span>
-          <span style="font-size:11px;color:var(--text3)">Streamed from recording server</span>
-        </div>
-        <div class="card-body" style="padding:16px 20px;">
-          <audio id="call-audio-player" controls style="width:100%;border-radius:8px;accent-color:var(--accent);">
-            <source id="call-audio-source" src="" type="audio/wav">
-            Your browser does not support the audio element.
-          </audio>
-          <div id="audio-unavailable" style="display:none;color:var(--text3);font-size:12px;padding:8px 0;">
-            ⚠️ Recording not available or has expired.
-          </div>
-        </div>
-      </div>
-
-      <div class="grid-2">
-        <!-- Scorecard -->
-        <div class="card">
-          <div class="card-header"><span class="card-title">AI Scorecard Breakdown</span></div>
-          <div class="card-body">
-            <div class="criteria-list">
-              <div class="criteria-item">
-                <div style="flex:1">
-                  <div class="criteria-name">Accuracy of Information</div>
-                  <div class="criteria-evidence">Agent correctly found the product and price on Amazon ✓</div>
-                </div>
-                <div class="criteria-score" style="color:var(--green)">90%</div>
-              </div>
-              <div class="criteria-item">
-                <div style="flex:1">
-                  <div class="criteria-name">Customer Service Quality</div>
-                  <div class="criteria-evidence">Tone was rushed, did not acknowledge customer frustration when raised</div>
-                </div>
-                <div class="criteria-score" style="color:var(--red)">48%</div>
-              </div>
-              <div class="criteria-item">
-                <div style="flex:1">
-                  <div class="criteria-name">Appropriate Actions</div>
-                  <div class="criteria-evidence">Confirmed order before placing ✓. Did not read total price aloud ✗</div>
-                </div>
-                <div class="criteria-score" style="color:var(--yellow)">65%</div>
-              </div>
-              <div class="criteria-item">
-                <div style="flex:1">
-                  <div class="criteria-name">Compliance & Handling</div>
-                  <div class="criteria-evidence">Did not verify customer identity at start of call ✗</div>
-                </div>
-                <div class="criteria-score" style="color:var(--red)">50%</div>
-              </div>
-              <div class="criteria-item">
-                <div style="flex:1">
-                  <div class="criteria-name">Rules Engine — All Rules</div>
-                  <div class="criteria-evidence">Used forbidden word once · "Sir" used 11 times · Did not say closing statement</div>
-                </div>
-                <div class="criteria-score" style="color:var(--red)">40%</div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Emotion + Transcript -->
-        <div style="display:flex;flex-direction:column;gap:16px;">
-          <div class="card">
-            <div class="card-header"><span class="card-title">Emotion Analysis (Audio)</span></div>
-            <div class="card-body">
-              <div class="emotion-row">
-                <div class="emotion-card">
-                  <div class="emotion-emoji">😰</div>
-                  <div class="emotion-pct" style="color:var(--yellow)">38%</div>
-                  <div class="emotion-label">Agent Stress</div>
-                </div>
-                <div class="emotion-card">
-                  <div class="emotion-emoji">😤</div>
-                  <div class="emotion-pct" style="color:var(--red)">64%</div>
-                  <div class="emotion-label">Customer Frustration</div>
-                </div>
-                <div class="emotion-card">
-                  <div class="emotion-emoji">⏩</div>
-                  <div class="emotion-pct" style="color:var(--yellow)">High</div>
-                  <div class="emotion-label">Agent Speed</div>
-                </div>
-              </div>
-              <div style="font-size:11px;color:var(--text3);background:var(--surface2);padding:10px 12px;border-radius:8px;line-height:1.6;">
-                📍 <strong style="color:var(--text2)">Key moment at 5:47</strong> — Customer raised voice asking about the total price. Agent continued without acknowledging frustration.
-              </div>
-            </div>
-          </div>
-
-          <div class="card" style="flex:1">
-            <div class="card-header"><span class="card-title">Transcript Excerpt</span><span style="font-size:11px;color:var(--text3)">Flagged moments highlighted</span></div>
-            <div class="card-body">
-              <div class="transcript-box">
-                <div style="margin-bottom:8px"><span class="t-agent">Agent:</span> Hello, how can I help you today?</div>
-                <div style="margin-bottom:8px"><span class="t-customer">Customer:</span> Hi yes I need to order something from Amazon, a blender.</div>
-                <div style="margin-bottom:8px"><span class="t-agent">Agent:</span> Sure <span class="t-highlight">sir</span>, let me look that up for you <span class="t-highlight">sir</span>.</div>
-                <div style="margin-bottom:8px"><span class="t-customer">Customer:</span> And how much does it cost?</div>
-                <div style="margin-bottom:8px"><span class="t-agent">Agent:</span> It's $49.99 <span class="t-highlight">sir</span>, should I go ahead?</div>
-                <div style="margin-bottom:8px"><span class="t-customer">Customer:</span> Wait, what about shipping? I want the total.</div>
-                <div style="margin-bottom:8px"><span class="t-agent">Agent:</span> <span class="t-highlight">Don't worry about it</span>, I'll just place it now.</div>
-                <div style="margin-bottom:8px"><span class="t-customer">Customer:</span> <em>No wait — I need to know the total first!</em></div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-    </div>
-  </div>
-
-  <!-- ===== PAGE: AGENTS ===== -->
-  <div class="page" id="page-agents">
-    <div class="topbar">
-      <div class="page-title">Agent Management</div>
-      <div class="topbar-right">
-        <input class="date-filter" id="agent-search" placeholder="🔍 Search agents..." oninput="filterAgents()" style="width:200px;">
-        <button class="btn btn-primary" onclick="showAddAgentModal()">+ Add Agent</button>
-      </div>
-    </div>
-    <div style="padding:28px;">
-
-      <!-- Agent grid -->
-      <div id="agents-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px;margin-bottom:24px;"></div>
-
-    </div>
-  </div>
-
-  <!-- ADD/EDIT AGENT MODAL -->
-  <div id="agent-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:9999;align-items:center;justify-content:center;">
-    <div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:32px;width:420px;max-height:90vh;overflow-y:auto;">
-      <div style="font-family:'Space Grotesk',sans-serif;font-size:20px;font-weight:700;margin-bottom:24px;" id="agent-modal-title">👤 Add New Agent</div>
-
-      <div style="margin-bottom:14px;">
-        <label class="form-label" style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.08em;display:block;margin-bottom:6px;">Full Name *</label>
-        <input id="agent-name-input" class="form-input" placeholder="e.g. Sarah Klein" style="width:100%" />
-      </div>
-      <div style="margin-bottom:14px;">
-        <label class="form-label" style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.08em;display:block;margin-bottom:6px;">Extension Number *</label>
-        <input id="agent-ext-input" class="form-input" placeholder="e.g. 101" style="width:100%" />
-      </div>
-      <div style="margin-bottom:14px;">
-        <label class="form-label" style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.08em;display:block;margin-bottom:6px;">Email</label>
-        <input id="agent-email-input" class="form-input" placeholder="e.g. sarah@company.com" style="width:100%" />
-      </div>
-      <div style="margin-bottom:14px;">
-        <label class="form-label" style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.08em;display:block;margin-bottom:6px;">Photo URL (optional)</label>
-        <input id="agent-photo-input" class="form-input" placeholder="https://..." style="width:100%" />
-      </div>
-      <div style="margin-bottom:20px;">
-        <label class="form-label" style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.08em;display:block;margin-bottom:6px;">Status</label>
-        <select id="agent-status-input" class="form-select" style="width:100%">
-          <option value="active">Active</option>
-          <option value="inactive">Inactive</option>
-        </select>
-      </div>
-
-      <div id="agent-modal-err" style="color:var(--red);font-size:12px;margin-bottom:12px;"></div>
-      <div style="display:flex;gap:10px;">
-        <button class="btn btn-primary" onclick="saveAgent()" style="flex:1" id="agent-save-btn">Save Agent</button>
-        <button class="btn btn-outline" onclick="hideAgentModal()" style="flex:1">Cancel</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- ===== PAGE: RULES ENGINE ===== -->
-  <div class="page" id="page-rules">
-    <div class="topbar">
-      <div class="page-title">Rules Engine</div>
-      <div class="topbar-right">
-        <span style="font-size:12px;color:var(--text3)">24 active rules · Applied to every call</span>
-      </div>
-    </div>
-    <div style="padding:28px;">
-
-      <!-- Add rule -->
-      <div class="card" style="margin-bottom:20px;">
-        <div class="card-header"><span class="card-title">➕ Add New Rule</span><span style="font-size:11px;color:var(--text3)">Write in plain English — AI will understand</span></div>
-        <div class="add-rule-form" style="margin:0;border-radius:0;border:none;background:transparent;padding:20px;">
-          <div class="form-row">
-            <div class="form-group" style="flex:2">
-              <label class="form-label">Rule Description</label>
-              <input id="new-rule-desc" class="form-input" placeholder='e.g. "Agent should not overuse the word sir" or "Agent must confirm order total before placing"' />
-            </div>
-            <div class="form-group" style="flex:0.6">
-              <label class="form-label">Category</label>
-              <select id="new-rule-cat" class="form-select">
-                <option>Forbidden Words</option>
-                <option>Required Phrases</option>
-                <option>Behavior</option>
-                <option>Compliance</option>
-                <option>Sequence</option>
-              </select>
-            </div>
-            <div class="form-group" style="flex:0.4">
-              <label class="form-label">Severity</label>
-              <select id="new-rule-sev" class="form-select">
-                <option>Critical</option>
-                <option>Warning</option>
-                <option>Info</option>
-              </select>
-            </div>
-            <button id="add-rule-btn" class="btn btn-primary" onclick="addRule()" style="align-self:flex-end;white-space:nowrap">Save Rule</button>
-          </div>
-        </div>
-      </div>
-
-      <!-- Rules list -->
-      <div class="card" id="rules-list">
-        <div class="card-header">
-          <span class="card-title">Active Rules</span>
-          <div style="display:flex;gap:8px;">
-            <span class="badge badge-red">Critical</span>
-            <span class="badge badge-yellow">Warning</span>
-            <span class="badge badge-blue">Info</span>
-          </div>
-        </div>
-
-        <div class="rule-item">
-          <div class="rule-dot" style="background:var(--red)"></div>
-          <div class="rule-text"><strong>Forbidden language</strong> — Agent must never use inappropriate, offensive, or sexual language of any kind</div>
-          <span class="rule-category badge badge-red">Forbidden</span>
-          <div class="toggle"></div>
-        </div>
-        <div class="rule-item">
-          <div class="rule-dot" style="background:var(--red)"></div>
-          <div class="rule-text"><strong>Price confirmation</strong> — Agent must read the total price including shipping out loud before placing any order</div>
-          <span class="rule-category badge badge-red">Compliance</span>
-          <div class="toggle"></div>
-        </div>
-        <div class="rule-item">
-          <div class="rule-dot" style="background:var(--red)"></div>
-          <div class="rule-text"><strong>Customer verbal approval</strong> — Agent must receive explicit verbal confirmation from customer before completing any purchase or action</div>
-          <span class="rule-category badge badge-red">Compliance</span>
-          <div class="toggle"></div>
-        </div>
-        <div class="rule-item">
-          <div class="rule-dot" style="background:var(--yellow)"></div>
-          <div class="rule-text"><strong>"Sir" overuse</strong> — Agent should not overuse the word "sir" — using it too frequently sounds robotic and impersonal</div>
-          <span class="rule-category badge badge-yellow">Behavior</span>
-          <div class="toggle"></div>
-        </div>
-        <div class="rule-item">
-          <div class="rule-dot" style="background:var(--yellow)"></div>
-          <div class="rule-text"><strong>Empathy requirement</strong> — If a customer sounds frustrated or upset, agent must acknowledge their feelings before continuing</div>
-          <span class="rule-category badge badge-yellow">Behavior</span>
-          <div class="toggle"></div>
-        </div>
-        <div class="rule-item">
-          <div class="rule-dot" style="background:var(--yellow)"></div>
-          <div class="rule-text"><strong>Identity verification</strong> — Agent must verify the customer's identity at the start of every call before accessing any account</div>
-          <span class="rule-category badge badge-yellow">Compliance</span>
-          <div class="toggle"></div>
-        </div>
-        <div class="rule-item">
-          <div class="rule-dot" style="background:var(--accent)"></div>
-          <div class="rule-text"><strong>Logout confirmation</strong> — Agent must verbally confirm "I have logged out of your account" before ending any call where account access occurred</div>
-          <span class="rule-category badge badge-blue">Compliance</span>
-          <div class="toggle"></div>
-        </div>
-        <div class="rule-item">
-          <div class="rule-dot" style="background:var(--accent)"></div>
-          <div class="rule-text"><strong>Closing statement</strong> — Agent must ask "Is there anything else I can help you with today?" before ending the call</div>
-          <span class="rule-category badge badge-blue">Required</span>
-          <div class="toggle"></div>
-        </div>
-        <div class="rule-item">
-          <div class="rule-dot" style="background:var(--accent)"></div>
-          <div class="rule-text"><strong>No competitor criticism</strong> — If a customer mentions a competitor, agent must not speak negatively about them</div>
-          <span class="rule-category badge badge-blue">Behavior</span>
-          <div class="toggle"></div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- ===== PAGE: ALERTS ===== -->
-  <div class="page" id="page-alerts">
-    <div class="topbar">
-      <div class="page-title">Live Alerts</div>
-      <div class="topbar-right">
-        <span class="badge badge-red" style="font-size:12px;padding:6px 14px;">3 Unresolved</span>
-        <button class="btn btn-outline">Mark All Resolved</button>
-      </div>
-    </div>
-    <div style="padding:28px;">
       <div class="card">
-        <div class="flag-item" style="padding:18px 20px;">
-          <div class="flag-icon red" style="width:40px;height:40px;font-size:18px">🚫</div>
-          <div class="flag-text">
-            <div class="flag-title" style="font-size:13px;">CRITICAL — Forbidden word detected</div>
-            <div class="flag-desc">Agent <strong style="color:var(--text)">Sarah K.</strong> used a forbidden word during call #4821. Rule: "Agent must never use inappropriate or sexual language." The word was used at timestamp 3:41.</div>
-            <div class="flag-time">Today at 9:22am · Call #4821</div>
-          </div>
-          <div style="display:flex;flex-direction:column;gap:8px;">
-            <button class="btn btn-outline" onclick="showPage('call-detail')">View Call</button>
-            <button class="btn btn-outline">Resolve</button>
-          </div>
+        <div class="card-header"><span class="card-title">Top Flags</span></div>
+        <div style="padding:12px 16px;" id="top-flags-container">
+          <div style="color:var(--text3);font-size:12px;padding:8px 0;">Loading...</div>
         </div>
-        <div class="flag-item" style="padding:18px 20px;">
-          <div class="flag-icon red" style="width:40px;height:40px;font-size:18px">💳</div>
-          <div class="flag-text">
-            <div class="flag-title" style="font-size:13px;">CRITICAL — Order placed without price confirmation</div>
-            <div class="flag-desc">Agent <strong style="color:var(--text)">Devorah S.</strong> placed an Amazon order without reading the total price to the customer first. Rule: "Agent must confirm total including shipping before any purchase."</div>
-            <div class="flag-time">Today at 8:18am · Call #4817</div>
-          </div>
-          <div style="display:flex;flex-direction:column;gap:8px;">
-            <button class="btn btn-outline">View Call</button>
-            <button class="btn btn-outline">Resolve</button>
-          </div>
+      </div>
+    </div>
+    <div class="card" style="margin-bottom:24px;">
+      <div class="card-header"><span class="card-title">Call Volume — Last 7 Days</span></div>
+      <div class="card-body">
+        <div class="chart-area" id="volume-chart">
+          <div style="color:var(--text3);font-size:12px;margin:auto;">Loading chart...</div>
         </div>
-        <div class="flag-item" style="padding:18px 20px;border-bottom:none;">
-          <div class="flag-icon yellow" style="width:40px;height:40px;font-size:18px">😤</div>
-          <div class="flag-text">
-            <div class="flag-title" style="font-size:13px;">WARNING — Customer anger not acknowledged</div>
-            <div class="flag-desc">Agent <strong style="color:var(--text)">Rachel B.</strong> continued the call without addressing customer frustration. Rule: "If a customer sounds frustrated, agent must acknowledge before moving forward."</div>
-            <div class="flag-time">Today at 8:49am · Call #4819</div>
-          </div>
-          <div style="display:flex;flex-direction:column;gap:8px;">
-            <button class="btn btn-outline">View Call</button>
-            <button class="btn btn-outline">Resolve</button>
-          </div>
+      </div>
+    </div>
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-header"><span class="card-title">Top Rule Violations</span></div>
+        <div class="card-body" id="rule-violations-container">
+          <div style="color:var(--text3);font-size:12px;">Loading...</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header"><span class="card-title">Notes Quality Overview</span></div>
+        <div class="card-body" id="notes-overview-container">
+          <div style="color:var(--text3);font-size:12px;">Loading...</div>
         </div>
       </div>
     </div>
   </div>
+</div>
+
+<!-- ===== CALL REVIEW ===== -->
+<div class="page" id="page-calls">
+  <div class="topbar">
+    <div class="page-title">Call Review</div>
+    <div class="topbar-right">
+      <select class="date-filter" id="calls-filter" onchange="filterCalls()">
+        <option value="">All calls</option>
+        <option value="Critical">Critical only</option>
+        <option value="Review">Needs review</option>
+        <option value="Passed">Passed</option>
+        <option value="Processing">Processing</option>
+      </select>
+      <input class="date-filter" id="calls-search" placeholder="🔍 Search agent or customer..." oninput="filterCalls()" style="width:220px;">
+    </div>
+  </div>
+  <div style="padding:28px;">
+    <div class="card">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Call ID</th>
+              <th>Agent</th>
+              <th>Customer</th>
+              <th>Date & Time</th>
+              <th>Duration</th>
+              <th>Billed</th>
+              <th>Emotion</th>
+              <th>QA Score</th>
+              <th>Notes</th>
+              <th>End</th>
+              <th>Line</th>
+              <th>Flags</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="calls-tbody">
+            <tr><td colspan="13" style="text-align:center;padding:32px;color:var(--text3)">Loading calls...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== HUMAN REVIEW ===== -->
+<div class="page" id="page-human-review">
+  <div class="topbar">
+    <div class="page-title">👁 Human Review Queue</div>
+    <div class="topbar-right">
+      <span style="font-size:12px;color:var(--text3)">Calls flagged for human verification</span>
+    </div>
+  </div>
+  <div style="padding:28px;">
+    <div class="alert-bar" style="margin-bottom:20px;">
+      <span style="font-size:18px;">⚠️</span>
+      <span style="font-size:12px;color:var(--text2);flex:1;">These calls had low AI confidence or triggered special flags. Review before taking any action against agents.</span>
+    </div>
+    <div class="card">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Call ID</th><th>Agent</th><th>Customer</th><th>Score</th><th>Reason for Review</th><th>Age Concern</th><th>Date</th><th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="human-review-tbody">
+            <tr><td colspan="8" style="text-align:center;padding:32px;color:var(--text3)">Loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== CALL DETAIL (modal-style) ===== -->
+<div class="page" id="page-call-detail">
+  <div class="topbar">
+    <div class="page-title">
+      <span style="color:var(--text3);cursor:pointer" onclick="showPage('calls')">← Call Review</span>
+      <span style="color:var(--text3);margin:0 8px">/</span>
+      <span id="detail-title">Call Detail</span>
+    </div>
+    <div class="topbar-right">
+      <span id="detail-status-badge" class="badge" style="font-size:12px;padding:6px 12px;"></span>
+      <button class="btn btn-outline" id="coaching-btn">Send to Coaching</button>
+    </div>
+  </div>
+  <div style="padding:28px;" id="call-detail-content">
+    <div style="color:var(--text3);text-align:center;padding:48px;">Select a call from Call Review to see details</div>
+  </div>
+</div>
+
+<!-- ===== AGENTS ===== -->
+<div class="page" id="page-agents">
+  <div class="topbar">
+    <div class="page-title">Agent Management</div>
+    <div class="topbar-right">
+      <input class="date-filter" id="agent-search" placeholder="🔍 Search agents..." oninput="filterAgents()" style="width:200px;">
+      <button class="btn btn-primary" onclick="showAddAgentModal()">+ Add Agent</button>
+    </div>
+  </div>
+  <div style="padding:28px;">
+    <div id="agents-grid" class="agents-grid"></div>
+  </div>
+</div>
+
+<!-- ===== ANALYTICS ===== -->
+<div class="page" id="page-analytics">
+  <div class="topbar">
+    <div class="page-title">📈 Trends & Analytics</div>
+  </div>
+  <div style="padding:28px;">
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-header"><span class="card-title">Agent Leaderboard</span><span class="badge badge-yellow">⭐ Ranked by Score</span></div>
+        <div class="card-body" style="padding:8px 16px;" id="agent-leaderboard"></div>
+      </div>
+      <div class="card">
+        <div class="card-header"><span class="card-title">Most Violated Rules</span></div>
+        <div class="card-body" id="rule-stats-container"><div style="color:var(--text3);font-size:12px;">Loading...</div></div>
+      </div>
+    </div>
+    <div class="card" style="margin-bottom:24px;">
+      <div class="card-header"><span class="card-title">Team Weakness Areas</span></div>
+      <div class="card-body" id="weakness-container"><div style="color:var(--text3);font-size:12px;">Loading...</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== BILLING ===== -->
+<div class="page" id="page-billing">
+  <div class="topbar">
+    <div class="page-title">💰 Billing vs Actual Time</div>
+  </div>
+  <div style="padding:28px;">
+    <div class="stats-row" style="grid-template-columns:repeat(3,1fr);margin-bottom:24px;">
+      <div class="stat-card blue"><div class="stat-label">Total Actual Minutes</div><div class="stat-value blue" id="bill-actual">—</div></div>
+      <div class="stat-card green"><div class="stat-label">Total Billed Minutes</div><div class="stat-value green" id="bill-billed">—</div></div>
+      <div class="stat-card yellow"><div class="stat-label">Difference</div><div class="stat-value yellow" id="bill-diff">—</div></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-title">Per Agent — Actual vs Billed</span></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Agent</th><th>Extension</th><th>Total Calls</th><th>Actual Minutes</th><th>Billed Minutes</th><th>Difference</th><th>Status</th></tr>
+          </thead>
+          <tbody id="billing-tbody"><tr><td colspan="7" style="text-align:center;padding:32px;color:var(--text3)">Loading...</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== NOTES QUALITY ===== -->
+<div class="page" id="page-notes">
+  <div class="topbar">
+    <div class="page-title">📝 Notes Quality</div>
+  </div>
+  <div style="padding:28px;">
+    <div class="alert-bar" style="background:rgba(79,110,247,0.08);border-color:rgba(79,110,247,0.2);margin-bottom:24px;">
+      <span style="font-size:18px;">📋</span>
+      <span style="font-size:12px;color:var(--text2);flex:1;">Call notes are scored 0-100. Missing notes = Critical issue. Vague notes = Poor. Detailed accurate notes = Excellent.</span>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-title">Notes Quality by Agent</span></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Agent</th><th>Total Calls</th><th>Missing Notes</th><th>Avg Notes Score</th><th>Poor Notes</th><th>Rating</th></tr>
+          </thead>
+          <tbody id="notes-tbody"><tr><td colspan="6" style="text-align:center;padding:32px;color:var(--text3)">Loading...</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== RULES ENGINE ===== -->
+<div class="page" id="page-rules">
+  <div class="topbar">
+    <div class="page-title">Rules Engine</div>
+    <div class="topbar-right">
+      <span style="font-size:12px;color:var(--text3)" id="rules-count">Loading rules...</span>
+    </div>
+  </div>
+  <div style="padding:28px;">
+    <div class="card" style="margin-bottom:20px;">
+      <div class="card-header"><span class="card-title">➕ Add New Rule</span><span style="font-size:11px;color:var(--text3)">Write in plain English — AI understands</span></div>
+      <div style="padding:20px;">
+        <div style="display:flex;gap:12px;align-items:flex-end;">
+          <div style="flex:2;"><label class="form-label">Rule Description</label><input id="new-rule-desc" class="form-input" placeholder='e.g. "Agent must not overuse the word sir" or "Agent must confirm price before ordering"'/></div>
+          <div style="flex:0.6;"><label class="form-label">Category</label>
+            <select id="new-rule-cat" class="form-select">
+              <option>Forbidden Words</option><option>Required Phrases</option><option>Behavior</option>
+              <option>Compliance</option><option>Conduct</option><option>Documentation</option><option>Sequence</option>
+            </select>
+          </div>
+          <div style="flex:0.4;"><label class="form-label">Severity</label>
+            <select id="new-rule-sev" class="form-select"><option>Critical</option><option>Warning</option><option>Info</option></select>
+          </div>
+          <button id="add-rule-btn" class="btn btn-primary" onclick="addRule()" style="white-space:nowrap">Save Rule</button>
+        </div>
+      </div>
+    </div>
+    <div class="card" id="rules-list"></div>
+  </div>
+</div>
+
+<!-- ===== ALERTS ===== -->
+<div class="page" id="page-alerts">
+  <div class="topbar">
+    <div class="page-title">🚨 Live Alerts</div>
+    <div class="topbar-right">
+      <span class="badge badge-red" id="alerts-count-badge" style="font-size:12px;padding:6px 14px;">0 Unresolved</span>
+    </div>
+  </div>
+  <div style="padding:28px;">
+    <div class="card" id="alerts-container">
+      <div style="padding:32px;text-align:center;color:var(--text3)">Loading alerts...</div>
+    </div>
+  </div>
+</div>
 
 </main>
 
-<script>
-function showPage(id) {
-  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-  document.getElementById('page-' + id).classList.add('active');
-  const map = { dashboard: 0, calls: 1, 'call-detail': 2, agents: 3, rules: 4, alerts: 5 };
-  const items = document.querySelectorAll('.nav-item');
-  if (map[id] !== undefined) items[map[id]].classList.add('active');
-}
+<!-- AGENT MODAL -->
+<div class="modal" id="agent-modal">
+  <div class="modal-box">
+    <div class="modal-title" id="agent-modal-title">👤 Add New Agent</div>
+    <div style="margin-bottom:14px;"><label class="form-label">Full Name *</label><input id="agent-name-input" class="form-input" placeholder="e.g. Sarah Klein"/></div>
+    <div style="margin-bottom:14px;"><label class="form-label">Extension *</label><input id="agent-ext-input" class="form-input" placeholder="e.g. 101"/></div>
+    <div style="margin-bottom:14px;"><label class="form-label">Status</label>
+      <select id="agent-status-input" class="form-select"><option value="active">Active</option><option value="inactive">Inactive</option></select>
+    </div>
+    <div style="margin-bottom:20px;"><label class="form-label">Email (optional)</label><input id="agent-email-input" class="form-input" placeholder="sarah@company.com"/></div>
+    <div style="margin-bottom:20px;"><label class="form-label">Photo URL (optional)</label><input id="agent-photo-input" class="form-input" placeholder="https://..."/></div>
+    <div id="agent-modal-err" style="color:var(--red);font-size:12px;margin-bottom:12px;"></div>
+    <div style="display:flex;gap:10px;">
+      <button class="btn btn-primary" onclick="saveAgent()" style="flex:1" id="agent-save-btn">Save Agent</button>
+      <button class="btn btn-outline" onclick="hideAgentModal()" style="flex:1">Cancel</button>
+    </div>
+  </div>
+</div>
 
-// ─── AGENTS ───────────────────────────────────────────────────────────────────
-let agents = [];
-let editingAgentId = null;
-const avatarColors = [
+<!-- LOGIN MODAL -->
+<div class="modal" id="login-modal">
+  <div class="modal-box" style="width:360px;">
+    <div class="modal-title">🔐 Admin Login</div>
+    <div style="font-size:12px;color:var(--text3);margin-bottom:24px;margin-top:-16px;">Only admins can add or edit rules and agents</div>
+    <div style="margin-bottom:12px;"><label class="form-label">Username</label><input id="login-user" class="form-input" placeholder="Username"/></div>
+    <div style="margin-bottom:16px;"><label class="form-label">Password</label><input id="login-pass" type="password" class="form-input" placeholder="Password" onkeydown="if(event.key==='Enter')doLogin()"/></div>
+    <div id="login-err" style="color:var(--red);font-size:12px;margin-bottom:12px;"></div>
+    <div style="display:flex;gap:10px;">
+      <button class="btn btn-primary" onclick="doLogin()" style="flex:1">Login</button>
+      <button class="btn btn-outline" onclick="hideModal('login-modal')" style="flex:1">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ─── STATE ───────────────────────────────────────────────────────────────────
+let rules=[], calls=[], agents=[], stats={}, ruleStats=[], agentStats=[], billingData={}, notesData=[];
+let isAdmin=false, editingAgentId=null, currentCallId=null;
+let allCalls=[];
+
+const AVATAR_COLORS=[
   'linear-gradient(135deg,#4F6EF7,#7C3AED)',
   'linear-gradient(135deg,#10D48E,#059669)',
   'linear-gradient(135deg,#F5A623,#E8890C)',
   'linear-gradient(135deg,#F24E4E,#B91C1C)',
-  'linear-gradient(135deg,#8B93C4,#4F5880)',
   'linear-gradient(135deg,#06B6D4,#0284C7)',
+  'linear-gradient(135deg,#8B5CF6,#6D28D9)',
 ];
 
-async function loadAgents() {
-  try { agents = await API.get('/api/agents'); } catch(e) { agents = []; }
-}
-
-function renderAgents(filter = '') {
-  const grid = document.getElementById('agents-grid');
-  if (!grid) return;
-
-  const filtered = filter
-    ? agents.filter(a => a.name.toLowerCase().includes(filter.toLowerCase()) || (a.extension || '').includes(filter))
-    : agents;
-
-  if (filtered.length === 0) {
-    grid.innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:48px;color:var(--text3);">
-      ${filter ? 'No agents found matching your search.' : 'No agents yet. Click "+ Add Agent" to add your first agent.'}
-    </div>`;
-    return;
-  }
-
-  grid.innerHTML = filtered.map((agent, i) => {
-    const initials = agent.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0,2);
-    const color = avatarColors[i % avatarColors.length];
-    const statusBadge = agent.status === 'active'
-      ? '<span class="badge badge-green">Active</span>'
-      : '<span class="badge" style="background:rgba(139,147,196,0.12);color:var(--text3)">Inactive</span>';
-
-    const avgScore = agent.avg_score ? `${Math.round(agent.avg_score)}%` : 'No calls yet';
-    const scoreColor = agent.avg_score >= 80 ? 'var(--green)' : agent.avg_score >= 70 ? 'var(--yellow)' : agent.avg_score ? 'var(--red)' : 'var(--text3)';
-
-    return `
-      <div class="card" style="padding:20px;">
-        <div style="display:flex;align-items:center;gap:14px;margin-bottom:16px;">
-          ${agent.photo
-            ? `<img src="${agent.photo}" style="width:48px;height:48px;border-radius:50%;object-fit:cover;" onerror="this.style.display='none';this.nextSibling.style.display='flex'">`
-            : ''}
-          <div class="agent-avatar" style="background:${color};width:48px;height:48px;font-size:16px;${agent.photo ? 'display:none' : ''}">${initials}</div>
-          <div style="flex:1">
-            <div style="font-weight:600;font-size:14px;color:var(--text)">${agent.name}</div>
-            <div style="font-size:12px;color:var(--text3)">Ext. ${agent.extension || '--'}</div>
-          </div>
-          ${statusBadge}
-        </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px;">
-          <div style="background:var(--surface2);border-radius:8px;padding:10px;text-align:center;">
-            <div style="font-family:'Space Grotesk',sans-serif;font-size:18px;font-weight:700;color:${scoreColor}">${avgScore}</div>
-            <div style="font-size:10px;color:var(--text3);margin-top:2px;">AVG SCORE</div>
-          </div>
-          <div style="background:var(--surface2);border-radius:8px;padding:10px;text-align:center;">
-            <div style="font-family:'Space Grotesk',sans-serif;font-size:18px;font-weight:700;color:var(--accent)">${agent.total_calls || 0}</div>
-            <div style="font-size:10px;color:var(--text3);margin-top:2px;">TOTAL CALLS</div>
-          </div>
-        </div>
-        ${isAdmin ? `
-        <div style="display:flex;gap:8px;">
-          <button onclick="editAgent(${agent.id})" class="btn btn-outline" style="flex:1;font-size:11px;">⚙️ Settings</button>
-          <button onclick="deleteAgent(${agent.id})" class="btn btn-outline" style="flex:1;font-size:11px;color:var(--red);">🗑 Delete</button>
-        </div>` : ''}
-      </div>`;
-  }).join('');
-}
-
-function filterAgents() {
-  const q = document.getElementById('agent-search').value;
-  renderAgents(q);
-}
-
-function showAddAgentModal() {
-  if (!isAdmin) { showLoginModal(); return; }
-  editingAgentId = null;
-  document.getElementById('agent-modal-title').textContent = '👤 Add New Agent';
-  document.getElementById('agent-name-input').value = '';
-  document.getElementById('agent-ext-input').value = '';
-  document.getElementById('agent-email-input').value = '';
-  document.getElementById('agent-photo-input').value = '';
-  document.getElementById('agent-status-input').value = 'active';
-  document.getElementById('agent-modal-err').textContent = '';
-  document.getElementById('agent-modal').style.display = 'flex';
-}
-
-function hideAgentModal() {
-  document.getElementById('agent-modal').style.display = 'none';
-}
-
-function editAgent(id) {
-  if (!isAdmin) { showLoginModal(); return; }
-  const agent = agents.find(a => a.id === id);
-  if (!agent) return;
-  editingAgentId = id;
-  document.getElementById('agent-modal-title').textContent = '⚙️ Agent Settings';
-  document.getElementById('agent-name-input').value = agent.name || '';
-  document.getElementById('agent-ext-input').value = agent.extension || '';
-  document.getElementById('agent-email-input').value = agent.email || '';
-  document.getElementById('agent-photo-input').value = agent.photo || '';
-  document.getElementById('agent-status-input').value = agent.status || 'active';
-  document.getElementById('agent-modal-err').textContent = '';
-  document.getElementById('agent-modal').style.display = 'flex';
-}
-
-async function saveAgent() {
-  if (!isAdmin) { showLoginModal(); return; }
-  const name = document.getElementById('agent-name-input').value.trim();
-  const extension = document.getElementById('agent-ext-input').value.trim();
-  const email = document.getElementById('agent-email-input').value.trim();
-  const photo = document.getElementById('agent-photo-input').value.trim();
-  const status = document.getElementById('agent-status-input').value;
-  const err = document.getElementById('agent-modal-err');
-
-  if (!name) { err.textContent = 'Name is required'; return; }
-  if (!extension) { err.textContent = 'Extension is required'; return; }
-
-  const btn = document.getElementById('agent-save-btn');
-  btn.textContent = 'Saving...'; btn.disabled = true;
-
-  const data = { name, extension, email, photo, status };
-  let result;
-
-  if (editingAgentId) {
-    result = await API.put(`/api/agents/${editingAgentId}`, data);
-    const idx = agents.findIndex(a => a.id === editingAgentId);
-    if (idx !== -1 && result.id) agents[idx] = result;
-  } else {
-    result = await API.post('/api/agents', data);
-    if (result.id) agents.push(result);
-  }
-
-  if (result && result.id) {
-    hideAgentModal();
-    renderAgents();
-    showToast(editingAgentId ? '✅ Agent updated' : '✅ Agent added successfully');
-  } else {
-    err.textContent = 'Failed to save agent';
-  }
-
-  btn.textContent = 'Save Agent'; btn.disabled = false;
-}
-
-async function deleteAgent(id) {
-  if (!isAdmin) { showLoginModal(); return; }
-  const agent = agents.find(a => a.id === id);
-  if (!confirm(`Delete agent "${agent?.name}"? This cannot be undone.`)) return;
-  await API.del(`/api/agents/${id}`);
-  agents = agents.filter(a => a.id !== id);
-  renderAgents();
-  showToast('🗑 Agent deleted');
-}
-
-// ─── API LAYER ───────────────────────────────────────────────────────────────
-const API = {
-  async get(path) { const r = await fetch(path); return r.json(); },
-  async post(path, data) {
-    const r = await fetch(path, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data) });
-    return r.json();
-  },
-  async put(path, data) {
-    const r = await fetch(path, { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data) });
-    return r.json();
-  },
-  async del(path) { const r = await fetch(path, { method:'DELETE' }); return r.json(); }
+// ─── API ─────────────────────────────────────────────────────────────────────
+const API={
+  async get(p){const r=await fetch(p);return r.json();},
+  async post(p,d){const r=await fetch(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});return r.json();},
+  async put(p,d){const r=await fetch(p,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});return r.json();},
+  async del(p){const r=await fetch(p,{method:'DELETE'});return r.json();}
 };
 
-let rules = [], calls = [], stats = {}, isAdmin = false;
-
-document.addEventListener('DOMContentLoaded', async () => {
+// ─── INIT ────────────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded',async()=>{
   await checkAuth();
-  await loadStats();
-  await loadRules();
-  await loadCalls();
-  await loadAgents();
-  renderDashboard();
-  renderRules();
-  renderCalls();
-  renderAgents();
+  await Promise.all([loadStats(),loadRules(),loadCalls(),loadAgents(),loadAnalytics(),loadBilling(),loadNotes()]);
+  renderAll();
 });
 
-async function checkAuth() {
-  try { const r = await API.get('/api/auth-check'); isAdmin = r.authenticated; } catch(e) {}
+async function checkAuth(){try{const r=await API.get('/api/auth-check');isAdmin=r.authenticated;}catch(e){isAdmin=false;}}
+
+async function loadStats(){try{stats=await API.get('/api/stats');}catch(e){}}
+async function loadRules(){try{rules=await API.get('/api/rules');}catch(e){rules=[];}}
+async function loadCalls(){try{calls=await API.get('/api/calls');allCalls=[...calls];}catch(e){calls=[];allCalls=[];}}
+async function loadAgents(){try{agents=await API.get('/api/agents');}catch(e){agents=[];}}
+async function loadAnalytics(){
+  try{
+    ruleStats=await API.get('/api/analytics/rule-stats');
+    agentStats=await API.get('/api/analytics/agent-stats');
+  }catch(e){}
+}
+async function loadBilling(){try{billingData=await API.get('/api/analytics/billing');}catch(e){billingData={};}}
+async function loadNotes(){try{notesData=await API.get('/api/analytics/notes-quality');}catch(e){notesData=[];}}
+
+function renderAll(){
+  renderDashboard();renderCalls();renderRules();renderAgents();
+  renderAnalytics();renderBilling();renderNotes();renderAlerts();renderHumanReview();
+  updateBadges();
 }
 
-function showLoginModal() { document.getElementById('login-modal').style.display = 'flex'; }
-function hideLoginModal() { document.getElementById('login-modal').style.display = 'none'; }
-
-async function doLogin() {
-  const u = document.getElementById('login-user').value;
-  const p = document.getElementById('login-pass').value;
-  const res = await API.post('/api/login', { username: u, password: p });
-  if (res.success) {
-    isAdmin = true; hideLoginModal(); renderRules();
-    showToast('✅ Logged in as Admin');
-  } else {
-    document.getElementById('login-err').textContent = 'Invalid username or password';
-  }
+// ─── PAGE NAV ─────────────────────────────────────────────────────────────────
+function showPage(id){
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+  document.getElementById('page-'+id).classList.add('active');
+  const map={dashboard:0,calls:1,'human-review':2,agents:3,analytics:4,billing:5,notes:6,rules:7,alerts:8,'call-detail':-1};
+  const items=document.querySelectorAll('.nav-item');
+  if(map[id]>=0)items[map[id]].classList.add('active');
 }
 
-async function loadStats() { try { stats = await API.get('/api/stats'); } catch(e) {} }
-async function loadRules() { try { rules = await API.get('/api/rules'); } catch(e) { rules = []; } }
-async function loadCalls() { try { calls = await API.get('/api/calls'); } catch(e) { calls = []; } }
-
-function renderDashboard() {
-  const set = (id, val) => { const el = document.getElementById(id); if(el) el.textContent = val; };
-  set('stat-calls', stats.total_calls || 0);
-  set('stat-score', (stats.avg_score || 0) + '%');
-  set('stat-coaching', stats.needs_coaching || 0);
-  set('stat-flags', stats.critical_flags || 0);
+function updateBadges(){
+  const criticals=calls.filter(c=>c.status==='Critical').length;
+  const humanReview=calls.filter(c=>c.requires_human_review&&c.status!=='Processing').length;
+  set('nb-review',criticals||'');
+  set('nb-human',humanReview||'');
+  set('nb-alerts',criticals||'');
+  set('alerts-count-badge',criticals+' Unresolved');
 }
 
-function renderRules() {
-  const container = document.getElementById('rules-list');
-  if (!container) return;
-  if (rules.length === 0) {
-    container.innerHTML = '<div style="padding:24px;text-align:center;color:var(--text3)">No rules yet. Add your first rule above.</div>';
-    return;
-  }
-  container.innerHTML = rules.map(rule => {
-    const sc = rule.severity === 'Critical' ? 'badge-red' : rule.severity === 'Warning' ? 'badge-yellow' : 'badge-blue';
-    const dc = rule.severity === 'Critical' ? 'var(--red)' : rule.severity === 'Warning' ? 'var(--yellow)' : 'var(--accent)';
-    return `
-      <div class="rule-item" id="rule-${rule.id}">
-        <div class="rule-dot" style="background:${dc}"></div>
-        <div class="rule-text">${rule.description}</div>
-        <span class="rule-category badge ${sc}">${rule.category}</span>
-        <div class="toggle ${rule.active ? '' : 'off'}" onclick="toggleRule(${rule.id})" title="${rule.active ? 'Active' : 'Inactive'}"></div>
-        ${isAdmin ? `<button onclick="deleteRule(${rule.id})" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:16px;padding:4px 8px" title="Delete">🗑</button>` : ''}
-      </div>`;
+// ─── DASHBOARD ────────────────────────────────────────────────────────────────
+function renderDashboard(){
+  set('stat-calls',stats.total_calls||0);
+  set('stat-score',(stats.avg_score||0)+'%');
+  set('stat-coaching',stats.needs_coaching||0);
+  set('stat-flags',stats.critical_flags||0);
+  set('stat-review',stats.needs_human_review||0);
+  set('stat-drops',stats.unresolved_drops||0);
+
+  // Alert bar
+  const ac=document.getElementById('alert-bar-container');
+  if(stats.critical_flags>0){
+    ac.innerHTML=`<div class="alert-bar"><span style="font-size:18px">🚨</span><span style="font-size:12px;color:var(--text2);flex:1"><strong style="color:var(--red)">${stats.critical_flags} critical flag${stats.critical_flags!==1?'s':''}</strong> detected — requires immediate attention.</span><button class="btn btn-outline btn-sm" onclick="showPage('alerts')">View Alerts</button></div>`;
+  } else { ac.innerHTML=''; }
+
+  // Category scores from recent calls
+  renderCategoryScores();
+  renderTopFlags();
+  renderVolumeChart();
+  renderRuleViolations();
+  renderNotesOverview();
+}
+
+function renderCategoryScores(){
+  const el=document.getElementById('category-scores-container');
+  if(!el)return;
+  // Aggregate from recent calls
+  const cats=[
+    {key:'accuracy_and_information',label:'Accuracy & Information'},
+    {key:'customer_service_quality',label:'Customer Service Quality'},
+    {key:'active_listening',label:'Active Listening'},
+    {key:'compliance_and_handling',label:'Compliance & Handling'},
+    {key:'emotion_management',label:'Emotion Management'},
+    {key:'documentation_quality',label:'Documentation Quality'},
+    {key:'script_and_language',label:'Script & Language'},
+    {key:'call_closure',label:'Call Closure'},
+  ];
+  const scored=calls.filter(c=>c.scorecard&&c.overall_score>0);
+  if(scored.length===0){el.innerHTML='<div style="color:var(--text3);font-size:12px;">No scored calls yet.</div>';return;}
+  el.innerHTML=cats.map(cat=>{
+    let total=0,count=0;
+    scored.forEach(c=>{
+      try{const sc=typeof c.scorecard==='string'?JSON.parse(c.scorecard):c.scorecard;
+        if(sc.category_scores&&sc.category_scores[cat.key]){total+=sc.category_scores[cat.key].score;count++;}}catch(e){}
+    });
+    const avg=count>0?Math.round(total/count):0;
+    const color=avg>=80?'var(--green)':avg>=70?'var(--yellow)':'var(--red)';
+    return `<div class="score-item"><div class="score-row"><span class="score-label">${cat.label}</span><span class="score-pct" style="color:${color}">${avg}%</span></div><div class="score-bar"><div class="score-fill" style="width:${avg}%;background:${color}"></div></div></div>`;
   }).join('');
 }
 
-function renderCalls() {
-  const tbody = document.getElementById('calls-tbody');
-  if (!tbody) return;
-  if (calls.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:32px;color:var(--text3)">No calls yet — they will appear here once analyzed.</td></tr>';
-    return;
-  }
-  tbody.innerHTML = calls.map(call => {
-    const sc = call.overall_score >= 80 ? 'sc-green' : call.overall_score >= 70 ? 'sc-yellow' : 'sc-red';
-    const stc = call.status === 'Critical' ? 'badge-red' : call.status === 'Passed' ? 'badge-green' : 'badge-yellow';
-    const fc = call.flags >= 2 ? 'badge-red' : call.flags === 1 ? 'badge-yellow' : 'badge-green';
-    return `
-      <tr onclick="showPage('call-detail')">
-        <td>#${call.call_id || call.id}</td>
-        <td class="agent">${call.agent_name || 'Unknown'}</td>
-        <td>${formatDate(call.created_at)}</td>
-        <td>${call.duration || '--'}</td>
-        <td>${call.emotion || '😐 Neutral'}</td>
-        <td><div class="score-circle ${sc}">${call.overall_score || 0}%</div></td>
-        <td><span class="badge ${fc}">${call.flags || 0} Flag${call.flags !== 1 ? 's' : ''}</span></td>
-        <td><span class="badge ${stc}">${call.status || 'Review'}</span></td>
-      </tr>`;
+function renderTopFlags(){
+  const el=document.getElementById('top-flags-container');
+  if(!el)return;
+  const flagged=calls.filter(c=>c.status==='Critical'||c.status==='Review').slice(0,5);
+  if(flagged.length===0){el.innerHTML='<div style="color:var(--text3);font-size:12px;padding:8px 0;">No flags yet.</div>';return;}
+  el.innerHTML=flagged.map(c=>{
+    const icon=c.status==='Critical'?'🚨':'⚠️';
+    const iconClass=c.status==='Critical'?'red':'yellow';
+    return `<div class="flag-item"><div class="flag-icon ${iconClass}">${icon}</div><div style="flex:1"><div class="flag-title">${c.agent_name||'Unknown'} — ${c.status}</div><div class="flag-desc">${c.summary||'Call flagged for review'}</div><div class="flag-time">${formatDate(c.created_at)}</div></div></div>`;
   }).join('');
 }
 
-async function addRule() {
-  if (!isAdmin) { showLoginModal(); return; }
-  const desc = document.getElementById('new-rule-desc');
-  const cat = document.getElementById('new-rule-cat');
-  const sev = document.getElementById('new-rule-sev');
-  if (!desc.value.trim()) { showToast('⚠️ Please enter a rule description', true); return; }
-  const btn = document.getElementById('add-rule-btn');
-  btn.textContent = 'Saving...'; btn.disabled = true;
-  const rule = await API.post('/api/rules', { description: desc.value.trim(), category: cat.value, severity: sev.value });
-  if (rule.id) {
-    rules.push(rule); renderRules(); desc.value = '';
-    showToast('✅ Rule saved successfully');
-    await loadStats(); renderDashboard();
-  } else { showToast('❌ Failed to save rule', true); }
-  btn.textContent = 'Save Rule'; btn.disabled = false;
+function renderVolumeChart(){
+  const el=document.getElementById('volume-chart');
+  if(!el)return;
+  const days=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  const colors=['var(--accent)','var(--accent)','var(--accent)','var(--accent)','var(--green)','var(--accent)','var(--accent)'];
+  const heights=[60,75,85,70,90,55,80];
+  el.innerHTML=days.map((d,i)=>`<div class="bar-group"><div class="bar" style="height:${heights[i]}%;background:linear-gradient(180deg,${colors[i]},${colors[i]}44)"></div><div class="bar-lbl">${d}</div></div>`).join('');
 }
 
-async function toggleRule(id) {
-  if (!isAdmin) { showLoginModal(); return; }
-  const updated = await API.post(`/api/rules/${id}/toggle`, {});
-  const idx = rules.findIndex(r => r.id === id);
-  if (idx !== -1) { rules[idx] = updated; renderRules(); }
+function renderRuleViolations(){
+  const el=document.getElementById('rule-violations-container');
+  if(!el)return;
+  if(ruleStats.length===0){el.innerHTML='<div style="color:var(--text3);font-size:12px;">No data yet.</div>';return;}
+  el.innerHTML=ruleStats.slice(0,5).map(r=>{
+    const rate=r.pass_rate||0;
+    const color=rate>=80?'var(--green)':rate>=60?'var(--yellow)':'var(--red)';
+    return `<div class="score-item"><div class="score-row"><span class="score-label" style="font-size:11px">${r.rule_description.substring(0,60)}...</span><span class="score-pct" style="color:${color}">${rate}%</span></div><div class="score-bar"><div class="score-fill" style="width:${rate}%;background:${color}"></div></div></div>`;
+  }).join('');
 }
 
-async function deleteRule(id) {
-  if (!isAdmin) { showLoginModal(); return; }
-  if (!confirm('Delete this rule? This cannot be undone.')) return;
+function renderNotesOverview(){
+  const el=document.getElementById('notes-overview-container');
+  if(!el)return;
+  if(notesData.length===0){el.innerHTML='<div style="color:var(--text3);font-size:12px;">No data yet.</div>';return;}
+  const totalMissing=notesData.reduce((s,a)=>s+(a.missing_notes||0),0);
+  const totalCalls=notesData.reduce((s,a)=>s+(a.total_calls||0),0);
+  const avgNotes=notesData.reduce((s,a)=>s+(a.avg_notes_score||0),0)/Math.max(notesData.length,1);
+  el.innerHTML=`
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
+      <div style="background:var(--surface2);border-radius:8px;padding:12px;text-align:center;">
+        <div style="font-family:'Space Grotesk',sans-serif;font-size:22px;font-weight:700;color:var(--accent)">${Math.round(avgNotes)}%</div>
+        <div style="font-size:11px;color:var(--text3)">Avg Notes Score</div>
+      </div>
+      <div style="background:var(--surface2);border-radius:8px;padding:12px;text-align:center;">
+        <div style="font-family:'Space Grotesk',sans-serif;font-size:22px;font-weight:700;color:var(--red)">${totalMissing}</div>
+        <div style="font-size:11px;color:var(--text3)">Missing Notes</div>
+      </div>
+    </div>
+    <div style="font-size:12px;color:var(--text3)">${totalCalls} calls analyzed for note quality</div>`;
+}
+
+// ─── CALLS TABLE ─────────────────────────────────────────────────────────────
+function renderCalls(list){
+  const tbody=document.getElementById('calls-tbody');
+  if(!tbody)return;
+  const data=list||calls;
+  if(data.length===0){tbody.innerHTML='<tr><td colspan="13" style="text-align:center;padding:32px;color:var(--text3)">No calls yet.</td></tr>';return;}
+  tbody.innerHTML=data.map(c=>{
+    const sc=c.overall_score>0?scoreCircle(c.overall_score):`<div class="score-circle sc-gray" style="font-size:10px;">...</div>`;
+    const stBadge=statusBadge(c.status);
+    const flagBadge=c.flags>0?`<span class="badge ${c.flags>=2?'badge-red':'badge-yellow'}">${c.flags}</span>`:`<span class="badge badge-green">0</span>`;
+    const endIcon=c.call_end_first==='agent'?'<span title="Agent ended" style="color:var(--yellow)">🔴A</span>':c.call_end_first==='drop'?'<span title="Dropped" style="color:var(--red)">📵</span>':'<span title="Customer ended" style="color:var(--green)">✓</span>';
+    const lineIcon=c.line_issues==='agent'?'<span title="Agent line issue" style="color:var(--yellow)">📶A</span>':c.line_issues==='customer'?'<span title="Customer line issue" style="color:var(--text3)">📶C</span>':'—';
+    const notesScore=c.notes_score>0?`<span class="badge ${c.notes_score>=70?'badge-green':c.notes_score>=40?'badge-yellow':'badge-red'}">${c.notes_score}%</span>`:`<span class="badge badge-gray">—</span>`;
+    const billed=c.billed_minutes?c.billed_minutes+'m':'—';
+    return `<tr onclick="openCallDetail('${c.call_id}')">
+      <td style="font-size:11px;color:var(--text3)">#${c.call_id||c.id}</td>
+      <td class="agent">${c.agent_name||'—'}</td>
+      <td style="color:var(--text)">${c.account_name||c.customer_account_id||'—'}</td>
+      <td>${formatDate(c.created_at)}</td>
+      <td>${c.duration||'—'}</td>
+      <td>${billed}</td>
+      <td>${c.emotion||'—'}</td>
+      <td>${sc}</td>
+      <td>${notesScore}</td>
+      <td>${endIcon}</td>
+      <td>${lineIcon}</td>
+      <td>${flagBadge}</td>
+      <td>${stBadge}</td>
+    </tr>`;
+  }).join('');
+}
+
+function filterCalls(){
+  const status=document.getElementById('calls-filter').value;
+  const search=document.getElementById('calls-search').value.toLowerCase();
+  let filtered=allCalls;
+  if(status)filtered=filtered.filter(c=>c.status===status);
+  if(search)filtered=filtered.filter(c=>(c.agent_name||'').toLowerCase().includes(search)||(c.account_name||'').toLowerCase().includes(search)||(c.call_id||'').includes(search));
+  renderCalls(filtered);
+}
+
+// ─── CALL DETAIL ──────────────────────────────────────────────────────────────
+async function openCallDetail(callId){
+  currentCallId=callId;
+  showPage('call-detail');
+  set('detail-title',`Call #${callId}`);
+  const el=document.getElementById('call-detail-content');
+  el.innerHTML='<div style="color:var(--text3);text-align:center;padding:48px;">Loading call details...</div>';
+
+  try{
+    const call=await API.get(`/api/calls/${callId}`);
+    renderCallDetail(call);
+  }catch(e){
+    el.innerHTML=`<div style="color:var(--red);text-align:center;padding:48px;">Failed to load call: ${e.message}</div>`;
+  }
+}
+
+function renderCallDetail(call){
+  const sc=call.scorecard?JSON.parse(typeof call.scorecard==='string'?call.scorecard:'{}'):{};
+  const catScores=sc.category_scores||{};
+  const flags=sc.flags||[];
+  const emotionDelta=sc.emotion_delta||call.emotion_delta||{};
+  const ageConcern=sc.age_concern||call.age_concern||{};
+  const statusBadgeHtml=statusBadge(call.status);
+  document.getElementById('detail-status-badge').outerHTML=`<span id="detail-status-badge" class="badge ${call.status==='Critical'?'badge-red':call.status==='Passed'?'badge-green':'badge-yellow'}" style="font-size:12px;padding:6px 12px;">${call.status||'Unknown'}</span>`;
+
+  const catLabels={
+    accuracy_and_information:'Accuracy & Info',
+    customer_service_quality:'Customer Service',
+    active_listening:'Active Listening',
+    appropriate_actions:'Appropriate Actions',
+    compliance_and_handling:'Compliance',
+    emotion_management:'Emotion Mgmt',
+    script_and_language:'Script & Language',
+    documentation_quality:'Documentation',
+    audio_and_technical:'Audio Quality',
+    call_closure:'Call Closure'
+  };
+
+  const el=document.getElementById('call-detail-content');
+  el.innerHTML=`
+    <div class="call-meta">
+      <div class="meta-card"><div class="meta-val" style="color:${call.overall_score>=80?'var(--green)':call.overall_score>=70?'var(--yellow)':'var(--red)'}">${call.overall_score||0}%</div><div class="meta-lbl">QA Score</div></div>
+      <div class="meta-card"><div class="meta-val">${call.duration||'—'}</div><div class="meta-lbl">Duration</div></div>
+      <div class="meta-card"><div class="meta-val">${call.billed_minutes||0}m</div><div class="meta-lbl">Billed</div></div>
+      <div class="meta-card"><div class="meta-val">${call.flags||0}</div><div class="meta-lbl">Flags</div></div>
+      <div class="meta-card"><div class="meta-val" style="font-size:14px;">${call.emotion||'—'}</div><div class="meta-lbl">Emotion</div></div>
+    </div>
+
+    ${call.requires_human_review?`<div class="alert-bar" style="margin-bottom:20px;background:rgba(139,92,246,0.08);border-color:rgba(139,92,246,0.2)"><span>👁</span><span style="font-size:12px;color:var(--text2);flex:1"><strong style="color:var(--purple)">Human Review Required</strong> — ${call.human_review_reason||'Low confidence score'}</span></div>`:''}
+
+    ${ageConcern.flagged?`<div class="alert-bar" style="margin-bottom:20px;"><span>🔞</span><span style="font-size:12px;color:var(--text2);flex:1"><strong style="color:var(--red)">Age Concern Flagged</strong> — ${ageConcern.reason||''}</span></div>`:''}
+
+    <!-- Audio Player -->
+    ${call.recording_url?`<div class="card" style="margin-bottom:20px;"><div class="card-header"><span class="card-title">🎧 Call Recording</span><span style="font-size:11px;color:var(--text3)">Streamed from recording server</span></div><div class="card-body"><audio controls style="width:100%;accent-color:var(--accent)"><source src="${call.recording_url}" type="audio/wav">Your browser does not support audio.</audio></div></div>`:''}
+
+    <div class="grid-2" style="margin-bottom:20px;">
+      <!-- Call Info -->
+      <div class="card">
+        <div class="card-header"><span class="card-title">Call Information</span></div>
+        <div class="card-body">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px;">
+            <div style="color:var(--text3)">Customer</div><div style="color:var(--text)">${call.account_name||'—'}</div>
+            <div style="color:var(--text3)">Account ID</div><div style="color:var(--text)">${call.customer_account_id||'—'}</div>
+            <div style="color:var(--text3)">Agent</div><div style="color:var(--text)">${call.agent_name||'—'} (Ext. ${call.agent_extension||'—'})</div>
+            <div style="color:var(--text3)">Call Ended By</div><div style="color:${call.call_end_first==='drop'?'var(--red)':call.call_end_first==='agent'?'var(--yellow)':'var(--green)'}">${call.call_end_first==='drop'?'📵 Dropped':call.call_end_first==='agent'?'⚠️ Agent first':'✓ Customer'}</div>
+            <div style="color:var(--text3)">Line Issues</div><div style="color:var(--text)">${call.line_issues||'none'}</div>
+            <div style="color:var(--text3)">Confidence</div><div style="color:var(--text)">${call.confidence||100}%</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Emotion Delta -->
+      <div class="card">
+        <div class="card-header"><span class="card-title">Emotion Journey</span></div>
+        <div class="card-body">
+          <div class="emotion-arrow" style="margin-bottom:12px;justify-content:center;">
+            <span style="font-size:18px;">${emotionEmoji(emotionDelta.start)}</span>
+            <span style="font-size:12px;color:var(--text2)">${emotionDelta.start||'—'}</span>
+            <span style="color:var(--text3);font-size:18px;">→</span>
+            <span style="font-size:18px;">${emotionEmoji(emotionDelta.end)}</span>
+            <span style="font-size:12px;color:var(--text2)">${emotionDelta.end||'—'}</span>
+            <span class="badge ${emotionDelta.improved?'badge-green':'badge-red'}" style="margin-left:8px;">${emotionDelta.improved?'✓ Improved':'✗ Worsened'}</span>
+          </div>
+          <div style="font-size:12px;color:var(--text3);line-height:1.5;">${emotionDelta.summary||'No emotion data available.'}</div>
+          ${sc.call_end_assessment?`<div style="margin-top:12px;font-size:12px;color:var(--text2);background:var(--surface2);padding:10px;border-radius:8px;">📋 ${sc.call_end_assessment}</div>`:''}
+        </div>
+      </div>
+    </div>
+
+    <!-- Call Notes -->
+    <div class="card" style="margin-bottom:20px;">
+      <div class="card-header">
+        <span class="card-title">📝 Agent Notes</span>
+        <span class="badge ${(call.notes_score||0)>=70?'badge-green':(call.notes_score||0)>=40?'badge-yellow':'badge-red'}">Notes Score: ${call.notes_score||0}%</span>
+      </div>
+      <div class="card-body">
+        ${call.call_notes?`<div class="notes-box" style="margin-bottom:12px;">${call.call_notes}</div>`:`<div class="notes-box" style="border-color:var(--red);color:var(--red);">⚠️ No notes written for this call</div>`}
+        ${call.notes_feedback?`<div style="font-size:12px;color:var(--text3);margin-top:8px;padding:10px;background:var(--surface2);border-radius:8px;line-height:1.5;"><strong style="color:var(--text2)">AI Feedback:</strong> ${call.notes_feedback}</div>`:''}
+      </div>
+    </div>
+
+    <div class="grid-2" style="margin-bottom:20px;">
+      <!-- Scorecard -->
+      <div class="card">
+        <div class="card-header"><span class="card-title">AI Scorecard</span></div>
+        <div class="card-body">
+          ${Object.entries(catLabels).map(([key,label])=>{
+            const cat=catScores[key]||{};
+            const score=cat.score||0;
+            const color=score>=80?'var(--green)':score>=70?'var(--yellow)':'var(--red)';
+            return `<div class="criteria-item"><div style="flex:1"><div class="criteria-name">${label}</div><div class="criteria-evidence">${cat.evidence||'No data'}</div></div><div class="criteria-score" style="color:${color}">${score}%</div></div>`;
+          }).join('')}
+        </div>
+      </div>
+
+      <!-- Flags & Coaching -->
+      <div style="display:flex;flex-direction:column;gap:16px;">
+        <div class="card">
+          <div class="card-header"><span class="card-title">🚩 Flags</span><span class="badge badge-red">${flags.length}</span></div>
+          <div class="card-body" style="padding:12px 16px;">
+            ${flags.length===0?'<div style="color:var(--text3);font-size:12px;">No flags on this call.</div>':flags.map(f=>`<div class="flag-item"><div class="flag-icon ${f.severity==='Critical'?'red':'yellow'}">${f.severity==='Critical'?'🚨':'⚠️'}</div><div><div class="flag-title">${f.title||'Flag'}</div><div class="flag-desc">${f.description||''}</div>${f.timestamp?`<div class="flag-time">⏱ ${f.timestamp}</div>`:''}</div></div>`).join('')}
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header"><span class="card-title">🎓 Coaching Notes</span></div>
+          <div class="card-body">
+            <div style="font-size:12px;color:var(--text2);line-height:1.6;">${call.coaching_notes||sc.coaching_notes||'No coaching notes generated.'}</div>
+            ${(call.positive_highlights||sc.positive_highlights)?`<div style="margin-top:12px;padding:10px;background:rgba(16,212,142,0.08);border-radius:8px;border-left:3px solid var(--green);font-size:12px;color:var(--text2)">✅ ${call.positive_highlights||sc.positive_highlights}</div>`:''}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Transcript -->
+    <div class="card">
+      <div class="card-header"><span class="card-title">Transcript</span><span style="font-size:11px;color:var(--text3)">Credentials redacted for security</span></div>
+      <div class="card-body">
+        <div class="transcript-box">${formatTranscript(call.transcript||'No transcript available.')}</div>
+      </div>
+    </div>`;
+}
+
+// ─── HUMAN REVIEW ─────────────────────────────────────────────────────────────
+function renderHumanReview(){
+  const tbody=document.getElementById('human-review-tbody');
+  if(!tbody)return;
+  const hr=calls.filter(c=>c.requires_human_review&&c.status!=='Processing');
+  set('nb-human',hr.length||'');
+  if(hr.length===0){tbody.innerHTML='<tr><td colspan="8" style="text-align:center;padding:32px;color:var(--green)">✅ No calls require human review right now.</td></tr>';return;}
+  tbody.innerHTML=hr.map(c=>{
+    const ac=c.age_concern?JSON.parse(typeof c.age_concern==='string'?c.age_concern:'{}'):{};
+    return `<tr onclick="openCallDetail('${c.call_id}')">
+      <td>#${c.call_id}</td><td class="agent">${c.agent_name||'—'}</td>
+      <td>${c.account_name||c.customer_account_id||'—'}</td>
+      <td>${scoreCircle(c.overall_score||0)}</td>
+      <td style="font-size:11px;color:var(--text2)">${c.human_review_reason||'—'}</td>
+      <td>${ac.flagged?'<span class="badge badge-red">⚠️ Yes</span>':'—'}</td>
+      <td>${formatDate(c.created_at)}</td>
+      <td><button class="btn btn-outline btn-sm" onclick="openCallDetail('${c.call_id}');event.stopPropagation()">Review</button></td>
+    </tr>`;
+  }).join('');
+}
+
+// ─── AGENTS ───────────────────────────────────────────────────────────────────
+function renderAgents(filter=''){
+  const grid=document.getElementById('agents-grid');
+  if(!grid)return;
+  const filtered=filter?agents.filter(a=>a.name.toLowerCase().includes(filter.toLowerCase())||a.extension.includes(filter)):agents;
+  if(filtered.length===0){
+    grid.innerHTML=`<div style="grid-column:1/-1;text-align:center;padding:48px;color:var(--text3)">${filter?'No agents found.':'No agents yet. Click "+ Add Agent" to add your first agent.'}</div>`;
+    return;
+  }
+  grid.innerHTML=filtered.map((agent,i)=>{
+    const initials=agent.name.split(' ').map(n=>n[0]).join('').toUpperCase().slice(0,2);
+    const color=AVATAR_COLORS[i%AVATAR_COLORS.length];
+    const avg=agent.avg_score?Math.round(agent.avg_score):null;
+    const scoreColor=avg>=80?'var(--green)':avg>=70?'var(--yellow)':avg?'var(--red)':'var(--text3)';
+    return `<div class="agent-card">
+      <div style="display:flex;align-items:center;gap:14px;margin-bottom:16px;">
+        ${agent.photo?`<img src="${agent.photo}" style="width:48px;height:48px;border-radius:50%;object-fit:cover;" onerror="this.style.display='none'">`:''}
+        <div class="agent-avatar" style="background:${color};${agent.photo?'display:none':''}">${initials}</div>
+        <div style="flex:1"><div style="font-weight:600;font-size:14px;">${agent.name}</div><div style="font-size:12px;color:var(--text3)">Ext. ${agent.extension}</div></div>
+        <span class="badge ${agent.status==='active'?'badge-green':'badge-gray'}">${agent.status}</span>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:${isAdmin?'16px':'0'}">
+        <div style="background:var(--surface2);border-radius:8px;padding:10px;text-align:center;">
+          <div style="font-family:'Space Grotesk',sans-serif;font-size:18px;font-weight:700;color:${scoreColor}">${avg?avg+'%':'—'}</div>
+          <div style="font-size:10px;color:var(--text3);margin-top:2px;">AVG SCORE</div>
+        </div>
+        <div style="background:var(--surface2);border-radius:8px;padding:10px;text-align:center;">
+          <div style="font-family:'Space Grotesk',sans-serif;font-size:18px;font-weight:700;color:var(--accent)">${agent.total_calls||0}</div>
+          <div style="font-size:10px;color:var(--text3);margin-top:2px;">TOTAL CALLS</div>
+        </div>
+      </div>
+      ${isAdmin?`<div style="display:flex;gap:8px;"><button onclick="editAgent(${agent.id})" class="btn btn-outline" style="flex:1;font-size:11px;">⚙️ Settings</button><button onclick="deleteAgent(${agent.id})" class="btn btn-outline" style="flex:1;font-size:11px;color:var(--red);">🗑 Delete</button></div>`:''}
+    </div>`;
+  }).join('');
+}
+
+function filterAgents(){renderAgents(document.getElementById('agent-search').value);}
+
+function showAddAgentModal(){
+  if(!isAdmin){showModal('login-modal');return;}
+  editingAgentId=null;
+  set('agent-modal-title','👤 Add New Agent');
+  ['agent-name-input','agent-ext-input','agent-email-input','agent-photo-input'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
+  document.getElementById('agent-status-input').value='active';
+  document.getElementById('agent-modal-err').textContent='';
+  showModal('agent-modal');
+}
+
+function hideAgentModal(){hideModal('agent-modal');}
+
+function editAgent(id){
+  if(!isAdmin){showModal('login-modal');return;}
+  const agent=agents.find(a=>a.id===id);if(!agent)return;
+  editingAgentId=id;
+  set('agent-modal-title','⚙️ Agent Settings');
+  document.getElementById('agent-name-input').value=agent.name||'';
+  document.getElementById('agent-ext-input').value=agent.extension||'';
+  document.getElementById('agent-email-input').value=agent.email||'';
+  document.getElementById('agent-photo-input').value=agent.photo||'';
+  document.getElementById('agent-status-input').value=agent.status||'active';
+  document.getElementById('agent-modal-err').textContent='';
+  showModal('agent-modal');
+}
+
+async function saveAgent(){
+  if(!isAdmin){showModal('login-modal');return;}
+  const name=document.getElementById('agent-name-input').value.trim();
+  const extension=document.getElementById('agent-ext-input').value.trim();
+  const err=document.getElementById('agent-modal-err');
+  if(!name){err.textContent='Name is required';return;}
+  if(!extension){err.textContent='Extension is required';return;}
+  const btn=document.getElementById('agent-save-btn');
+  btn.textContent='Saving...';btn.disabled=true;
+  const data={name,extension,email:document.getElementById('agent-email-input').value,photo:document.getElementById('agent-photo-input').value,status:document.getElementById('agent-status-input').value};
+  let result;
+  if(editingAgentId){result=await API.put(`/api/agents/${editingAgentId}`,data);const idx=agents.findIndex(a=>a.id===editingAgentId);if(idx!==-1&&result.id)agents[idx]=result;}
+  else{result=await API.post('/api/agents',data);if(result.id)agents.push(result);}
+  if(result&&result.id){hideAgentModal();renderAgents();showToast(editingAgentId?'✅ Agent updated':'✅ Agent added');}
+  else{err.textContent='Failed to save agent';}
+  btn.textContent='Save Agent';btn.disabled=false;
+}
+
+async function deleteAgent(id){
+  if(!isAdmin){showModal('login-modal');return;}
+  const agent=agents.find(a=>a.id===id);
+  if(!confirm(`Delete agent "${agent?.name}"? This cannot be undone.`))return;
+  await API.del(`/api/agents/${id}`);
+  agents=agents.filter(a=>a.id!==id);
+  renderAgents();showToast('🗑 Agent deleted');
+}
+
+// ─── ANALYTICS ────────────────────────────────────────────────────────────────
+function renderAnalytics(){
+  // Agent leaderboard
+  const lb=document.getElementById('agent-leaderboard');
+  if(lb){
+    if(agentStats.length===0){lb.innerHTML='<div style="color:var(--text3);font-size:12px;padding:8px;">No data yet.</div>';}
+    else{
+      lb.innerHTML=agentStats.map((a,i)=>{
+        const avg=a.avg_score?Math.round(a.avg_score):0;
+        const color=avg>=80?'var(--green)':avg>=70?'var(--yellow)':'var(--red)';
+        const initials=a.agent_name.split(' ').map(n=>n[0]).join('').toUpperCase().slice(0,2);
+        return `<div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border);">
+          <div style="font-family:'Space Grotesk',sans-serif;font-size:16px;font-weight:700;color:${i<3?'var(--yellow)':'var(--text3)'};width:24px;text-align:center;">${i+1}</div>
+          <div class="agent-avatar" style="background:${AVATAR_COLORS[i%AVATAR_COLORS.length]};width:34px;height:34px;font-size:12px;">${initials}</div>
+          <div style="flex:1"><div style="font-weight:600;font-size:13px;">${a.agent_name}</div><div style="font-size:11px;color:var(--text3);">${a.total_calls||0} calls · Ext. ${a.agent_extension||'—'}</div></div>
+          <div style="text-align:right"><div style="width:80px;height:6px;background:var(--surface2);border-radius:3px;margin-bottom:4px;"><div style="width:${avg}%;height:100%;background:${color};border-radius:3px;"></div></div><div style="font-size:11px;font-weight:600;color:${color}">${avg}%</div></div>
+        </div>`;
+      }).join('');
+    }
+  }
+
+  // Rule stats
+  const rs=document.getElementById('rule-stats-container');
+  if(rs){
+    if(ruleStats.length===0){rs.innerHTML='<div style="color:var(--text3);font-size:12px;">No data yet.</div>';}
+    else{
+      rs.innerHTML=ruleStats.slice(0,8).map(r=>{
+        const rate=r.pass_rate||0;
+        const color=rate>=80?'var(--green)':rate>=60?'var(--yellow)':'var(--red)';
+        const sevBadge=r.severity==='Critical'?'badge-red':r.severity==='Warning'?'badge-yellow':'badge-blue';
+        return `<div class="score-item"><div class="score-row"><span class="score-label" style="font-size:11px;">${r.rule_description.substring(0,55)}${r.rule_description.length>55?'...':''}</span><span class="score-pct" style="color:${color}">${rate}%</span></div><div style="display:flex;align-items:center;gap:8px;"><div class="score-bar" style="flex:1;"><div class="score-fill" style="width:${rate}%;background:${color}"></div></div><span style="font-size:10px;color:var(--text3);white-space:nowrap">${r.failed_count} fails</span></div></div>`;
+      }).join('');
+    }
+  }
+
+  // Weakness areas from agent stats
+  const wc=document.getElementById('weakness-container');
+  if(wc&&agentStats.length>0){
+    const cats=[
+      {label:'Notes Quality',fn:a=>a.avg_notes_score||0},
+      {label:'Critical Calls',fn:a=>100-Math.min(100,(a.critical_count||0)*20)},
+      {label:'Early Hangups',fn:a=>100-Math.min(100,(a.agent_ended_count||0)*10)},
+      {label:'Line Issues',fn:a=>100-Math.min(100,(a.line_issues_count||0)*15)},
+    ];
+    const teamAvg=agentStats.reduce((s,a)=>s+(a.avg_score||0),0)/Math.max(agentStats.length,1);
+    wc.innerHTML=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+      <div>${cats.map(cat=>{const avg=agentStats.reduce((s,a)=>s+cat.fn(a),0)/Math.max(agentStats.length,1);const color=avg>=80?'var(--green)':avg>=60?'var(--yellow)':'var(--red)';return `<div class="score-item"><div class="score-row"><span class="score-label">${cat.label}</span><span class="score-pct" style="color:${color}">${Math.round(avg)}%</span></div><div class="score-bar"><div class="score-fill" style="width:${Math.round(avg)}%;background:${color}"></div></div></div>`;}).join('')}</div>
+      <div style="background:var(--surface2);border-radius:10px;padding:16px;display:flex;flex-direction:column;justify-content:center;align-items:center;">
+        <div style="font-family:'Space Grotesk',sans-serif;font-size:48px;font-weight:700;color:${teamAvg>=80?'var(--green)':teamAvg>=70?'var(--yellow)':'var(--red)'}">${Math.round(teamAvg)}%</div>
+        <div style="font-size:12px;color:var(--text3);margin-top:8px;">Team Average QA Score</div>
+        <div style="font-size:11px;color:var(--text3);margin-top:4px;">${agentStats.length} agents · ${calls.filter(c=>c.overall_score>0).length} scored calls</div>
+      </div>
+    </div>`;
+  }
+}
+
+// ─── BILLING ──────────────────────────────────────────────────────────────────
+function renderBilling(){
+  const data=billingData||{};
+  const agents_data=data.agents||[];
+  const totals=data.totals||{};
+
+  const actualMins=totals.total_seconds?Math.round(totals.total_seconds/60):0;
+  const billedMins=totals.total_billed_minutes||0;
+  const diff=billedMins-actualMins;
+
+  set('bill-actual',actualMins+'m');
+  set('bill-billed',billedMins+'m');
+  const diffEl=document.getElementById('bill-diff');
+  if(diffEl){diffEl.textContent=(diff>=0?'+':'')+diff+'m';diffEl.style.color=diff>5?'var(--red)':diff>0?'var(--yellow)':'var(--green)';}
+
+  const tbody=document.getElementById('billing-tbody');
+  if(!tbody)return;
+  if(agents_data.length===0){tbody.innerHTML='<tr><td colspan="7" style="text-align:center;padding:32px;color:var(--text3)">No billing data yet.</td></tr>';return;}
+  tbody.innerHTML=agents_data.map(a=>{
+    const actual=a.actual_minutes||0;
+    const billed=a.total_billed_minutes||0;
+    const diff=billed-actual;
+    const diffColor=Math.abs(diff)>5?'var(--red)':Math.abs(diff)>2?'var(--yellow)':'var(--green)';
+    const diffText=(diff>=0?'+':'')+diff.toFixed(1);
+    const status=Math.abs(diff)>5?'<span class="badge badge-red">Review</span>':Math.abs(diff)>2?'<span class="badge badge-yellow">Check</span>':'<span class="badge badge-green">OK</span>';
+    return `<tr><td class="agent">${a.agent_name||'—'}</td><td>${a.agent_extension||'—'}</td><td>${a.total_calls||0}</td><td>${actual.toFixed(1)}m</td><td>${billed}m</td><td style="color:${diffColor};font-weight:600;">${diffText}m</td><td>${status}</td></tr>`;
+  }).join('');
+}
+
+// ─── NOTES ────────────────────────────────────────────────────────────────────
+function renderNotes(){
+  const tbody=document.getElementById('notes-tbody');
+  if(!tbody)return;
+  if(notesData.length===0){tbody.innerHTML='<tr><td colspan="6" style="text-align:center;padding:32px;color:var(--text3)">No notes data yet.</td></tr>';return;}
+  tbody.innerHTML=notesData.map(a=>{
+    const avg=a.avg_notes_score?Math.round(a.avg_notes_score):0;
+    const color=avg>=70?'var(--green)':avg>=40?'var(--yellow)':'var(--red)';
+    const rating=avg>=80?'<span class="badge badge-green">Excellent</span>':avg>=60?'<span class="badge badge-blue">Good</span>':avg>=40?'<span class="badge badge-yellow">Fair</span>':'<span class="badge badge-red">Poor</span>';
+    const missingBadge=a.missing_notes>0?`<span class="badge badge-red">${a.missing_notes} missing</span>`:`<span class="badge badge-green">0</span>`;
+    return `<tr><td class="agent">${a.agent_name||'—'}</td><td>${a.total_calls||0}</td><td>${missingBadge}</td><td style="color:${color};font-weight:600;">${avg}%</td><td>${a.poor_notes_count||0}</td><td>${rating}</td></tr>`;
+  }).join('');
+}
+
+// ─── RULES ────────────────────────────────────────────────────────────────────
+function renderRules(){
+  const container=document.getElementById('rules-list');
+  if(!container)return;
+  set('rules-count',`${rules.filter(r=>r.active).length} active rules`);
+  if(rules.length===0){container.innerHTML='<div style="padding:24px;text-align:center;color:var(--text3)">No rules yet.</div>';return;}
+  container.innerHTML=rules.map(rule=>{
+    const sc=rule.severity==='Critical'?'badge-red':rule.severity==='Warning'?'badge-yellow':'badge-blue';
+    const dc=rule.severity==='Critical'?'var(--red)':rule.severity==='Warning'?'var(--yellow)':'var(--accent)';
+    return `<div class="rule-item"><div class="rule-dot" style="background:${dc}"></div><div class="rule-text">${rule.description}</div><span class="badge ${sc}" style="white-space:nowrap">${rule.category}</span><div class="toggle ${rule.active?'':'off'}" onclick="toggleRule(${rule.id})"></div>${isAdmin?`<button onclick="deleteRule(${rule.id})" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:16px;padding:4px 8px;">🗑</button>`:''}</div>`;
+  }).join('');
+}
+
+async function addRule(){
+  if(!isAdmin){showModal('login-modal');return;}
+  const desc=document.getElementById('new-rule-desc');
+  if(!desc.value.trim()){showToast('⚠️ Please enter a rule description',true);return;}
+  const btn=document.getElementById('add-rule-btn');
+  btn.textContent='Saving...';btn.disabled=true;
+  const rule=await API.post('/api/rules',{description:desc.value.trim(),category:document.getElementById('new-rule-cat').value,severity:document.getElementById('new-rule-sev').value});
+  if(rule.id){rules.push(rule);renderRules();desc.value='';showToast('✅ Rule saved');await loadStats();renderDashboard();}
+  else{showToast('❌ Failed to save rule',true);}
+  btn.textContent='Save Rule';btn.disabled=false;
+}
+
+async function toggleRule(id){
+  if(!isAdmin){showModal('login-modal');return;}
+  const updated=await API.post(`/api/rules/${id}/toggle`,{});
+  const idx=rules.findIndex(r=>r.id===id);
+  if(idx!==-1){rules[idx]=updated;renderRules();}
+}
+
+async function deleteRule(id){
+  if(!isAdmin){showModal('login-modal');return;}
+  if(!confirm('Delete this rule?'))return;
   await API.del(`/api/rules/${id}`);
-  rules = rules.filter(r => r.id !== id);
-  renderRules(); showToast('🗑 Rule deleted');
+  rules=rules.filter(r=>r.id!==id);
+  renderRules();showToast('🗑 Rule deleted');
 }
 
-function showToast(msg, isError = false) {
-  let t = document.getElementById('toast');
-  if (!t) {
-    t = document.createElement('div'); t.id = 'toast';
-    t.style.cssText = 'position:fixed;bottom:24px;right:24px;padding:12px 20px;border-radius:10px;font-size:13px;font-weight:600;z-index:9999;transition:opacity 0.3s;box-shadow:0 4px 20px rgba(0,0,0,0.4)';
-    document.body.appendChild(t);
-  }
-  t.textContent = msg;
-  t.style.background = isError ? 'var(--red)' : 'var(--green)';
-  t.style.color = 'white'; t.style.opacity = '1';
-  clearTimeout(t._t); t._t = setTimeout(() => { t.style.opacity = '0'; }, 3000);
+// ─── ALERTS ───────────────────────────────────────────────────────────────────
+function renderAlerts(){
+  const container=document.getElementById('alerts-container');
+  if(!container)return;
+  const criticals=calls.filter(c=>c.status==='Critical');
+  set('nb-alerts',criticals.length||'');
+  set('alerts-count-badge',criticals.length+' Unresolved');
+  if(criticals.length===0){container.innerHTML='<div style="padding:32px;text-align:center;color:var(--green)">✅ No critical alerts right now.</div>';return;}
+  container.innerHTML=criticals.map(c=>{
+    return `<div style="display:flex;gap:12px;padding:18px 20px;border-bottom:1px solid var(--border);align-items:flex-start;">
+      <div class="flag-icon red" style="width:40px;height:40px;font-size:18px;flex-shrink:0;">🚨</div>
+      <div style="flex:1">
+        <div class="flag-title" style="font-size:13px;">CRITICAL — ${c.agent_name||'Unknown Agent'}</div>
+        <div class="flag-desc">${c.summary||'Call flagged as critical'}</div>
+        <div class="flag-time">Call #${c.call_id} · ${formatDate(c.created_at)} · Score: ${c.overall_score||0}%</div>
+      </div>
+      <button class="btn btn-outline btn-sm" onclick="openCallDetail('${c.call_id}')">View Call</button>
+    </div>`;
+  }).join('');
 }
 
-function formatDate(str) {
-  if (!str) return '--';
-  const d = new Date(str);
-  return d.toLocaleDateString() + ' · ' + d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+// ─── AUTH ─────────────────────────────────────────────────────────────────────
+async function doLogin(){
+  const u=document.getElementById('login-user').value;
+  const p=document.getElementById('login-pass').value;
+  const err=document.getElementById('login-err');
+  const res=await API.post('/api/login',{username:u,password:p});
+  if(res.success){isAdmin=true;hideModal('login-modal');renderRules();renderAgents();showToast('✅ Logged in as Admin');}
+  else{err.textContent='Invalid username or password';}
 }
+
+// ─── HELPERS ─────────────────────────────────────────────────────────────────
+function set(id,val){const el=document.getElementById(id);if(el)el.textContent=val;}
+function showModal(id){document.getElementById(id).style.display='flex';}
+function hideModal(id){document.getElementById(id).style.display='none';}
+
+function scoreCircle(score){
+  const cls=score>=80?'sc-green':score>=70?'sc-yellow':'sc-red';
+  return `<div class="score-circle ${cls}">${score}%</div>`;
+}
+
+function statusBadge(status){
+  const map={Critical:'badge-red',Passed:'badge-green',Review:'badge-yellow',Processing:'badge-gray',Failed:'badge-red'};
+  return `<span class="badge ${map[status]||'badge-gray'}">${status||'—'}</span>`;
+}
+
+function emotionEmoji(e){
+  const map={Happy:'😊',Satisfied:'😊',Neutral:'😐',Frustrated:'😤',Angry:'😠',Confused:'😕'};
+  return map[e]||'😐';
+}
+
+function formatDate(str){
+  if(!str)return '—';
+  const d=new Date(str);
+  return d.toLocaleDateString()+' · '+d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+}
+
+function formatTranscript(text){
+  if(!text)return 'No transcript.';
+  return text.replace(/AGENT:/g,'<span class="t-agent">AGENT:</span>').replace(/CUSTOMER:/g,'<span class="t-customer">CUSTOMER:</span>').replace(/\[REDACTED\]/g,'<span class="t-highlight">[REDACTED]</span>').replace(/\[OTP-REDACTED\]/g,'<span class="t-highlight">[OTP-REDACTED]</span>').replace(/\[CARD-REDACTED\]/g,'<span class="t-highlight">[CARD-REDACTED]</span>').replace(/\n/g,'<br>');
+}
+
+function showToast(msg,isError=false){
+  let t=document.getElementById('toast');
+  if(!t){t=document.createElement('div');t.id='toast';t.style.cssText='position:fixed;bottom:24px;right:24px;padding:12px 20px;border-radius:10px;font-size:13px;font-weight:600;z-index:9999;transition:opacity 0.3s;box-shadow:0 4px 20px rgba(0,0,0,0.4)';document.body.appendChild(t);}
+  t.textContent=msg;t.style.background=isError?'var(--red)':'var(--green)';t.style.color='white';t.style.opacity='1';
+  clearTimeout(t._t);t._t=setTimeout(()=>{t.style.opacity='0';},3000);
+}
+
+function exportReport(){showToast('📊 Export coming soon!');}
 </script>
-
-<!-- LOGIN MODAL -->
-<div id="login-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:9999;align-items:center;justify-content:center;">
-  <div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:32px;width:360px;">
-    <div style="font-family:'Space Grotesk',sans-serif;font-size:20px;font-weight:700;margin-bottom:8px;">🔐 Admin Login</div>
-    <div style="font-size:12px;color:var(--text3);margin-bottom:24px;">Only admins can add or edit rules</div>
-    <div style="margin-bottom:12px;">
-      <label style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.08em;display:block;margin-bottom:6px;">Username</label>
-      <input id="login-user" class="form-input" placeholder="Enter username" style="width:100%" />
-    </div>
-    <div style="margin-bottom:16px;">
-      <label style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.08em;display:block;margin-bottom:6px;">Password</label>
-      <input id="login-pass" type="password" class="form-input" placeholder="Enter password" style="width:100%" onkeydown="if(event.key==='Enter')doLogin()" />
-    </div>
-    <div id="login-err" style="color:var(--red);font-size:12px;margin-bottom:12px;"></div>
-    <div style="display:flex;gap:10px;">
-      <button class="btn btn-primary" onclick="doLogin()" style="flex:1">Login</button>
-      <button class="btn btn-outline" onclick="hideLoginModal()" style="flex:1">Cancel</button>
-    </div>
-  </div>
-</div>
 </body>
 </html>
