@@ -8,7 +8,6 @@ from datetime import datetime
 from dotenv import load_dotenv
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from psycopg2 import pool
 
 load_dotenv()
 
@@ -16,22 +15,15 @@ app = Flask(__name__, static_folder='.')
 app.secret_key = os.getenv('SECRET_KEY', 'voiceguard-secret-change-this')
 CORS(app)
 
-# ─── ADMIN CREDENTIALS ───────────────────────────────────────────────────────
 ADMIN_USERNAME = os.getenv('ADMIN_USERNAME', 'david')
 ADMIN_PASSWORD = hashlib.sha256(os.getenv('ADMIN_PASSWORD', 'admin123').encode()).hexdigest()
-
-# ─── API KEY ─────────────────────────────────────────────────────────────────
 VOICEGUARD_API_KEY = os.getenv('VOICEGUARD_API_KEY', 'vg-change-this-secret-key')
-
-# ─── DATABASE CONNECTION ──────────────────────────────────────────────────────
 DATABASE_URL = os.getenv('DATABASE_URL', '')
 
 def get_db():
     conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-    conn.autocommit = False
     return conn
 
-# ─── DATABASE SETUP ──────────────────────────────────────────────────────────
 def init_db():
     conn = get_db()
     c = conn.cursor()
@@ -62,11 +54,11 @@ def init_db():
     c.execute('''
         CREATE TABLE IF NOT EXISTS calls (
             id SERIAL PRIMARY KEY,
-            call_id TEXT,
+            call_id TEXT UNIQUE,
             agent_name TEXT,
             agent_extension TEXT,
-            account_worked TEXT,
-            line_issues TEXT DEFAULT 'none',
+            customer_account_id TEXT,
+            account_name TEXT,
             duration TEXT,
             call_duration_seconds INTEGER DEFAULT 0,
             billed_minutes INTEGER DEFAULT 0,
@@ -74,12 +66,17 @@ def init_db():
             confidence INTEGER DEFAULT 100,
             emotion TEXT,
             emotion_delta TEXT,
-            status TEXT,
+            status TEXT DEFAULT 'Processing',
             flags INTEGER DEFAULT 0,
             scorecard TEXT,
             transcript TEXT,
             recording_url TEXT,
             summary TEXT,
+            call_end_first TEXT DEFAULT 'customer',
+            line_issues TEXT DEFAULT 'none',
+            call_notes TEXT,
+            notes_score INTEGER,
+            notes_feedback TEXT,
             call_dropped BOOLEAN DEFAULT FALSE,
             callback_made BOOLEAN DEFAULT FALSE,
             callback_call_id TEXT,
@@ -87,6 +84,7 @@ def init_db():
             human_review_reason TEXT,
             age_concern TEXT,
             coaching_notes TEXT,
+            positive_highlights TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -95,11 +93,11 @@ def init_db():
         CREATE TABLE IF NOT EXISTS rule_results (
             id SERIAL PRIMARY KEY,
             call_id TEXT,
-            rule_id INTEGER,
             rule_description TEXT,
             category TEXT,
             severity TEXT,
             passed BOOLEAN,
+            confidence INTEGER DEFAULT 100,
             evidence TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -115,28 +113,29 @@ def init_db():
         )
     ''')
 
-    # Insert default rules if empty
+    # Default rules
     c.execute('SELECT COUNT(*) FROM rules')
-    count = c.fetchone()[0]
-    if count == 0:
+    if c.fetchone()[0] == 0:
         default_rules = [
             ('Agent must never use inappropriate, offensive, or sexual language of any kind', 'Forbidden Words', 'Critical'),
             ('Agent must read the total price including shipping out loud before placing any order', 'Compliance', 'Critical'),
             ('Agent must receive explicit verbal confirmation from customer before completing any purchase', 'Compliance', 'Critical'),
+            ('Agent must verify the customer identity at the start of every call before accessing any account', 'Compliance', 'Critical'),
+            ('Agent must verbally confirm "I have logged out of your account" before ending any call where account access occurred', 'Compliance', 'Critical'),
             ('Agent should not overuse the word "sir" — using it too frequently sounds robotic', 'Behavior', 'Warning'),
             ('If a customer sounds frustrated or upset, agent must acknowledge their feelings before continuing', 'Behavior', 'Warning'),
-            ('Agent must verify the customer identity at the start of every call before accessing any account', 'Compliance', 'Warning'),
-            ('Agent must verbally confirm "I have logged out of your account" before ending any call where account access occurred', 'Compliance', 'Info'),
+            ('Agent must not discuss working outside of Proclick or solicit personal contact with customers', 'Conduct', 'Critical'),
+            ('Agent must not make promises or guarantees without authorization', 'Compliance', 'Warning'),
             ('Agent must ask "Is there anything else I can help you with today?" before ending the call', 'Required Phrases', 'Info'),
             ('If a customer mentions a competitor, agent must not speak negatively about them', 'Behavior', 'Info'),
+            ('Agent must write detailed and accurate call notes after every call', 'Documentation', 'Warning'),
         ]
         c.executemany('INSERT INTO rules (description, category, severity) VALUES (%s,%s,%s)', default_rules)
 
     conn.commit()
     conn.close()
-    print('✅ Database initialized successfully')
+    print('✅ Database initialized')
 
-# ─── AUTH HELPERS ─────────────────────────────────────────────────────────────
 def require_admin(f):
     from functools import wraps
     @wraps(f)
@@ -157,7 +156,7 @@ def require_api_key(f):
         return f(*args, **kwargs)
     return decorated
 
-# ─── AUTH ROUTES ──────────────────────────────────────────────────────────────
+# ─── AUTH ─────────────────────────────────────────────────────────────────────
 @app.route('/api/login', methods=['POST'])
 def login():
     data = request.json
@@ -177,31 +176,27 @@ def logout():
 def auth_check():
     return jsonify({'authenticated': session.get('admin', False)})
 
-# ─── RULES API ────────────────────────────────────────────────────────────────
+# ─── RULES ────────────────────────────────────────────────────────────────────
 @app.route('/api/rules', methods=['GET'])
 def get_rules():
     conn = get_db()
     c = conn.cursor(cursor_factory=RealDictCursor)
     c.execute('SELECT * FROM rules ORDER BY severity DESC, id ASC')
-    rules = c.fetchall()
+    rules = [dict(r) for r in c.fetchall()]
     conn.close()
-    return jsonify([dict(r) for r in rules])
+    return jsonify(rules)
 
 @app.route('/api/rules', methods=['POST'])
 @require_admin
 def add_rule():
     data = request.json
     description = data.get('description', '').strip()
-    category = data.get('category', 'Behavior')
-    severity = data.get('severity', 'Warning')
     if not description:
-        return jsonify({'error': 'Description is required'}), 400
+        return jsonify({'error': 'Description required'}), 400
     conn = get_db()
     c = conn.cursor(cursor_factory=RealDictCursor)
-    c.execute(
-        'INSERT INTO rules (description, category, severity) VALUES (%s,%s,%s) RETURNING *',
-        (description, category, severity)
-    )
+    c.execute('INSERT INTO rules (description, category, severity) VALUES (%s,%s,%s) RETURNING *',
+              (description, data.get('category','Behavior'), data.get('severity','Warning')))
     rule = dict(c.fetchone())
     conn.commit()
     conn.close()
@@ -217,14 +212,10 @@ def update_rule(rule_id):
     rule = c.fetchone()
     if not rule:
         conn.close()
-        return jsonify({'error': 'Rule not found'}), 404
-    c.execute(
-        'UPDATE rules SET description=%s, category=%s, severity=%s, active=%s WHERE id=%s RETURNING *',
-        (data.get('description', rule['description']),
-         data.get('category', rule['category']),
-         data.get('severity', rule['severity']),
-         data.get('active', rule['active']), rule_id)
-    )
+        return jsonify({'error': 'Not found'}), 404
+    c.execute('UPDATE rules SET description=%s, category=%s, severity=%s, active=%s WHERE id=%s RETURNING *',
+              (data.get('description', rule['description']), data.get('category', rule['category']),
+               data.get('severity', rule['severity']), data.get('active', rule['active']), rule_id))
     updated = dict(c.fetchone())
     conn.commit()
     conn.close()
@@ -249,7 +240,7 @@ def toggle_rule(rule_id):
     rule = c.fetchone()
     if not rule:
         conn.close()
-        return jsonify({'error': 'Rule not found'}), 404
+        return jsonify({'error': 'Not found'}), 404
     new_active = 0 if rule['active'] else 1
     c.execute('UPDATE rules SET active=%s WHERE id=%s RETURNING *', (new_active, rule_id))
     updated = dict(c.fetchone())
@@ -257,38 +248,31 @@ def toggle_rule(rule_id):
     conn.close()
     return jsonify(updated)
 
-# ─── AGENTS API ───────────────────────────────────────────────────────────────
+# ─── AGENTS ───────────────────────────────────────────────────────────────────
 @app.route('/api/agents', methods=['GET'])
 def get_agents():
     conn = get_db()
     c = conn.cursor(cursor_factory=RealDictCursor)
     c.execute('''
-        SELECT a.*,
-               COUNT(c.id) as total_calls,
-               AVG(c.overall_score) as avg_score
+        SELECT a.*, COUNT(c.id) as total_calls, AVG(c.overall_score) as avg_score
         FROM agents a
         LEFT JOIN calls c ON c.agent_name = a.name
-        GROUP BY a.id
-        ORDER BY a.name ASC
+        GROUP BY a.id ORDER BY a.name ASC
     ''')
-    agents = c.fetchall()
+    agents = [dict(a) for a in c.fetchall()]
     conn.close()
-    return jsonify([dict(a) for a in agents])
+    return jsonify(agents)
 
 @app.route('/api/agents', methods=['POST'])
 @require_admin
 def add_agent():
     data = request.json
-    name = data.get('name', '').strip()
-    extension = data.get('extension', '').strip()
-    if not name or not extension:
-        return jsonify({'error': 'Name and extension are required'}), 400
+    if not data.get('name') or not data.get('extension'):
+        return jsonify({'error': 'Name and extension required'}), 400
     conn = get_db()
     c = conn.cursor(cursor_factory=RealDictCursor)
-    c.execute(
-        'INSERT INTO agents (name, extension, email, photo, status) VALUES (%s,%s,%s,%s,%s) RETURNING *',
-        (name, extension, data.get('email',''), data.get('photo',''), data.get('status','active'))
-    )
+    c.execute('INSERT INTO agents (name, extension, email, photo, status) VALUES (%s,%s,%s,%s,%s) RETURNING *',
+              (data['name'], data['extension'], data.get('email',''), data.get('photo',''), data.get('status','active')))
     agent = dict(c.fetchone())
     conn.commit()
     conn.close()
@@ -304,13 +288,11 @@ def update_agent(agent_id):
     agent = c.fetchone()
     if not agent:
         conn.close()
-        return jsonify({'error': 'Agent not found'}), 404
-    c.execute(
-        'UPDATE agents SET name=%s, extension=%s, email=%s, photo=%s, status=%s WHERE id=%s RETURNING *',
-        (data.get('name', agent['name']), data.get('extension', agent['extension']),
-         data.get('email', agent['email']), data.get('photo', agent['photo']),
-         data.get('status', agent['status']), agent_id)
-    )
+        return jsonify({'error': 'Not found'}), 404
+    c.execute('UPDATE agents SET name=%s, extension=%s, email=%s, photo=%s, status=%s WHERE id=%s RETURNING *',
+              (data.get('name', agent['name']), data.get('extension', agent['extension']),
+               data.get('email', agent['email']), data.get('photo', agent['photo']),
+               data.get('status', agent['status']), agent_id))
     updated = dict(c.fetchone())
     conn.commit()
     conn.close()
@@ -326,15 +308,15 @@ def delete_agent(agent_id):
     conn.close()
     return jsonify({'success': True})
 
-# ─── CALLS API ────────────────────────────────────────────────────────────────
+# ─── CALLS ────────────────────────────────────────────────────────────────────
 @app.route('/api/calls', methods=['GET'])
 def get_calls():
     conn = get_db()
     c = conn.cursor(cursor_factory=RealDictCursor)
     c.execute('SELECT * FROM calls ORDER BY created_at DESC LIMIT 100')
-    calls = c.fetchall()
+    calls = [dict(c) for c in c.fetchall()]
     conn.close()
-    return jsonify([dict(c) for c in calls])
+    return jsonify(calls)
 
 @app.route('/api/calls/<call_id>', methods=['GET'])
 def get_call(call_id):
@@ -344,32 +326,35 @@ def get_call(call_id):
     call = c.fetchone()
     if not call:
         conn.close()
-        return jsonify({'error': 'Call not found'}), 404
-    # Get rule results for this call
+        return jsonify({'error': 'Not found'}), 404
     c.execute('SELECT * FROM rule_results WHERE call_id=%s ORDER BY severity DESC', (call_id,))
-    rule_results = c.fetchall()
+    rule_results = [dict(r) for r in c.fetchall()]
     conn.close()
     result = dict(call)
-    result['rule_results'] = [dict(r) for r in rule_results]
+    result['rule_results'] = rule_results
     return jsonify(result)
 
-# ─── STATS API ────────────────────────────────────────────────────────────────
+# ─── STATS ────────────────────────────────────────────────────────────────────
 @app.route('/api/stats', methods=['GET'])
 def get_stats():
     conn = get_db()
     c = conn.cursor(cursor_factory=RealDictCursor)
-    c.execute('SELECT COUNT(*) as total FROM calls')
-    total_calls = c.fetchone()['total']
-    c.execute('SELECT AVG(overall_score) as avg FROM calls')
-    avg_score = c.fetchone()['avg'] or 0
-    c.execute("SELECT COUNT(*) as total FROM calls WHERE status='Critical'")
-    critical_flags = c.fetchone()['total']
-    c.execute('SELECT COUNT(DISTINCT agent_name) as total FROM calls WHERE overall_score < 70')
-    needs_coaching = c.fetchone()['total']
-    c.execute('SELECT COUNT(*) as total FROM rules WHERE active=1')
-    active_rules = c.fetchone()['total']
-    c.execute('SELECT COUNT(*) as total FROM agents WHERE status=%s', ('active',))
-    active_agents = c.fetchone()['total']
+    c.execute("SELECT COUNT(*) as v FROM calls WHERE status != 'Processing'")
+    total_calls = c.fetchone()['v']
+    c.execute("SELECT AVG(overall_score) as v FROM calls WHERE overall_score > 0")
+    avg_score = c.fetchone()['v'] or 0
+    c.execute("SELECT COUNT(*) as v FROM calls WHERE status='Critical'")
+    critical_flags = c.fetchone()['v']
+    c.execute("SELECT COUNT(DISTINCT agent_name) as v FROM calls WHERE overall_score < 70 AND overall_score > 0")
+    needs_coaching = c.fetchone()['v']
+    c.execute("SELECT COUNT(*) as v FROM rules WHERE active=1")
+    active_rules = c.fetchone()['v']
+    c.execute("SELECT COUNT(*) as v FROM agents WHERE status='active'")
+    active_agents = c.fetchone()['v']
+    c.execute("SELECT COUNT(*) as v FROM calls WHERE requires_human_review=true AND status != 'Processing'")
+    needs_review = c.fetchone()['v']
+    c.execute("SELECT COUNT(*) as v FROM calls WHERE call_end_first='drop' AND callback_made=false AND status != 'Processing'")
+    unresolved_drops = c.fetchone()['v']
     conn.close()
     return jsonify({
         'total_calls': total_calls,
@@ -377,46 +362,12 @@ def get_stats():
         'critical_flags': critical_flags,
         'needs_coaching': needs_coaching,
         'active_rules': active_rules,
-        'active_agents': active_agents
+        'active_agents': active_agents,
+        'needs_human_review': needs_review,
+        'unresolved_drops': unresolved_drops
     })
 
-@app.route('/api/analytics/billing', methods=['GET'])
-def get_billing():
-    conn = get_db()
-    c = conn.cursor(cursor_factory=RealDictCursor)
-    c.execute('''
-        SELECT 
-            agent_name,
-            agent_extension,
-            COUNT(*) as total_calls,
-            SUM(call_duration_seconds) as total_seconds,
-            SUM(billed_minutes) as total_billed_minutes,
-            ROUND(SUM(call_duration_seconds) / 60.0, 1) as actual_minutes,
-            SUM(billed_minutes) - ROUND(SUM(call_duration_seconds) / 60.0, 1) as billing_difference
-        FROM calls
-        WHERE call_duration_seconds > 0
-        GROUP BY agent_name, agent_extension
-        ORDER BY total_billed_minutes DESC
-    ''')
-    results = c.fetchall()
-    
-    # Team totals
-    c.execute('''
-        SELECT 
-            SUM(call_duration_seconds) as total_seconds,
-            SUM(billed_minutes) as total_billed_minutes,
-            COUNT(*) as total_calls
-        FROM calls
-        WHERE call_duration_seconds > 0
-    ''')
-    totals = c.fetchone()
-    conn.close()
-    
-    return jsonify({
-        'agents': [dict(r) for r in results],
-        'totals': dict(totals) if totals else {}
-    })
-
+# ─── ANALYTICS ────────────────────────────────────────────────────────────────
 @app.route('/api/analytics/trends', methods=['GET'])
 def get_trends():
     conn = get_db()
@@ -426,14 +377,13 @@ def get_trends():
                COUNT(*) as total_calls,
                AVG(overall_score) as avg_score,
                SUM(CASE WHEN status='Critical' THEN 1 ELSE 0 END) as critical_count
-        FROM calls
-        WHERE created_at >= NOW() - INTERVAL '30 days'
-        GROUP BY DATE(created_at)
-        ORDER BY date ASC
+        FROM calls WHERE created_at >= NOW() - INTERVAL '30 days'
+        AND overall_score > 0
+        GROUP BY DATE(created_at) ORDER BY date ASC
     ''')
-    trends = c.fetchall()
+    trends = [dict(t) for t in c.fetchall()]
     conn.close()
-    return jsonify([dict(t) for t in trends])
+    return jsonify(trends)
 
 @app.route('/api/analytics/rule-stats', methods=['GET'])
 def get_rule_stats():
@@ -447,49 +397,95 @@ def get_rule_stats():
                ROUND(100.0 * SUM(CASE WHEN passed THEN 1 ELSE 0 END) / COUNT(*), 1) as pass_rate
         FROM rule_results
         GROUP BY rule_description, category, severity
-        ORDER BY failed_count DESC
-        LIMIT 20
+        ORDER BY failed_count DESC LIMIT 20
     ''')
-    stats = c.fetchall()
+    stats = [dict(s) for s in c.fetchall()]
     conn.close()
-    return jsonify([dict(s) for s in stats])
+    return jsonify(stats)
 
-@app.route('/api/analytics/agent-trends', methods=['GET'])
-def get_agent_trends():
-    agent_name = request.args.get('agent')
+@app.route('/api/analytics/agent-stats', methods=['GET'])
+def get_agent_stats():
     conn = get_db()
     c = conn.cursor(cursor_factory=RealDictCursor)
-    if agent_name:
-        c.execute('''
-            SELECT DATE(created_at) as date,
-                   AVG(overall_score) as avg_score,
-                   COUNT(*) as total_calls
-            FROM calls
-            WHERE agent_name=%s AND created_at >= NOW() - INTERVAL '30 days'
-            GROUP BY DATE(created_at)
-            ORDER BY date ASC
-        ''', (agent_name,))
-    else:
-        c.execute('''
-            SELECT agent_name,
-                   AVG(overall_score) as avg_score,
-                   COUNT(*) as total_calls,
-                   SUM(CASE WHEN status='Critical' THEN 1 ELSE 0 END) as critical_count
-            FROM calls
-            GROUP BY agent_name
-            ORDER BY avg_score DESC
-        ''')
-    results = c.fetchall()
+    c.execute('''
+        SELECT agent_name, agent_extension,
+               COUNT(*) as total_calls,
+               AVG(overall_score) as avg_score,
+               AVG(notes_score) as avg_notes_score,
+               SUM(CASE WHEN status='Critical' THEN 1 ELSE 0 END) as critical_count,
+               SUM(CASE WHEN requires_human_review THEN 1 ELSE 0 END) as review_count,
+               SUM(CASE WHEN call_end_first='agent' THEN 1 ELSE 0 END) as agent_ended_count,
+               SUM(CASE WHEN line_issues='agent' THEN 1 ELSE 0 END) as line_issues_count
+        FROM calls WHERE overall_score > 0
+        GROUP BY agent_name, agent_extension
+        ORDER BY avg_score DESC
+    ''')
+    stats = [dict(s) for s in c.fetchall()]
     conn.close()
-    return jsonify([dict(r) for r in results])
+    return jsonify(stats)
 
-# ─── AI ANALYZE ENDPOINT (ASYNC QUEUE) ───────────────────────────────────────
+@app.route('/api/analytics/billing', methods=['GET'])
+def get_billing():
+    conn = get_db()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('''
+        SELECT agent_name, agent_extension,
+               COUNT(*) as total_calls,
+               SUM(call_duration_seconds) as total_seconds,
+               SUM(billed_minutes) as total_billed_minutes,
+               ROUND(SUM(call_duration_seconds) / 60.0, 1) as actual_minutes,
+               SUM(billed_minutes) - ROUND(SUM(call_duration_seconds) / 60.0, 1) as billing_difference
+        FROM calls WHERE call_duration_seconds > 0
+        GROUP BY agent_name, agent_extension
+        ORDER BY total_billed_minutes DESC
+    ''')
+    agents = [dict(r) for r in c.fetchall()]
+    c.execute('''
+        SELECT SUM(call_duration_seconds) as total_seconds,
+               SUM(billed_minutes) as total_billed_minutes,
+               COUNT(*) as total_calls
+        FROM calls WHERE call_duration_seconds > 0
+    ''')
+    totals = dict(c.fetchone())
+    conn.close()
+    return jsonify({'agents': agents, 'totals': totals})
+
+@app.route('/api/analytics/notes-quality', methods=['GET'])
+def get_notes_quality():
+    conn = get_db()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('''
+        SELECT agent_name,
+               COUNT(*) as total_calls,
+               SUM(CASE WHEN call_notes IS NULL OR call_notes = '' THEN 1 ELSE 0 END) as missing_notes,
+               AVG(notes_score) as avg_notes_score,
+               SUM(CASE WHEN notes_score < 60 THEN 1 ELSE 0 END) as poor_notes_count
+        FROM calls WHERE overall_score > 0
+        GROUP BY agent_name
+        ORDER BY avg_notes_score ASC
+    ''')
+    stats = [dict(s) for s in c.fetchall()]
+    conn.close()
+    return jsonify(stats)
+
+@app.route('/api/analytics/drops', methods=['GET'])
+def get_drops():
+    conn = get_db()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('''
+        SELECT * FROM calls
+        WHERE call_end_first = 'drop'
+        ORDER BY created_at DESC LIMIT 50
+    ''')
+    drops = [dict(d) for d in c.fetchall()]
+    conn.close()
+    return jsonify(drops)
+
+# ─── ANALYZE ENDPOINT ─────────────────────────────────────────────────────────
 @app.route('/api/analyze', methods=['POST'])
 @require_api_key
 def analyze_call():
     try:
-        import redis as redis_lib
-
         data = request.json
         agent_name = data.get('agent_name', 'Unknown')
         agent_extension = data.get('agent_extension', '')
@@ -497,10 +493,18 @@ def analyze_call():
         recording_url = data.get('recording_url', '')
         call_duration_seconds = data.get('call_duration_seconds', 0)
         billed_minutes = data.get('billed_minutes', 0)
-        caller_id = data.get('caller_id', '')
-        call_dropped = data.get('call_dropped', False)
+        customer_account_id = data.get('customer_account_id', '')
+        account_name = data.get('account_name', '')
+        call_end_first = data.get('call_end_first', 'customer')
+        line_issues = data.get('line_issues', 'none')
+        call_notes = data.get('call_notes', '')
 
-        # Format duration as MM:SS for display
+        if not recording_url:
+            return jsonify({'error': 'recording_url is required'}), 400
+        if not agent_name or agent_name == 'Unknown':
+            return jsonify({'error': 'agent_name is required'}), 400
+
+        # Format duration
         if call_duration_seconds:
             mins = call_duration_seconds // 60
             secs = call_duration_seconds % 60
@@ -508,47 +512,66 @@ def analyze_call():
         else:
             duration_display = '--'
 
-        if not recording_url:
-            return jsonify({'error': 'recording_url is required'}), 400
-        if not agent_name or agent_name == 'Unknown':
-            return jsonify({'error': 'agent_name is required'}), 400
+        call_dropped = (call_end_first == 'drop')
 
         # Insert pending record immediately
         conn = get_db()
         c = conn.cursor()
         c.execute('''
-            INSERT INTO calls (call_id, agent_name, agent_extension, caller_id, recording_url,
-                             call_duration_seconds, billed_minutes, duration, call_dropped, status, overall_score, flags)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT DO NOTHING
-        ''', (call_id, agent_name, agent_extension, caller_id, recording_url,
-              call_duration_seconds, billed_minutes, duration_display, call_dropped, 'Processing', 0, 0))
+            INSERT INTO calls (call_id, agent_name, agent_extension, customer_account_id,
+                             account_name, recording_url, call_duration_seconds, billed_minutes,
+                             duration, call_end_first, line_issues, call_notes, call_dropped,
+                             status, overall_score, flags)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT (call_id) DO NOTHING
+        ''', (call_id, agent_name, agent_extension, customer_account_id, account_name,
+              recording_url, call_duration_seconds, billed_minutes, duration_display,
+              call_end_first, line_issues, call_notes, call_dropped, 'Processing', 0, 0))
         conn.commit()
         conn.close()
 
-        # Add to Redis queue
+        # Check for callback (same customer_account_id, drop within 10 min)
+        if customer_account_id and call_dropped:
+            try:
+                conn = get_db()
+                c = conn.cursor(cursor_factory=RealDictCursor)
+                c.execute('''
+                    SELECT call_id FROM calls
+                    WHERE customer_account_id = %s
+                    AND call_end_first = 'drop'
+                    AND call_id != %s
+                    AND created_at >= NOW() - INTERVAL '10 minutes'
+                    ORDER BY created_at DESC LIMIT 1
+                ''', (customer_account_id, call_id))
+                prev_drop = c.fetchone()
+                if prev_drop:
+                    c.execute("UPDATE calls SET callback_made=true, callback_call_id=%s WHERE call_id=%s",
+                              (call_id, prev_drop['call_id']))
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                print(f"Callback check warning: {e}")
+
+        # Queue or process synchronously
         REDIS_URL = os.getenv('REDIS_URL', '')
         if REDIS_URL:
+            import redis as redis_lib
             r = redis_lib.from_url(REDIS_URL, decode_responses=True)
             job = json.dumps({
-                'call_id': call_id,
-                'agent_name': agent_name,
-                'agent_extension': agent_extension,
-                'recording_url': recording_url,
-                'call_duration_seconds': call_duration_seconds,
-                'billed_minutes': billed_minutes,
-                'caller_id': caller_id,
-                'call_dropped': call_dropped
+                'call_id': call_id, 'agent_name': agent_name,
+                'agent_extension': agent_extension, 'recording_url': recording_url,
+                'call_duration_seconds': call_duration_seconds, 'billed_minutes': billed_minutes,
+                'customer_account_id': customer_account_id, 'account_name': account_name,
+                'call_end_first': call_end_first, 'line_issues': line_issues,
+                'call_notes': call_notes, 'call_dropped': call_dropped
             })
             r.lpush('voiceguard:calls', job)
             return jsonify({
-                'success': True,
-                'call_id': call_id,
-                'status': 'Processing',
-                'message': 'Call received and queued for analysis. Check dashboard for results in 1-2 minutes.'
+                'success': True, 'call_id': call_id, 'status': 'Processing',
+                'message': 'Call received and queued for analysis. Results in 1-2 minutes.'
             })
         else:
-            # Fallback: process synchronously if no Redis
+            # Synchronous fallback
             from ai_engine import analyze_call as run_analysis
             import urllib.request
 
@@ -563,49 +586,58 @@ def analyze_call():
 
             try:
                 urllib.request.urlretrieve(recording_url, audio_path)
-                result = run_analysis(audio_path, agent_name, call_id, caller_id=caller_id, call_dropped=call_dropped)
+                result = run_analysis(audio_path, agent_name, call_id,
+                                    call_end_first=call_end_first,
+                                    call_notes=call_notes,
+                                    account_name=account_name,
+                                    line_issues=line_issues)
             finally:
-                try:
-                    os.remove(audio_path)
-                except:
-                    pass
+                try: os.remove(audio_path)
+                except: pass
 
             conn = get_db()
             c = conn.cursor()
             c.execute('''
-                UPDATE calls SET duration=%s, overall_score=%s, confidence=%s, emotion=%s, 
-                    status=%s, flags=%s, scorecard=%s, transcript=%s, summary=%s,
-                    emotion_delta=%s, requires_human_review=%s, human_review_reason=%s,
-                    age_concern=%s, coaching_notes=%s, call_dropped=%s,
-                    callback_made=%s, callback_call_id=%s
+                UPDATE calls SET duration=%s, overall_score=%s, confidence=%s,
+                    emotion=%s, status=%s, flags=%s, scorecard=%s, transcript=%s,
+                    summary=%s, emotion_delta=%s, requires_human_review=%s,
+                    human_review_reason=%s, age_concern=%s, coaching_notes=%s,
+                    positive_highlights=%s, call_dropped=%s, notes_score=%s,
+                    notes_feedback=%s
                 WHERE call_id=%s
             ''', (
-                result.get('duration', '--'), result['overall_score'],
-                result.get('confidence', 100), result['emotion'],
-                result['status'], result['flags'],
-                json.dumps(result.get('scorecard', {})),
-                result.get('transcript', ''), result.get('summary', ''),
-                json.dumps(result.get('emotion_delta', {})),
-                result.get('requires_human_review', False),
-                result.get('human_review_reason', ''),
-                json.dumps(result.get('age_concern', {})),
-                result.get('coaching_notes', ''),
+                result.get('duration','--'), result['overall_score'],
+                result.get('confidence',100), result['emotion'], result['status'],
+                result['flags'], json.dumps(result.get('scorecard',{})),
+                result.get('transcript',''), result.get('summary',''),
+                json.dumps(result.get('emotion_delta',{})),
+                result.get('requires_human_review',False),
+                result.get('human_review_reason',''),
+                json.dumps(result.get('age_concern',{})),
+                result.get('coaching_notes',''),
+                result.get('positive_highlights',''),
                 result.get('call_dropped', False),
-                result.get('is_callback', False),
-                result.get('original_call_id', ''),
+                result.get('notes_score', 0),
+                result.get('notes_feedback',''),
                 call_id
             ))
+
+            # Save rule results
+            for rr in result.get('scorecard',{}).get('rules_evaluation',[]):
+                c.execute('''INSERT INTO rule_results
+                    (call_id, rule_description, category, severity, passed, confidence, evidence)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s)''',
+                    (call_id, rr.get('rule',''), rr.get('category',''),
+                     rr.get('severity',''), rr.get('passed',False),
+                     rr.get('confidence',100), rr.get('evidence','')))
             conn.commit()
             conn.close()
 
             return jsonify({
-                'success': True,
-                'call_id': result['call_id'],
+                'success': True, 'call_id': result['call_id'],
                 'overall_score': result['overall_score'],
-                'status': result['status'],
-                'emotion': result['emotion'],
-                'flags': result['flags'],
-                'summary': result.get('summary', '')
+                'status': result['status'], 'emotion': result['emotion'],
+                'flags': result['flags'], 'summary': result.get('summary','')
             })
 
     except Exception as e:
@@ -615,33 +647,26 @@ def analyze_call():
 def analyze_status():
     anthropic_key = os.getenv('ANTHROPIC_API_KEY', '')
     gemini_key = os.getenv('GEMINI_API_KEY', '')
-    db_url = os.getenv('DATABASE_URL', '')
     db_ok = False
     try:
-        conn = get_db()
-        conn.close()
-        db_ok = True
-    except:
-        pass
+        conn = get_db(); conn.close(); db_ok = True
+    except: pass
     return jsonify({
-        'ready': bool(anthropic_key and gemini_key and db_ok and anthropic_key != 'your_anthropic_api_key_here'),
-        'anthropic_configured': bool(anthropic_key and anthropic_key != 'your_anthropic_api_key_here'),
-        'gemini_configured': bool(gemini_key and gemini_key != 'your_gemini_api_key_here'),
+        'ready': bool(anthropic_key and gemini_key and db_ok and 'your_' not in anthropic_key),
+        'anthropic_configured': bool(anthropic_key and 'your_' not in anthropic_key),
+        'gemini_configured': bool(gemini_key and 'your_' not in gemini_key),
         'database_connected': db_ok
     })
 
-# ─── SERVE FRONTEND ───────────────────────────────────────────────────────────
 @app.route('/')
 def index():
     return send_from_directory('.', 'qa-dashboard.html')
 
-# ─── INITIALIZE ───────────────────────────────────────────────────────────────
 try:
     init_db()
 except Exception as e:
-    print(f'⚠️ Database init warning: {e}')
+    print(f'⚠️ DB init warning: {e}')
 
 if __name__ == '__main__':
     print('\n✅ VoiceGuard QA Server running!')
-    print('📊 Open your dashboard: http://localhost:5000')
     app.run(debug=True, port=5000)
