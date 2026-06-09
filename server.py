@@ -13,7 +13,7 @@ app = Flask(__name__, static_folder='.')
 app.secret_key = 'voiceguard-secret-2024-change-this'
 CORS(app)
 
-DB_PATH = 'rules.db'
+DB_PATH = os.path.join(os.getenv('HOME', '.'), 'voiceguard.db')
 
 # ─── ADMIN CREDENTIALS (change these) ───────────────────────────────────────
 ADMIN_USERNAME = os.getenv('ADMIN_USERNAME', 'david')
@@ -362,9 +362,10 @@ def analyze_call():
             ext = '.wav'
 
         # Download audio file
-        os.makedirs('uploads', exist_ok=True)
+        UPLOAD_DIR = os.path.join(os.getenv('HOME', '.'), 'uploads')
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
         safe_filename = f"call_{call_id}_{int(time.time())}{ext}"
-        audio_path = os.path.join('uploads', safe_filename)
+        audio_path = os.path.join(UPLOAD_DIR, safe_filename)
 
         try:
             urllib.request.urlretrieve(recording_url, audio_path)
@@ -422,9 +423,12 @@ def analyze_status():
 def index():
     return send_from_directory('.', 'qa-dashboard.html')
 
+# ─── INITIALIZE DATABASE ON STARTUP ──────────────────────────────────────────
+# This runs whether started by gunicorn (Azure) or python server.py (local)
+init_db()
+
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 if __name__ == '__main__':
-    init_db()
     print('\n✅ VoiceGuard QA Server running!')
     print('📊 Open your dashboard: http://localhost:5000')
     print('🔐 Admin login: david / admin123')

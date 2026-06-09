@@ -12,7 +12,7 @@ load_dotenv()
 anthropic_client = anthropic.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
 genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
 
-DB_PATH = 'rules.db'
+DB_PATH = os.path.join(os.getenv('HOME', '.'), 'voiceguard.db')
 
 # ─── LOAD ACTIVE RULES FROM DATABASE ─────────────────────────────────────────
 def load_active_rules():
