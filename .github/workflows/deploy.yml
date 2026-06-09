@@ -22,11 +22,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Zip artifact for deployment
+        run: zip -r release.zip . -x "*.git*" -x "*.wav" -x "rules.db" -x "uploads/*"
+
       - name: Upload artifact for deployment jobs
         uses: actions/upload-artifact@v4
         with:
           name: python-app
-          path: .
+          path: release.zip
 
   deploy:
     runs-on: ubuntu-latest
@@ -53,3 +56,4 @@ jobs:
         with:
           app-name: 'VoiceGuard-qa'
           slot-name: 'Production'
+          package: release.zip
