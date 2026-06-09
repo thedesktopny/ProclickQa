@@ -32,7 +32,7 @@ def analyze_audio_with_gemini(audio_path):
     """
     print(f"[Gemini] Analyzing audio: {audio_path}")
 
-    model = genai.GenerativeModel('gemini-2.0-flash-001')
+    model = genai.GenerativeModel('gemini-2.5-flash')
 
     # Read and encode audio file
     with open(audio_path, 'rb') as f:
