@@ -66,6 +66,8 @@ def init_db():
             agent_name TEXT,
             agent_extension TEXT,
             duration TEXT,
+            call_duration_seconds INTEGER DEFAULT 0,
+            billed_minutes INTEGER DEFAULT 0,
             overall_score INTEGER,
             emotion TEXT,
             status TEXT,
@@ -367,6 +369,43 @@ def get_stats():
         'active_agents': active_agents
     })
 
+@app.route('/api/analytics/billing', methods=['GET'])
+def get_billing():
+    conn = get_db()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('''
+        SELECT 
+            agent_name,
+            agent_extension,
+            COUNT(*) as total_calls,
+            SUM(call_duration_seconds) as total_seconds,
+            SUM(billed_minutes) as total_billed_minutes,
+            ROUND(SUM(call_duration_seconds) / 60.0, 1) as actual_minutes,
+            SUM(billed_minutes) - ROUND(SUM(call_duration_seconds) / 60.0, 1) as billing_difference
+        FROM calls
+        WHERE call_duration_seconds > 0
+        GROUP BY agent_name, agent_extension
+        ORDER BY total_billed_minutes DESC
+    ''')
+    results = c.fetchall()
+    
+    # Team totals
+    c.execute('''
+        SELECT 
+            SUM(call_duration_seconds) as total_seconds,
+            SUM(billed_minutes) as total_billed_minutes,
+            COUNT(*) as total_calls
+        FROM calls
+        WHERE call_duration_seconds > 0
+    ''')
+    totals = c.fetchone()
+    conn.close()
+    
+    return jsonify({
+        'agents': [dict(r) for r in results],
+        'totals': dict(totals) if totals else {}
+    })
+
 @app.route('/api/analytics/trends', methods=['GET'])
 def get_trends():
     conn = get_db()
@@ -433,103 +472,112 @@ def get_agent_trends():
     conn.close()
     return jsonify([dict(r) for r in results])
 
-# ─── AI ANALYZE ENDPOINT ──────────────────────────────────────────────────────
+# ─── AI ANALYZE ENDPOINT (ASYNC QUEUE) ───────────────────────────────────────
 @app.route('/api/analyze', methods=['POST'])
 @require_api_key
 def analyze_call():
     try:
-        from ai_engine import analyze_call as run_analysis
-        import urllib.request
+        import redis as redis_lib
 
         data = request.json
         agent_name = data.get('agent_name', 'Unknown')
         agent_extension = data.get('agent_extension', '')
         call_id = data.get('call_id', f"CALL-{int(time.time())}")
         recording_url = data.get('recording_url', '')
+        call_duration_seconds = data.get('call_duration_seconds', 0)
+        billed_minutes = data.get('billed_minutes', 0)
+
+        # Format duration as MM:SS for display
+        if call_duration_seconds:
+            mins = call_duration_seconds // 60
+            secs = call_duration_seconds % 60
+            duration_display = f"{mins}:{secs:02d}"
+        else:
+            duration_display = '--'
 
         if not recording_url:
             return jsonify({'error': 'recording_url is required'}), 400
         if not agent_name or agent_name == 'Unknown':
             return jsonify({'error': 'agent_name is required'}), 400
 
-        # Detect file extension
-        url_path = recording_url.split('?')[0]
-        ext = os.path.splitext(url_path)[1].lower()
-        if ext not in ['.mp3', '.wav', '.m4a', '.ogg', '.webm', '.flac']:
-            ext = '.wav'
-
-        # Download audio temporarily
-        UPLOAD_DIR = os.path.join(os.getenv('HOME', '.'), 'uploads')
-        os.makedirs(UPLOAD_DIR, exist_ok=True)
-        safe_filename = f"call_{call_id}_{int(time.time())}{ext}"
-        audio_path = os.path.join(UPLOAD_DIR, safe_filename)
-
-        try:
-            urllib.request.urlretrieve(recording_url, audio_path)
-        except Exception as e:
-            return jsonify({'error': f'Failed to download recording: {str(e)}'}), 400
-
-        # Run AI analysis
-        try:
-            result = run_analysis(audio_path, agent_name, call_id)
-        finally:
-            try:
-                os.remove(audio_path)
-            except:
-                pass
-
-        # Save to Postgres
+        # Insert pending record immediately
         conn = get_db()
         c = conn.cursor()
-
         c.execute('''
-            INSERT INTO calls (call_id, agent_name, agent_extension, duration, overall_score,
-                             emotion, status, flags, scorecard, transcript, recording_url, summary)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            INSERT INTO calls (call_id, agent_name, agent_extension, recording_url, 
+                             call_duration_seconds, billed_minutes, duration, status, overall_score, flags)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT DO NOTHING
-        ''', (
-            result['call_id'], result['agent_name'], agent_extension,
-            result.get('duration', '--'), result['overall_score'],
-            result['emotion'], result['status'], result['flags'],
-            json.dumps(result.get('scorecard', {})),
-            result.get('transcript', ''),
-            recording_url,
-            result.get('summary', '')
-        ))
-
-        # Save per-rule results for analytics
-        scorecard = result.get('scorecard', {})
-        rules_evaluation = scorecard.get('rules_evaluation', [])
-        for rule_result in rules_evaluation:
-            c.execute('''
-                INSERT INTO rule_results (call_id, rule_description, category, severity, passed, evidence)
-                VALUES (%s,%s,%s,%s,%s,%s)
-            ''', (
-                result['call_id'],
-                rule_result.get('rule', ''),
-                rule_result.get('category', ''),
-                rule_result.get('severity', ''),
-                rule_result.get('passed', False),
-                rule_result.get('evidence', '')
-            ))
-
+        ''', (call_id, agent_name, agent_extension, recording_url,
+              call_duration_seconds, billed_minutes, duration_display, 'Processing', 0, 0))
         conn.commit()
         conn.close()
 
-        return jsonify({
-            'success': True,
-            'call_id': result['call_id'],
-            'agent_name': result['agent_name'],
-            'agent_extension': agent_extension,
-            'overall_score': result['overall_score'],
-            'status': result['status'],
-            'emotion': result['emotion'],
-            'flags': result['flags'],
-            'summary': result.get('summary', '')
-        })
+        # Add to Redis queue
+        REDIS_URL = os.getenv('REDIS_URL', '')
+        if REDIS_URL:
+            r = redis_lib.from_url(REDIS_URL, decode_responses=True)
+            job = json.dumps({
+                'call_id': call_id,
+                'agent_name': agent_name,
+                'agent_extension': agent_extension,
+                'recording_url': recording_url
+            })
+            r.lpush('voiceguard:calls', job)
+            return jsonify({
+                'success': True,
+                'call_id': call_id,
+                'status': 'Processing',
+                'message': 'Call received and queued for analysis. Check dashboard for results in 1-2 minutes.'
+            })
+        else:
+            # Fallback: process synchronously if no Redis
+            from ai_engine import analyze_call as run_analysis
+            import urllib.request
 
-    except ImportError:
-        return jsonify({'error': 'AI engine not available. Check API keys.'}), 500
+            url_path = recording_url.split('?')[0]
+            ext = os.path.splitext(url_path)[1].lower()
+            if ext not in ['.mp3', '.wav', '.m4a', '.ogg', '.webm', '.flac']:
+                ext = '.wav'
+
+            UPLOAD_DIR = os.path.join(os.getenv('HOME', '.'), 'uploads')
+            os.makedirs(UPLOAD_DIR, exist_ok=True)
+            audio_path = os.path.join(UPLOAD_DIR, f"call_{call_id}_{int(time.time())}{ext}")
+
+            try:
+                urllib.request.urlretrieve(recording_url, audio_path)
+                result = run_analysis(audio_path, agent_name, call_id)
+            finally:
+                try:
+                    os.remove(audio_path)
+                except:
+                    pass
+
+            conn = get_db()
+            c = conn.cursor()
+            c.execute('''
+                UPDATE calls SET duration=%s, overall_score=%s, emotion=%s, status=%s,
+                    flags=%s, scorecard=%s, transcript=%s, summary=%s
+                WHERE call_id=%s
+            ''', (
+                result.get('duration', '--'), result['overall_score'],
+                result['emotion'], result['status'], result['flags'],
+                json.dumps(result.get('scorecard', {})),
+                result.get('transcript', ''), result.get('summary', ''), call_id
+            ))
+            conn.commit()
+            conn.close()
+
+            return jsonify({
+                'success': True,
+                'call_id': result['call_id'],
+                'overall_score': result['overall_score'],
+                'status': result['status'],
+                'emotion': result['emotion'],
+                'flags': result['flags'],
+                'summary': result.get('summary', '')
+            })
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
