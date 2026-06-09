@@ -52,6 +52,7 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             call_id TEXT,
             agent_name TEXT,
+            agent_extension TEXT,
             duration TEXT,
             overall_score INTEGER,
             emotion TEXT,
@@ -318,51 +319,79 @@ def delete_agent(agent_id):
 @app.route('/api/analyze', methods=['POST'])
 def analyze_call():
     """
-    Accepts an audio file + agent name, runs full AI analysis.
-    Your phone system calls this endpoint when a call ends.
+    Accepts call data as JSON with a recording_url.
+    Downloads the audio, runs full AI analysis, saves to database.
     """
     try:
         from ai_engine import analyze_call as run_analysis
+        import urllib.request
+        import time
 
-        agent_name = request.form.get('agent_name', 'Unknown')
-        call_id = request.form.get('call_id', None)
+        data = request.json
+        if not data:
+            return jsonify({'error': 'No JSON data provided'}), 400
 
-        if 'audio' not in request.files:
-            return jsonify({'error': 'No audio file provided. Send audio file as multipart form field named "audio"'}), 400
+        agent_name = data.get('agent_name', 'Unknown')
+        agent_extension = data.get('agent_extension', '')
+        call_id = data.get('call_id', f"CALL-{int(time.time())}")
+        recording_url = data.get('recording_url', '')
 
-        audio_file = request.files['audio']
-        if audio_file.filename == '':
-            return jsonify({'error': 'Empty filename'}), 400
+        if not recording_url:
+            return jsonify({'error': 'recording_url is required'}), 400
 
-        # Save audio temporarily
+        if not agent_name or agent_name == 'Unknown':
+            return jsonify({'error': 'agent_name is required'}), 400
+
+        # Detect file extension from URL
+        url_path = recording_url.split('?')[0]  # remove query params
+        ext = os.path.splitext(url_path)[1].lower()
+        if ext not in ['.mp3', '.wav', '.m4a', '.ogg', '.webm', '.flac']:
+            ext = '.wav'  # default
+
+        # Download audio file
         os.makedirs('uploads', exist_ok=True)
-        safe_name = f"call_{call_id or 'temp'}_{int(__import__('time').time())}{os.path.splitext(audio_file.filename)[1]}"
-        audio_path = os.path.join('uploads', safe_name)
-        audio_file.save(audio_path)
+        safe_filename = f"call_{call_id}_{int(time.time())}{ext}"
+        audio_path = os.path.join('uploads', safe_filename)
+
+        try:
+            urllib.request.urlretrieve(recording_url, audio_path)
+        except Exception as e:
+            return jsonify({'error': f'Failed to download recording: {str(e)}'}), 400
 
         # Run AI analysis
-        result = run_analysis(audio_path, agent_name, call_id)
-
-        # Clean up audio file after analysis
         try:
-            os.remove(audio_path)
-        except:
-            pass
+            result = run_analysis(audio_path, agent_name, call_id)
+        finally:
+            # Always clean up audio file after analysis
+            try:
+                os.remove(audio_path)
+            except:
+                pass
+
+        # Save extension to calls table if provided
+        if agent_extension:
+            conn = get_db()
+            conn.execute(
+                'UPDATE calls SET agent_extension=? WHERE call_id=?',
+                (agent_extension, call_id)
+            )
+            conn.commit()
+            conn.close()
 
         return jsonify({
             'success': True,
             'call_id': result['call_id'],
             'agent_name': result['agent_name'],
+            'agent_extension': agent_extension,
             'overall_score': result['overall_score'],
             'status': result['status'],
             'emotion': result['emotion'],
             'flags': result['flags'],
-            'scorecard': result['scorecard'],
-            'summary': result['summary']
+            'summary': result.get('summary', '')
         })
 
     except ImportError:
-        return jsonify({'error': 'AI engine not available. Make sure ANTHROPIC_API_KEY and GEMINI_API_KEY are set in .env file'}), 500
+        return jsonify({'error': 'AI engine not available. Check ANTHROPIC_API_KEY and GEMINI_API_KEY in environment variables'}), 500
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
