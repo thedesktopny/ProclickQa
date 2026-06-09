@@ -1170,116 +1170,53 @@
   <!-- ===== PAGE: AGENTS ===== -->
   <div class="page" id="page-agents">
     <div class="topbar">
-      <div class="page-title">Agent Performance</div>
+      <div class="page-title">Agent Management</div>
       <div class="topbar-right">
-        <select class="date-filter"><option>This week</option><option>This month</option><option>All time</option></select>
+        <input class="date-filter" id="agent-search" placeholder="🔍 Search agents..." oninput="filterAgents()" style="width:200px;">
+        <button class="btn btn-primary" onclick="showAddAgentModal()">+ Add Agent</button>
       </div>
     </div>
     <div style="padding:28px;">
-      <div class="grid-2">
-        <div class="card">
-          <div class="card-header"><span class="card-title">Agent Leaderboard</span><span class="badge badge-yellow">⭐ Top Performers</span></div>
-          <div class="card-body" style="padding:8px 16px;">
-            <div class="agent-item">
-              <div class="agent-rank top">1</div>
-              <div class="agent-avatar" style="background:linear-gradient(135deg,#F5A623,#E8890C)">AR</div>
-              <div class="agent-details">
-                <div class="agent-name">Avi R.</div>
-                <div class="agent-calls">142 calls this week</div>
-              </div>
-              <div>
-                <div class="agent-score-bar"><div class="score-fill" style="width:96%;height:100%;background:var(--green)"></div></div>
-                <div class="agent-score-label" style="color:var(--green)">96%</div>
-              </div>
-            </div>
-            <div class="agent-item">
-              <div class="agent-rank top">2</div>
-              <div class="agent-avatar" style="background:linear-gradient(135deg,#4F6EF7,#7C3AED)">ML</div>
-              <div class="agent-details">
-                <div class="agent-name">Moshe L.</div>
-                <div class="agent-calls">138 calls this week</div>
-              </div>
-              <div>
-                <div class="agent-score-bar"><div class="score-fill" style="width:92%;height:100%;background:var(--green)"></div></div>
-                <div class="agent-score-label" style="color:var(--green)">92%</div>
-              </div>
-            </div>
-            <div class="agent-item">
-              <div class="agent-rank">3</div>
-              <div class="agent-avatar" style="background:linear-gradient(135deg,#10D48E,#059669)">RB</div>
-              <div class="agent-details">
-                <div class="agent-name">Rachel B.</div>
-                <div class="agent-calls">119 calls this week</div>
-              </div>
-              <div>
-                <div class="agent-score-bar"><div class="score-fill" style="width:88%;height:100%;background:var(--green)"></div></div>
-                <div class="agent-score-label" style="color:var(--green)">88%</div>
-              </div>
-            </div>
-            <div class="agent-item">
-              <div class="agent-rank">4</div>
-              <div class="agent-avatar" style="background:linear-gradient(135deg,#8B93C4,#4F5880)">YM</div>
-              <div class="agent-details">
-                <div class="agent-name">Yosef M.</div>
-                <div class="agent-calls">127 calls this week</div>
-              </div>
-              <div>
-                <div class="agent-score-bar"><div class="score-fill" style="width:84%;height:100%;background:var(--green)"></div></div>
-                <div class="agent-score-label" style="color:var(--green)">84%</div>
-              </div>
-            </div>
-            <div class="agent-item">
-              <div class="agent-rank">5</div>
-              <div class="agent-avatar" style="background:linear-gradient(135deg,#F5A623,#D97706)">DS</div>
-              <div class="agent-details">
-                <div class="agent-name">Devorah S.</div>
-                <div class="agent-calls">98 calls this week</div>
-              </div>
-              <div>
-                <div class="agent-score-bar"><div class="score-fill" style="width:74%;height:100%;background:var(--yellow)"></div></div>
-                <div class="agent-score-label" style="color:var(--yellow)">74%</div>
-              </div>
-            </div>
-            <div class="agent-item">
-              <div class="agent-rank" style="color:var(--red)">!</div>
-              <div class="agent-avatar" style="background:linear-gradient(135deg,#F24E4E,#B91C1C)">SK</div>
-              <div class="agent-details">
-                <div class="agent-name">Sarah K.</div>
-                <div class="agent-calls">104 calls this week · <span style="color:var(--red)">Needs coaching</span></div>
-              </div>
-              <div>
-                <div class="agent-score-bar"><div class="score-fill" style="width:61%;height:100%;background:var(--red)"></div></div>
-                <div class="agent-score-label" style="color:var(--red)">61%</div>
-              </div>
-            </div>
-          </div>
-        </div>
 
-        <div class="card">
-          <div class="card-header"><span class="card-title">Team Weakness Areas</span></div>
-          <div class="card-body">
-            <div class="score-item">
-              <div class="score-row"><span class="score-label">Compliance — Price Confirmation</span><span class="score-pct" style="color:var(--red)">62%</span></div>
-              <div class="score-bar"><div class="score-fill" style="width:62%;background:var(--red)"></div></div>
-            </div>
-            <div class="score-item">
-              <div class="score-row"><span class="score-label">Rules Engine Pass Rate</span><span class="score-pct" style="color:var(--red)">68%</span></div>
-              <div class="score-bar"><div class="score-fill" style="width:68%;background:var(--red)"></div></div>
-            </div>
-            <div class="score-item">
-              <div class="score-row"><span class="score-label">Empathy When Customer Upset</span><span class="score-pct" style="color:var(--yellow)">71%</span></div>
-              <div class="score-bar"><div class="score-fill" style="width:71%;background:var(--yellow)"></div></div>
-            </div>
-            <div class="score-item">
-              <div class="score-row"><span class="score-label">Identity Verification</span><span class="score-pct" style="color:var(--yellow)">75%</span></div>
-              <div class="score-bar"><div class="score-fill" style="width:75%;background:var(--yellow)"></div></div>
-            </div>
-            <div class="score-item" style="margin-bottom:0">
-              <div class="score-row"><span class="score-label">Closing Statement Delivered</span><span class="score-pct" style="color:var(--yellow)">78%</span></div>
-              <div class="score-bar"><div class="score-fill" style="width:78%;background:var(--yellow)"></div></div>
-            </div>
-          </div>
-        </div>
+      <!-- Agent grid -->
+      <div id="agents-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px;margin-bottom:24px;"></div>
+
+    </div>
+  </div>
+
+  <!-- ADD/EDIT AGENT MODAL -->
+  <div id="agent-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:9999;align-items:center;justify-content:center;">
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:32px;width:420px;max-height:90vh;overflow-y:auto;">
+      <div style="font-family:'Space Grotesk',sans-serif;font-size:20px;font-weight:700;margin-bottom:24px;" id="agent-modal-title">👤 Add New Agent</div>
+
+      <div style="margin-bottom:14px;">
+        <label class="form-label" style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.08em;display:block;margin-bottom:6px;">Full Name *</label>
+        <input id="agent-name-input" class="form-input" placeholder="e.g. Sarah Klein" style="width:100%" />
+      </div>
+      <div style="margin-bottom:14px;">
+        <label class="form-label" style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.08em;display:block;margin-bottom:6px;">Extension Number *</label>
+        <input id="agent-ext-input" class="form-input" placeholder="e.g. 101" style="width:100%" />
+      </div>
+      <div style="margin-bottom:14px;">
+        <label class="form-label" style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.08em;display:block;margin-bottom:6px;">Email</label>
+        <input id="agent-email-input" class="form-input" placeholder="e.g. sarah@company.com" style="width:100%" />
+      </div>
+      <div style="margin-bottom:14px;">
+        <label class="form-label" style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.08em;display:block;margin-bottom:6px;">Photo URL (optional)</label>
+        <input id="agent-photo-input" class="form-input" placeholder="https://..." style="width:100%" />
+      </div>
+      <div style="margin-bottom:20px;">
+        <label class="form-label" style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.08em;display:block;margin-bottom:6px;">Status</label>
+        <select id="agent-status-input" class="form-select" style="width:100%">
+          <option value="active">Active</option>
+          <option value="inactive">Inactive</option>
+        </select>
+      </div>
+
+      <div id="agent-modal-err" style="color:var(--red);font-size:12px;margin-bottom:12px;"></div>
+      <div style="display:flex;gap:10px;">
+        <button class="btn btn-primary" onclick="saveAgent()" style="flex:1" id="agent-save-btn">Save Agent</button>
+        <button class="btn btn-outline" onclick="hideAgentModal()" style="flex:1">Cancel</button>
       </div>
     </div>
   </div>
@@ -1458,11 +1395,173 @@ function showPage(id) {
   if (map[id] !== undefined) items[map[id]].classList.add('active');
 }
 
+// ─── AGENTS ───────────────────────────────────────────────────────────────────
+let agents = [];
+let editingAgentId = null;
+const avatarColors = [
+  'linear-gradient(135deg,#4F6EF7,#7C3AED)',
+  'linear-gradient(135deg,#10D48E,#059669)',
+  'linear-gradient(135deg,#F5A623,#E8890C)',
+  'linear-gradient(135deg,#F24E4E,#B91C1C)',
+  'linear-gradient(135deg,#8B93C4,#4F5880)',
+  'linear-gradient(135deg,#06B6D4,#0284C7)',
+];
+
+async function loadAgents() {
+  try { agents = await API.get('/api/agents'); } catch(e) { agents = []; }
+}
+
+function renderAgents(filter = '') {
+  const grid = document.getElementById('agents-grid');
+  if (!grid) return;
+
+  const filtered = filter
+    ? agents.filter(a => a.name.toLowerCase().includes(filter.toLowerCase()) || (a.extension || '').includes(filter))
+    : agents;
+
+  if (filtered.length === 0) {
+    grid.innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:48px;color:var(--text3);">
+      ${filter ? 'No agents found matching your search.' : 'No agents yet. Click "+ Add Agent" to add your first agent.'}
+    </div>`;
+    return;
+  }
+
+  grid.innerHTML = filtered.map((agent, i) => {
+    const initials = agent.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0,2);
+    const color = avatarColors[i % avatarColors.length];
+    const statusBadge = agent.status === 'active'
+      ? '<span class="badge badge-green">Active</span>'
+      : '<span class="badge" style="background:rgba(139,147,196,0.12);color:var(--text3)">Inactive</span>';
+
+    const avgScore = agent.avg_score ? `${Math.round(agent.avg_score)}%` : 'No calls yet';
+    const scoreColor = agent.avg_score >= 80 ? 'var(--green)' : agent.avg_score >= 70 ? 'var(--yellow)' : agent.avg_score ? 'var(--red)' : 'var(--text3)';
+
+    return `
+      <div class="card" style="padding:20px;">
+        <div style="display:flex;align-items:center;gap:14px;margin-bottom:16px;">
+          ${agent.photo
+            ? `<img src="${agent.photo}" style="width:48px;height:48px;border-radius:50%;object-fit:cover;" onerror="this.style.display='none';this.nextSibling.style.display='flex'">`
+            : ''}
+          <div class="agent-avatar" style="background:${color};width:48px;height:48px;font-size:16px;${agent.photo ? 'display:none' : ''}">${initials}</div>
+          <div style="flex:1">
+            <div style="font-weight:600;font-size:14px;color:var(--text)">${agent.name}</div>
+            <div style="font-size:12px;color:var(--text3)">Ext. ${agent.extension || '--'}</div>
+          </div>
+          ${statusBadge}
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px;">
+          <div style="background:var(--surface2);border-radius:8px;padding:10px;text-align:center;">
+            <div style="font-family:'Space Grotesk',sans-serif;font-size:18px;font-weight:700;color:${scoreColor}">${avgScore}</div>
+            <div style="font-size:10px;color:var(--text3);margin-top:2px;">AVG SCORE</div>
+          </div>
+          <div style="background:var(--surface2);border-radius:8px;padding:10px;text-align:center;">
+            <div style="font-family:'Space Grotesk',sans-serif;font-size:18px;font-weight:700;color:var(--accent)">${agent.total_calls || 0}</div>
+            <div style="font-size:10px;color:var(--text3);margin-top:2px;">TOTAL CALLS</div>
+          </div>
+        </div>
+        ${isAdmin ? `
+        <div style="display:flex;gap:8px;">
+          <button onclick="editAgent(${agent.id})" class="btn btn-outline" style="flex:1;font-size:11px;">⚙️ Settings</button>
+          <button onclick="deleteAgent(${agent.id})" class="btn btn-outline" style="flex:1;font-size:11px;color:var(--red);">🗑 Delete</button>
+        </div>` : ''}
+      </div>`;
+  }).join('');
+}
+
+function filterAgents() {
+  const q = document.getElementById('agent-search').value;
+  renderAgents(q);
+}
+
+function showAddAgentModal() {
+  if (!isAdmin) { showLoginModal(); return; }
+  editingAgentId = null;
+  document.getElementById('agent-modal-title').textContent = '👤 Add New Agent';
+  document.getElementById('agent-name-input').value = '';
+  document.getElementById('agent-ext-input').value = '';
+  document.getElementById('agent-email-input').value = '';
+  document.getElementById('agent-photo-input').value = '';
+  document.getElementById('agent-status-input').value = 'active';
+  document.getElementById('agent-modal-err').textContent = '';
+  document.getElementById('agent-modal').style.display = 'flex';
+}
+
+function hideAgentModal() {
+  document.getElementById('agent-modal').style.display = 'none';
+}
+
+function editAgent(id) {
+  if (!isAdmin) { showLoginModal(); return; }
+  const agent = agents.find(a => a.id === id);
+  if (!agent) return;
+  editingAgentId = id;
+  document.getElementById('agent-modal-title').textContent = '⚙️ Agent Settings';
+  document.getElementById('agent-name-input').value = agent.name || '';
+  document.getElementById('agent-ext-input').value = agent.extension || '';
+  document.getElementById('agent-email-input').value = agent.email || '';
+  document.getElementById('agent-photo-input').value = agent.photo || '';
+  document.getElementById('agent-status-input').value = agent.status || 'active';
+  document.getElementById('agent-modal-err').textContent = '';
+  document.getElementById('agent-modal').style.display = 'flex';
+}
+
+async function saveAgent() {
+  if (!isAdmin) { showLoginModal(); return; }
+  const name = document.getElementById('agent-name-input').value.trim();
+  const extension = document.getElementById('agent-ext-input').value.trim();
+  const email = document.getElementById('agent-email-input').value.trim();
+  const photo = document.getElementById('agent-photo-input').value.trim();
+  const status = document.getElementById('agent-status-input').value;
+  const err = document.getElementById('agent-modal-err');
+
+  if (!name) { err.textContent = 'Name is required'; return; }
+  if (!extension) { err.textContent = 'Extension is required'; return; }
+
+  const btn = document.getElementById('agent-save-btn');
+  btn.textContent = 'Saving...'; btn.disabled = true;
+
+  const data = { name, extension, email, photo, status };
+  let result;
+
+  if (editingAgentId) {
+    result = await API.put(`/api/agents/${editingAgentId}`, data);
+    const idx = agents.findIndex(a => a.id === editingAgentId);
+    if (idx !== -1 && result.id) agents[idx] = result;
+  } else {
+    result = await API.post('/api/agents', data);
+    if (result.id) agents.push(result);
+  }
+
+  if (result && result.id) {
+    hideAgentModal();
+    renderAgents();
+    showToast(editingAgentId ? '✅ Agent updated' : '✅ Agent added successfully');
+  } else {
+    err.textContent = 'Failed to save agent';
+  }
+
+  btn.textContent = 'Save Agent'; btn.disabled = false;
+}
+
+async function deleteAgent(id) {
+  if (!isAdmin) { showLoginModal(); return; }
+  const agent = agents.find(a => a.id === id);
+  if (!confirm(`Delete agent "${agent?.name}"? This cannot be undone.`)) return;
+  await API.del(`/api/agents/${id}`);
+  agents = agents.filter(a => a.id !== id);
+  renderAgents();
+  showToast('🗑 Agent deleted');
+}
+
 // ─── API LAYER ───────────────────────────────────────────────────────────────
 const API = {
   async get(path) { const r = await fetch(path); return r.json(); },
   async post(path, data) {
     const r = await fetch(path, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data) });
+    return r.json();
+  },
+  async put(path, data) {
+    const r = await fetch(path, { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data) });
     return r.json();
   },
   async del(path) { const r = await fetch(path, { method:'DELETE' }); return r.json(); }
@@ -1475,9 +1574,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadStats();
   await loadRules();
   await loadCalls();
+  await loadAgents();
   renderDashboard();
   renderRules();
   renderCalls();
+  renderAgents();
 });
 
 async function checkAuth() {

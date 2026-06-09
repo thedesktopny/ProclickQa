@@ -36,7 +36,16 @@ def init_db():
     ''')
 
     c.execute('''
-        CREATE TABLE IF NOT EXISTS calls (
+        CREATE TABLE IF NOT EXISTS agents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            extension TEXT NOT NULL,
+            email TEXT,
+            photo TEXT,
+            status TEXT DEFAULT 'active',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             call_id TEXT,
             agent_name TEXT,
@@ -237,6 +246,70 @@ def get_stats():
         'needs_coaching': needs_coaching,
         'active_rules': active_rules
     })
+
+# ─── AGENTS API ───────────────────────────────────────────────────────────────
+@app.route('/api/agents', methods=['GET'])
+def get_agents():
+    conn = get_db()
+    agents = conn.execute('''
+        SELECT a.*,
+               COUNT(c.id) as total_calls,
+               AVG(c.overall_score) as avg_score
+        FROM agents a
+        LEFT JOIN calls c ON c.agent_name = a.name
+        GROUP BY a.id
+        ORDER BY a.name ASC
+    ''').fetchall()
+    conn.close()
+    return jsonify([dict(a) for a in agents])
+
+@app.route('/api/agents', methods=['POST'])
+@require_admin
+def add_agent():
+    data = request.json
+    name = data.get('name', '').strip()
+    extension = data.get('extension', '').strip()
+    if not name or not extension:
+        return jsonify({'error': 'Name and extension are required'}), 400
+    conn = get_db()
+    cursor = conn.execute(
+        'INSERT INTO agents (name, extension, email, photo, status) VALUES (?,?,?,?,?)',
+        (name, extension, data.get('email',''), data.get('photo',''), data.get('status','active'))
+    )
+    agent_id = cursor.lastrowid
+    conn.commit()
+    agent = conn.execute('SELECT * FROM agents WHERE id=?', (agent_id,)).fetchone()
+    conn.close()
+    return jsonify(dict(agent)), 201
+
+@app.route('/api/agents/<int:agent_id>', methods=['PUT'])
+@require_admin
+def update_agent(agent_id):
+    data = request.json
+    conn = get_db()
+    agent = conn.execute('SELECT * FROM agents WHERE id=?', (agent_id,)).fetchone()
+    if not agent:
+        conn.close()
+        return jsonify({'error': 'Agent not found'}), 404
+    conn.execute(
+        'UPDATE agents SET name=?, extension=?, email=?, photo=?, status=? WHERE id=?',
+        (data.get('name', agent['name']), data.get('extension', agent['extension']),
+         data.get('email', agent['email']), data.get('photo', agent['photo']),
+         data.get('status', agent['status']), agent_id)
+    )
+    conn.commit()
+    agent = conn.execute('SELECT * FROM agents WHERE id=?', (agent_id,)).fetchone()
+    conn.close()
+    return jsonify(dict(agent))
+
+@app.route('/api/agents/<int:agent_id>', methods=['DELETE'])
+@require_admin
+def delete_agent(agent_id):
+    conn = get_db()
+    conn.execute('DELETE FROM agents WHERE id=?', (agent_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True})
 
 # ─── AI ANALYZE ENDPOINT ──────────────────────────────────────────────────────
 @app.route('/api/analyze', methods=['POST'])
