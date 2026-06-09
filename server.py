@@ -16,8 +16,22 @@ CORS(app)
 DB_PATH = 'rules.db'
 
 # ─── ADMIN CREDENTIALS (change these) ───────────────────────────────────────
-ADMIN_USERNAME = 'david'
-ADMIN_PASSWORD = hashlib.sha256('admin123'.encode()).hexdigest()  # change 'admin123'
+ADMIN_USERNAME = os.getenv('ADMIN_USERNAME', 'david')
+ADMIN_PASSWORD = hashlib.sha256(os.getenv('ADMIN_PASSWORD', 'admin123').encode()).hexdigest()
+
+# ─── API KEY for developer integration ───────────────────────────────────────
+VOICEGUARD_API_KEY = os.getenv('VOICEGUARD_API_KEY', 'vg-change-this-secret-key')
+
+def require_api_key(f):
+    from functools import wraps
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        data = request.json or {}
+        key = data.get('api_key') or request.headers.get('X-API-Key', '')
+        if key != VOICEGUARD_API_KEY:
+            return jsonify({'error': 'Invalid or missing API key'}), 401
+        return f(*args, **kwargs)
+    return decorated
 
 # ─── DATABASE SETUP ──────────────────────────────────────────────────────────
 def init_db():
@@ -60,6 +74,7 @@ def init_db():
             flags INTEGER DEFAULT 0,
             scorecard TEXT,
             transcript TEXT,
+            recording_url TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -317,6 +332,7 @@ def delete_agent(agent_id):
 
 # ─── AI ANALYZE ENDPOINT ──────────────────────────────────────────────────────
 @app.route('/api/analyze', methods=['POST'])
+@require_api_key
 def analyze_call():
     """
     Accepts call data as JSON with a recording_url.
@@ -328,9 +344,6 @@ def analyze_call():
         import time
 
         data = request.json
-        if not data:
-            return jsonify({'error': 'No JSON data provided'}), 400
-
         agent_name = data.get('agent_name', 'Unknown')
         agent_extension = data.get('agent_extension', '')
         call_id = data.get('call_id', f"CALL-{int(time.time())}")
@@ -343,10 +356,10 @@ def analyze_call():
             return jsonify({'error': 'agent_name is required'}), 400
 
         # Detect file extension from URL
-        url_path = recording_url.split('?')[0]  # remove query params
+        url_path = recording_url.split('?')[0]
         ext = os.path.splitext(url_path)[1].lower()
         if ext not in ['.mp3', '.wav', '.m4a', '.ogg', '.webm', '.flac']:
-            ext = '.wav'  # default
+            ext = '.wav'
 
         # Download audio file
         os.makedirs('uploads', exist_ok=True)
@@ -362,21 +375,19 @@ def analyze_call():
         try:
             result = run_analysis(audio_path, agent_name, call_id)
         finally:
-            # Always clean up audio file after analysis
             try:
                 os.remove(audio_path)
             except:
                 pass
 
-        # Save extension to calls table if provided
-        if agent_extension:
-            conn = get_db()
-            conn.execute(
-                'UPDATE calls SET agent_extension=? WHERE call_id=?',
-                (agent_extension, call_id)
-            )
-            conn.commit()
-            conn.close()
+        # Save recording_url and extension to database
+        conn = get_db()
+        conn.execute(
+            'UPDATE calls SET agent_extension=?, recording_url=? WHERE call_id=?',
+            (agent_extension, recording_url, call_id)
+        )
+        conn.commit()
+        conn.close()
 
         return jsonify({
             'success': True,
@@ -391,7 +402,7 @@ def analyze_call():
         })
 
     except ImportError:
-        return jsonify({'error': 'AI engine not available. Check ANTHROPIC_API_KEY and GEMINI_API_KEY in environment variables'}), 500
+        return jsonify({'error': 'AI engine not available. Check API keys in environment variables'}), 500
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

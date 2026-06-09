@@ -1073,6 +1073,23 @@
         </div>
       </div>
 
+      <!-- Audio Player -->
+      <div class="card" style="margin-bottom:20px;" id="audio-player-card">
+        <div class="card-header">
+          <span class="card-title">🎧 Call Recording</span>
+          <span style="font-size:11px;color:var(--text3)">Streamed from recording server</span>
+        </div>
+        <div class="card-body" style="padding:16px 20px;">
+          <audio id="call-audio-player" controls style="width:100%;border-radius:8px;accent-color:var(--accent);">
+            <source id="call-audio-source" src="" type="audio/wav">
+            Your browser does not support the audio element.
+          </audio>
+          <div id="audio-unavailable" style="display:none;color:var(--text3);font-size:12px;padding:8px 0;">
+            ⚠️ Recording not available or has expired.
+          </div>
+        </div>
+      </div>
+
       <div class="grid-2">
         <!-- Scorecard -->
         <div class="card">
