@@ -833,6 +833,8 @@ def retry_stuck_calls():
         'count': len(stuck_calls),
         'call_ids': [c['call_id'] for c in stuck_calls]
     })
+
+@app.route('/api/analyze/status', methods=['GET'])
 def analyze_status():
     anthropic_key = os.getenv('ANTHROPIC_API_KEY', '')
     gemini_key = os.getenv('GEMINI_API_KEY', '')
@@ -846,6 +848,65 @@ def analyze_status():
         'gemini_configured': bool(gemini_key and 'your_' not in gemini_key),
         'database_connected': db_ok
     })
+
+@app.route('/api/test-analyze', methods=['GET'])
+def test_analyze():
+    """Test each component of the AI pipeline individually."""
+    results = {}
+
+    # Test 1: Database
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute('SELECT COUNT(*) FROM calls')
+        count = c.fetchone()[0]
+        conn.close()
+        results['database'] = f'OK — {count} calls'
+    except Exception as e:
+        results['database'] = f'FAIL: {str(e)}'
+
+    # Test 2: Anthropic / Claude
+    try:
+        import anthropic as anthropic_lib
+        client = anthropic_lib.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
+        msg = client.messages.create(
+            model='claude-sonnet-4-20250514',
+            max_tokens=20,
+            messages=[{'role':'user','content':'Reply with just the word OK'}]
+        )
+        results['claude'] = f'OK — {msg.content[0].text.strip()}'
+    except Exception as e:
+        results['claude'] = f'FAIL: {str(e)}'
+
+    # Test 3: Gemini
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
+        model = genai.GenerativeModel('gemini-2.5-flash')
+        resp = model.generate_content('Reply with just the word OK')
+        results['gemini'] = f'OK — {resp.text.strip()}'
+    except Exception as e:
+        results['gemini'] = f'FAIL: {str(e)}'
+
+    # Test 4: Can we download a recording?
+    try:
+        import urllib.request
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT recording_url, call_id FROM calls WHERE recording_url IS NOT NULL AND recording_url != '' LIMIT 1")
+        row = c.fetchone()
+        conn.close()
+        if row:
+            url = row[0].strip().rstrip(':').rstrip('/')
+            req = urllib.request.Request(url, method='HEAD')
+            urllib.request.urlopen(req, timeout=10)
+            results['audio_url'] = f'OK — accessible: {url[-40:]}'
+        else:
+            results['audio_url'] = 'No calls with recording URL'
+    except Exception as e:
+        results['audio_url'] = f'FAIL: {str(e)}'
+
+    return jsonify(results)
 
 @app.route('/')
 def index():
