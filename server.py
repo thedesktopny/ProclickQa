@@ -965,28 +965,10 @@ def analyze_call():
             except Exception as e:
                 print(f"Callback check warning: {e}")
 
-        # Queue or process synchronously
-        REDIS_URL = os.getenv('REDIS_URL', '')
-        if REDIS_URL:
-            import redis as redis_lib
-            r = redis_lib.from_url(REDIS_URL, decode_responses=True)
-            job = json.dumps({
-                'call_id': call_id, 'agent_name': agent_name,
-                'agent_extension': agent_extension, 'recording_url': recording_url,
-                'call_duration_seconds': call_duration_seconds, 'billed_minutes': billed_minutes,
-                'caller_id': caller_id, 'customer_account_id': customer_account_id,
-                'account_name': account_name, 'call_end_first': call_end_first,
-                'agent_qos_tx': agent_qos_tx, 'agent_qos_rx': agent_qos_rx,
-                'customer_qos_tx': customer_qos_tx, 'customer_qos_rx': customer_qos_rx,
-                'call_notes': call_notes, 'call_dropped': call_dropped
-            })
-            r.lpush('voiceguard:calls', job)
-            return jsonify({
-                'success': True, 'call_id': call_id, 'status': 'Processing',
-                'message': 'Call received and queued for analysis. Results in 1-2 minutes.'
-            })
-        else:
-            # Synchronous fallback
+        # Always process in background thread — respond to Igor instantly
+        import threading
+
+        def process_new_call():
             from ai_engine import analyze_call as run_analysis
             import urllib.request
 
@@ -1007,54 +989,65 @@ def analyze_call():
                                     account_name=account_name,
                                     agent_qos_tx=agent_qos_tx, agent_qos_rx=agent_qos_rx,
                                     customer_qos_tx=customer_qos_tx, customer_qos_rx=customer_qos_rx)
+
+                conn2 = get_db()
+                c2 = conn2.cursor()
+                c2.execute('''
+                    UPDATE calls SET duration=%s, overall_score=%s, confidence=%s,
+                        emotion=%s, status=%s, flags=%s, scorecard=%s, transcript=%s,
+                        summary=%s, emotion_delta=%s, requires_human_review=%s,
+                        human_review_reason=%s, age_concern=%s, coaching_notes=%s,
+                        positive_highlights=%s, call_dropped=%s, notes_score=%s,
+                        notes_feedback=%s
+                    WHERE call_id=%s
+                ''', (
+                    result.get('duration','--'), result['overall_score'],
+                    result.get('confidence',100), result['emotion'], result['status'],
+                    result['flags'], json.dumps(result.get('scorecard',{})),
+                    result.get('transcript',''), result.get('summary',''),
+                    json.dumps(result.get('emotion_delta',{})),
+                    result.get('requires_human_review',False),
+                    result.get('human_review_reason',''),
+                    json.dumps(result.get('age_concern',{})),
+                    result.get('coaching_notes',''),
+                    result.get('positive_highlights',''),
+                    result.get('call_dropped', False),
+                    result.get('notes_score', 0),
+                    result.get('notes_feedback',''),
+                    call_id
+                ))
+                for rr in result.get('scorecard',{}).get('rules_evaluation',[]):
+                    c2.execute('''INSERT INTO rule_results
+                        (call_id, rule_description, category, severity, passed, confidence, evidence)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s)''',
+                        (call_id, rr.get('rule',''), rr.get('category',''),
+                         rr.get('severity',''), rr.get('passed',False),
+                         rr.get('confidence',100), rr.get('evidence','')))
+                conn2.commit()
+                conn2.close()
+                print(f"[AutoProcess] ✅ {call_id} scored: {result['overall_score']}%")
+
+            except Exception as e:
+                print(f"[AutoProcess] ❌ {call_id} failed: {e}")
+                try:
+                    conn3 = get_db()
+                    c3 = conn3.cursor()
+                    c3.execute("UPDATE calls SET status='Failed' WHERE call_id=%s", (call_id,))
+                    conn3.commit()
+                    conn3.close()
+                except: pass
             finally:
                 try: os.remove(audio_path)
                 except: pass
 
-            conn = get_db()
-            c = conn.cursor()
-            c.execute('''
-                UPDATE calls SET duration=%s, overall_score=%s, confidence=%s,
-                    emotion=%s, status=%s, flags=%s, scorecard=%s, transcript=%s,
-                    summary=%s, emotion_delta=%s, requires_human_review=%s,
-                    human_review_reason=%s, age_concern=%s, coaching_notes=%s,
-                    positive_highlights=%s, call_dropped=%s, notes_score=%s,
-                    notes_feedback=%s
-                WHERE call_id=%s
-            ''', (
-                result.get('duration','--'), result['overall_score'],
-                result.get('confidence',100), result['emotion'], result['status'],
-                result['flags'], json.dumps(result.get('scorecard',{})),
-                result.get('transcript',''), result.get('summary',''),
-                json.dumps(result.get('emotion_delta',{})),
-                result.get('requires_human_review',False),
-                result.get('human_review_reason',''),
-                json.dumps(result.get('age_concern',{})),
-                result.get('coaching_notes',''),
-                result.get('positive_highlights',''),
-                result.get('call_dropped', False),
-                result.get('notes_score', 0),
-                result.get('notes_feedback',''),
-                call_id
-            ))
+        thread = threading.Thread(target=process_new_call, daemon=True)
+        thread.start()
 
-            # Save rule results
-            for rr in result.get('scorecard',{}).get('rules_evaluation',[]):
-                c.execute('''INSERT INTO rule_results
-                    (call_id, rule_description, category, severity, passed, confidence, evidence)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s)''',
-                    (call_id, rr.get('rule',''), rr.get('category',''),
-                     rr.get('severity',''), rr.get('passed',False),
-                     rr.get('confidence',100), rr.get('evidence','')))
-            conn.commit()
-            conn.close()
-
-            return jsonify({
-                'success': True, 'call_id': result['call_id'],
-                'overall_score': result['overall_score'],
-                'status': result['status'], 'emotion': result['emotion'],
-                'flags': result['flags'], 'summary': result.get('summary','')
-            })
+        # Return immediately to Igor — don't make him wait
+        return jsonify({
+            'success': True, 'call_id': call_id, 'status': 'Processing',
+            'message': 'Call received. Analysis running in background — results in 1-2 minutes.'
+        })
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
