@@ -1445,6 +1445,17 @@ async function pollRetryStatus(){
       // Refresh calls list
       await loadCalls();
       renderCalls();
+      // Auto-start next batch if there are more stuck calls
+      const remaining = calls.filter(c=>c.status==='Processing'||c.status==='Failed').filter(c=>!c.overall_score||c.overall_score===0);
+      if(remaining.length > 0){
+        const statusEl = document.getElementById('retry-log-status');
+        if(statusEl) statusEl.textContent = `⏳ Starting next batch (${remaining.length} remaining)...`;
+        setTimeout(async()=>{
+          const res2 = await API.post('/api/retry-stuck',{});
+          if(res2.count > 0) startRetryPolling();
+          else if(statusEl) statusEl.textContent = '✅ All calls scored!';
+        }, 3000);
+      }
     }
   }catch(e){}
 }

@@ -833,7 +833,7 @@ def retry_stuck_calls():
                     try: os.remove(audio_path)
                     except: pass
 
-                time.sleep(15)
+                time.sleep(5)
 
             except Exception as e:
                 call_id = call.get('call_id','?')
