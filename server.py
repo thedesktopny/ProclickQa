@@ -865,14 +865,15 @@ def test_one_call():
             WHERE status IN ('Processing', 'Failed')
             AND overall_score = 0
             AND recording_url IS NOT NULL
-            ORDER BY created_at DESC
+            AND call_duration_seconds > 0
+            ORDER BY call_duration_seconds ASC
             LIMIT 1
         ''')
         call = c.fetchone()
         conn.close()
 
         if not call:
-            return jsonify({'error': 'No stuck calls found'})
+            return jsonify({'error': 'No suitable call found — need calls with duration > 0'})
 
         call = dict(call)
         call_id = call['call_id']
