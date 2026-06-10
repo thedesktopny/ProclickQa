@@ -12,7 +12,11 @@ from psycopg2.extras import RealDictCursor
 load_dotenv()
 
 app = Flask(__name__, static_folder='.')
-app.secret_key = os.getenv('SECRET_KEY', 'voiceguard-secret-change-this')
+app.secret_key = os.getenv('SECRET_KEY', 'voiceguard-secret-key-2024-proclick')
+app.config['SESSION_COOKIE_SECURE'] = False
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['PERMANENT_SESSION_LIFETIME'] = 86400 * 30  # 30 days
 CORS(app)
 
 ADMIN_USERNAME = os.getenv('ADMIN_USERNAME', 'david')
@@ -285,6 +289,7 @@ def login():
         c.execute('SELECT * FROM users WHERE username = %s AND status = %s', (username, 'active'))
         user = c.fetchone()
         if user and user['password_hash'] == password_hash:
+            session.permanent = True
             session['user_id'] = user['id']
             session['role'] = user['role']
             session['username'] = user['username']
@@ -301,6 +306,7 @@ def login():
 
     # Fallback to env admin (in case users table not seeded yet)
     if username == ADMIN_USERNAME and password_hash == ADMIN_PASSWORD:
+        session.permanent = True
         session['admin'] = True
         session['role'] = 'admin'
         session['username'] = username
@@ -925,7 +931,35 @@ def get_calls():
         'pages': max(1, -(-total // limit))  # ceiling division
     })
 
-@app.route('/api/calls/<call_id>', methods=['GET'])
+@app.route('/api/calls/<call_id>/recording', methods=['GET'])
+def proxy_recording(call_id):
+    """Proxy the recording file so browser can download it."""
+    import urllib.request
+    conn = get_db()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('SELECT recording_url, agent_name, account_name FROM calls WHERE call_id=%s', (call_id,))
+    call = c.fetchone()
+    conn.close()
+    if not call or not call['recording_url']:
+        return jsonify({'error': 'Recording not found'}), 404
+    url = call['recording_url'].strip().rstrip(':').rstrip('/')
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'VoiceGuard/1.0'})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = resp.read()
+        agent = (call['agent_name'] or 'agent').replace(' ','_')
+        filename = f"call_{call_id[-8:]}_{agent}.wav"
+        from flask import Response
+        return Response(
+            data,
+            mimetype='audio/wav',
+            headers={
+                'Content-Disposition': f'attachment; filename="{filename}"',
+                'Content-Length': len(data)
+            }
+        )
+    except Exception as e:
+        return jsonify({'error': f'Could not download recording: {str(e)}'}), 500
 def get_call(call_id):
     conn = get_db()
     c = conn.cursor(cursor_factory=RealDictCursor)

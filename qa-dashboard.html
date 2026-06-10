@@ -1468,7 +1468,7 @@ function renderCalls(list){
     const stBadge=statusBadge(c.status);
     const flagBadge=c.flags>0?`<span class="badge ${c.flags>=2?'badge-red':'badge-yellow'}">${c.flags}</span>`:`<span class="badge badge-green">0</span>`;
     const endIcon=c.call_end_first==='agent'?'<span title="Agent ended first" style="color:var(--yellow)">⚠️A</span>':c.call_end_first==='drop'?'<span title="Call dropped" style="color:var(--red)">📵</span>':'<span title="Customer ended" style="color:var(--green)">✓C</span>';
-    const notesScore=c.notes_score>0?`<span class="badge ${c.notes_score>=70?'badge-green':c.notes_score>=40?'badge-yellow':'badge-red'}">${c.notes_score}%</span>`:`<span class="badge badge-gray">—</span>`;
+    const notesScore=c.notes_score>0?`<span class="badge ${c.notes_score>=70?'badge-green':c.notes_score>=40?'badge-yellow':'badge-red'}">${c.notes_score}%</span>`:c.overall_score>0?`<span class="badge badge-red">0%</span>`:`<span class="badge badge-gray">—</span>`;
     const billed=c.billed_minutes?c.billed_minutes+'m':'—';
     const emotion=c.emotion||'<span style="color:var(--text3);font-size:11px;">Pending</span>';
     const isExp=expandedRows.has(c.call_id);
@@ -1821,7 +1821,21 @@ function renderCallDetail(call){
     ${ageConcern.flagged?`<div class="alert-bar" style="margin-bottom:20px;"><span>🔞</span><span style="font-size:12px;color:var(--text2);flex:1"><strong style="color:var(--red)">Age Concern Flagged</strong> — ${ageConcern.reason||''}</span></div>`:''}
 
     <!-- Audio Player -->
-    ${call.recording_url?`<div class="card" style="margin-bottom:20px;"><div class="card-header"><span class="card-title">🎧 Call Recording</span><span style="font-size:11px;color:var(--text3)">Streamed from recording server</span></div><div class="card-body"><audio controls style="width:100%;accent-color:var(--accent)"><source src="${call.recording_url}" type="audio/wav">Your browser does not support audio.</audio></div></div>`:''}
+    ${call.recording_url?`<div class="card" style="margin-bottom:20px;">
+      <div class="card-header">
+        <span class="card-title">🎧 Call Recording</span>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <span style="font-size:11px;color:var(--text3)">Streamed from recording server</span>
+          <a href="/api/calls/${call.call_id}/recording" download style="background:rgba(79,110,247,0.15);color:var(--accent);padding:4px 12px;border-radius:6px;font-size:11px;font-weight:600;text-decoration:none;">⬇ Download</a>
+        </div>
+      </div>
+      <div class="card-body">
+        <audio controls style="width:100%;accent-color:var(--accent)">
+          <source src="${call.recording_url}" type="audio/wav">
+          Your browser does not support audio.
+        </audio>
+      </div>
+    </div>`:''}
 
     <div class="grid-2" style="margin-bottom:20px;">
       <!-- Call Info -->
