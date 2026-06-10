@@ -716,7 +716,7 @@ def retry_stuck_calls():
                agent_qos_tx, agent_qos_rx, customer_qos_tx, customer_qos_rx,
                call_notes, call_dropped
         FROM calls
-        WHERE status = 'Processing'
+        WHERE status IN ('Processing', 'Failed')
         AND overall_score = 0
         AND created_at < NOW() - INTERVAL '5 minutes'
         ORDER BY created_at ASC
@@ -870,7 +870,7 @@ def test_analyze():
         import anthropic as anthropic_lib
         client = anthropic_lib.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
         msg = client.messages.create(
-            model='claude-sonnet-4-20250514',
+            model='claude-sonnet-4-6',
             max_tokens=20,
             messages=[{'role':'user','content':'Reply with just the word OK'}]
         )
