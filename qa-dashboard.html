@@ -1097,7 +1097,74 @@ function buildExpandContent(c){
       ${c.positive_highlights?`<div style="padding:9px 12px;background:rgba(16,212,142,0.08);border-left:3px solid var(--green);border-radius:6px;font-size:12px;color:var(--text2);margin-bottom:10px;">✅ ${c.positive_highlights}</div>`:''}
       <button onclick="openCallDetail('${c.call_id}')" style="background:var(--surface2);border:1px solid var(--border);color:var(--text2);padding:7px 14px;border-radius:8px;cursor:pointer;font-size:11px;width:100%;font-weight:500;">View Full Detail Page →</button>
     </div>`:''}
-  </div>`;
+  </div>
+
+  ${(c.status==='Review'||c.status==='Critical'||c.requires_human_review)&&!isPending?`
+  <div style="margin-top:14px;background:var(--surface);border:1px solid ${c.status==='Critical'?'rgba(242,78,78,0.3)':'var(--border)'};border-radius:10px;padding:16px;" id="resolution-panel-${c.call_id}">
+    <div style="font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--text3);margin-bottom:12px;">📋 QA Resolution</div>
+    <div id="resolution-content-${c.call_id}">
+      <div style="text-align:center;padding:8px;color:var(--text3);font-size:12px;">Loading...</div>
+    </div>
+  </div>`:''}
+  `;
+}
+
+async function loadResolution(callId){
+  try{
+    const res = await API.get(`/api/resolutions/${callId}`);
+    const container = document.getElementById(`resolution-content-${callId}`);
+    if(!container) return;
+    if(res && res.id){
+      // Already resolved — show what was done
+      const scoreColor = res.ai_resolution_score>=80?'var(--green)':res.ai_resolution_score>=60?'var(--yellow)':'var(--red)';
+      container.innerHTML = `
+        <div style="background:rgba(16,212,142,0.08);border-left:3px solid var(--green);border-radius:8px;padding:12px;margin-bottom:10px;">
+          <div style="font-size:11px;color:var(--text3);margin-bottom:4px;">✅ Resolved by ${res.qa_user_name} · ${formatDate(res.resolved_at)}</div>
+          <div style="font-size:12px;color:var(--text2);line-height:1.6;">${res.actions_taken}</div>
+        </div>
+        ${res.ai_resolution_score?`<div style="display:flex;align-items:center;gap:10px;background:var(--surface2);padding:10px;border-radius:8px;">
+          <div style="font-size:22px;font-weight:700;color:${scoreColor};">${res.ai_resolution_score}</div>
+          <div>
+            <div style="font-size:11px;font-weight:600;color:${scoreColor};">AI Resolution Score</div>
+            <div style="font-size:11px;color:var(--text3);">${res.ai_resolution_feedback||''}</div>
+          </div>
+        </div>`:''}
+      `;
+    } else {
+      // Not resolved yet — show input form (QA users) or prompt (admin)
+      if(currentRole === 'qa_user'){
+        container.innerHTML = `
+          <div style="font-size:12px;color:var(--text3);margin-bottom:10px;">Describe the actions you took to handle this flagged call:</div>
+          <textarea id="resolution-text-${callId}" placeholder="e.g. Called the agent and explained the compliance violation. Reminded them of the logout confirmation requirement. Agent acknowledged and will follow procedure going forward." style="width:100%;min-height:90px;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:10px;border-radius:8px;font-size:12px;line-height:1.5;box-sizing:border-box;resize:vertical;"></textarea>
+          <button onclick="submitResolution('${callId}')" class="btn btn-primary" style="width:100%;margin-top:10px;">Submit Resolution → AI will score your response</button>
+        `;
+      } else {
+        container.innerHTML = `<div style="font-size:12px;color:var(--text3);font-style:italic;">Not yet resolved by QA reviewer.</div>`;
+      }
+    }
+  }catch(e){
+    const container = document.getElementById(`resolution-content-${callId}`);
+    if(container) container.innerHTML = `<div style="font-size:12px;color:var(--text3);">Could not load resolution data.</div>`;
+  }
+}
+
+async function submitResolution(callId){
+  const text = (document.getElementById(`resolution-text-${callId}`)?.value||'').trim();
+  if(!text){ showToast('Please describe the actions you took', true); return; }
+  const btn = document.querySelector(`#resolution-content-${callId} button`);
+  if(btn){ btn.textContent = '⏳ Submitting & scoring...'; btn.disabled = true; }
+  try{
+    const res = await API.post('/api/resolutions', {call_id: callId, actions_taken: text});
+    if(res.success){
+      showToast(`✅ Resolution submitted! AI Score: ${res.ai_score}/100`);
+      // Reload the resolution panel
+      await loadResolution(callId);
+    } else {
+      showToast('Failed to submit: ' + (res.error||'Unknown error'), true);
+    }
+  }catch(e){
+    showToast('Error submitting resolution', true);
+  }
 }
 
 async function toggleRow(callId){
@@ -1121,6 +1188,10 @@ async function toggleRow(callId){
       const idx=calls.findIndex(c=>c.call_id===callId);
       if(idx!==-1)calls[idx]={...calls[idx],...call};
       expContent.innerHTML=buildExpandContent(call);
+      // Load resolution status for flagged calls
+      if(call.status==='Review'||call.status==='Critical'||call.requires_human_review){
+        loadResolution(callId);
+      }
     }catch(e){
       expContent.innerHTML=`<div style="padding:24px;text-align:center;color:var(--red);font-size:12px;">Failed to load: ${e.message}</div>`;
     }
