@@ -906,8 +906,116 @@ def get_resolution(call_id):
     return jsonify(dict(res) if res else {})
 
 # ─── AGENTS ───────────────────────────────────────────────────────────────────
-@app.route('/api/agents', methods=['GET'])
-def get_agents():
+@app.route('/api/agents/<agent_name>/profile', methods=['GET'])
+def agent_profile(agent_name):
+    conn = get_db()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+
+    # Agent info
+    c.execute('SELECT * FROM agents WHERE name=%s', (agent_name,))
+    agent = dict(c.fetchone() or {'name': agent_name, 'extension': '—'})
+
+    # All scored calls
+    c.execute('''
+        SELECT call_id, overall_score, status, emotion, flags, duration,
+               billed_minutes, call_end_first, call_notes, notes_score,
+               scorecard, summary, coaching_notes, created_at, account_name,
+               requires_human_review, agent_qos_tx, agent_qos_rx
+        FROM calls
+        WHERE agent_name=%s AND overall_score > 0
+        ORDER BY created_at DESC
+        LIMIT 100
+    ''', (agent_name,))
+    calls = [dict(c) for c in c.fetchall()]
+
+    # Category averages
+    cat_totals = {}
+    cat_counts = {}
+    flag_counts = {}
+    emotion_counts = {}
+    notes_scores = []
+
+    for call in calls:
+        # Notes
+        if call.get('notes_score') is not None:
+            notes_scores.append(call['notes_score'])
+
+        # Emotion
+        emo = call.get('emotion') or ''
+        if emo:
+            emotion_counts[emo] = emotion_counts.get(emo, 0) + 1
+
+        # Scorecard
+        sc = call.get('scorecard') or '{}'
+        if isinstance(sc, str):
+            try: sc = json.loads(sc)
+            except: sc = {}
+
+        cat_scores = sc.get('category_scores', {})
+        for cat, val in cat_scores.items():
+            score = val.get('score', 0) if isinstance(val, dict) else 0
+            cat_totals[cat] = cat_totals.get(cat, 0) + score
+            cat_counts[cat] = cat_counts.get(cat, 0) + 1
+
+        # Flags
+        for flag in sc.get('flags', []):
+            title = flag.get('title', 'Unknown')
+            flag_counts[title] = flag_counts.get(title, 0) + 1
+
+    # Build category averages
+    cat_averages = {}
+    for cat in cat_totals:
+        cat_averages[cat] = round(cat_totals[cat] / cat_counts[cat])
+
+    # Top flags
+    top_flags = sorted(flag_counts.items(), key=lambda x: x[1], reverse=True)[:8]
+
+    # Overall stats
+    scored = [c for c in calls if c['overall_score'] > 0]
+    avg_score = round(sum(c['overall_score'] for c in scored) / max(len(scored), 1))
+    passed = sum(1 for c in scored if c['status'] == 'Passed')
+    review = sum(1 for c in scored if c['status'] == 'Review')
+    critical = sum(1 for c in scored if c['status'] == 'Critical')
+    avg_notes = round(sum(notes_scores) / max(len(notes_scores), 1)) if notes_scores else 0
+    total_flags = sum(c.get('flags', 0) or 0 for c in scored)
+    dropped = sum(1 for c in calls if c.get('call_end_first') == 'drop')
+    agent_ended = sum(1 for c in calls if c.get('call_end_first') == 'agent')
+
+    # Recent trend (last 10 calls avg vs previous 10)
+    recent = scored[:10]
+    older = scored[10:20]
+    recent_avg = round(sum(c['overall_score'] for c in recent) / max(len(recent), 1)) if recent else 0
+    older_avg = round(sum(c['overall_score'] for c in older) / max(len(older), 1)) if older else 0
+    trend = 'improving' if recent_avg > older_avg + 3 else 'declining' if recent_avg < older_avg - 3 else 'stable'
+
+    # Total calls including unscored
+    c.execute('SELECT COUNT(*) as total FROM calls WHERE agent_name=%s', (agent_name,))
+    total_calls = c.fetchone()['total']
+
+    conn.close()
+
+    return jsonify({
+        'agent': agent,
+        'stats': {
+            'total_calls': total_calls,
+            'scored_calls': len(scored),
+            'avg_score': avg_score,
+            'passed': passed,
+            'review': review,
+            'critical': critical,
+            'avg_notes': avg_notes,
+            'total_flags': total_flags,
+            'dropped_calls': dropped,
+            'agent_ended_calls': agent_ended,
+            'recent_avg': recent_avg,
+            'older_avg': older_avg,
+            'trend': trend
+        },
+        'category_averages': cat_averages,
+        'top_flags': top_flags,
+        'emotion_distribution': emotion_counts,
+        'recent_calls': calls[:20]
+    })
     conn = get_db()
     c = conn.cursor(cursor_factory=RealDictCursor)
     user = current_user()

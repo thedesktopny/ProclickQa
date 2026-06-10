@@ -394,6 +394,22 @@ td.agent{color:var(--text);font-weight:500;}
   </div>
 </div>
 
+<!-- ===== AGENT PROFILE ===== -->
+<div class="page" id="page-agent-profile">
+  <div class="topbar">
+    <div style="display:flex;align-items:center;gap:12px;">
+      <button onclick="showPage('agents')" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:20px;">←</button>
+      <div class="page-title" id="agent-profile-title">Agent Profile</div>
+    </div>
+    <div class="topbar-right">
+      <span id="agent-profile-status" class="badge badge-green">Active</span>
+    </div>
+  </div>
+  <div style="padding:28px;" id="agent-profile-body">
+    <div style="text-align:center;padding:48px;color:var(--text3);">Loading...</div>
+  </div>
+</div>
+
 <!-- ===== ANALYTICS ===== -->
 <div class="page" id="page-analytics">
   <div class="topbar">
@@ -1323,12 +1339,146 @@ async function saveAssignments(){
   loadQAUsers();
 }
 
+// ─── AGENT PROFILE PAGE ───────────────────────────────────────────────────────
+async function openAgentProfile(agentName){
+  showPage('agent-profile');
+  document.getElementById('agent-profile-title').textContent = agentName;
+  document.getElementById('agent-profile-body').innerHTML='<div style="text-align:center;padding:48px;color:var(--text3);">Loading profile...</div>';
+  try{
+    const data=await API.get(`/api/agents/${encodeURIComponent(agentName)}/profile`);
+    renderAgentProfile(data);
+  }catch(e){
+    document.getElementById('agent-profile-body').innerHTML=`<div style="text-align:center;padding:48px;color:var(--red);">Failed to load: ${e.message}</div>`;
+  }
+}
+
+function renderAgentProfile(data){
+  const {agent,stats:s,category_averages,top_flags,emotion_distribution,recent_calls}=data;
+  const scoreColor=s.avg_score>=80?'var(--green)':s.avg_score>=70?'var(--yellow)':'var(--red)';
+  const trendIcon=s.trend==='improving'?'📈':s.trend==='declining'?'📉':'➡️';
+  const trendColor=s.trend==='improving'?'var(--green)':s.trend==='declining'?'var(--red)':'var(--text3)';
+  const initials=(agent.name||'?').split(' ').map(n=>n[0]).join('').toUpperCase().slice(0,2);
+  const catLabels={
+    accuracy_and_information:'Accuracy & Info',customer_service_quality:'Customer Service',
+    active_listening:'Active Listening',appropriate_actions:'Appropriate Actions',
+    compliance_and_handling:'Compliance',emotion_management:'Emotion Mgmt',
+    script_and_language:'Script & Language',documentation_quality:'Documentation',
+    audio_and_technical:'Audio & Technical',call_closure:'Call Closure'
+  };
+
+  document.getElementById('agent-profile-body').innerHTML=`
+    <div style="display:flex;align-items:center;gap:20px;margin-bottom:24px;background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:20px;">
+      <div style="width:64px;height:64px;border-radius:50%;background:rgba(79,110,247,0.2);display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:800;color:var(--accent);flex-shrink:0;">${initials}</div>
+      <div style="flex:1;">
+        <div style="font-family:'Space Grotesk',sans-serif;font-size:22px;font-weight:800;">${agent.name}</div>
+        <div style="font-size:12px;color:var(--text3);margin-top:4px;">Ext. ${agent.extension||'—'} · ${s.total_calls} total calls · ${s.scored_calls} scored</div>
+      </div>
+      <div style="text-align:center;padding:16px 24px;background:var(--surface2);border-radius:12px;">
+        <div style="font-family:'Space Grotesk',sans-serif;font-size:42px;font-weight:800;color:${scoreColor};line-height:1;">${s.avg_score}%</div>
+        <div style="font-size:11px;color:var(--text3);margin-top:4px;">Overall QA Score</div>
+        <div style="font-size:12px;color:${trendColor};margin-top:4px;">${trendIcon} ${s.trend} · ${s.recent_avg}% recent</div>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin-bottom:20px;">
+      ${[
+        {v:s.passed,l:'Passed',c:'var(--green)'},
+        {v:s.review,l:'Review',c:'var(--yellow)'},
+        {v:s.critical,l:'Critical',c:'var(--red)'},
+        {v:s.avg_notes+'%',l:'Notes Score',c:s.avg_notes>=70?'var(--green)':s.avg_notes>=40?'var(--yellow)':'var(--red)'},
+        {v:s.total_flags,l:'Total Flags',c:s.total_flags>0?'var(--red)':'var(--green)'},
+        {v:s.dropped_calls,l:'Dropped',c:s.dropped_calls>0?'var(--red)':'var(--green)'}
+      ].map(x=>`<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px;text-align:center;">
+        <div style="font-size:24px;font-weight:800;color:${x.c};">${x.v}</div>
+        <div style="font-size:10px;color:var(--text3);">${x.l}</div>
+      </div>`).join('')}
+    </div>
+
+    <div style="display:grid;grid-template-columns:1.2fr 1fr;gap:16px;margin-bottom:20px;">
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:18px;">
+        <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:var(--text3);margin-bottom:14px;">📊 Performance by Category</div>
+        ${Object.entries(catLabels).map(([key,label])=>{
+          const score=category_averages[key]||0;
+          const color=score>=80?'var(--green)':score>=70?'var(--yellow)':'var(--red)';
+          const weak=score<60&&score>0;
+          return `<div style="margin-bottom:9px;">
+            <div style="display:flex;justify-content:space-between;margin-bottom:3px;">
+              <span style="font-size:12px;color:${weak?'var(--red)':'var(--text2)'};font-weight:${weak?600:400};">${weak?'⚠️ ':''}${label}</span>
+              <span style="font-size:12px;font-weight:700;color:${color};">${score||'—'}${score?'%':''}</span>
+            </div>
+            <div style="height:5px;background:var(--surface2);border-radius:3px;">
+              <div style="height:100%;width:${score}%;background:${color};border-radius:3px;"></div>
+            </div>
+          </div>`;
+        }).join('')}
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:14px;">
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:18px;flex:1;">
+          <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:var(--text3);margin-bottom:12px;">🚩 Most Common Flags</div>
+          ${top_flags.length===0?'<div style="color:var(--green);font-size:12px;">No flags! ✅</div>'
+            :top_flags.map(([title,count])=>`<div style="display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--border);">
+              <span style="font-size:11px;color:var(--text2);">⚠️ ${title}</span>
+              <span class="badge badge-red">${count}x</span>
+            </div>`).join('')}
+        </div>
+
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:18px;">
+          <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:var(--text3);margin-bottom:12px;">😊 Customer Emotions</div>
+          ${Object.entries(emotion_distribution).length===0?'<div style="color:var(--text3);font-size:12px;">No data yet.</div>'
+            :Object.entries(emotion_distribution).sort((a,b)=>b[1]-a[1]).map(([emo,count])=>{
+              const total=Object.values(emotion_distribution).reduce((a,b)=>a+b,0);
+              const pct=Math.round(count/total*100);
+              const color=emo.includes('Satisfied')||emo.includes('Happy')?'var(--green)':emo.includes('Frustrated')||emo.includes('Angry')?'var(--red)':'var(--yellow)';
+              return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+                <span style="font-size:11px;min-width:80px;color:var(--text2);">${emo}</span>
+                <div style="flex:1;height:7px;background:var(--surface2);border-radius:4px;"><div style="height:100%;width:${pct}%;background:${color};border-radius:4px;"></div></div>
+                <span style="font-size:10px;color:var(--text3);min-width:28px;text-align:right;">${pct}%</span>
+              </div>`;
+            }).join('')}
+        </div>
+      </div>
+    </div>
+
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:18px;">
+      <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:var(--text3);margin-bottom:14px;">📞 Recent Scored Calls</div>
+      ${recent_calls.length===0?'<div style="color:var(--text3);font-size:12px;text-align:center;padding:20px;">No scored calls yet.</div>'
+        :`<table style="width:100%;border-collapse:collapse;">
+          <thead><tr style="font-size:10px;text-transform:uppercase;color:var(--text3);">
+            <th style="text-align:left;padding:6px 8px;">Customer</th>
+            <th style="text-align:left;padding:6px 8px;">Date</th>
+            <th style="text-align:center;padding:6px 8px;">Score</th>
+            <th style="text-align:center;padding:6px 8px;">Notes</th>
+            <th style="text-align:center;padding:6px 8px;">Emotion</th>
+            <th style="text-align:center;padding:6px 8px;">Flags</th>
+            <th style="text-align:center;padding:6px 8px;">Status</th>
+          </tr></thead>
+          <tbody>${recent_calls.map(c=>{
+            const sc=c.overall_score||0;
+            const col=sc>=80?'var(--green)':sc>=70?'var(--yellow)':'var(--red)';
+            return `<tr onclick="openCallDetail('${c.call_id}')" style="cursor:pointer;border-top:1px solid var(--border);" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background='none'">
+              <td style="padding:8px;font-size:12px;">${c.account_name||'—'}</td>
+              <td style="padding:8px;font-size:11px;color:var(--text3);">${formatDate(c.created_at)}</td>
+              <td style="padding:8px;text-align:center;font-weight:700;color:${col};">${sc}%</td>
+              <td style="padding:8px;text-align:center;font-size:11px;color:${(c.notes_score||0)>=70?'var(--green)':(c.notes_score||0)>=40?'var(--yellow)':'var(--red)'};">${c.notes_score||0}%</td>
+              <td style="padding:8px;text-align:center;font-size:11px;">${c.emotion||'—'}</td>
+              <td style="padding:8px;text-align:center;">${(c.flags||0)>0?`<span class="badge badge-red">${c.flags}</span>`:'<span style="color:var(--green)">✓</span>'}</td>
+              <td style="padding:8px;text-align:center;"><span class="badge ${c.status==='Passed'?'badge-green':c.status==='Review'?'badge-yellow':'badge-red'}">${c.status}</span></td>
+            </tr>`;
+          }).join('')}</tbody>
+        </table>`}
+    </div>`;
+
+  document.getElementById('agent-profile-status').textContent=agent.status||'active';
+  document.getElementById('agent-profile-status').className=`badge ${agent.status==='active'?'badge-green':'badge-gray'}`;
+}
+
 function showPage(id){
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
   const page = document.getElementById('page-'+id);
   if(page) page.classList.add('active');
-  const map={dashboard:0,calls:1,'human-review':2,agents:3,analytics:4,billing:5,notes:6,costs:7,rules:8,alerts:9,'qa-users':10,'call-detail':-1};
+  const map={dashboard:0,calls:1,'human-review':2,agents:3,analytics:4,billing:5,notes:6,costs:7,rules:8,alerts:9,'qa-users':10,'call-detail':-1,'agent-profile':-1};
   const items=document.querySelectorAll('.nav-item');
   if(map[id]>=0 && items[map[id]]) items[map[id]].classList.add('active');
   if(id==='qa-users') loadQAUsers();
@@ -2050,14 +2200,15 @@ function renderAgents(filter=''){
     const color=AVATAR_COLORS[i%AVATAR_COLORS.length];
     const avg=agent.avg_score?Math.round(agent.avg_score):null;
     const scoreColor=avg>=80?'var(--green)':avg>=70?'var(--yellow)':avg?'var(--red)':'var(--text3)';
-    return `<div class="agent-card">
+    const safeName=(agent.name||'').replace(/'/g,"\\'");
+    return `<div class="agent-card" style="cursor:pointer;transition:all 0.15s;" onclick="openAgentProfile('${safeName}')" onmouseover="this.style.transform='translateY(-2px)';this.style.borderColor='var(--accent)'" onmouseout="this.style.transform='none';this.style.borderColor='var(--border)'">
       <div style="display:flex;align-items:center;gap:14px;margin-bottom:16px;">
         ${agent.photo?`<img src="${agent.photo}" style="width:48px;height:48px;border-radius:50%;object-fit:cover;" onerror="this.style.display='none'">`:''}
         <div class="agent-avatar" style="background:${color};${agent.photo?'display:none':''}">${initials}</div>
         <div style="flex:1"><div style="font-weight:600;font-size:14px;">${agent.name}</div><div style="font-size:12px;color:var(--text3)">Ext. ${agent.extension}</div></div>
         <span class="badge ${agent.status==='active'?'badge-green':'badge-gray'}">${agent.status}</span>
       </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:${isAdmin?'16px':'0'}">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;">
         <div style="background:var(--surface2);border-radius:8px;padding:10px;text-align:center;">
           <div style="font-family:'Space Grotesk',sans-serif;font-size:18px;font-weight:700;color:${scoreColor}">${avg?avg+'%':'—'}</div>
           <div style="font-size:10px;color:var(--text3);margin-top:2px;">AVG SCORE</div>
@@ -2067,7 +2218,10 @@ function renderAgents(filter=''){
           <div style="font-size:10px;color:var(--text3);margin-top:2px;">TOTAL CALLS</div>
         </div>
       </div>
-      ${isAdmin?`<div style="display:flex;gap:8px;"><button onclick="editAgent(${agent.id})" class="btn btn-outline" style="flex:1;font-size:11px;">⚙️ Settings</button><button onclick="deleteAgent(${agent.id})" class="btn btn-outline" style="flex:1;font-size:11px;color:var(--red);">🗑 Delete</button></div>`:''}
+      <div style="display:flex;gap:6px;">
+        <button onclick="event.stopPropagation();openAgentProfile('${safeName}')" class="btn btn-outline" style="flex:1;font-size:11px;color:var(--accent);">📊 Full Profile</button>
+        ${isAdmin?`<button onclick="event.stopPropagation();editAgent(${agent.id})" class="btn btn-outline" style="font-size:11px;">⚙️</button><button onclick="event.stopPropagation();deleteAgent(${agent.id})" class="btn btn-outline" style="font-size:11px;color:var(--red);">🗑</button>`:''}
+      </div>
     </div>`;
   }).join('');
 }
@@ -2146,7 +2300,7 @@ function renderLeaderboard(){
     const color=avg>=80?'var(--green)':avg>=70?'var(--yellow)':'var(--red)';
     const medal=i===0?'🥇':i===1?'🥈':i===2?'🥉':'';
     const initials=(a.agent_name||'?').split(' ').map(n=>n[0]).join('').toUpperCase().slice(0,2);
-    return `<div onclick="openAgentDrilldown('${(a.agent_name||'').replace(/'/g,"\\'")}')" style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border);cursor:pointer;transition:opacity 0.15s;" onmouseover="this.style.opacity='0.8'" onmouseout="this.style.opacity='1'">
+    return `<div onclick="openAgentProfile('${(a.agent_name||'').replace(/'/g,"\\'")}')" style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border);cursor:pointer;transition:opacity 0.15s;" onmouseover="this.style.opacity='0.8'" onmouseout="this.style.opacity='1'">
       <div style="font-size:${medal?'18px':'14px'};font-weight:700;color:${i<3?'var(--yellow)':'var(--text3)'};width:28px;text-align:center;">${medal||i+1}</div>
       <div class="agent-avatar" style="background:${AVATAR_COLORS[i%AVATAR_COLORS.length]};width:34px;height:34px;font-size:12px;">${initials}</div>
       <div style="flex:1;">
