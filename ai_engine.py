@@ -68,54 +68,93 @@ def analyze_audio_with_gemini(audio_path):
                 '.ogg':'audio/ogg','.flac':'audio/flac','.webm':'audio/webm'}
     mime_type = mime_map.get(ext, 'audio/wav')
 
-    prompt = """You are an expert call center audio analyst. Listen carefully to every detail.
+    prompt = """You are a call center audio analyst. Listen to this call carefully.
 
-Respond ONLY with this exact JSON — no other text:
+Respond ONLY with valid JSON — keep all text values SHORT (max 100 chars each) to avoid truncation:
 
 {
-  "transcript": "Full transcript. Label each line AGENT: or CUSTOMER:",
+  "transcript": "Summarized transcript max 3000 chars. Label each line AGENT: or CUSTOMER:",
   "duration_estimate": "e.g. 5:32",
   "audio_quality": {
     "overall": "Good/Fair/Poor",
     "background_noise": true/false,
-    "background_noise_description": "describe if present",
+    "background_noise_description": "brief",
     "audio_cuts_or_drops": true/false
   },
   "emotion_analysis": {
     "customer_emotion_start": "Happy/Satisfied/Neutral/Frustrated/Angry/Confused",
     "customer_emotion_end": "Happy/Satisfied/Neutral/Frustrated/Angry/Confused",
     "customer_emotion_overall": "Happy/Satisfied/Neutral/Frustrated/Angry/Confused",
-    "customer_frustration_level": 0-100,
-    "customer_satisfaction_level": 0-100,
+    "customer_frustration_level": 0,
+    "customer_satisfaction_level": 0,
     "customer_repeated_themselves": true/false,
     "customer_repeated_count": 0,
     "customer_sounds_young": true/false,
     "customer_raised_voice": true/false,
     "agent_tone": "Professional/Friendly/Neutral/Rushed/Defensive/Robotic/Rude",
-    "agent_stress_level": 0-100,
+    "agent_stress_level": 0,
     "agent_speaking_speed": "Too Fast/Normal/Too Slow",
-    "agent_talk_ratio": 0-100,
+    "agent_talk_ratio": 50,
     "agent_interrupted_customer": true/false,
     "long_silences_detected": true/false,
     "longest_silence_seconds": 0,
-    "key_emotional_moments": [{"timestamp": "2:14", "description": "what happened"}]
+    "key_emotional_moments": [{"timestamp": "2:14", "description": "brief description"}]
   },
   "call_dropped_audio": true/false,
-  "summary": "2-3 sentence summary",
-  "agent_uncertainty_phrases": ["list phrases like I am not sure, maybe, I think so"],
+  "summary": "2-3 sentence summary max",
+  "agent_uncertainty_phrases": ["phrase1", "phrase2"],
   "explicit_content_detected": true/false,
   "explicit_content_description": ""
 }"""
 
-    response = model.generate_content([{'mime_type': mime_type, 'data': audio_b64}, prompt])
+    response = model.generate_content(
+        [{'mime_type': mime_type, 'data': audio_b64}, prompt],
+        generation_config=genai.GenerationConfig(
+            max_output_tokens=8192,
+            temperature=0.1
+        )
+    )
 
     text = response.text.strip()
     if '```' in text:
         text = text.split('```')[1]
         if text.startswith('json'):
             text = text[4:]
+    text = text.strip()
 
-    result = json.loads(text.strip())
+    try:
+        result = json.loads(text)
+    except json.JSONDecodeError:
+        try:
+            start = text.find('{')
+            end = text.rfind('}') + 1
+            if start >= 0 and end > start:
+                result = json.loads(text[start:end])
+            else:
+                raise ValueError("No JSON found")
+        except Exception:
+            print(f"[Gemini] Warning: Could not parse response, using fallback")
+            result = {
+                "transcript": "Audio too large or corrupted — manual review needed.",
+                "duration_estimate": "--",
+                "audio_quality": {"overall": "Unknown", "background_noise": False, "audio_cuts_or_drops": False},
+                "emotion_analysis": {
+                    "customer_emotion_start": "Neutral", "customer_emotion_end": "Neutral",
+                    "customer_emotion_overall": "Neutral", "customer_frustration_level": 0,
+                    "customer_satisfaction_level": 50, "customer_repeated_themselves": False,
+                    "customer_repeated_count": 0, "customer_sounds_young": False,
+                    "customer_raised_voice": False, "agent_tone": "Unknown",
+                    "agent_stress_level": 0, "agent_speaking_speed": "Normal",
+                    "agent_talk_ratio": 50, "agent_interrupted_customer": False,
+                    "long_silences_detected": False, "longest_silence_seconds": 0,
+                    "key_emotional_moments": []
+                },
+                "call_dropped_audio": False,
+                "summary": "Audio analysis could not be completed — file may be too large.",
+                "agent_uncertainty_phrases": [],
+                "explicit_content_detected": False,
+                "explicit_content_description": ""
+            }
     print(f"[Gemini] Done. Emotion: {result['emotion_analysis']['customer_emotion_overall']}")
     return result
 
@@ -280,8 +319,30 @@ Respond ONLY with this exact JSON:
         text = text.split('```')[1]
         if text.startswith('json'):
             text = text[4:]
+    text = text.strip()
 
-    result = json.loads(text.strip())
+    try:
+        result = json.loads(text)
+    except json.JSONDecodeError:
+        try:
+            start = text.find('{')
+            end = text.rfind('}') + 1
+            if start >= 0 and end > start:
+                result = json.loads(text[start:end])
+            else:
+                raise ValueError("No JSON found")
+        except Exception:
+            print(f"[Claude] Warning: Could not parse response, using fallback")
+            result = {
+                "overall_score": 0, "confidence": 0, "status": "Review",
+                "requires_human_review": True,
+                "human_review_reason": "AI scoring failed — manual review required",
+                "category_scores": {}, "notes_score": 0, "notes_feedback": "",
+                "rules_evaluation": [], "flags": [], "emotion_delta": {},
+                "age_concern": {"flagged": False, "reason": ""},
+                "call_end_assessment": "", "coaching_notes": "Manual review needed",
+                "positive_highlights": ""
+            }
     print(f"[Claude] Score: {result['overall_score']}% | Confidence: {result.get('confidence',0)}% | Notes: {result.get('notes_score',0)}%")
     return result
 
