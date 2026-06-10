@@ -288,6 +288,7 @@ td.agent{color:var(--text);font-weight:500;}
         <table>
           <thead>
             <tr>
+              <th style="width:32px;"></th>
               <th>Call ID</th>
               <th>Agent</th>
               <th>Customer</th>
@@ -297,14 +298,15 @@ td.agent{color:var(--text);font-weight:500;}
               <th>Emotion</th>
               <th>QA Score</th>
               <th>Notes</th>
-              <th>Agent QoS TX/RX</th>
-              <th>Cust QoS TX/RX</th>
+              <th>Notes Score</th>
+              <th>End</th>
               <th>Flags</th>
+              <th>▶</th>
               <th>Status</th>
             </tr>
           </thead>
           <tbody id="calls-tbody">
-            <tr><td colspan="13" style="text-align:center;padding:32px;color:var(--text3)">Loading calls...</td></tr>
+            <tr><td colspan="15" style="text-align:center;padding:32px;color:var(--text3)">Loading calls...</td></tr>
           </tbody>
         </table>
       </div>
@@ -703,35 +705,187 @@ function renderNotesOverview(){
 }
 
 // ─── CALLS TABLE ─────────────────────────────────────────────────────────────
+let expandedRows = new Set();
+
 function renderCalls(list){
   const tbody=document.getElementById('calls-tbody');
   if(!tbody)return;
   const data=list||calls;
-  if(data.length===0){tbody.innerHTML='<tr><td colspan="13" style="text-align:center;padding:32px;color:var(--text3)">No calls yet.</td></tr>';return;}
+  if(data.length===0){tbody.innerHTML='<tr><td colspan="15" style="text-align:center;padding:32px;color:var(--text3)">No calls yet.</td></tr>';return;}
   tbody.innerHTML=data.map(c=>{
-    const sc=c.overall_score>0?scoreCircle(c.overall_score):`<div class="score-circle sc-gray" style="font-size:10px;">...</div>`;
+    const sc=c.overall_score>0?scoreCircle(c.overall_score):`<div class="score-circle sc-gray" style="font-size:10px;color:var(--text3);">...</div>`;
     const stBadge=statusBadge(c.status);
     const flagBadge=c.flags>0?`<span class="badge ${c.flags>=2?'badge-red':'badge-yellow'}">${c.flags}</span>`:`<span class="badge badge-green">0</span>`;
-    const endIcon=c.call_end_first==='agent'?'<span title="Agent ended" style="color:var(--yellow)">🔴A</span>':c.call_end_first==='drop'?'<span title="Dropped" style="color:var(--red)">📵</span>':'<span title="Customer ended" style="color:var(--green)">✓</span>';
-    const lineIcon=c.line_issues==='agent'?'<span title="Agent line issue" style="color:var(--yellow)">📶A</span>':c.line_issues==='customer'?'<span title="Customer line issue" style="color:var(--text3)">📶C</span>':'—';
+    const endIcon=c.call_end_first==='agent'?'<span title="Agent ended first" style="color:var(--yellow)">⚠️A</span>':c.call_end_first==='drop'?'<span title="Call dropped" style="color:var(--red)">📵</span>':'<span title="Customer ended" style="color:var(--green)">✓C</span>';
     const notesScore=c.notes_score>0?`<span class="badge ${c.notes_score>=70?'badge-green':c.notes_score>=40?'badge-yellow':'badge-red'}">${c.notes_score}%</span>`:`<span class="badge badge-gray">—</span>`;
     const billed=c.billed_minutes?c.billed_minutes+'m':'—';
-    return `<tr onclick="openCallDetail('${c.call_id}')">
-      <td style="font-size:11px;color:var(--text3)">#${c.call_id||c.id}</td>
+    const emotion=c.emotion||'<span style="color:var(--text3);font-size:11px;">Pending</span>';
+    const isExp=expandedRows.has(c.call_id);
+    const notesText=c.call_notes||'';
+    const notesDisplay=notesText
+      ?`<span title="${notesText.replace(/"/g,'&quot;')}" style="cursor:help;max-width:80px;display:inline-block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:var(--text2);">${notesText}</span>`
+      :`<span style="color:var(--text3);font-size:11px;">—</span>`;
+    const playBtn=c.recording_url
+      ?`<button onclick="playAudio('${c.recording_url}','${c.call_id}');event.stopPropagation();" style="background:rgba(79,110,247,0.15);border:none;color:var(--accent);cursor:pointer;border-radius:6px;padding:4px 8px;font-size:13px;" title="Play recording">▶</button>`
+      :'—';
+    const expBtn=`<button onclick="toggleRow('${c.call_id}');event.stopPropagation();" id="exp-btn-${c.call_id}" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:15px;padding:2px 4px;">${isExp?'▾':'▸'}</button>`;
+
+    return `<tr id="row-${c.call_id}" style="border-bottom:${isExp?'none':'1px solid var(--border)'};">
+      <td>${expBtn}</td>
+      <td style="font-size:11px;color:var(--text3)">#${(c.call_id||c.id||'').toString().slice(-8)}</td>
       <td class="agent">${c.agent_name||'—'}</td>
-      <td style="color:var(--text)">${c.account_name||c.customer_account_id||'—'}</td>
-      <td>${formatDate(c.created_at)}</td>
+      <td style="color:var(--text);max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${c.account_name||c.customer_account_id||'—'}</td>
+      <td style="white-space:nowrap;">${formatDate(c.created_at)}</td>
       <td>${c.duration||'—'}</td>
       <td>${billed}</td>
-      <td>${c.emotion||'—'}</td>
+      <td>${emotion}</td>
       <td>${sc}</td>
+      <td>${notesDisplay}</td>
       <td>${notesScore}</td>
-      <td style="font-size:11px;">${c.agent_qos_tx||'—'}/${c.agent_qos_rx||'—'}</td>
-      <td style="font-size:11px;">${c.customer_qos_tx||'—'}/${c.customer_qos_rx||'—'}</td>
+      <td>${endIcon}</td>
       <td>${flagBadge}</td>
+      <td>${playBtn}</td>
       <td>${stBadge}</td>
+    </tr>
+    <tr id="expand-${c.call_id}" style="display:${isExp?'table-row':'none'};background:var(--bg);">
+      <td colspan="15" style="padding:0;">
+        <div id="expand-content-${c.call_id}" style="padding:20px 24px;border-bottom:2px solid var(--border);">
+          ${isExp?buildExpandContent(c):''}
+        </div>
+      </td>
     </tr>`;
   }).join('');
+}
+
+function buildExpandContent(c){
+  const sc=c.scorecard?JSON.parse(typeof c.scorecard==='string'?c.scorecard:'{}'):{};
+  const flags=sc.flags||[];
+  const isPending=c.status==='Processing'||!c.transcript;
+  let emo={};
+  try{emo=c.emotion_delta?JSON.parse(typeof c.emotion_delta==='string'?c.emotion_delta:'{}'):{};}catch(e){}
+
+  return `<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;margin-bottom:14px;">
+
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px;">
+      <div style="font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--text3);margin-bottom:10px;">📋 Call Information</div>
+      <div style="display:grid;grid-template-columns:auto 1fr;gap:5px 10px;font-size:12px;">
+        <span style="color:var(--text3)">Customer</span><span style="color:var(--text);font-weight:500">${c.account_name||'—'}</span>
+        <span style="color:var(--text3)">Account</span><span style="color:var(--text2)">${c.customer_account_id||'—'}</span>
+        <span style="color:var(--text3)">Caller ID</span><span style="color:var(--text2)">${c.caller_id||'—'}</span>
+        <span style="color:var(--text3)">Duration</span><span style="color:var(--text2)">${c.duration||'—'} / billed ${c.billed_minutes||0}m</span>
+        <span style="color:var(--text3)">Ended by</span><span style="color:${c.call_end_first==='drop'?'var(--red)':c.call_end_first==='agent'?'var(--yellow)':'var(--green)'}">${c.call_end_first==='drop'?'📵 Dropped':c.call_end_first==='agent'?'⚠️ Agent first':'✓ Customer'}</span>
+        <span style="color:var(--text3)">Agent QoS</span><span style="color:var(--text2)">↑${c.agent_qos_tx||'—'} ↓${c.agent_qos_rx||'—'}</span>
+        <span style="color:var(--text3)">Cust QoS</span><span style="color:var(--text2)">↑${c.customer_qos_tx||'—'} ↓${c.customer_qos_rx||'—'}</span>
+      </div>
+    </div>
+
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--text3);">📝 Agent Notes</div>
+        ${c.notes_score>0?`<span style="font-size:12px;font-weight:600;color:${c.notes_score>=70?'var(--green)':c.notes_score>=40?'var(--yellow)':'var(--red)'}">${c.notes_score}%</span>`:''}
+      </div>
+      ${c.call_notes
+        ?`<div style="font-size:12px;color:var(--text2);line-height:1.6;background:var(--surface2);padding:10px;border-radius:8px;border-left:3px solid var(--accent);">${c.call_notes}</div>
+          ${c.notes_feedback?`<div style="margin-top:8px;font-size:11px;color:var(--text3);line-height:1.5;"><strong style="color:var(--accent)">AI:</strong> ${c.notes_feedback}</div>`:''}`
+        :`<div style="font-size:12px;color:var(--red);padding:10px;background:rgba(242,78,78,0.08);border-radius:8px;border-left:3px solid var(--red);">⚠️ No notes written</div>`}
+    </div>
+
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--text3);">🤖 AI Summary</div>
+        ${c.overall_score>0?`<span style="font-size:14px;font-weight:700;font-family:'Space Grotesk',sans-serif;color:${c.overall_score>=80?'var(--green)':c.overall_score>=70?'var(--yellow)':'var(--red)'}">${c.overall_score}%</span>`:''}
+      </div>
+      ${isPending
+        ?`<div style="text-align:center;padding:12px 0;"><div style="font-size:20px;margin-bottom:6px;">⏳</div><div style="font-size:11px;color:var(--text3)">Analyzing call...<br>Results in 1-2 min</div></div>`
+        :`<div style="font-size:12px;color:var(--text2);line-height:1.6;margin-bottom:10px;">${c.summary||'—'}</div>
+          ${emo.start?`<div style="display:flex;align-items:center;gap:6px;font-size:11px;background:var(--surface2);padding:7px 10px;border-radius:7px;">
+            <span>${emotionEmoji(emo.start)}</span><span style="color:var(--text3)">${emo.start}</span>
+            <span style="color:var(--text3)">→</span>
+            <span>${emotionEmoji(emo.end)}</span><span style="color:var(--text3)">${emo.end}</span>
+            <span class="badge ${emo.improved?'badge-green':'badge-red'}" style="margin-left:auto;font-size:10px;">${emo.improved?'↑ Better':'↓ Worse'}</span>
+          </div>`:''}`}
+    </div>
+  </div>
+
+  ${flags.length>0?`<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:14px;">
+    <div style="font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--text3);margin-bottom:10px;">🚩 Flags (${flags.length})</div>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;">
+      ${flags.map(f=>`<div style="background:${f.severity==='Critical'?'rgba(242,78,78,0.1)':'rgba(245,166,35,0.1)'};border:1px solid ${f.severity==='Critical'?'rgba(242,78,78,0.3)':'rgba(245,166,35,0.3)'};border-radius:8px;padding:8px 12px;max-width:280px;">
+        <div style="font-size:11px;font-weight:600;color:${f.severity==='Critical'?'var(--red)':'var(--yellow)'};margin-bottom:3px;">${f.severity==='Critical'?'🚨':'⚠️'} ${f.title||'Flag'}</div>
+        <div style="font-size:11px;color:var(--text3);line-height:1.4;">${f.description||''}</div>
+      </div>`).join('')}
+    </div>
+  </div>`:''}
+
+  <div style="display:grid;grid-template-columns:${c.coaching_notes?'1.4fr 1fr':'1fr'};gap:14px;">
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--text3);">💬 Conversation Transcript</div>
+        ${c.recording_url?`<button onclick="playAudio('${c.recording_url}','${c.call_id}')" style="background:rgba(79,110,247,0.15);border:none;color:var(--accent);cursor:pointer;border-radius:6px;padding:4px 10px;font-size:11px;font-weight:600;">▶ Play Recording</button>`:''}
+      </div>
+      ${isPending||!c.transcript
+        ?`<div style="font-size:12px;color:var(--text3);font-style:italic;padding:16px;text-align:center;background:var(--surface2);border-radius:8px;">${isPending?'Transcript will appear after AI analysis completes.':'No transcript available for this call.'}</div>`
+        :`<div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px;max-height:220px;overflow-y:auto;font-size:12px;line-height:1.8;">${formatTranscript(c.transcript)}</div>`}
+    </div>
+
+    ${c.coaching_notes?`<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px;">
+      <div style="font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--text3);margin-bottom:10px;">🎓 Coaching Notes</div>
+      <div style="font-size:12px;color:var(--text2);line-height:1.7;margin-bottom:10px;">${c.coaching_notes}</div>
+      ${c.positive_highlights?`<div style="padding:9px 12px;background:rgba(16,212,142,0.08);border-left:3px solid var(--green);border-radius:6px;font-size:12px;color:var(--text2);margin-bottom:10px;">✅ ${c.positive_highlights}</div>`:''}
+      <button onclick="openCallDetail('${c.call_id}')" style="background:var(--surface2);border:1px solid var(--border);color:var(--text2);padding:7px 14px;border-radius:8px;cursor:pointer;font-size:11px;width:100%;font-weight:500;">View Full Detail Page →</button>
+    </div>`:''}
+  </div>`;
+}
+
+async function toggleRow(callId){
+  const expRow=document.getElementById(`expand-${callId}`);
+  const expContent=document.getElementById(`expand-content-${callId}`);
+  const btn=document.getElementById(`exp-btn-${callId}`);
+  const mainRow=document.getElementById(`row-${callId}`);
+  if(expandedRows.has(callId)){
+    expandedRows.delete(callId);
+    expRow.style.display='none';
+    btn.textContent='▸';
+    if(mainRow)mainRow.style.borderBottom='1px solid var(--border)';
+  } else {
+    expandedRows.add(callId);
+    expRow.style.display='table-row';
+    btn.textContent='▾';
+    if(mainRow)mainRow.style.borderBottom='none';
+    expContent.innerHTML='<div style="padding:24px;text-align:center;color:var(--text3);font-size:12px;">Loading...</div>';
+    try{
+      const call=await API.get(`/api/calls/${callId}`);
+      const idx=calls.findIndex(c=>c.call_id===callId);
+      if(idx!==-1)calls[idx]={...calls[idx],...call};
+      expContent.innerHTML=buildExpandContent(call);
+    }catch(e){
+      expContent.innerHTML=`<div style="padding:24px;text-align:center;color:var(--red);font-size:12px;">Failed to load: ${e.message}</div>`;
+    }
+  }
+}
+
+// ─── AUDIO PLAYER ─────────────────────────────────────────────────────────────
+let currentAudio = null;
+
+function playAudio(url, callId) {
+  if(currentAudio){currentAudio.pause();currentAudio=null;}
+  let player=document.getElementById('mini-audio-player');
+  if(!player){
+    player=document.createElement('div');
+    player.id='mini-audio-player';
+    player.style.cssText='position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:12px 16px;z-index:9999;display:flex;align-items:center;gap:12px;box-shadow:0 8px 32px rgba(0,0,0,0.5);min-width:340px;';
+    document.body.appendChild(player);
+  }
+  player.innerHTML=`
+    <span style="font-size:16px;">🎧</span>
+    <div style="flex:1;">
+      <div style="font-size:11px;color:var(--text3);margin-bottom:4px;">Call #${callId.toString().slice(-8)}</div>
+      <audio id="mini-audio-el" controls autoplay style="width:100%;height:28px;accent-color:var(--accent);">
+        <source src="${url}" type="audio/wav">
+      </audio>
+    </div>
+    <button onclick="document.getElementById('mini-audio-player').remove();currentAudio=null;" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:18px;flex-shrink:0;">✕</button>`;
+  currentAudio=document.getElementById('mini-audio-el');
 }
 
 function filterCalls(){
