@@ -26,7 +26,7 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);displ
 .nav-item:hover{background:var(--surface2);color:var(--text);}
 .nav-item.active{background:rgba(79,110,247,0.15);color:var(--accent);}
 .nav-item .icon{font-size:15px;width:18px;text-align:center;}
-.nav-badge{margin-left:auto;background:var(--red);color:white;font-size:10px;font-weight:600;padding:2px 6px;border-radius:10px;}
+.nav-badge{margin-left:auto;background:var(--red);color:white;font-size:10px;font-weight:600;padding:2px 6px;border-radius:10px;min-width:18px;text-align:center;}
 .sidebar-footer{margin-top:auto;padding:16px 20px;border-top:1px solid var(--border);display:flex;align-items:center;gap:10px;}
 .avatar{width:32px;height:32px;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;}
 .user-name{font-size:12px;font-weight:600;}
@@ -1153,12 +1153,32 @@ function showPage(id){
 }
 
 function updateBadges(){
-  const criticals=calls.filter(c=>c.status==='Critical').length;
-  const humanReview=calls.filter(c=>c.requires_human_review&&c.status!=='Processing').length;
-  set('nb-review',criticals||'');
-  set('nb-human',humanReview||'');
-  set('nb-alerts',criticals||'');
-  set('alerts-count-badge',criticals+' Unresolved');
+  const scored = calls.filter(c=>c.overall_score>0);
+  const criticals = scored.filter(c=>c.status==='Critical').length;
+  const needsReview = scored.filter(c=>c.status==='Critical'||c.status==='Review').length;
+  const humanReview = scored.filter(c=>c.requires_human_review||(c.status==='Critical'&&c.overall_score>0)).length;
+
+  // Use server stats for more accurate all-calls counts
+  const statsCritical = stats.critical_flags||criticals;
+  const statsHuman = stats.needs_human_review||humanReview;
+
+  const reviewBadge = document.getElementById('nb-review');
+  if(reviewBadge){
+    const count = stats.needs_coaching||needsReview;
+    reviewBadge.textContent = count||'0';
+    reviewBadge.style.background = statsCritical>0?'var(--red)':count>0?'rgba(245,166,35,0.5)':'rgba(16,212,142,0.2)';
+    reviewBadge.style.color = statsCritical>0?'white':count>0?'var(--yellow)':'var(--green)';
+  }
+
+  const humanBadge = document.getElementById('nb-human');
+  if(humanBadge){
+    humanBadge.textContent = statsHuman||'0';
+    humanBadge.style.background = statsHuman>0?'var(--red)':'rgba(16,212,142,0.2)';
+    humanBadge.style.color = statsHuman>0?'white':'var(--green)';
+  }
+
+  set('nb-alerts', statsCritical||'0');
+  set('alerts-count-badge', statsCritical+' Unresolved');
 }
 
 // ─── DASHBOARD ────────────────────────────────────────────────────────────────
@@ -1726,23 +1746,34 @@ function renderCallDetail(call){
 function renderHumanReview(){
   const tbody=document.getElementById('human-review-tbody');
   if(!tbody)return;
-  const hr=calls.filter(c=>c.requires_human_review&&c.status!=='Processing'&&c.overall_score>0);
-  set('nb-human',hr.length||'');
+
+  // Include: explicitly flagged, Critical status, or Review with flags
+  const hr=calls.filter(c=>
+    c.overall_score>0 &&
+    c.status!=='Processing' &&
+    (c.requires_human_review || c.status==='Critical' || (c.status==='Review'&&c.flags>0))
+  );
+
+  set('nb-human', hr.length||'0');
+
   if(hr.length===0){
     tbody.innerHTML='<tr><td colspan="8" style="text-align:center;padding:40px;color:var(--green);font-size:14px;">✅ No calls require human review right now.</td></tr>';
     return;
   }
+
   tbody.innerHTML=hr.map(c=>{
-    const ac=c.age_concern?JSON.parse(typeof c.age_concern==='string'?c.age_concern:'{}'):{};
-    return `<tr onclick="openCallDetail('${c.call_id}')">
+    let ac={};
+    try{ac=c.age_concern?JSON.parse(typeof c.age_concern==='string'?c.age_concern:'{}'):{}}catch(e){}
+    const reason = c.human_review_reason || (c.status==='Critical'?'Critical QA score':c.flags>0?`${c.flags} flags detected`:'Needs review');
+    return `<tr onclick="showPage('calls')" style="cursor:pointer;">
       <td style="font-size:11px;color:var(--text3)">#${(c.call_id||'').toString().slice(-8)}</td>
       <td class="agent">${c.agent_name||'—'}</td>
       <td>${c.account_name||c.customer_account_id||'—'}</td>
       <td>${scoreCircle(c.overall_score||0)}</td>
-      <td style="font-size:11px;color:var(--text2);max-width:200px;">${c.human_review_reason||'—'}</td>
+      <td style="font-size:11px;color:var(--text2);max-width:200px;">${reason}</td>
       <td>${ac.flagged?'<span class="badge badge-red">⚠️ Yes</span>':'<span style="color:var(--text3)">—</span>'}</td>
       <td style="white-space:nowrap;">${formatDate(c.created_at)}</td>
-      <td><button class="btn btn-outline btn-sm" onclick="openCallDetail('${c.call_id}');event.stopPropagation()">Review</button></td>
+      <td><button class="btn btn-outline btn-sm" onclick="event.stopPropagation();openCallDetail('${c.call_id}')">Review</button></td>
     </tr>`;
   }).join('');
 }

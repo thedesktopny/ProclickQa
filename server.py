@@ -884,7 +884,7 @@ def get_stats():
     active_rules = c.fetchone()['v']
     c.execute("SELECT COUNT(*) as v FROM agents WHERE status='active'")
     active_agents = c.fetchone()['v']
-    c.execute("SELECT COUNT(*) as v FROM calls WHERE requires_human_review=true AND status != 'Processing'")
+    c.execute("SELECT COUNT(*) as v FROM calls WHERE (requires_human_review=true OR status='Critical') AND overall_score > 0")
     needs_review = c.fetchone()['v']
     c.execute("SELECT COUNT(*) as v FROM calls WHERE call_end_first='drop' AND callback_made=false AND status != 'Processing'")
     unresolved_drops = c.fetchone()['v']
