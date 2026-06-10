@@ -1924,18 +1924,33 @@ function renderCallDetail(call){
 }
 
 // ─── HUMAN REVIEW ─────────────────────────────────────────────────────────────
-function renderHumanReview(){
+async function renderHumanReview(){
   const tbody=document.getElementById('human-review-tbody');
   if(!tbody)return;
+  tbody.innerHTML='<tr><td colspan="8" style="text-align:center;padding:32px;color:var(--text3)">Loading...</td></tr>';
 
-  // Include: explicitly flagged, Critical status, or Review with flags
-  const hr=calls.filter(c=>
-    c.overall_score>0 &&
-    c.status!=='Processing' &&
-    (c.requires_human_review || c.status==='Critical' || (c.status==='Review'&&c.flags>0))
-  );
+  let hr=[];
+  try{
+    // Fetch large page to get all flagged calls, not just current 25
+    const res = await API.get('/api/calls?page=1&limit=500');
+    const allCalls = Array.isArray(res) ? res : (res.calls||[]);
+    hr = allCalls.filter(c=>
+      c.overall_score>0 &&
+      c.status!=='Processing' &&
+      c.status!=='Failed' &&
+      (c.requires_human_review || c.status==='Critical' || (c.status==='Review'&&(c.flags||0)>0))
+    );
+  }catch(e){
+    tbody.innerHTML='<tr><td colspan="8" style="text-align:center;padding:32px;color:var(--red)">Failed to load. Refresh and try again.</td></tr>';
+    return;
+  }
 
   set('nb-human', hr.length||'0');
+  const humanBadge=document.getElementById('nb-human');
+  if(humanBadge){
+    humanBadge.style.background=hr.length>0?'var(--red)':'rgba(16,212,142,0.2)';
+    humanBadge.style.color=hr.length>0?'white':'var(--green)';
+  }
 
   if(hr.length===0){
     tbody.innerHTML='<tr><td colspan="8" style="text-align:center;padding:40px;color:var(--green);font-size:14px;">✅ No calls require human review right now.</td></tr>';
@@ -1945,16 +1960,16 @@ function renderHumanReview(){
   tbody.innerHTML=hr.map(c=>{
     let ac={};
     try{ac=c.age_concern?JSON.parse(typeof c.age_concern==='string'?c.age_concern:'{}'):{}}catch(e){}
-    const reason = c.human_review_reason || (c.status==='Critical'?'Critical QA score':c.flags>0?`${c.flags} flags detected`:'Needs review');
-    return `<tr onclick="showPage('calls')" style="cursor:pointer;">
-      <td style="font-size:11px;color:var(--text3)">#${(c.call_id||'').toString().slice(-8)}</td>
+    const reason=c.human_review_reason||(c.status==='Critical'?'Critical QA score':c.flags>0?`${c.flags} flags detected`:'Needs review');
+    return `<tr style="cursor:pointer;">
+      <td style="font-size:11px;color:var(--text3)">#${(c.call_id||''). toString().slice(-8)}</td>
       <td class="agent">${c.agent_name||'—'}</td>
       <td>${c.account_name||c.customer_account_id||'—'}</td>
       <td>${scoreCircle(c.overall_score||0)}</td>
       <td style="font-size:11px;color:var(--text2);max-width:200px;">${reason}</td>
       <td>${ac.flagged?'<span class="badge badge-red">⚠️ Yes</span>':'<span style="color:var(--text3)">—</span>'}</td>
       <td style="white-space:nowrap;">${formatDate(c.created_at)}</td>
-      <td><button class="btn btn-outline btn-sm" onclick="event.stopPropagation();openCallDetail('${c.call_id}')">Review</button></td>
+      <td><button class="btn btn-outline btn-sm" onclick="openCallDetail('${c.call_id}')">Review →</button></td>
     </tr>`;
   }).join('');
 }
