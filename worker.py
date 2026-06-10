@@ -31,10 +31,14 @@ def process_job(job_data):
     recording_url = job_data.get('recording_url')
     call_duration_seconds = job_data.get('call_duration_seconds', 0)
     billed_minutes = job_data.get('billed_minutes', 0)
+    caller_id = job_data.get('caller_id', '')
     customer_account_id = job_data.get('customer_account_id', '')
     account_name = job_data.get('account_name', '')
     call_end_first = job_data.get('call_end_first', 'customer')
-    line_issues = job_data.get('line_issues', 'none')
+    agent_qos_tx = job_data.get('agent_qos_tx', 'Good')
+    agent_qos_rx = job_data.get('agent_qos_rx', 'Good')
+    customer_qos_tx = job_data.get('customer_qos_tx', 'Good')
+    customer_qos_rx = job_data.get('customer_qos_rx', 'Good')
     call_notes = job_data.get('call_notes', '')
     call_dropped = job_data.get('call_dropped', False)
 
@@ -59,7 +63,8 @@ def process_job(job_data):
             call_end_first=call_end_first,
             call_notes=call_notes,
             account_name=account_name,
-            line_issues=line_issues,
+            agent_qos_tx=agent_qos_tx, agent_qos_rx=agent_qos_rx,
+            customer_qos_tx=customer_qos_tx, customer_qos_rx=customer_qos_rx,
             call_dropped=call_dropped
         )
 

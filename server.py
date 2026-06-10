@@ -57,6 +57,7 @@ def init_db():
             call_id TEXT UNIQUE,
             agent_name TEXT,
             agent_extension TEXT,
+            caller_id TEXT,
             customer_account_id TEXT,
             account_name TEXT,
             duration TEXT,
@@ -73,7 +74,10 @@ def init_db():
             recording_url TEXT,
             summary TEXT,
             call_end_first TEXT DEFAULT 'customer',
-            line_issues TEXT DEFAULT 'none',
+            agent_qos_tx TEXT DEFAULT 'Good',
+            agent_qos_rx TEXT DEFAULT 'Good',
+            customer_qos_tx TEXT DEFAULT 'Good',
+            customer_qos_rx TEXT DEFAULT 'Good',
             call_notes TEXT,
             notes_score INTEGER,
             notes_feedback TEXT,
@@ -493,10 +497,14 @@ def analyze_call():
         recording_url = data.get('recording_url', '')
         call_duration_seconds = data.get('call_duration_seconds', 0)
         billed_minutes = data.get('billed_minutes', 0)
+        caller_id = data.get('caller_id', '')
         customer_account_id = data.get('customer_account_id', '')
         account_name = data.get('account_name', '')
         call_end_first = data.get('call_end_first', 'customer')
-        line_issues = data.get('line_issues', 'none')
+        agent_qos_tx = data.get('agent_qos_tx', 'Good')
+        agent_qos_rx = data.get('agent_qos_rx', 'Good')
+        customer_qos_tx = data.get('customer_qos_tx', 'Good')
+        customer_qos_rx = data.get('customer_qos_rx', 'Good')
         call_notes = data.get('call_notes', '')
 
         if not recording_url:
@@ -518,15 +526,17 @@ def analyze_call():
         conn = get_db()
         c = conn.cursor()
         c.execute('''
-            INSERT INTO calls (call_id, agent_name, agent_extension, customer_account_id,
+            INSERT INTO calls (call_id, agent_name, agent_extension, caller_id, customer_account_id,
                              account_name, recording_url, call_duration_seconds, billed_minutes,
-                             duration, call_end_first, line_issues, call_notes, call_dropped,
+                             duration, call_end_first, agent_qos_tx, agent_qos_rx, 
+                             customer_qos_tx, customer_qos_rx, call_notes, call_dropped,
                              status, overall_score, flags)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             ON CONFLICT (call_id) DO NOTHING
-        ''', (call_id, agent_name, agent_extension, customer_account_id, account_name,
+        ''', (call_id, agent_name, agent_extension, caller_id, customer_account_id, account_name,
               recording_url, call_duration_seconds, billed_minutes, duration_display,
-              call_end_first, line_issues, call_notes, call_dropped, 'Processing', 0, 0))
+              call_end_first, agent_qos_tx, agent_qos_rx, customer_qos_tx, customer_qos_rx,
+              call_notes, call_dropped, 'Processing', 0, 0))
         conn.commit()
         conn.close()
 
@@ -561,8 +571,10 @@ def analyze_call():
                 'call_id': call_id, 'agent_name': agent_name,
                 'agent_extension': agent_extension, 'recording_url': recording_url,
                 'call_duration_seconds': call_duration_seconds, 'billed_minutes': billed_minutes,
-                'customer_account_id': customer_account_id, 'account_name': account_name,
-                'call_end_first': call_end_first, 'line_issues': line_issues,
+                'caller_id': caller_id, 'customer_account_id': customer_account_id,
+                'account_name': account_name, 'call_end_first': call_end_first,
+                'agent_qos_tx': agent_qos_tx, 'agent_qos_rx': agent_qos_rx,
+                'customer_qos_tx': customer_qos_tx, 'customer_qos_rx': customer_qos_rx,
                 'call_notes': call_notes, 'call_dropped': call_dropped
             })
             r.lpush('voiceguard:calls', job)
@@ -590,7 +602,8 @@ def analyze_call():
                                     call_end_first=call_end_first,
                                     call_notes=call_notes,
                                     account_name=account_name,
-                                    line_issues=line_issues)
+                                    agent_qos_tx=agent_qos_tx, agent_qos_rx=agent_qos_rx,
+                                    customer_qos_tx=customer_qos_tx, customer_qos_rx=customer_qos_rx)
             finally:
                 try: os.remove(audio_path)
                 except: pass

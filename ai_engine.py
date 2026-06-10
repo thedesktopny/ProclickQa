@@ -121,7 +121,8 @@ Respond ONLY with this exact JSON — no other text:
 
 # ─── CLAUDE QA SCORING ────────────────────────────────────────────────────────
 def score_call_with_claude(gemini_result, rules, call_end_first='customer',
-                            call_notes='', account_name='', line_issues='none'):
+                            call_notes='', account_name='', agent_qos_tx='Good', agent_qos_rx='Good',
+                            customer_qos_tx='Good', customer_qos_rx='Good'):
     print(f"[Claude] Scoring against {len(rules)} rules...")
 
     transcript = gemini_result.get('transcript', '')
@@ -143,11 +144,11 @@ def score_call_with_claude(gemini_result, rules, call_end_first='customer',
         'drop': 'Call DROPPED unexpectedly — evaluate if agent attempted callback'
     }.get(call_end_first, 'Unknown')
 
-    line_issues_context = {
-        'none': 'No line issues reported',
-        'agent': 'Line issues on AGENT side — factor into audio quality score',
-        'customer': 'Line issues on CUSTOMER side — less agent responsibility for audio quality'
-    }.get(line_issues, 'Unknown')
+    qos_context = f'Agent TX (upload): {agent_qos_tx} | Agent RX (download): {agent_qos_rx} | Customer TX: {customer_qos_tx} | Customer RX: {customer_qos_rx}'
+    if agent_qos_tx in ['Poor','Fair'] or agent_qos_rx in ['Poor','Fair']:
+        qos_context += ' — Agent had connection issues, factor into audio/technical score'
+    if customer_qos_tx in ['Poor','Fair'] or customer_qos_rx in ['Poor','Fair']:
+        qos_context += ' — Customer had connection issues, reduce agent responsibility for audio quality'
 
     notes_context = f'Agent call notes: "{call_notes}"' if call_notes else 'Agent wrote NO call notes after this call'
     customer_context = f'Customer: {account_name}' if account_name else ''
@@ -160,7 +161,7 @@ def score_call_with_claude(gemini_result, rules, call_end_first='customer',
 ═══ CALL METADATA ═══
 {customer_context}
 Call ended by: {call_end_context}
-Line issues: {line_issues_context}
+{qos_context}
 {notes_context}
 
 ═══ AUDIO ANALYSIS ═══
@@ -286,7 +287,8 @@ Respond ONLY with this exact JSON:
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 def analyze_call(audio_path, agent_name, call_id=None, call_end_first='customer',
-                 call_notes='', account_name='', line_issues='none', call_dropped=False):
+                 call_notes='', account_name='', agent_qos_tx='Good', agent_qos_rx='Good',
+                 customer_qos_tx='Good', customer_qos_rx='Good', call_dropped=False):
 
     print(f"\n{'='*50}")
     print(f"[VoiceGuard] Agent: {agent_name} | Call: {call_id}")
@@ -305,7 +307,8 @@ def analyze_call(audio_path, agent_name, call_id=None, call_end_first='customer'
         call_end_first=call_end_first,
         call_notes=call_notes,
         account_name=account_name,
-        line_issues=line_issues
+        agent_qos_tx=agent_qos_tx, agent_qos_rx=agent_qos_rx,
+        customer_qos_tx=customer_qos_tx, customer_qos_rx=customer_qos_rx
     )
 
     # Step 4: Redact credentials

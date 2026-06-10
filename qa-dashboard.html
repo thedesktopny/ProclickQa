@@ -296,8 +296,8 @@ td.agent{color:var(--text);font-weight:500;}
               <th>Emotion</th>
               <th>QA Score</th>
               <th>Notes</th>
-              <th>End</th>
-              <th>Line</th>
+              <th>Agent QoS TX/RX</th>
+              <th>Cust QoS TX/RX</th>
               <th>Flags</th>
               <th>Status</th>
             </tr>
@@ -725,8 +725,8 @@ function renderCalls(list){
       <td>${c.emotion||'—'}</td>
       <td>${sc}</td>
       <td>${notesScore}</td>
-      <td>${endIcon}</td>
-      <td>${lineIcon}</td>
+      <td style="font-size:11px;">${c.agent_qos_tx||'—'}/${c.agent_qos_rx||'—'}</td>
+      <td style="font-size:11px;">${c.customer_qos_tx||'—'}/${c.customer_qos_rx||'—'}</td>
       <td>${flagBadge}</td>
       <td>${stBadge}</td>
     </tr>`;
@@ -803,11 +803,13 @@ function renderCallDetail(call){
         <div class="card-header"><span class="card-title">Call Information</span></div>
         <div class="card-body">
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px;">
+            <div style="color:var(--text3)">Caller ID</div><div style="color:var(--text)">${call.caller_id||'—'}</div>
             <div style="color:var(--text3)">Customer</div><div style="color:var(--text)">${call.account_name||'—'}</div>
             <div style="color:var(--text3)">Account ID</div><div style="color:var(--text)">${call.customer_account_id||'—'}</div>
             <div style="color:var(--text3)">Agent</div><div style="color:var(--text)">${call.agent_name||'—'} (Ext. ${call.agent_extension||'—'})</div>
             <div style="color:var(--text3)">Call Ended By</div><div style="color:${call.call_end_first==='drop'?'var(--red)':call.call_end_first==='agent'?'var(--yellow)':'var(--green)'}">${call.call_end_first==='drop'?'📵 Dropped':call.call_end_first==='agent'?'⚠️ Agent first':'✓ Customer'}</div>
-            <div style="color:var(--text3)">Line Issues</div><div style="color:var(--text)">${call.line_issues||'none'}</div>
+            <div style="color:var(--text3)">Agent TX/RX</div><div style="color:var(--text)">${call.agent_qos_tx||'—'} / ${call.agent_qos_rx||'—'}</div>
+            <div style="color:var(--text3)">Customer TX/RX</div><div style="color:var(--text)">${call.customer_qos_tx||'—'} / ${call.customer_qos_rx||'—'}</div>
             <div style="color:var(--text3)">Confidence</div><div style="color:var(--text)">${call.confidence||100}%</div>
           </div>
         </div>
