@@ -697,15 +697,25 @@ def analyze_call():
         return jsonify({'error': str(e)}), 500
 
 # ─── RETRY STUCK CALLS ────────────────────────────────────────────────────────
+# ─── RETRY STATUS LOG ─────────────────────────────────────────────────────────
+retry_log = []
+retry_running = False
+
+@app.route('/api/retry-status', methods=['GET'])
+def retry_status():
+    return jsonify({
+        'running': retry_running,
+        'log': retry_log[-50:]  # Last 50 entries
+    })
+
 @app.route('/api/retry-stuck', methods=['POST'])
 @require_admin
 def retry_stuck_calls():
-    """
-    Retries calls stuck in Processing status.
-    Throttled — max 10 calls per batch, 30s delay between each.
-    Runs in background so response is instant.
-    """
+    global retry_log, retry_running
     import threading
+
+    if retry_running:
+        return jsonify({'message': 'Retry already running', 'log': retry_log[-10:]})
 
     conn = get_db()
     c = conn.cursor(cursor_factory=RealDictCursor)
@@ -726,19 +736,29 @@ def retry_stuck_calls():
     conn.close()
 
     if not stuck_calls:
+        retry_log = [{'time': time.strftime('%H:%M:%S'), 'msg': '✅ No stuck calls found — all done!', 'type': 'success'}]
         return jsonify({'message': 'No stuck calls found', 'count': 0})
 
+    retry_log = [{'time': time.strftime('%H:%M:%S'), 'msg': f'🔄 Starting retry for {len(stuck_calls)} calls...', 'type': 'info'}]
+
     def process_batch():
+        global retry_running
+        retry_running = True
         from ai_engine import analyze_call as run_analysis
         import urllib.request
 
-        for call in stuck_calls:
+        for i, call in enumerate(stuck_calls):
             try:
                 call_id = call['call_id']
+                agent = (call['agent_name'] or 'Unknown').strip()
+                customer = (call['account_name'] or call['customer_account_id'] or '').strip()
                 recording_url = (call['recording_url'] or '').strip().rstrip(':').rstrip('/')
 
                 if not recording_url:
+                    retry_log.append({'time': time.strftime('%H:%M:%S'), 'msg': f'⏭️ Skipped #{call_id[-8:]} — no recording URL', 'type': 'warning'})
                     continue
+
+                retry_log.append({'time': time.strftime('%H:%M:%S'), 'msg': f'🔄 [{i+1}/{len(stuck_calls)}] {agent} / {customer} — downloading audio...', 'type': 'info'})
 
                 url_path = recording_url.split('?')[0]
                 ext = os.path.splitext(url_path)[1].lower()
@@ -749,14 +769,13 @@ def retry_stuck_calls():
                 os.makedirs(UPLOAD_DIR, exist_ok=True)
                 audio_path = os.path.join(UPLOAD_DIR, f"retry_{call_id}_{int(time.time())}{ext}")
 
-                print(f"[Retry] Processing call {call_id}")
-
                 try:
                     urllib.request.urlretrieve(recording_url, audio_path)
+                    size_mb = round(os.path.getsize(audio_path) / 1024 / 1024, 1)
+                    retry_log.append({'time': time.strftime('%H:%M:%S'), 'msg': f'🤖 [{i+1}/{len(stuck_calls)}] {agent} / {customer} — analyzing ({size_mb}MB)...', 'type': 'info'})
+
                     result = run_analysis(
-                        audio_path,
-                        call['agent_name'] or 'Unknown',
-                        call_id,
+                        audio_path, agent, call_id,
                         call_end_first=call.get('call_end_first') or 'customer',
                         call_notes=call.get('call_notes') or '',
                         account_name=call.get('account_name') or '',
@@ -803,33 +822,40 @@ def retry_stuck_calls():
                              rr.get('confidence',100), rr.get('evidence','')))
                     conn2.commit()
                     conn2.close()
-                    print(f"[Retry] ✅ Call {call_id} scored: {result['overall_score']}%")
+
+                    score = result['overall_score']
+                    status = result['status']
+                    emotion = result.get('emotion','')
+                    icon = '✅' if status == 'Passed' else '⚠️' if status == 'Review' else '🚨'
+                    retry_log.append({'time': time.strftime('%H:%M:%S'), 'msg': f'{icon} {agent} / {customer} — {score}% | {status} | {emotion}', 'type': status.lower()})
 
                 finally:
                     try: os.remove(audio_path)
                     except: pass
 
-                # Wait 15 seconds between calls to avoid overloading
                 time.sleep(15)
 
             except Exception as e:
-                print(f"[Retry] ❌ Failed {call.get('call_id')}: {e}")
+                call_id = call.get('call_id','?')
+                agent = (call.get('agent_name') or '?').strip()
+                retry_log.append({'time': time.strftime('%H:%M:%S'), 'msg': f'❌ {agent} #{call_id[-8:]} — {str(e)[:80]}', 'type': 'error'})
                 try:
                     conn3 = get_db()
                     c3 = conn3.cursor()
-                    c3.execute("UPDATE calls SET status='Failed' WHERE call_id=%s", (call.get('call_id'),))
+                    c3.execute("UPDATE calls SET status='Failed' WHERE call_id=%s", (call_id,))
                     conn3.commit()
                     conn3.close()
                 except: pass
-                # Still wait before next call even on failure
                 time.sleep(5)
 
-    # Run in background thread
+        retry_log.append({'time': time.strftime('%H:%M:%S'), 'msg': f'✅ Batch complete — processed {len(stuck_calls)} calls', 'type': 'success'})
+        retry_running = False
+
     thread = threading.Thread(target=process_batch, daemon=True)
     thread.start()
 
     return jsonify({
-        'message': f'Retry started for {len(stuck_calls)} stuck calls. Processing one at a time with 30s delay.',
+        'message': f'Retry started for {len(stuck_calls)} calls',
         'count': len(stuck_calls),
         'call_ids': [c['call_id'] for c in stuck_calls]
     })
@@ -865,15 +891,14 @@ def test_one_call():
             WHERE status IN ('Processing', 'Failed')
             AND overall_score = 0
             AND recording_url IS NOT NULL
-            AND call_duration_seconds > 0
-            ORDER BY call_duration_seconds ASC
+            ORDER BY created_at DESC
             LIMIT 1
         ''')
         call = c.fetchone()
         conn.close()
 
         if not call:
-            return jsonify({'error': 'No suitable call found — need calls with duration > 0'})
+            return jsonify({'error': 'No stuck calls found'})
 
         call = dict(call)
         call_id = call['call_id']

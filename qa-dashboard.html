@@ -1363,10 +1363,90 @@ function showToast(msg,isError=false){
 
 async function retryStuck(){
   if(!isAdmin){showModal('login-modal');return;}
-  if(!confirm('Retry all stuck Processing calls? They will be processed one at a time with 30 second delays.'))return;
+  if(!confirm('Retry all stuck Processing/Failed calls? Processes 20 at a time with 15 second delays.'))return;
+  
   const res=await API.post('/api/retry-stuck',{});
-  if(res.count===0){showToast('No stuck calls found',false);}
-  else{showToast(`🔄 Retrying ${res.count} calls — check back in a few minutes`);}
+  if(res.count===0){
+    showToast('✅ No stuck calls found — all scored!');
+    return;
+  }
+  
+  showToast(`🔄 Retrying ${res.count} calls — watch the live log below`);
+  showRetryLog();
+  startRetryPolling();
+}
+
+let retryPollInterval = null;
+
+function showRetryLog(){
+  // Show log panel on Call Review page
+  let logPanel = document.getElementById('retry-log-panel');
+  if(!logPanel){
+    logPanel = document.createElement('div');
+    logPanel.id = 'retry-log-panel';
+    logPanel.style.cssText = 'position:fixed;bottom:0;left:220px;right:0;background:var(--surface);border-top:2px solid var(--accent);z-index:500;max-height:220px;display:flex;flex-direction:column;';
+    logPanel.innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 20px;border-bottom:1px solid var(--border);">
+        <div style="font-size:13px;font-weight:600;color:var(--accent)">🔄 Retry Progress</div>
+        <div style="display:flex;gap:10px;align-items:center;">
+          <span id="retry-log-status" style="font-size:11px;color:var(--text3)">Running...</span>
+          <button onclick="hideRetryLog()" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:16px;">✕</button>
+        </div>
+      </div>
+      <div id="retry-log-entries" style="overflow-y:auto;flex:1;padding:8px 20px;font-family:monospace;font-size:12px;"></div>
+    `;
+    document.body.appendChild(logPanel);
+  }
+  logPanel.style.display='flex';
+}
+
+function hideRetryLog(){
+  const p=document.getElementById('retry-log-panel');
+  if(p)p.style.display='none';
+  stopRetryPolling();
+}
+
+function startRetryPolling(){
+  stopRetryPolling();
+  retryPollInterval = setInterval(pollRetryStatus, 2000);
+}
+
+function stopRetryPolling(){
+  if(retryPollInterval){clearInterval(retryPollInterval);retryPollInterval=null;}
+}
+
+async function pollRetryStatus(){
+  try{
+    const res = await API.get('/api/retry-status');
+    const entries = document.getElementById('retry-log-entries');
+    const statusEl = document.getElementById('retry-log-status');
+    
+    if(!entries)return;
+    
+    if(statusEl){
+      statusEl.textContent = res.running ? '⏳ Running...' : '✅ Complete';
+      statusEl.style.color = res.running ? 'var(--yellow)' : 'var(--green)';
+    }
+    
+    const colors = {info:'var(--text2)',success:'var(--green)',error:'var(--red)',warning:'var(--yellow)',passed:'var(--green)',review:'var(--yellow)',critical:'var(--red)'};
+    
+    entries.innerHTML = (res.log||[]).map(entry=>`
+      <div style="padding:3px 0;border-bottom:1px solid var(--border);color:${colors[entry.type]||'var(--text2)'}">
+        <span style="color:var(--text3);margin-right:8px;">${entry.time}</span>${entry.msg}
+      </div>
+    `).join('');
+    
+    // Auto scroll to bottom
+    entries.scrollTop = entries.scrollHeight;
+    
+    // Stop polling when done
+    if(!res.running && res.log && res.log.length > 0){
+      stopRetryPolling();
+      // Refresh calls list
+      await loadCalls();
+      renderCalls();
+    }
+  }catch(e){}
 }
 
 function exportReport(){showToast('📊 Export coming soon!');}
