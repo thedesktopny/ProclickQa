@@ -117,7 +117,31 @@ def init_db():
         )
     ''')
 
-    # Default rules
+    # Migration — add new columns if they don't exist
+    migrations = [
+        "ALTER TABLE calls ADD COLUMN IF NOT EXISTS caller_id TEXT",
+        "ALTER TABLE calls ADD COLUMN IF NOT EXISTS agent_qos_tx TEXT DEFAULT 'Good'",
+        "ALTER TABLE calls ADD COLUMN IF NOT EXISTS agent_qos_rx TEXT DEFAULT 'Good'",
+        "ALTER TABLE calls ADD COLUMN IF NOT EXISTS customer_qos_tx TEXT DEFAULT 'Good'",
+        "ALTER TABLE calls ADD COLUMN IF NOT EXISTS customer_qos_rx TEXT DEFAULT 'Good'",
+        "ALTER TABLE calls ADD COLUMN IF NOT EXISTS notes_score INTEGER",
+        "ALTER TABLE calls ADD COLUMN IF NOT EXISTS notes_feedback TEXT",
+        "ALTER TABLE calls ADD COLUMN IF NOT EXISTS emotion_delta TEXT",
+        "ALTER TABLE calls ADD COLUMN IF NOT EXISTS requires_human_review BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE calls ADD COLUMN IF NOT EXISTS human_review_reason TEXT",
+        "ALTER TABLE calls ADD COLUMN IF NOT EXISTS age_concern TEXT",
+        "ALTER TABLE calls ADD COLUMN IF NOT EXISTS coaching_notes TEXT",
+        "ALTER TABLE calls ADD COLUMN IF NOT EXISTS positive_highlights TEXT",
+        "ALTER TABLE calls ADD COLUMN IF NOT EXISTS callback_made BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE calls ADD COLUMN IF NOT EXISTS callback_call_id TEXT",
+        "ALTER TABLE calls ADD COLUMN IF NOT EXISTS confidence INTEGER DEFAULT 100",
+        "ALTER TABLE calls ADD COLUMN IF NOT EXISTS summary TEXT",
+    ]
+    for sql in migrations:
+        try:
+            c.execute(sql)
+        except Exception:
+            pass
     c.execute('SELECT COUNT(*) FROM rules')
     if c.fetchone()[0] == 0:
         default_rules = [
