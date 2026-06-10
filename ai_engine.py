@@ -21,6 +21,28 @@ def get_db():
     import sqlite3
     return sqlite3.connect(os.path.join(os.getenv('HOME', '.'), 'voiceguard.db'))
 
+# ─── USAGE TRACKING ───────────────────────────────────────────────────────────
+# Claude Sonnet 4 pricing (per million tokens)
+CLAUDE_INPUT_COST_PER_M = 3.00
+CLAUDE_OUTPUT_COST_PER_M = 15.00
+
+# Gemini 2.5 Flash pricing
+GEMINI_AUDIO_COST_PER_MIN = 0.001  # $0.001 per audio minute
+GEMINI_OUTPUT_COST_PER_M = 3.50    # $3.50 per million output tokens
+
+def track_usage(service, call_id, input_tokens=0, output_tokens=0, audio_seconds=0, cost_usd=0):
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute('''INSERT INTO api_usage
+            (service, call_id, input_tokens, output_tokens, audio_seconds, cost_usd, used_at)
+            VALUES (%s, %s, %s, %s, %s, %s, NOW())''',
+            (service, call_id, input_tokens, output_tokens, audio_seconds, cost_usd))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[Usage] Warning: could not track usage: {e}")
+
 # ─── CREDENTIAL REDACTION ─────────────────────────────────────────────────────
 def redact_credentials(text):
     if not text:
@@ -156,6 +178,18 @@ Respond ONLY with valid JSON — keep all text values SHORT (max 100 chars each)
                 "explicit_content_description": ""
             }
     print(f"[Gemini] Done. Emotion: {result['emotion_analysis']['customer_emotion_overall']}")
+
+    # Track usage
+    try:
+        audio_size_mb = os.path.getsize(audio_path) / 1024 / 1024
+        # Estimate audio minutes from file size (roughly 1MB/min for WAV)
+        estimated_mins = max(1, round(audio_size_mb))
+        output_tokens = len(json.dumps(result)) // 4  # rough token estimate
+        gemini_cost = (estimated_mins * GEMINI_AUDIO_COST_PER_MIN) + (output_tokens / 1_000_000 * GEMINI_OUTPUT_COST_PER_M)
+        track_usage('gemini', None, 0, output_tokens, estimated_mins * 60, round(gemini_cost, 6))
+    except Exception as e:
+        print(f"[Gemini] Usage tracking skipped: {e}")
+
     return result
 
 # ─── CLAUDE QA SCORING ────────────────────────────────────────────────────────
@@ -344,6 +378,16 @@ Respond ONLY with this exact JSON:
                 "positive_highlights": ""
             }
     print(f"[Claude] Score: {result['overall_score']}% | Confidence: {result.get('confidence',0)}% | Notes: {result.get('notes_score',0)}%")
+
+    # Track usage
+    try:
+        input_tok = message.usage.input_tokens
+        output_tok = message.usage.output_tokens
+        claude_cost = (input_tok / 1_000_000 * CLAUDE_INPUT_COST_PER_M) + (output_tok / 1_000_000 * CLAUDE_OUTPUT_COST_PER_M)
+        track_usage('claude', None, input_tok, output_tok, 0, round(claude_cost, 6))
+    except Exception as e:
+        print(f"[Claude] Usage tracking skipped: {e}")
+
     return result
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────────

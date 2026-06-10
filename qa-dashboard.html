@@ -194,6 +194,7 @@ td.agent{color:var(--text);font-weight:500;}
     <div class="nav-item" onclick="showPage('analytics')"><span class="icon">📈</span>Trends</div>
     <div class="nav-item" onclick="showPage('billing')"><span class="icon">💰</span>Billing</div>
     <div class="nav-item" onclick="showPage('notes')"><span class="icon">📝</span>Notes Quality</div>
+    <div class="nav-item" onclick="showPage('costs')"><span class="icon">💳</span>Costs</div>
   </div>
   <div class="nav-section admin-only" style="margin-top:12px;">
     <div class="nav-label">Config</div>
@@ -540,6 +541,53 @@ td.agent{color:var(--text);font-weight:500;}
   </div>
 </div>
 
+<!-- ===== COSTS ===== -->
+<div class="page" id="page-costs">
+  <div class="topbar">
+    <div class="page-title">💳 Cost Tracker</div>
+    <div class="topbar-right">
+      <select id="costs-month" onchange="loadCosts()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:7px 12px;border-radius:8px;font-size:13px;"></select>
+      <button class="btn btn-outline" onclick="showModal('add-cost-modal')">+ Add Manual Cost</button>
+    </div>
+  </div>
+  <div style="padding:28px;">
+
+    <!-- Summary cards -->
+    <div class="stats-row" style="grid-template-columns:repeat(5,1fr);margin-bottom:24px;">
+      <div class="stat-card blue"><div class="stat-label">Claude API</div><div class="stat-value blue" id="cost-claude">$—</div><div class="stat-sub">This month</div></div>
+      <div class="stat-card green"><div class="stat-label">Gemini API</div><div class="stat-value green" id="cost-gemini">$—</div><div class="stat-sub">This month</div></div>
+      <div class="stat-card yellow"><div class="stat-label">Azure & Other</div><div class="stat-value yellow" id="cost-manual">$—</div><div class="stat-sub">This month</div></div>
+      <div class="stat-card red"><div class="stat-label">Month Total</div><div class="stat-value red" id="cost-month-total">$—</div><div class="stat-sub">All services</div></div>
+      <div class="stat-card" style="background:rgba(139,92,246,0.08);border-color:rgba(139,92,246,0.2);"><div class="stat-label">All-Time Total</div><div class="stat-value" style="color:var(--purple);" id="cost-alltime">$—</div><div class="stat-sub">Since launch</div></div>
+    </div>
+
+    <div class="grid-2" style="margin-bottom:24px;">
+      <!-- API Usage Detail -->
+      <div class="card">
+        <div class="card-header"><span class="card-title">🤖 API Usage Detail</span></div>
+        <div class="card-body" id="cost-api-detail">
+          <div style="color:var(--text3);font-size:12px;text-align:center;padding:20px;">Loading...</div>
+        </div>
+      </div>
+
+      <!-- Manual Costs -->
+      <div class="card">
+        <div class="card-header"><span class="card-title">🏗️ Infrastructure Costs</span><span style="font-size:11px;color:var(--text3);">Azure, domains, etc.</span></div>
+        <div class="card-body" id="cost-manual-list">
+          <div style="color:var(--text3);font-size:12px;text-align:center;padding:20px;">Loading...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Monthly history -->
+    <div class="card">
+      <div class="card-header"><span class="card-title">📊 Monthly API Cost History</span></div>
+      <div class="card-body" id="cost-history-chart"></div>
+    </div>
+
+  </div>
+</div>
+
 <!-- ===== QA USERS (ADMIN ONLY) ===== -->
 <div class="page" id="page-qa-users">
   <div class="topbar">
@@ -568,6 +616,41 @@ td.agent{color:var(--text);font-weight:500;}
 </div>
 
 </main>
+
+<!-- ADD MANUAL COST MODAL -->
+<div class="modal" id="add-cost-modal">
+  <div class="modal-box" style="width:400px;">
+    <div style="font-size:17px;font-weight:700;margin-bottom:20px;">Add Infrastructure Cost</div>
+    <div style="display:flex;flex-direction:column;gap:12px;">
+      <div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:5px;">Service</div>
+        <select id="new-cost-service" style="width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:9px 12px;border-radius:8px;font-size:13px;box-sizing:border-box;">
+          <option value="Azure App Service">Azure App Service</option>
+          <option value="Azure PostgreSQL">Azure PostgreSQL</option>
+          <option value="Azure Other">Azure Other</option>
+          <option value="Domain">Domain</option>
+          <option value="Other">Other</option>
+        </select>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:5px;">Description (optional)</div>
+        <input id="new-cost-desc" type="text" placeholder="e.g. B1 App Service Plan" style="width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:9px 12px;border-radius:8px;font-size:13px;box-sizing:border-box;">
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:5px;">Amount (USD)</div>
+        <input id="new-cost-amount" type="number" step="0.01" placeholder="e.g. 13.00" style="width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:9px 12px;border-radius:8px;font-size:13px;box-sizing:border-box;">
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:5px;">Billing Month</div>
+        <input id="new-cost-month" type="month" style="width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:9px 12px;border-radius:8px;font-size:13px;box-sizing:border-box;">
+      </div>
+    </div>
+    <div style="display:flex;gap:10px;margin-top:20px;">
+      <button onclick="hideModal('add-cost-modal')" class="btn btn-outline" style="flex:1;">Cancel</button>
+      <button onclick="submitManualCost()" class="btn btn-primary" style="flex:1;">Add Cost</button>
+    </div>
+  </div>
+</div>
 
 <!-- CREATE QA USER MODAL -->
 <div class="modal" id="create-qa-user-modal">
@@ -741,7 +824,171 @@ function renderAll(){
 }
 
 // ─── PAGE NAV ─────────────────────────────────────────────────────────────────
-// ─── QA USERS PAGE ────────────────────────────────────────────────────────────
+// ─── COSTS PAGE ───────────────────────────────────────────────────────────────
+let costsData = null;
+
+function initCostsMonthSelector(){
+  const sel = document.getElementById('costs-month');
+  if(!sel) return;
+  const now = new Date();
+  const months = [];
+  for(let i=0;i<12;i++){
+    const d = new Date(now.getFullYear(), now.getMonth()-i, 1);
+    const val = d.toISOString().slice(0,7);
+    const label = d.toLocaleDateString('en-US',{month:'long',year:'numeric'});
+    months.push({val,label});
+  }
+  sel.innerHTML = months.map(m=>`<option value="${m.val}">${m.label}</option>`).join('');
+  // Set default month input in add cost modal
+  const mi = document.getElementById('new-cost-month');
+  if(mi) mi.value = months[0].val;
+}
+
+async function loadCosts(){
+  const sel = document.getElementById('costs-month');
+  const month = sel ? sel.value : new Date().toISOString().slice(0,7);
+  try{
+    costsData = await API.get(`/api/costs?month=${month}`);
+    renderCosts();
+  }catch(e){console.error('Failed to load costs:', e);}
+}
+
+function renderCosts(){
+  if(!costsData) return;
+  const s = costsData.summary;
+
+  // Summary cards
+  set('cost-claude', '$' + s.claude.toFixed(4));
+  set('cost-gemini', '$' + s.gemini.toFixed(4));
+  set('cost-manual', '$' + s.manual.toFixed(2));
+  set('cost-month-total', '$' + s.month_total.toFixed(2));
+  set('cost-alltime', '$' + s.alltime_total.toFixed(2));
+
+  // API usage detail
+  const detail = document.getElementById('cost-api-detail');
+  if(detail){
+    const claude = costsData.usage_totals['claude'] || {};
+    const gemini = costsData.usage_totals['gemini'] || {};
+    detail.innerHTML = `
+      <div style="margin-bottom:16px;padding-bottom:16px;border-bottom:1px solid var(--border);">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+          <div style="font-size:13px;font-weight:600;color:var(--accent);">🤖 Claude Sonnet 4</div>
+          <div style="font-size:16px;font-weight:700;color:var(--accent);">$${parseFloat(claude.total_cost||0).toFixed(4)}</div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;">
+          <div style="background:var(--surface2);border-radius:8px;padding:10px;text-align:center;">
+            <div style="font-size:16px;font-weight:700;">${claude.api_calls||0}</div>
+            <div style="font-size:10px;color:var(--text3);">API Calls</div>
+          </div>
+          <div style="background:var(--surface2);border-radius:8px;padding:10px;text-align:center;">
+            <div style="font-size:16px;font-weight:700;">${((claude.total_input_tokens||0)/1000).toFixed(1)}K</div>
+            <div style="font-size:10px;color:var(--text3);">Input Tokens</div>
+          </div>
+          <div style="background:var(--surface2);border-radius:8px;padding:10px;text-align:center;">
+            <div style="font-size:16px;font-weight:700;">${((claude.total_output_tokens||0)/1000).toFixed(1)}K</div>
+            <div style="font-size:10px;color:var(--text3);">Output Tokens</div>
+          </div>
+        </div>
+        <div style="font-size:10px;color:var(--text3);margin-top:8px;">$3.00/M input · $15.00/M output (Sonnet 4 pricing)</div>
+      </div>
+
+      <div>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+          <div style="font-size:13px;font-weight:600;color:var(--green);">✨ Gemini 2.5 Flash</div>
+          <div style="font-size:16px;font-weight:700;color:var(--green);">$${parseFloat(gemini.total_cost||0).toFixed(4)}</div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;">
+          <div style="background:var(--surface2);border-radius:8px;padding:10px;text-align:center;">
+            <div style="font-size:16px;font-weight:700;">${gemini.api_calls||0}</div>
+            <div style="font-size:10px;color:var(--text3);">Calls Analyzed</div>
+          </div>
+          <div style="background:var(--surface2);border-radius:8px;padding:10px;text-align:center;">
+            <div style="font-size:16px;font-weight:700;">${Math.round((gemini.total_audio_seconds||0)/60)}m</div>
+            <div style="font-size:10px;color:var(--text3);">Audio Processed</div>
+          </div>
+          <div style="background:var(--surface2);border-radius:8px;padding:10px;text-align:center;">
+            <div style="font-size:16px;font-weight:700;">${((gemini.total_output_tokens||0)/1000).toFixed(1)}K</div>
+            <div style="font-size:10px;color:var(--text3);">Output Tokens</div>
+          </div>
+        </div>
+        <div style="font-size:10px;color:var(--text3);margin-top:8px;">$0.001/audio min · $3.50/M output (2.5 Flash pricing)</div>
+      </div>`;
+  }
+
+  // Manual costs list
+  const manualList = document.getElementById('cost-manual-list');
+  if(manualList){
+    const costs = costsData.manual_costs || [];
+    if(costs.length === 0){
+      manualList.innerHTML = `<div style="text-align:center;padding:24px;color:var(--text3);font-size:12px;">
+        No infrastructure costs entered for this month.<br>
+        <button onclick="showModal('add-cost-modal')" class="btn btn-outline" style="margin-top:12px;font-size:11px;">+ Add Azure Cost</button>
+      </div>`;
+    } else {
+      manualList.innerHTML = `
+        ${costs.map(c=>`<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border);">
+          <div>
+            <div style="font-size:13px;font-weight:500;">${c.service}</div>
+            ${c.description?`<div style="font-size:11px;color:var(--text3);">${c.description}</div>`:''}
+          </div>
+          <div style="display:flex;align-items:center;gap:10px;">
+            <div style="font-size:15px;font-weight:700;color:var(--yellow);">$${parseFloat(c.cost_usd).toFixed(2)}</div>
+            <button onclick="deleteManualCost(${c.id})" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:14px;">✕</button>
+          </div>
+        </div>`).join('')}
+        <div style="display:flex;justify-content:space-between;padding-top:10px;margin-top:4px;">
+          <div style="font-size:12px;font-weight:600;">Total</div>
+          <div style="font-size:15px;font-weight:700;color:var(--yellow);">$${costs.reduce((s,c)=>s+parseFloat(c.cost_usd),0).toFixed(2)}</div>
+        </div>
+        <button onclick="showModal('add-cost-modal')" class="btn btn-outline" style="width:100%;margin-top:12px;font-size:11px;">+ Add Cost</button>
+      `;
+    }
+  }
+
+  // Monthly history chart
+  const history = document.getElementById('cost-history-chart');
+  if(history){
+    const months = [...(costsData.monthly_history||[])].reverse();
+    if(months.length === 0){
+      history.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:16px;text-align:center;">No history yet.</div>';
+    } else {
+      const max = Math.max(...months.map(m=>parseFloat(m.api_cost||0)), 0.01);
+      history.innerHTML = `<div style="display:flex;align-items:flex-end;gap:12px;height:120px;padding:0 8px;">
+        ${months.map(m=>{
+          const cost = parseFloat(m.api_cost||0);
+          const height = Math.round((cost/max)*100);
+          const label = m.month.slice(0,7);
+          return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;">
+            <div style="font-size:10px;color:var(--accent);font-weight:600;">$${cost.toFixed(3)}</div>
+            <div style="width:100%;height:${Math.max(height,4)}px;background:var(--accent);border-radius:4px 4px 0 0;opacity:0.8;"></div>
+            <div style="font-size:9px;color:var(--text3);">${label}</div>
+          </div>`;
+        }).join('')}
+      </div>`;
+    }
+  }
+}
+
+async function submitManualCost(){
+  const service = document.getElementById('new-cost-service').value;
+  const desc = document.getElementById('new-cost-desc').value.trim();
+  const amount = parseFloat(document.getElementById('new-cost-amount').value);
+  const month = document.getElementById('new-cost-month').value;
+  if(!amount || amount <= 0){ showToast('Enter a valid amount', true); return; }
+  await API.post('/api/costs/manual', {service, description: desc, cost_usd: amount, billing_month: month});
+  hideModal('add-cost-modal');
+  document.getElementById('new-cost-amount').value = '';
+  document.getElementById('new-cost-desc').value = '';
+  showToast('✅ Cost added');
+  loadCosts();
+}
+
+async function deleteManualCost(id){
+  if(!confirm('Remove this cost entry?')) return;
+  await API.del(`/api/costs/manual/${id}`);
+  showToast('Removed');
+  loadCosts();
+}
 let qaUsers = [];
 let allAgentsForAssign = [];
 let assigningUserId = null;
@@ -897,11 +1144,12 @@ function showPage(id){
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
   const page = document.getElementById('page-'+id);
   if(page) page.classList.add('active');
-  const map={dashboard:0,calls:1,'human-review':2,agents:3,analytics:4,billing:5,notes:6,rules:7,alerts:8,'qa-users':9,'call-detail':-1};
+  const map={dashboard:0,calls:1,'human-review':2,agents:3,analytics:4,billing:5,notes:6,costs:7,rules:8,alerts:9,'qa-users':10,'call-detail':-1};
   const items=document.querySelectorAll('.nav-item');
   if(map[id]>=0 && items[map[id]]) items[map[id]].classList.add('active');
   if(id==='qa-users') loadQAUsers();
   if(id==='analytics') renderAnalytics();
+  if(id==='costs'){ initCostsMonthSelector(); loadCosts(); }
 }
 
 function updateBadges(){

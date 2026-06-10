@@ -52,7 +52,31 @@ def init_db():
         )
     ''')
 
-    # QA users — people who review call agents (separate from call agents)
+    # API usage tracking
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS api_usage (
+            id SERIAL PRIMARY KEY,
+            service TEXT NOT NULL,
+            call_id TEXT,
+            input_tokens INTEGER DEFAULT 0,
+            output_tokens INTEGER DEFAULT 0,
+            audio_seconds INTEGER DEFAULT 0,
+            cost_usd NUMERIC(10,6) DEFAULT 0,
+            used_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    # Manual cost entries (Azure, etc.)
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS manual_costs (
+            id SERIAL PRIMARY KEY,
+            service TEXT NOT NULL,
+            description TEXT,
+            cost_usd NUMERIC(10,2) NOT NULL,
+            billing_month TEXT NOT NULL,
+            entered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
     c.execute('''
         CREATE TABLE IF NOT EXISTS users (
             id SERIAL PRIMARY KEY,
@@ -372,7 +396,124 @@ def toggle_rule(rule_id):
     conn.close()
     return jsonify(updated)
 
-# ─── QA USERS (ADMIN ONLY) ────────────────────────────────────────────────────
+# ─── COSTS ────────────────────────────────────────────────────────────────────
+@app.route('/api/costs', methods=['GET'])
+@require_admin
+def get_costs():
+    month = request.args.get('month', datetime.now().strftime('%Y-%m'))
+    conn = get_db()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+
+    # API usage by service for this month
+    c.execute('''
+        SELECT
+            service,
+            COUNT(*) as api_calls,
+            SUM(input_tokens) as total_input_tokens,
+            SUM(output_tokens) as total_output_tokens,
+            SUM(audio_seconds) as total_audio_seconds,
+            SUM(cost_usd) as total_cost,
+            DATE(used_at) as day
+        FROM api_usage
+        WHERE TO_CHAR(used_at, 'YYYY-MM') = %s
+        GROUP BY service, DATE(used_at)
+        ORDER BY day ASC
+    ''', (month,))
+    usage_by_day = [dict(r) for r in c.fetchall()]
+
+    # Totals by service
+    c.execute('''
+        SELECT
+            service,
+            COUNT(*) as api_calls,
+            SUM(input_tokens) as total_input_tokens,
+            SUM(output_tokens) as total_output_tokens,
+            SUM(audio_seconds) as total_audio_seconds,
+            ROUND(SUM(cost_usd)::numeric, 4) as total_cost
+        FROM api_usage
+        WHERE TO_CHAR(used_at, 'YYYY-MM') = %s
+        GROUP BY service
+    ''', (month,))
+    usage_totals = {r['service']: dict(r) for r in c.fetchall()}
+
+    # Manual costs for this month
+    c.execute('''
+        SELECT * FROM manual_costs
+        WHERE billing_month = %s
+        ORDER BY service ASC
+    ''', (month,))
+    manual = [dict(r) for r in c.fetchall()]
+
+    # All-time totals
+    c.execute('SELECT ROUND(SUM(cost_usd)::numeric, 4) as total FROM api_usage')
+    alltime_api = c.fetchone()['total'] or 0
+
+    c.execute('SELECT ROUND(SUM(cost_usd)::numeric, 2) as total FROM manual_costs')
+    alltime_manual = c.fetchone()['total'] or 0
+
+    # Monthly totals for chart (last 6 months)
+    c.execute('''
+        SELECT
+            TO_CHAR(used_at, 'YYYY-MM') as month,
+            ROUND(SUM(cost_usd)::numeric, 4) as api_cost
+        FROM api_usage
+        GROUP BY TO_CHAR(used_at, 'YYYY-MM')
+        ORDER BY month DESC LIMIT 6
+    ''')
+    monthly = [dict(r) for r in c.fetchall()]
+
+    conn.close()
+
+    claude_total = float(usage_totals.get('claude', {}).get('total_cost', 0) or 0)
+    gemini_total = float(usage_totals.get('gemini', {}).get('total_cost', 0) or 0)
+    manual_total = sum(float(m['cost_usd']) for m in manual)
+    month_total = claude_total + gemini_total + manual_total
+
+    return jsonify({
+        'month': month,
+        'usage_totals': usage_totals,
+        'usage_by_day': usage_by_day,
+        'manual_costs': manual,
+        'monthly_history': monthly,
+        'summary': {
+            'claude': round(claude_total, 4),
+            'gemini': round(gemini_total, 4),
+            'manual': round(manual_total, 2),
+            'month_total': round(month_total, 2),
+            'alltime_api': float(alltime_api),
+            'alltime_total': round(float(alltime_api) + float(alltime_manual), 2)
+        }
+    })
+
+@app.route('/api/costs/manual', methods=['POST'])
+@require_admin
+def add_manual_cost():
+    data = request.json
+    service = data.get('service', '').strip()
+    description = data.get('description', '').strip()
+    cost_usd = float(data.get('cost_usd', 0))
+    billing_month = data.get('billing_month', datetime.now().strftime('%Y-%m'))
+    if not service or cost_usd <= 0:
+        return jsonify({'error': 'Service and cost required'}), 400
+    conn = get_db()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('''INSERT INTO manual_costs (service, description, cost_usd, billing_month)
+                 VALUES (%s, %s, %s, %s) RETURNING *''',
+              (service, description, cost_usd, billing_month))
+    row = dict(c.fetchone())
+    conn.commit()
+    conn.close()
+    return jsonify(row), 201
+
+@app.route('/api/costs/manual/<int:cost_id>', methods=['DELETE'])
+@require_admin
+def delete_manual_cost(cost_id):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('DELETE FROM manual_costs WHERE id=%s', (cost_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True})
 @app.route('/api/qa-users', methods=['GET'])
 @require_admin
 def get_qa_users():
