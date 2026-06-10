@@ -315,6 +315,18 @@ td.agent{color:var(--text);font-weight:500;}
           </tbody>
         </table>
       </div>
+
+      <!-- Pagination -->
+      <div id="calls-pagination" style="display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-top:1px solid var(--border);">
+        <div style="font-size:12px;color:var(--text3);" id="pagination-info">Loading...</div>
+        <div style="display:flex;gap:6px;align-items:center;">
+          <button id="pg-first" onclick="goToPage(1)" style="background:var(--surface2);border:1px solid var(--border);color:var(--text2);padding:5px 10px;border-radius:6px;cursor:pointer;font-size:12px;">«</button>
+          <button id="pg-prev" onclick="goToPage(currentPage-1)" style="background:var(--surface2);border:1px solid var(--border);color:var(--text2);padding:5px 10px;border-radius:6px;cursor:pointer;font-size:12px;">‹ Prev</button>
+          <div id="pg-numbers" style="display:flex;gap:4px;"></div>
+          <button id="pg-next" onclick="goToPage(currentPage+1)" style="background:var(--surface2);border:1px solid var(--border);color:var(--text2);padding:5px 10px;border-radius:6px;cursor:pointer;font-size:12px;">Next ›</button>
+          <button id="pg-last" onclick="goToPage(totalPages)" style="background:var(--surface2);border:1px solid var(--border);color:var(--text2);padding:5px 10px;border-radius:6px;cursor:pointer;font-size:12px;">»</button>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -387,20 +399,49 @@ td.agent{color:var(--text);font-weight:500;}
     <div class="page-title">📈 Trends & Analytics</div>
   </div>
   <div style="padding:28px;">
-    <div class="grid-2">
+
+    <!-- Agent Drill-down Panel (hidden by default) -->
+    <div id="agent-drilldown" style="display:none;background:var(--surface);border:1px solid var(--accent);border-radius:12px;padding:20px;margin-bottom:24px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+        <div style="font-size:16px;font-weight:700;" id="drilldown-title">Agent Details</div>
+        <button onclick="closeDrilldown()" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:20px;">✕</button>
+      </div>
+      <div id="drilldown-stats" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px;"></div>
+      <div id="drilldown-calls" style="max-height:300px;overflow-y:auto;"></div>
+    </div>
+
+    <div class="grid-2" style="margin-bottom:24px;">
+      <!-- Agent Leaderboard -->
       <div class="card">
-        <div class="card-header"><span class="card-title">Agent Leaderboard</span><span class="badge badge-yellow">⭐ Ranked by Score</span></div>
+        <div class="card-header"><span class="card-title">Agent Leaderboard</span><span class="badge badge-yellow">Click agent for details</span></div>
         <div class="card-body" style="padding:8px 16px;" id="agent-leaderboard"></div>
       </div>
+
+      <!-- Most Violated Rules -->
       <div class="card">
         <div class="card-header"><span class="card-title">Most Violated Rules</span></div>
         <div class="card-body" id="rule-stats-container"><div style="color:var(--text3);font-size:12px;">Loading...</div></div>
       </div>
     </div>
+
+    <!-- Category scores chart -->
     <div class="card" style="margin-bottom:24px;">
-      <div class="card-header"><span class="card-title">Team Weakness Areas</span></div>
-      <div class="card-body" id="weakness-container"><div style="color:var(--text3);font-size:12px;">Loading...</div></div>
+      <div class="card-header"><span class="card-title">Team Category Scores</span><span id="team-avg-badge" class="badge badge-yellow">—% avg</span></div>
+      <div class="card-body" id="category-chart"></div>
     </div>
+
+    <!-- Team weakness + score distribution -->
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-header"><span class="card-title">Score Distribution</span></div>
+        <div class="card-body" id="score-dist-chart"></div>
+      </div>
+      <div class="card">
+        <div class="card-header"><span class="card-title">Team Summary</span></div>
+        <div class="card-body" id="weakness-container"><div style="color:var(--text3);font-size:12px;">Loading...</div></div>
+      </div>
+    </div>
+
   </div>
 </div>
 
@@ -606,6 +647,9 @@ td.agent{color:var(--text);font-weight:500;}
 let rules=[], calls=[], agents=[], stats={}, ruleStats=[], agentStats=[], billingData={}, notesData=[];
 let isAdmin=false, editingAgentId=null, currentCallId=null;
 let allCalls=[];
+let currentPage=1;
+let totalPages=1;
+let totalCalls=0;
 
 const AVATAR_COLORS=[
   'linear-gradient(135deg,#4F6EF7,#7C3AED)',
@@ -667,7 +711,18 @@ async function doLogout(){
 
 async function loadStats(){try{stats=await API.get('/api/stats');}catch(e){}}
 async function loadRules(){try{rules=await API.get('/api/rules');}catch(e){rules=[];}}
-async function loadCalls(){try{calls=await API.get('/api/calls');allCalls=[...calls];}catch(e){calls=[];allCalls=[];}}
+async function loadCalls(page=1){
+  try{
+    const res=await API.get(`/api/calls?page=${page}&limit=25`);
+    // Handle both old array response and new paginated response
+    if(Array.isArray(res)){
+      calls=res; allCalls=[...res]; totalPages=1; totalCalls=res.length;
+    } else {
+      calls=res.calls||[]; allCalls=[...calls];
+      currentPage=res.page||1; totalPages=res.pages||1; totalCalls=res.total||0;
+    }
+  }catch(e){calls=[];allCalls=[];totalPages=1;totalCalls=0;}
+}
 async function loadAgents(){try{agents=await API.get('/api/agents');}catch(e){agents=[];}}
 async function loadAnalytics(){
   try{
@@ -680,6 +735,7 @@ async function loadNotes(){try{notesData=await API.get('/api/analytics/notes-qua
 
 function renderAll(){
   renderDashboard();renderCalls();renderRules();renderAgents();
+  renderPagination();
   renderAnalytics();renderBilling();renderNotes();renderAlerts();renderHumanReview();
   updateBadges();
 }
@@ -845,6 +901,7 @@ function showPage(id){
   const items=document.querySelectorAll('.nav-item');
   if(map[id]>=0 && items[map[id]]) items[map[id]].classList.add('active');
   if(id==='qa-users') loadQAUsers();
+  if(id==='analytics') renderAnalytics();
 }
 
 function updateBadges(){
@@ -1222,6 +1279,48 @@ function playAudio(url, callId) {
   currentAudio=document.getElementById('mini-audio-el');
 }
 
+async function goToPage(page){
+  if(page<1||page>totalPages)return;
+  currentPage=page;
+  await loadCalls(page);
+  renderCalls();
+  renderPagination();
+  // Scroll to top of calls table
+  document.getElementById('page-calls')?.scrollIntoView({behavior:'smooth'});
+}
+
+function renderPagination(){
+  const info=document.getElementById('pagination-info');
+  const pgNumbers=document.getElementById('pg-numbers');
+  const pgFirst=document.getElementById('pg-first');
+  const pgPrev=document.getElementById('pg-prev');
+  const pgNext=document.getElementById('pg-next');
+  const pgLast=document.getElementById('pg-last');
+
+  if(!info)return;
+
+  const start=(currentPage-1)*25+1;
+  const end=Math.min(currentPage*25,totalCalls);
+  info.textContent=`Showing ${start}–${end} of ${totalCalls} calls`;
+
+  // Disable buttons at boundaries
+  if(pgFirst)pgFirst.disabled=currentPage<=1;
+  if(pgPrev)pgPrev.disabled=currentPage<=1;
+  if(pgNext)pgNext.disabled=currentPage>=totalPages;
+  if(pgLast)pgLast.disabled=currentPage>=totalPages;
+
+  // Page number buttons (show 5 around current)
+  if(pgNumbers){
+    const pages=[];
+    const start2=Math.max(1,currentPage-2);
+    const end2=Math.min(totalPages,currentPage+2);
+    for(let i=start2;i<=end2;i++) pages.push(i);
+    pgNumbers.innerHTML=pages.map(p=>`
+      <button onclick="goToPage(${p})" style="background:${p===currentPage?'var(--accent)':'var(--surface2)'};border:1px solid ${p===currentPage?'var(--accent)':'var(--border)'};color:${p===currentPage?'white':'var(--text2)'};padding:5px 10px;border-radius:6px;cursor:pointer;font-size:12px;min-width:32px;">${p}</button>
+    `).join('');
+  }
+}
+
 function filterCalls(){
   const status=document.getElementById('calls-filter').value;
   const search=document.getElementById('calls-search').value.toLowerCase();
@@ -1379,18 +1478,22 @@ function renderCallDetail(call){
 function renderHumanReview(){
   const tbody=document.getElementById('human-review-tbody');
   if(!tbody)return;
-  const hr=calls.filter(c=>c.requires_human_review&&c.status!=='Processing');
+  const hr=calls.filter(c=>c.requires_human_review&&c.status!=='Processing'&&c.overall_score>0);
   set('nb-human',hr.length||'');
-  if(hr.length===0){tbody.innerHTML='<tr><td colspan="8" style="text-align:center;padding:32px;color:var(--green)">✅ No calls require human review right now.</td></tr>';return;}
+  if(hr.length===0){
+    tbody.innerHTML='<tr><td colspan="8" style="text-align:center;padding:40px;color:var(--green);font-size:14px;">✅ No calls require human review right now.</td></tr>';
+    return;
+  }
   tbody.innerHTML=hr.map(c=>{
     const ac=c.age_concern?JSON.parse(typeof c.age_concern==='string'?c.age_concern:'{}'):{};
     return `<tr onclick="openCallDetail('${c.call_id}')">
-      <td>#${c.call_id}</td><td class="agent">${c.agent_name||'—'}</td>
+      <td style="font-size:11px;color:var(--text3)">#${(c.call_id||'').toString().slice(-8)}</td>
+      <td class="agent">${c.agent_name||'—'}</td>
       <td>${c.account_name||c.customer_account_id||'—'}</td>
       <td>${scoreCircle(c.overall_score||0)}</td>
-      <td style="font-size:11px;color:var(--text2)">${c.human_review_reason||'—'}</td>
-      <td>${ac.flagged?'<span class="badge badge-red">⚠️ Yes</span>':'—'}</td>
-      <td>${formatDate(c.created_at)}</td>
+      <td style="font-size:11px;color:var(--text2);max-width:200px;">${c.human_review_reason||'—'}</td>
+      <td>${ac.flagged?'<span class="badge badge-red">⚠️ Yes</span>':'<span style="color:var(--text3)">—</span>'}</td>
+      <td style="white-space:nowrap;">${formatDate(c.created_at)}</td>
       <td><button class="btn btn-outline btn-sm" onclick="openCallDetail('${c.call_id}');event.stopPropagation()">Review</button></td>
     </tr>`;
   }).join('');
@@ -1489,58 +1592,254 @@ async function deleteAgent(id){
 
 // ─── ANALYTICS ────────────────────────────────────────────────────────────────
 function renderAnalytics(){
-  // Agent leaderboard
+  renderLeaderboard();
+  renderRuleStats();
+  renderCategoryChart();
+  renderScoreDistribution();
+  renderTeamSummary();
+}
+
+function renderLeaderboard(){
   const lb=document.getElementById('agent-leaderboard');
-  if(lb){
-    if(agentStats.length===0){lb.innerHTML='<div style="color:var(--text3);font-size:12px;padding:8px;">No data yet.</div>';}
-    else{
-      lb.innerHTML=agentStats.map((a,i)=>{
-        const avg=a.avg_score?Math.round(a.avg_score):0;
-        const color=avg>=80?'var(--green)':avg>=70?'var(--yellow)':'var(--red)';
-        const initials=a.agent_name.split(' ').map(n=>n[0]).join('').toUpperCase().slice(0,2);
-        return `<div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border);">
-          <div style="font-family:'Space Grotesk',sans-serif;font-size:16px;font-weight:700;color:${i<3?'var(--yellow)':'var(--text3)'};width:24px;text-align:center;">${i+1}</div>
-          <div class="agent-avatar" style="background:${AVATAR_COLORS[i%AVATAR_COLORS.length]};width:34px;height:34px;font-size:12px;">${initials}</div>
-          <div style="flex:1"><div style="font-weight:600;font-size:13px;">${a.agent_name}</div><div style="font-size:11px;color:var(--text3);">${a.total_calls||0} calls · Ext. ${a.agent_extension||'—'}</div></div>
-          <div style="text-align:right"><div style="width:80px;height:6px;background:var(--surface2);border-radius:3px;margin-bottom:4px;"><div style="width:${avg}%;height:100%;background:${color};border-radius:3px;"></div></div><div style="font-size:11px;font-weight:600;color:${color}">${avg}%</div></div>
-        </div>`;
-      }).join('');
-    }
-  }
-
-  // Rule stats
-  const rs=document.getElementById('rule-stats-container');
-  if(rs){
-    if(ruleStats.length===0){rs.innerHTML='<div style="color:var(--text3);font-size:12px;">No data yet.</div>';}
-    else{
-      rs.innerHTML=ruleStats.slice(0,8).map(r=>{
-        const rate=r.pass_rate||0;
-        const color=rate>=80?'var(--green)':rate>=60?'var(--yellow)':'var(--red)';
-        const sevBadge=r.severity==='Critical'?'badge-red':r.severity==='Warning'?'badge-yellow':'badge-blue';
-        return `<div class="score-item"><div class="score-row"><span class="score-label" style="font-size:11px;">${r.rule_description.substring(0,55)}${r.rule_description.length>55?'...':''}</span><span class="score-pct" style="color:${color}">${rate}%</span></div><div style="display:flex;align-items:center;gap:8px;"><div class="score-bar" style="flex:1;"><div class="score-fill" style="width:${rate}%;background:${color}"></div></div><span style="font-size:10px;color:var(--text3);white-space:nowrap">${r.failed_count} fails</span></div></div>`;
-      }).join('');
-    }
-  }
-
-  // Weakness areas from agent stats
-  const wc=document.getElementById('weakness-container');
-  if(wc&&agentStats.length>0){
-    const cats=[
-      {label:'Notes Quality',fn:a=>a.avg_notes_score||0},
-      {label:'Critical Calls',fn:a=>100-Math.min(100,(a.critical_count||0)*20)},
-      {label:'Early Hangups',fn:a=>100-Math.min(100,(a.agent_ended_count||0)*10)},
-      {label:'Line Issues',fn:a=>100-Math.min(100,(a.line_issues_count||0)*15)},
-    ];
-    const teamAvg=agentStats.reduce((s,a)=>s+(a.avg_score||0),0)/Math.max(agentStats.length,1);
-    wc.innerHTML=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
-      <div>${cats.map(cat=>{const avg=agentStats.reduce((s,a)=>s+cat.fn(a),0)/Math.max(agentStats.length,1);const color=avg>=80?'var(--green)':avg>=60?'var(--yellow)':'var(--red)';return `<div class="score-item"><div class="score-row"><span class="score-label">${cat.label}</span><span class="score-pct" style="color:${color}">${Math.round(avg)}%</span></div><div class="score-bar"><div class="score-fill" style="width:${Math.round(avg)}%;background:${color}"></div></div></div>`;}).join('')}</div>
-      <div style="background:var(--surface2);border-radius:10px;padding:16px;display:flex;flex-direction:column;justify-content:center;align-items:center;">
-        <div style="font-family:'Space Grotesk',sans-serif;font-size:48px;font-weight:700;color:${teamAvg>=80?'var(--green)':teamAvg>=70?'var(--yellow)':'var(--red)'}">${Math.round(teamAvg)}%</div>
-        <div style="font-size:12px;color:var(--text3);margin-top:8px;">Team Average QA Score</div>
-        <div style="font-size:11px;color:var(--text3);margin-top:4px;">${agentStats.length} agents · ${calls.filter(c=>c.overall_score>0).length} scored calls</div>
+  if(!lb)return;
+  if(agentStats.length===0){lb.innerHTML='<div style="color:var(--text3);font-size:12px;padding:16px;text-align:center;">No scored calls yet.</div>';return;}
+  const sorted=[...agentStats].sort((a,b)=>(b.avg_score||0)-(a.avg_score||0));
+  lb.innerHTML=sorted.map((a,i)=>{
+    const avg=a.avg_score?Math.round(a.avg_score):0;
+    const color=avg>=80?'var(--green)':avg>=70?'var(--yellow)':'var(--red)';
+    const medal=i===0?'🥇':i===1?'🥈':i===2?'🥉':'';
+    const initials=(a.agent_name||'?').split(' ').map(n=>n[0]).join('').toUpperCase().slice(0,2);
+    return `<div onclick="openAgentDrilldown('${(a.agent_name||'').replace(/'/g,"\\'")}')" style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border);cursor:pointer;transition:opacity 0.15s;" onmouseover="this.style.opacity='0.8'" onmouseout="this.style.opacity='1'">
+      <div style="font-size:${medal?'18px':'14px'};font-weight:700;color:${i<3?'var(--yellow)':'var(--text3)'};width:28px;text-align:center;">${medal||i+1}</div>
+      <div class="agent-avatar" style="background:${AVATAR_COLORS[i%AVATAR_COLORS.length]};width:34px;height:34px;font-size:12px;">${initials}</div>
+      <div style="flex:1;">
+        <div style="font-weight:600;font-size:13px;">${a.agent_name}</div>
+        <div style="font-size:11px;color:var(--text3);">${a.total_calls||0} calls · Ext. ${a.agent_extension||'—'}</div>
+      </div>
+      <div style="text-align:right;">
+        <div style="width:90px;height:6px;background:var(--surface2);border-radius:3px;margin-bottom:4px;"><div style="width:${avg}%;height:100%;background:${color};border-radius:3px;transition:width 0.5s;"></div></div>
+        <div style="font-size:12px;font-weight:700;color:${color};">${avg}%</div>
       </div>
     </div>`;
+  }).join('');
+}
+
+function renderRuleStats(){
+  const rs=document.getElementById('rule-stats-container');
+  if(!rs)return;
+  if(ruleStats.length===0){rs.innerHTML='<div style="color:var(--text3);font-size:12px;padding:16px;text-align:center;">No rule data yet.</div>';return;}
+  const sorted=[...ruleStats].sort((a,b)=>(a.pass_rate||0)-(b.pass_rate||0));
+  rs.innerHTML=sorted.slice(0,8).map(r=>{
+    const rate=Math.round(r.pass_rate||0);
+    const color=rate>=80?'var(--green)':rate>=60?'var(--yellow)':'var(--red)';
+    const sevBadge=r.severity==='Critical'?'badge-red':r.severity==='Warning'?'badge-yellow':'badge-blue';
+    const desc=(r.rule_description||'').substring(0,60)+(r.rule_description?.length>60?'...':'');
+    return `<div style="padding:8px 0;border-bottom:1px solid var(--border);">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:5px;gap:8px;">
+        <span style="font-size:11px;color:var(--text2);flex:1;line-height:1.4;">${desc}</span>
+        <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
+          <span class="badge ${sevBadge}" style="font-size:9px;">${r.severity||''}</span>
+          <span style="font-size:12px;font-weight:700;color:${color};">${rate}%</span>
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <div style="flex:1;height:5px;background:var(--surface2);border-radius:3px;"><div style="width:${rate}%;height:100%;background:${color};border-radius:3px;"></div></div>
+        <span style="font-size:10px;color:var(--text3);white-space:nowrap;">${r.failed_count||0} fails</span>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderCategoryChart(){
+  const container=document.getElementById('category-chart');
+  if(!container)return;
+  const scored=calls.filter(c=>c.overall_score>0&&c.scorecard);
+  if(scored.length===0){container.innerHTML='<div style="color:var(--text3);font-size:12px;padding:16px;text-align:center;">No scored calls yet.</div>';return;}
+
+  const cats={
+    'Accuracy & Info':[],'Customer Service':[],'Active Listening':[],'Compliance':[],'Emotion Mgmt':[],
+    'Documentation':[],'Script & Language':[],'Call Closure':[]
+  };
+  const catKeys={
+    'Accuracy & Info':'accuracy','Customer Service':'customer_service','Active Listening':'active_listening',
+    'Compliance':'compliance_and_handling','Emotion Mgmt':'emotion_management',
+    'Documentation':'documentation_quality','Script & Language':'script_and_language','Call Closure':'call_closure'
+  };
+
+  scored.forEach(c=>{
+    let sc={};
+    try{sc=typeof c.scorecard==='string'?JSON.parse(c.scorecard):c.scorecard;}catch(e){}
+    const catScores=sc.category_scores||{};
+    Object.entries(catKeys).forEach(([label,key])=>{
+      if(catScores[key]!=null) cats[label].push(catScores[key]);
+    });
+  });
+
+  const teamAvg=scored.reduce((s,c)=>s+(c.overall_score||0),0)/scored.length;
+  const badge=document.getElementById('team-avg-badge');
+  if(badge){
+    badge.textContent=`${Math.round(teamAvg)}% avg`;
+    badge.className=`badge ${teamAvg>=80?'badge-green':teamAvg>=70?'badge-yellow':'badge-red'}`;
   }
+
+  container.innerHTML=`<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;">
+    ${Object.entries(cats).map(([label,scores])=>{
+      const avg=scores.length>0?Math.round(scores.reduce((a,b)=>a+b,0)/scores.length):0;
+      const color=avg>=80?'var(--green)':avg>=70?'var(--yellow)':'var(--red)';
+      return `<div style="background:var(--surface2);border-radius:10px;padding:14px;text-align:center;">
+        <div style="position:relative;width:70px;height:70px;margin:0 auto 10px;">
+          <svg viewBox="0 0 70 70" style="transform:rotate(-90deg)">
+            <circle cx="35" cy="35" r="28" fill="none" stroke="var(--border)" stroke-width="8"/>
+            <circle cx="35" cy="35" r="28" fill="none" stroke="${color}" stroke-width="8"
+              stroke-dasharray="${Math.round(2*Math.PI*28*avg/100)} ${Math.round(2*Math.PI*28)}"
+              stroke-linecap="round"/>
+          </svg>
+          <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;color:${color};">${avg}%</div>
+        </div>
+        <div style="font-size:11px;color:var(--text2);font-weight:500;">${label}</div>
+        <div style="font-size:10px;color:var(--text3);">${scores.length} calls</div>
+      </div>`;
+    }).join('')}
+  </div>`;
+}
+
+function renderScoreDistribution(){
+  const container=document.getElementById('score-dist-chart');
+  if(!container)return;
+  const scored=calls.filter(c=>c.overall_score>0);
+  if(scored.length===0){container.innerHTML='<div style="color:var(--text3);font-size:12px;padding:16px;text-align:center;">No scored calls yet.</div>';return;}
+
+  const buckets=[
+    {label:'90-100%',min:90,max:100,color:'var(--green)'},
+    {label:'80-89%',min:80,max:89,color:'#4ade80'},
+    {label:'70-79%',min:70,max:79,color:'var(--yellow)'},
+    {label:'60-69%',min:60,max:69,color:'#fb923c'},
+    {label:'Below 60%',min:0,max:59,color:'var(--red)'},
+  ];
+
+  const counts=buckets.map(b=>({
+    ...b,
+    count:scored.filter(c=>c.overall_score>=b.min&&c.overall_score<=b.max).length
+  }));
+  const max=Math.max(...counts.map(b=>b.count),1);
+
+  container.innerHTML=`<div style="display:flex;flex-direction:column;gap:10px;padding:8px 0;">
+    ${counts.map(b=>`<div style="display:flex;align-items:center;gap:10px;">
+      <div style="width:70px;font-size:11px;color:var(--text3);text-align:right;flex-shrink:0;">${b.label}</div>
+      <div style="flex:1;height:24px;background:var(--surface2);border-radius:6px;overflow:hidden;">
+        <div style="height:100%;width:${Math.round(b.count/max*100)}%;background:${b.color};border-radius:6px;display:flex;align-items:center;padding-left:8px;transition:width 0.6s;">
+          ${b.count>0?`<span style="font-size:11px;font-weight:600;color:white;">${b.count}</span>`:''}
+        </div>
+      </div>
+      <div style="width:40px;font-size:11px;color:var(--text3);">${Math.round(b.count/scored.length*100)}%</div>
+    </div>`).join('')}
+  </div>`;
+}
+
+function renderTeamSummary(){
+  const wc=document.getElementById('weakness-container');
+  if(!wc)return;
+  const scored=calls.filter(c=>c.overall_score>0);
+  if(scored.length===0){wc.innerHTML='<div style="color:var(--text3);font-size:12px;padding:16px;text-align:center;">No scored calls yet.</div>';return;}
+
+  const teamAvg=Math.round(scored.reduce((s,c)=>s+(c.overall_score||0),0)/scored.length);
+  const passed=scored.filter(c=>c.status==='Passed').length;
+  const review=scored.filter(c=>c.status==='Review').length;
+  const critical=scored.filter(c=>c.status==='Critical').length;
+  const color=teamAvg>=80?'var(--green)':teamAvg>=70?'var(--yellow)':'var(--red)';
+
+  wc.innerHTML=`
+    <div style="text-align:center;margin-bottom:20px;">
+      <div style="font-family:'Space Grotesk',sans-serif;font-size:56px;font-weight:800;color:${color};line-height:1;">${teamAvg}%</div>
+      <div style="font-size:12px;color:var(--text3);margin-top:6px;">Team Average · ${scored.length} scored calls</div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:16px;">
+      <div style="background:rgba(16,212,142,0.1);border-radius:8px;padding:10px;text-align:center;">
+        <div style="font-size:20px;font-weight:700;color:var(--green);">${passed}</div>
+        <div style="font-size:10px;color:var(--text3);">Passed</div>
+      </div>
+      <div style="background:rgba(245,166,35,0.1);border-radius:8px;padding:10px;text-align:center;">
+        <div style="font-size:20px;font-weight:700;color:var(--yellow);">${review}</div>
+        <div style="font-size:10px;color:var(--text3);">Review</div>
+      </div>
+      <div style="background:rgba(242,78,78,0.1);border-radius:8px;padding:10px;text-align:center;">
+        <div style="font-size:20px;font-weight:700;color:var(--red);">${critical}</div>
+        <div style="font-size:10px;color:var(--text3);">Critical</div>
+      </div>
+    </div>
+    <div style="font-size:11px;color:var(--text3);text-align:center;">${agentStats.length} active agents monitored</div>`;
+}
+
+// ─── AGENT DRILL-DOWN ─────────────────────────────────────────────────────────
+async function openAgentDrilldown(agentName){
+  showPage('analytics');
+  const panel=document.getElementById('agent-drilldown');
+  const title=document.getElementById('drilldown-title');
+  const statsEl=document.getElementById('drilldown-stats');
+  const callsEl=document.getElementById('drilldown-calls');
+  if(!panel)return;
+
+  panel.style.display='block';
+  panel.scrollIntoView({behavior:'smooth'});
+  title.textContent=`📊 ${agentName}`;
+  statsEl.innerHTML='<div style="color:var(--text3);font-size:12px;">Loading...</div>';
+  callsEl.innerHTML='';
+
+  // Filter calls for this agent
+  const agentCalls=calls.filter(c=>c.agent_name===agentName&&c.overall_score>0);
+  const allAgentCalls=calls.filter(c=>c.agent_name===agentName);
+  const stat=agentStats.find(a=>a.agent_name===agentName)||{};
+
+  const avg=agentCalls.length?Math.round(agentCalls.reduce((s,c)=>s+(c.overall_score||0),0)/agentCalls.length):0;
+  const color=avg>=80?'var(--green)':avg>=70?'var(--yellow)':'var(--red)';
+  const flagged=agentCalls.filter(c=>c.flags>0).reduce((s,c)=>s+c.flags,0);
+  const avgNotes=agentCalls.filter(c=>c.notes_score>0).length?
+    Math.round(agentCalls.filter(c=>c.notes_score>0).reduce((s,c)=>s+(c.notes_score||0),0)/agentCalls.filter(c=>c.notes_score>0).length):0;
+
+  statsEl.innerHTML=`
+    <div style="background:var(--surface2);border-radius:8px;padding:14px;text-align:center;">
+      <div style="font-size:28px;font-weight:800;color:${color};">${avg}%</div>
+      <div style="font-size:10px;color:var(--text3);">Avg QA Score</div>
+    </div>
+    <div style="background:var(--surface2);border-radius:8px;padding:14px;text-align:center;">
+      <div style="font-size:28px;font-weight:800;color:var(--accent);">${allAgentCalls.length}</div>
+      <div style="font-size:10px;color:var(--text3);">Total Calls</div>
+    </div>
+    <div style="background:var(--surface2);border-radius:8px;padding:14px;text-align:center;">
+      <div style="font-size:28px;font-weight:800;color:var(--red);">${flagged}</div>
+      <div style="font-size:10px;color:var(--text3);">Total Flags</div>
+    </div>
+    <div style="background:var(--surface2);border-radius:8px;padding:14px;text-align:center;">
+      <div style="font-size:28px;font-weight:800;color:${avgNotes>=70?'var(--green)':avgNotes>=40?'var(--yellow)':'var(--red)'};">${avgNotes||'—'}${avgNotes?'%':''}</div>
+      <div style="font-size:10px;color:var(--text3);">Avg Notes Score</div>
+    </div>`;
+
+  if(agentCalls.length===0){
+    callsEl.innerHTML='<div style="color:var(--text3);font-size:12px;padding:16px;text-align:center;">No scored calls for this agent yet.</div>';
+    return;
+  }
+
+  callsEl.innerHTML=`<div style="font-size:11px;color:var(--text3);margin-bottom:8px;padding-top:8px;border-top:1px solid var(--border);">Recent scored calls (${agentCalls.length})</div>
+    ${agentCalls.slice(0,10).map(c=>{
+      const sc=c.overall_score||0;
+      const color=sc>=80?'var(--green)':sc>=70?'var(--yellow)':'var(--red)';
+      return `<div onclick="openCallDetail('${c.call_id}')" style="display:flex;align-items:center;gap:12px;padding:8px;border-radius:8px;cursor:pointer;margin-bottom:4px;background:var(--surface2);" onmouseover="this.style.opacity='0.8'" onmouseout="this.style.opacity='1'">
+        <div style="font-size:16px;font-weight:700;color:${color};width:42px;text-align:center;">${sc}%</div>
+        <div style="flex:1;">
+          <div style="font-size:12px;font-weight:500;">${c.account_name||c.customer_account_id||'Unknown'}</div>
+          <div style="font-size:10px;color:var(--text3);">${formatDate(c.created_at)} · ${c.duration||'--'} · ${c.emotion||'—'}</div>
+        </div>
+        <div style="display:flex;gap:6px;align-items:center;">
+          ${c.flags>0?`<span class="badge badge-red">${c.flags} flags</span>`:''}
+          <span class="badge ${c.status==='Passed'?'badge-green':c.status==='Review'?'badge-yellow':'badge-red'}">${c.status}</span>
+        </div>
+      </div>`;
+    }).join('')}`;
+}
+
+function closeDrilldown(){
+  const panel=document.getElementById('agent-drilldown');
+  if(panel)panel.style.display='none';
 }
 
 // ─── BILLING ──────────────────────────────────────────────────────────────────

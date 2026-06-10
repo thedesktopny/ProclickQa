@@ -682,20 +682,33 @@ def delete_agent(agent_id):
 def get_calls():
     conn = get_db()
     c = conn.cursor(cursor_factory=RealDictCursor)
+    page = int(request.args.get('page', 1))
+    limit = int(request.args.get('limit', 25))
+    offset = (page - 1) * limit
     user = current_user()
-    # QA users only see calls from their assigned agents
+
     if user and user['role'] == 'qa_user':
+        c.execute('SELECT COUNT(*) FROM calls JOIN agents ON agents.name = calls.agent_name WHERE agents.assigned_qa_user_id = %s', (user['id'],))
+        total = c.fetchone()['count']
         c.execute('''
             SELECT calls.* FROM calls
             JOIN agents ON agents.name = calls.agent_name
             WHERE agents.assigned_qa_user_id = %s
-            ORDER BY calls.created_at DESC LIMIT 100
-        ''', (user['id'],))
+            ORDER BY calls.created_at DESC LIMIT %s OFFSET %s
+        ''', (user['id'], limit, offset))
     else:
-        c.execute('SELECT * FROM calls ORDER BY created_at DESC LIMIT 100')
+        c.execute('SELECT COUNT(*) FROM calls')
+        total = c.fetchone()['count']
+        c.execute('SELECT * FROM calls ORDER BY created_at DESC LIMIT %s OFFSET %s', (limit, offset))
     calls = [dict(c) for c in c.fetchall()]
     conn.close()
-    return jsonify(calls)
+    return jsonify({
+        'calls': calls,
+        'total': total,
+        'page': page,
+        'limit': limit,
+        'pages': max(1, -(-total // limit))  # ceiling division
+    })
 
 @app.route('/api/calls/<call_id>', methods=['GET'])
 def get_call(call_id):
@@ -1086,10 +1099,10 @@ def retry_stuck_calls():
     conn.close()
 
     if not stuck_calls:
-        retry_log = [{'time': time.strftime('%H:%M:%S'), 'msg': '✅ No stuck calls found — all done!', 'type': 'success'}]
+        retry_log = [{'time': datetime.now().strftime('%I:%M:%S %p'), 'msg': '✅ No stuck calls found — all done!', 'type': 'success'}]
         return jsonify({'message': 'No stuck calls found', 'count': 0})
 
-    retry_log = [{'time': time.strftime('%H:%M:%S'), 'msg': f'🔄 Starting retry for {len(stuck_calls)} calls...', 'type': 'info'}]
+    retry_log = [{'time': datetime.now().strftime('%I:%M:%S %p'), 'msg': f'🔄 Starting retry for {len(stuck_calls)} calls...', 'type': 'info'}]
 
     def process_batch():
         global retry_running
@@ -1105,10 +1118,10 @@ def retry_stuck_calls():
                 recording_url = (call['recording_url'] or '').strip().rstrip(':').rstrip('/')
 
                 if not recording_url:
-                    retry_log.append({'time': time.strftime('%H:%M:%S'), 'msg': f'⏭️ Skipped #{call_id[-8:]} — no recording URL', 'type': 'warning'})
+                    retry_log.append({'time': datetime.now().strftime('%I:%M:%S %p'), 'msg': f'⏭️ Skipped #{call_id[-8:]} — no recording URL', 'type': 'warning'})
                     continue
 
-                retry_log.append({'time': time.strftime('%H:%M:%S'), 'msg': f'🔄 [{i+1}/{len(stuck_calls)}] {agent} / {customer} — downloading audio...', 'type': 'info'})
+                retry_log.append({'time': datetime.now().strftime('%I:%M:%S %p'), 'msg': f'🔄 [{i+1}/{len(stuck_calls)}] {agent} / {customer} — downloading audio...', 'type': 'info'})
 
                 url_path = recording_url.split('?')[0]
                 ext = os.path.splitext(url_path)[1].lower()
@@ -1126,12 +1139,12 @@ def retry_stuck_calls():
 
                     # Skip files over 25MB (very long calls) — process them last
                     if size_mb > 25:
-                        retry_log.append({'time': time.strftime('%H:%M:%S'), 'msg': f'⏭️ [{i+1}/{len(stuck_calls)}] {agent} / {customer} — skipped ({size_mb}MB, too large for now)', 'type': 'warning'})
+                        retry_log.append({'time': datetime.now().strftime('%I:%M:%S %p'), 'msg': f'⏭️ [{i+1}/{len(stuck_calls)}] {agent} / {customer} — skipped ({size_mb}MB, too large for now)', 'type': 'warning'})
                         try: os.remove(audio_path)
                         except: pass
                         continue
 
-                    retry_log.append({'time': time.strftime('%H:%M:%S'), 'msg': f'🤖 [{i+1}/{len(stuck_calls)}] {agent} / {customer} — analyzing ({size_mb}MB)...', 'type': 'info'})
+                    retry_log.append({'time': datetime.now().strftime('%I:%M:%S %p'), 'msg': f'🤖 [{i+1}/{len(stuck_calls)}] {agent} / {customer} — analyzing ({size_mb}MB)...', 'type': 'info'})
 
                     result = run_analysis(
                         audio_path, agent, call_id,
@@ -1186,7 +1199,7 @@ def retry_stuck_calls():
                     status = result['status']
                     emotion = result.get('emotion','')
                     icon = '✅' if status == 'Passed' else '⚠️' if status == 'Review' else '🚨'
-                    retry_log.append({'time': time.strftime('%H:%M:%S'), 'msg': f'{icon} {agent} / {customer} — {score}% | {status} | {emotion}', 'type': status.lower()})
+                    retry_log.append({'time': datetime.now().strftime('%I:%M:%S %p'), 'msg': f'{icon} {agent} / {customer} — {score}% | {status} | {emotion}', 'type': status.lower()})
 
                 finally:
                     try: os.remove(audio_path)
@@ -1197,7 +1210,7 @@ def retry_stuck_calls():
             except Exception as e:
                 call_id = call.get('call_id','?')
                 agent = (call.get('agent_name') or '?').strip()
-                retry_log.append({'time': time.strftime('%H:%M:%S'), 'msg': f'❌ {agent} #{call_id[-8:]} — {str(e)[:80]}', 'type': 'error'})
+                retry_log.append({'time': datetime.now().strftime('%I:%M:%S %p'), 'msg': f'❌ {agent} #{call_id[-8:]} — {str(e)[:80]}', 'type': 'error'})
                 try:
                     conn3 = get_db()
                     c3 = conn3.cursor()
@@ -1207,7 +1220,7 @@ def retry_stuck_calls():
                 except: pass
                 time.sleep(5)
 
-        retry_log.append({'time': time.strftime('%H:%M:%S'), 'msg': f'✅ Batch complete — processed {len(stuck_calls)} calls', 'type': 'success'})
+        retry_log.append({'time': datetime.now().strftime('%I:%M:%S %p'), 'msg': f'✅ Batch complete — processed {len(stuck_calls)} calls', 'type': 'success'})
         retry_running = False
 
     thread = threading.Thread(target=process_batch, daemon=True)
