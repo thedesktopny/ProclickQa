@@ -799,11 +799,41 @@ const AVATAR_COLORS=[
 ];
 
 // ─── API ─────────────────────────────────────────────────────────────────────
+// ─── AUTH TOKEN ───────────────────────────────────────────────────────────────
+const TOKEN_KEY = 'vg_auth_token';
+
+function getToken(){ return localStorage.getItem(TOKEN_KEY); }
+function setToken(t){ localStorage.setItem(TOKEN_KEY, t); }
+function clearToken(){ localStorage.removeItem(TOKEN_KEY); }
+
+function authHeaders(){
+  const t = getToken();
+  const h = {'Content-Type':'application/json'};
+  if(t) h['Authorization'] = 'Bearer ' + t;
+  return h;
+}
+
 const API={
-  async get(p){const r=await fetch(p);return r.json();},
-  async post(p,d){const r=await fetch(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});return r.json();},
-  async put(p,d){const r=await fetch(p,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});return r.json();},
-  async del(p){const r=await fetch(p,{method:'DELETE'});return r.json();}
+  async get(p){
+    const r=await fetch(p,{headers:authHeaders()});
+    if(r.status===401){clearToken();showModal('login-modal');throw new Error('Unauthorized');}
+    return r.json();
+  },
+  async post(p,d){
+    const r=await fetch(p,{method:'POST',headers:authHeaders(),body:JSON.stringify(d)});
+    if(r.status===401&&p!=='/api/login'){clearToken();showModal('login-modal');throw new Error('Unauthorized');}
+    return r.json();
+  },
+  async put(p,d){
+    const r=await fetch(p,{method:'PUT',headers:authHeaders(),body:JSON.stringify(d)});
+    if(r.status===401){clearToken();showModal('login-modal');throw new Error('Unauthorized');}
+    return r.json();
+  },
+  async del(p){
+    const r=await fetch(p,{method:'DELETE',headers:authHeaders()});
+    if(r.status===401){clearToken();showModal('login-modal');throw new Error('Unauthorized');}
+    return r.json();
+  }
 };
 
 // ─── INIT ────────────────────────────────────────────────────────────────────
@@ -817,8 +847,15 @@ let currentUserData=null;
 
 async function checkAuth(){
   try{
+    // If no token at all, go straight to login
+    if(!getToken()){
+      document.body.style.visibility='visible';
+      showModal('login-modal');
+      return;
+    }
     const r=await API.get('/api/auth-check');
     if(!r.authenticated){
+      clearToken();
       document.body.style.visibility='visible';
       showModal('login-modal');
       return;
@@ -839,15 +876,22 @@ async function checkAuth(){
     await Promise.all([loadStats(),loadRules(),loadCalls(),loadAgents(),loadAnalytics(),loadBilling(),loadNotes()]);
     renderAll();
   }catch(e){
-    isAdmin=false;
-    document.body.style.visibility='visible';
-    showModal('login-modal');
+    if(e.message==='Unauthorized'){
+      clearToken();
+      document.body.style.visibility='visible';
+      showModal('login-modal');
+    } else {
+      // Network error — still show something
+      isAdmin=false;
+      document.body.style.visibility='visible';
+      showModal('login-modal');
+    }
   }
 }
 
 async function doLogout(){
-  await API.post('/api/logout',{});
-  session = null;
+  try{ await API.post('/api/logout',{}); }catch(e){}
+  clearToken();
   location.reload();
 }
 
@@ -2464,19 +2508,24 @@ async function doLogin(){
   const btn=document.querySelector('#login-modal .btn-primary');
   if(btn){btn.textContent='Logging in...';btn.disabled=true;}
   try{
-    const res=await API.post('/api/login',{username:u,password:p});
-    if(res.success){
+    const res=await fetch('/api/login',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({username:u,password:p})
+    });
+    const data=await res.json();
+    if(data.success && data.token){
+      setToken(data.token);
       hideModal('login-modal');
       document.body.style.visibility='hidden';
-      // Full reload so all data loads fresh for the correct role
       await checkAuth();
     } else {
-      err.textContent='Invalid username or password';
+      err.textContent=data.error||'Invalid username or password';
     }
   }catch(e){
     err.textContent='Login failed. Try again.';
   }
-  if(btn){btn.textContent='Login';btn.disabled=false;}
+  if(btn){btn.textContent='Login →';btn.disabled=false;}
 }
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────

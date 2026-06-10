@@ -12,11 +12,17 @@ from psycopg2.extras import RealDictCursor
 load_dotenv()
 
 app = Flask(__name__, static_folder='.')
-app.secret_key = os.getenv('SECRET_KEY', 'voiceguard-secret-key-2024-proclick')
+app.secret_key = os.getenv('SECRET_KEY', 'voiceguard-secret-2024-proclick-xK9mP2nQ')
 app.config['SESSION_COOKIE_SECURE'] = False
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_NAME'] = 'vg_session'
 app.config['PERMANENT_SESSION_LIFETIME'] = 86400 * 30  # 30 days
+app.config['SESSION_REFRESH_EACH_REQUEST'] = True
+
+@app.before_request
+def make_session_permanent():
+    session.permanent = True
 CORS(app)
 
 ADMIN_USERNAME = os.getenv('ADMIN_USERNAME', 'david')
@@ -79,6 +85,17 @@ def init_db():
             cost_usd NUMERIC(10,2) NOT NULL,
             billing_month TEXT NOT NULL,
             entered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS auth_tokens (
+            token TEXT PRIMARY KEY,
+            user_id INTEGER,
+            role TEXT NOT NULL DEFAULT 'admin',
+            username TEXT,
+            full_name TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            expires_at TIMESTAMP
         )
     ''')
     c.execute('''
@@ -234,35 +251,91 @@ def init_db():
     conn.close()
     print('✅ Database initialized')
 
+# ─── TOKEN-BASED AUTH (replaces Flask sessions) ───────────────────────────────
+import secrets
+
+# In-memory token store — survives within a process, backed by DB for persistence
+_token_cache = {}
+
+def create_token(user_data):
+    token = secrets.token_urlsafe(32)
+    _token_cache[token] = user_data
+    # Also save to DB for persistence across restarts
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute('''INSERT INTO auth_tokens (token, user_id, role, username, full_name, expires_at)
+                     VALUES (%s, %s, %s, %s, %s, NOW() + INTERVAL '30 days')
+                     ON CONFLICT (token) DO NOTHING''',
+                  (token, user_data.get('id'), user_data.get('role'),
+                   user_data.get('username'), user_data.get('full_name')))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f'Token save warning: {e}')
+    return token
+
+def get_token_user(token):
+    if not token:
+        return None
+    # Check cache first
+    if token in _token_cache:
+        return _token_cache[token]
+    # Fall back to DB
+    try:
+        conn = get_db()
+        c = conn.cursor(cursor_factory=RealDictCursor)
+        c.execute('SELECT * FROM auth_tokens WHERE token=%s AND expires_at > NOW()', (token,))
+        row = c.fetchone()
+        conn.close()
+        if row:
+            user_data = {'id': row['user_id'], 'role': row['role'],
+                        'username': row['username'], 'full_name': row['full_name']}
+            _token_cache[token] = user_data
+            return user_data
+    except Exception as e:
+        print(f'Token lookup warning: {e}')
+    return None
+
+def get_request_token():
+    # Check Authorization header first, then X-Auth-Token
+    auth = request.headers.get('Authorization', '')
+    if auth.startswith('Bearer '):
+        return auth[7:]
+    return request.headers.get('X-Auth-Token', '')
+
 def require_admin(f):
     from functools import wraps
     @wraps(f)
     def decorated(*args, **kwargs):
-        if session.get('role') != 'admin' and not session.get('admin'):
+        user = get_token_user(get_request_token())
+        # Also check legacy Flask session
+        if not user and (session.get('role') == 'admin' or session.get('admin')):
+            user = {'role': 'admin', 'id': None, 'username': session.get('username'), 'full_name': session.get('full_name')}
+        if not user or user.get('role') != 'admin':
             return jsonify({'error': 'Unauthorized'}), 401
         return f(*args, **kwargs)
     return decorated
 
 def require_login(f):
-    """Any logged-in user (admin or QA user)."""
     from functools import wraps
     @wraps(f)
     def decorated(*args, **kwargs):
-        if not session.get('user_id') and not session.get('admin'):
+        user = get_token_user(get_request_token())
+        if not user and (session.get('user_id') or session.get('admin')):
+            user = {'role': session.get('role','admin'), 'id': session.get('user_id'),
+                    'username': session.get('username'), 'full_name': session.get('full_name')}
+        if not user:
             return jsonify({'error': 'Unauthorized'}), 401
         return f(*args, **kwargs)
     return decorated
 
 def current_user():
-    """Returns dict with id, role, username or None."""
-    if not session.get('user_id'):
-        return None
-    return {
-        'id': session.get('user_id'),
-        'role': session.get('role'),
-        'username': session.get('username'),
-        'full_name': session.get('full_name')
-    }
+    user = get_token_user(get_request_token())
+    if not user and (session.get('user_id') or session.get('admin')):
+        user = {'role': session.get('role','admin'), 'id': session.get('user_id'),
+                'username': session.get('username'), 'full_name': session.get('full_name')}
+    return user
 
 def require_api_key(f):
     from functools import wraps
@@ -282,53 +355,59 @@ def login():
     username = (data.get('username', '') or '').strip()
     password_hash = hashlib.sha256(data.get('password', '').encode()).hexdigest()
 
-    # Look up user in users table
+    user_data = None
+
     try:
         conn = get_db()
         c = conn.cursor(cursor_factory=RealDictCursor)
         c.execute('SELECT * FROM users WHERE username = %s AND status = %s', (username, 'active'))
         user = c.fetchone()
         if user and user['password_hash'] == password_hash:
-            session.permanent = True
-            session['user_id'] = user['id']
-            session['role'] = user['role']
-            session['username'] = user['username']
-            session['full_name'] = user['full_name'] or user['username']
-            if user['role'] == 'admin':
-                session['admin'] = True  # backward compatibility
+            user_data = {'id': user['id'], 'role': user['role'],
+                        'username': user['username'], 'full_name': user['full_name'] or user['username']}
             c.execute('UPDATE users SET last_login = NOW() WHERE id = %s', (user['id'],))
             conn.commit()
-            conn.close()
-            return jsonify({'success': True, 'role': user['role'], 'full_name': session['full_name']})
         conn.close()
     except Exception as e:
         print(f'Login error: {e}')
 
-    # Fallback to env admin (in case users table not seeded yet)
-    if username == ADMIN_USERNAME and password_hash == ADMIN_PASSWORD:
-        session.permanent = True
-        session['admin'] = True
-        session['role'] = 'admin'
-        session['username'] = username
-        session['full_name'] = 'Administrator'
-        return jsonify({'success': True, 'role': 'admin', 'full_name': 'Administrator'})
+    if not user_data:
+        if username == ADMIN_USERNAME and password_hash == ADMIN_PASSWORD:
+            user_data = {'id': None, 'role': 'admin', 'username': username, 'full_name': 'Administrator'}
 
-    return jsonify({'success': False, 'error': 'Invalid credentials'}), 401
+    if not user_data:
+        return jsonify({'success': False, 'error': 'Invalid credentials'}), 401
+
+    token = create_token(user_data)
+    return jsonify({
+        'success': True,
+        'token': token,
+        'role': user_data['role'],
+        'full_name': user_data['full_name']
+    })
 
 @app.route('/api/logout', methods=['POST'])
 def logout():
+    token = get_request_token()
+    if token:
+        _token_cache.pop(token, None)
+        try:
+            conn = get_db()
+            c = conn.cursor()
+            c.execute('DELETE FROM auth_tokens WHERE token=%s', (token,))
+            conn.commit()
+            conn.close()
+        except: pass
     session.clear()
     return jsonify({'success': True})
 
 @app.route('/api/auth-check', methods=['GET'])
 def auth_check():
-    authed = bool(session.get('user_id') or session.get('admin'))
-    return jsonify({
-        'authenticated': authed,
-        'role': session.get('role', 'admin' if session.get('admin') else None),
-        'username': session.get('username'),
-        'full_name': session.get('full_name')
-    })
+    user = current_user()
+    if user:
+        return jsonify({'authenticated': True, 'role': user.get('role','admin'),
+                       'username': user.get('username'), 'full_name': user.get('full_name')})
+    return jsonify({'authenticated': False})
 
 # ─── RULES ────────────────────────────────────────────────────────────────────
 @app.route('/api/rules', methods=['GET'])
