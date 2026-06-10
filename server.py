@@ -507,8 +507,8 @@ def analyze_call():
         customer_qos_rx = data.get('customer_qos_rx', 'Good')
         call_notes = data.get('call_notes', '')
 
-        if not recording_url:
-            return jsonify({'error': 'recording_url is required'}), 400
+        # Clean recording URL — strip trailing colons, spaces, or other invalid chars
+        recording_url = recording_url.strip().rstrip(':').rstrip('/')
         if not agent_name or agent_name == 'Unknown':
             return jsonify({'error': 'agent_name is required'}), 400
 
@@ -656,7 +656,143 @@ def analyze_call():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/analyze/status', methods=['GET'])
+# ─── RETRY STUCK CALLS ────────────────────────────────────────────────────────
+@app.route('/api/retry-stuck', methods=['POST'])
+@require_admin
+def retry_stuck_calls():
+    """
+    Retries calls stuck in Processing status.
+    Throttled — max 10 calls per batch, 30s delay between each.
+    Runs in background so response is instant.
+    """
+    import threading
+
+    conn = get_db()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('''
+        SELECT call_id, agent_name, agent_extension, recording_url,
+               call_duration_seconds, billed_minutes, caller_id,
+               customer_account_id, account_name, call_end_first,
+               agent_qos_tx, agent_qos_rx, customer_qos_tx, customer_qos_rx,
+               call_notes, call_dropped
+        FROM calls
+        WHERE status = 'Processing'
+        AND overall_score = 0
+        AND created_at < NOW() - INTERVAL '5 minutes'
+        ORDER BY created_at ASC
+        LIMIT 10
+    ''')
+    stuck_calls = [dict(c) for c in c.fetchall()]
+    conn.close()
+
+    if not stuck_calls:
+        return jsonify({'message': 'No stuck calls found', 'count': 0})
+
+    def process_batch():
+        from ai_engine import analyze_call as run_analysis
+        import urllib.request
+
+        for call in stuck_calls:
+            try:
+                call_id = call['call_id']
+                recording_url = (call['recording_url'] or '').strip().rstrip(':').rstrip('/')
+
+                if not recording_url:
+                    continue
+
+                url_path = recording_url.split('?')[0]
+                ext = os.path.splitext(url_path)[1].lower()
+                if ext not in ['.mp3', '.wav', '.m4a', '.ogg', '.webm', '.flac']:
+                    ext = '.wav'
+
+                UPLOAD_DIR = os.path.join(os.getenv('HOME', '.'), 'uploads')
+                os.makedirs(UPLOAD_DIR, exist_ok=True)
+                audio_path = os.path.join(UPLOAD_DIR, f"retry_{call_id}_{int(time.time())}{ext}")
+
+                print(f"[Retry] Processing call {call_id}")
+
+                try:
+                    urllib.request.urlretrieve(recording_url, audio_path)
+                    result = run_analysis(
+                        audio_path,
+                        call['agent_name'] or 'Unknown',
+                        call_id,
+                        call_end_first=call.get('call_end_first') or 'customer',
+                        call_notes=call.get('call_notes') or '',
+                        account_name=call.get('account_name') or '',
+                        agent_qos_tx=call.get('agent_qos_tx') or 'Good',
+                        agent_qos_rx=call.get('agent_qos_rx') or 'Good',
+                        customer_qos_tx=call.get('customer_qos_tx') or 'Good',
+                        customer_qos_rx=call.get('customer_qos_rx') or 'Good',
+                        call_dropped=call.get('call_dropped') or False
+                    )
+
+                    conn2 = get_db()
+                    c2 = conn2.cursor()
+                    c2.execute('''
+                        UPDATE calls SET duration=%s, overall_score=%s, confidence=%s,
+                            emotion=%s, status=%s, flags=%s, scorecard=%s, transcript=%s,
+                            summary=%s, emotion_delta=%s, requires_human_review=%s,
+                            human_review_reason=%s, age_concern=%s, coaching_notes=%s,
+                            positive_highlights=%s, call_dropped=%s, notes_score=%s,
+                            notes_feedback=%s
+                        WHERE call_id=%s
+                    ''', (
+                        result.get('duration','--'), result['overall_score'],
+                        result.get('confidence',100), result['emotion'],
+                        result['status'], result['flags'],
+                        json.dumps(result.get('scorecard',{})),
+                        result.get('transcript',''), result.get('summary',''),
+                        json.dumps(result.get('emotion_delta',{})),
+                        result.get('requires_human_review',False),
+                        result.get('human_review_reason',''),
+                        json.dumps(result.get('age_concern',{})),
+                        result.get('coaching_notes',''),
+                        result.get('positive_highlights',''),
+                        result.get('call_dropped',False),
+                        result.get('notes_score',0),
+                        result.get('notes_feedback',''),
+                        call_id
+                    ))
+                    for rr in result.get('scorecard',{}).get('rules_evaluation',[]):
+                        c2.execute('''INSERT INTO rule_results
+                            (call_id, rule_description, category, severity, passed, confidence, evidence)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s)''',
+                            (call_id, rr.get('rule',''), rr.get('category',''),
+                             rr.get('severity',''), rr.get('passed',False),
+                             rr.get('confidence',100), rr.get('evidence','')))
+                    conn2.commit()
+                    conn2.close()
+                    print(f"[Retry] ✅ Call {call_id} scored: {result['overall_score']}%")
+
+                finally:
+                    try: os.remove(audio_path)
+                    except: pass
+
+                # Wait 30 seconds between calls to avoid overloading
+                time.sleep(30)
+
+            except Exception as e:
+                print(f"[Retry] ❌ Failed {call.get('call_id')}: {e}")
+                try:
+                    conn3 = get_db()
+                    c3 = conn3.cursor()
+                    c3.execute("UPDATE calls SET status='Failed' WHERE call_id=%s", (call.get('call_id'),))
+                    conn3.commit()
+                    conn3.close()
+                except: pass
+                # Still wait before next call even on failure
+                time.sleep(10)
+
+    # Run in background thread
+    thread = threading.Thread(target=process_batch, daemon=True)
+    thread.start()
+
+    return jsonify({
+        'message': f'Retry started for {len(stuck_calls)} stuck calls. Processing one at a time with 30s delay.',
+        'count': len(stuck_calls),
+        'call_ids': [c['call_id'] for c in stuck_calls]
+    })
 def analyze_status():
     anthropic_key = os.getenv('ANTHROPIC_API_KEY', '')
     gemini_key = os.getenv('GEMINI_API_KEY', '')

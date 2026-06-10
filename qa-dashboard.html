@@ -271,6 +271,7 @@ td.agent{color:var(--text);font-weight:500;}
   <div class="topbar">
     <div class="page-title">Call Review</div>
     <div class="topbar-right">
+      <button class="btn btn-outline" onclick="retryStuck()" style="color:var(--yellow)">🔄 Retry Stuck</button>
       <select class="date-filter" id="calls-filter" onchange="filterCalls()">
         <option value="">All calls</option>
         <option value="Critical">Critical only</option>
@@ -1204,6 +1205,14 @@ function showToast(msg,isError=false){
   if(!t){t=document.createElement('div');t.id='toast';t.style.cssText='position:fixed;bottom:24px;right:24px;padding:12px 20px;border-radius:10px;font-size:13px;font-weight:600;z-index:9999;transition:opacity 0.3s;box-shadow:0 4px 20px rgba(0,0,0,0.4)';document.body.appendChild(t);}
   t.textContent=msg;t.style.background=isError?'var(--red)':'var(--green)';t.style.color='white';t.style.opacity='1';
   clearTimeout(t._t);t._t=setTimeout(()=>{t.style.opacity='0';},3000);
+}
+
+async function retryStuck(){
+  if(!isAdmin){showModal('login-modal');return;}
+  if(!confirm('Retry all stuck Processing calls? They will be processed one at a time with 30 second delays.'))return;
+  const res=await API.post('/api/retry-stuck',{});
+  if(res.count===0){showToast('No stuck calls found',false);}
+  else{showToast(`🔄 Retrying ${res.count} calls — check back in a few minutes`);}
 }
 
 function exportReport(){showToast('📊 Export coming soon!');}

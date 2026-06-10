@@ -42,6 +42,9 @@ def process_job(job_data):
     call_notes = job_data.get('call_notes', '')
     call_dropped = job_data.get('call_dropped', False)
 
+    # Clean recording URL
+    recording_url = recording_url.strip().rstrip(':').rstrip('/')
+
     log.info(f"Processing call {call_id} — {agent_name}")
 
     url_path = recording_url.split('?')[0]
