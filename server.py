@@ -136,6 +136,7 @@ def init_db():
         "ALTER TABLE calls ADD COLUMN IF NOT EXISTS callback_call_id TEXT",
         "ALTER TABLE calls ADD COLUMN IF NOT EXISTS confidence INTEGER DEFAULT 100",
         "ALTER TABLE calls ADD COLUMN IF NOT EXISTS summary TEXT",
+        "CREATE UNIQUE INDEX IF NOT EXISTS agents_name_unique ON agents (name)",
     ]
     for sql in migrations:
         try:
@@ -545,6 +546,21 @@ def analyze_call():
             duration_display = '--'
 
         call_dropped = (call_end_first == 'drop')
+
+        # Auto-create agent if not exists
+        if agent_name and agent_name != 'Unknown':
+            try:
+                conn_a = get_db()
+                c_a = conn_a.cursor()
+                c_a.execute('''
+                    INSERT INTO agents (name, extension, status)
+                    VALUES (%s, %s, 'active')
+                    ON CONFLICT (name) DO UPDATE SET extension = EXCLUDED.extension
+                ''', (agent_name.strip(), agent_extension.strip() or '—'))
+                conn_a.commit()
+                conn_a.close()
+            except Exception:
+                pass
 
         # Insert pending record immediately
         conn = get_db()

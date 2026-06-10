@@ -45,6 +45,21 @@ def process_job(job_data):
     # Clean recording URL
     recording_url = recording_url.strip().rstrip(':').rstrip('/')
 
+    # Auto-create agent if not exists
+    if agent_name and agent_name != 'Unknown':
+        try:
+            conn_a = get_db()
+            c_a = conn_a.cursor()
+            c_a.execute('''
+                INSERT INTO agents (name, extension, status)
+                VALUES (%s, %s, 'active')
+                ON CONFLICT (name) DO UPDATE SET extension = EXCLUDED.extension
+            ''', (agent_name.strip(), agent_extension.strip() or '—'))
+            conn_a.commit()
+            conn_a.close()
+        except Exception:
+            pass
+
     log.info(f"Processing call {call_id} — {agent_name}")
 
     url_path = recording_url.split('?')[0]
