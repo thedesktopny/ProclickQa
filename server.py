@@ -564,6 +564,80 @@ def create_qa_user():
     except Exception as e:
         return jsonify({'error': str(e)}), 400
 
+@app.route('/api/qa-users/<int:user_id>/drilldown', methods=['GET'])
+@require_admin
+def qa_user_drilldown(user_id):
+    conn = get_db()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+
+    # User info
+    c.execute('SELECT * FROM users WHERE id=%s', (user_id,))
+    user = dict(c.fetchone() or {})
+    user.pop('password_hash', None)
+
+    # Assigned agents with their stats
+    c.execute('''
+        SELECT a.*,
+            COUNT(c.id) as total_calls,
+            COUNT(CASE WHEN c.overall_score > 0 THEN 1 END) as scored_calls,
+            COUNT(CASE WHEN c.status IN ('Review','Critical') AND c.overall_score > 0 THEN 1 END) as flagged_calls,
+            ROUND(AVG(CASE WHEN c.overall_score > 0 THEN c.overall_score END)) as avg_score
+        FROM agents a
+        LEFT JOIN calls c ON c.agent_name = a.name
+        WHERE a.assigned_qa_user_id = %s
+        GROUP BY a.id ORDER BY a.name ASC
+    ''', (user_id,))
+    agents = [dict(a) for a in c.fetchall()]
+
+    # Recent resolutions with call info
+    c.execute('''
+        SELECT r.*, ca.agent_name, ca.account_name, ca.overall_score, ca.status as call_status
+        FROM resolutions r
+        LEFT JOIN calls ca ON ca.call_id = r.call_id
+        WHERE r.qa_user_id = %s
+        ORDER BY r.resolved_at DESC LIMIT 20
+    ''', (user_id,))
+    resolutions = [dict(r) for r in c.fetchall()]
+
+    # Unresolved flagged calls (Review/Critical with no resolution)
+    c.execute('''
+        SELECT c.call_id, c.agent_name, c.account_name, c.overall_score,
+               c.status, c.flags, c.created_at, c.summary, c.human_review_reason
+        FROM calls c
+        JOIN agents a ON a.name = c.agent_name
+        LEFT JOIN resolutions r ON r.call_id = c.call_id AND r.qa_user_id = %s
+        WHERE a.assigned_qa_user_id = %s
+        AND c.status IN ('Review','Critical')
+        AND c.overall_score > 0
+        AND r.id IS NULL
+        ORDER BY c.status DESC, c.overall_score ASC
+        LIMIT 30
+    ''', (user_id, user_id))
+    unresolved = [dict(u) for u in c.fetchall()]
+
+    # Performance summary
+    total_flagged = sum(a.get('flagged_calls',0) or 0 for a in agents)
+    total_resolved = len(resolutions)
+    avg_res_score = round(sum(r.get('ai_resolution_score',0) or 0 for r in resolutions) / max(len(resolutions),1))
+    coverage = round((total_resolved / max(total_flagged,1)) * 100)
+
+    conn.close()
+    return jsonify({
+        'user': user,
+        'agents': agents,
+        'resolutions': resolutions,
+        'unresolved': unresolved,
+        'summary': {
+            'assigned_agents': len(agents),
+            'total_calls_covered': sum(a.get('total_calls',0) or 0 for a in agents),
+            'total_flagged': total_flagged,
+            'total_resolved': total_resolved,
+            'coverage_pct': coverage,
+            'avg_resolution_score': avg_res_score,
+            'unresolved_count': len(unresolved)
+        }
+    })
+
 @app.route('/api/qa-users/<int:user_id>', methods=['PUT'])
 @require_admin
 def update_qa_user(user_id):
