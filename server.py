@@ -849,7 +849,107 @@ def analyze_status():
         'database_connected': db_ok
     })
 
-@app.route('/api/test-analyze', methods=['GET'])
+@app.route('/api/test-one-call', methods=['GET'])
+def test_one_call():
+    """Process one stuck call and return detailed result."""
+    import urllib.request
+    import traceback
+
+    try:
+        conn = get_db()
+        c = conn.cursor(cursor_factory=RealDictCursor)
+        c.execute('''
+            SELECT call_id, agent_name, recording_url, call_notes, account_name,
+                   call_end_first, agent_qos_tx, agent_qos_rx, customer_qos_tx, customer_qos_rx
+            FROM calls
+            WHERE status IN ('Processing', 'Failed')
+            AND overall_score = 0
+            AND recording_url IS NOT NULL
+            AND call_duration_seconds > 0
+            ORDER BY call_duration_seconds ASC
+            LIMIT 1
+        ''')
+        call = c.fetchone()
+        conn.close()
+
+        if not call:
+            return jsonify({'error': 'No suitable call found — need calls with duration > 0'})
+
+        call = dict(call)
+        call_id = call['call_id']
+        recording_url = (call['recording_url'] or '').strip().rstrip(':').rstrip('/')
+
+        results = {'call_id': call_id, 'recording_url': recording_url, 'steps': {}}
+
+        # Step 1: Download audio
+        url_path = recording_url.split('?')[0]
+        ext = os.path.splitext(url_path)[1].lower()
+        if ext not in ['.mp3', '.wav', '.m4a', '.ogg', '.webm', '.flac']:
+            ext = '.wav'
+
+        UPLOAD_DIR = os.path.join(os.getenv('HOME', '.'), 'uploads')
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
+        audio_path = os.path.join(UPLOAD_DIR, f"test_{call_id}{ext}")
+
+        try:
+            urllib.request.urlretrieve(recording_url, audio_path)
+            size = os.path.getsize(audio_path)
+            results['steps']['download'] = f'OK — {size} bytes ({round(size/1024/1024,1)} MB)'
+        except Exception as e:
+            results['steps']['download'] = f'FAIL: {str(e)}'
+            return jsonify(results)
+
+        # Step 2: Run AI
+        try:
+            from ai_engine import analyze_call as run_analysis
+            result = run_analysis(
+                audio_path,
+                call['agent_name'] or 'Unknown',
+                call_id,
+                call_end_first=call.get('call_end_first') or 'customer',
+                call_notes=call.get('call_notes') or '',
+                account_name=call.get('account_name') or '',
+                agent_qos_tx=call.get('agent_qos_tx') or 'Good',
+                agent_qos_rx=call.get('agent_qos_rx') or 'Good',
+                customer_qos_tx=call.get('customer_qos_tx') or 'Good',
+                customer_qos_rx=call.get('customer_qos_rx') or 'Good',
+            )
+            results['steps']['ai_analysis'] = f"OK — Score: {result['overall_score']}% | Status: {result['status']}"
+            results['score'] = result['overall_score']
+            results['emotion'] = result['emotion']
+            results['summary'] = result.get('summary', '')[:200]
+
+            # Save result
+            conn2 = get_db()
+            c2 = conn2.cursor()
+            c2.execute('''UPDATE calls SET duration=%s, overall_score=%s, confidence=%s,
+                emotion=%s, status=%s, flags=%s, scorecard=%s, transcript=%s, summary=%s,
+                emotion_delta=%s, requires_human_review=%s, human_review_reason=%s,
+                age_concern=%s, coaching_notes=%s, positive_highlights=%s,
+                call_dropped=%s, notes_score=%s, notes_feedback=%s WHERE call_id=%s''',
+                (result.get('duration','--'), result['overall_score'], result.get('confidence',100),
+                 result['emotion'], result['status'], result['flags'],
+                 json.dumps(result.get('scorecard',{})), result.get('transcript',''),
+                 result.get('summary',''), json.dumps(result.get('emotion_delta',{})),
+                 result.get('requires_human_review',False), result.get('human_review_reason',''),
+                 json.dumps(result.get('age_concern',{})), result.get('coaching_notes',''),
+                 result.get('positive_highlights',''), result.get('call_dropped',False),
+                 result.get('notes_score',0), result.get('notes_feedback',''), call_id))
+            conn2.commit()
+            conn2.close()
+            results['steps']['saved'] = 'OK — saved to database'
+
+        except Exception as e:
+            results['steps']['ai_analysis'] = f'FAIL: {str(e)}'
+            results['traceback'] = traceback.format_exc()
+        finally:
+            try: os.remove(audio_path)
+            except: pass
+
+        return jsonify(results)
+
+    except Exception as e:
+        return jsonify({'error': str(e), 'traceback': traceback.format_exc()})
 def test_analyze():
     """Test each component of the AI pipeline individually."""
     results = {}
