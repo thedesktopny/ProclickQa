@@ -226,125 +226,38 @@ def score_call_with_claude(gemini_result, rules, call_end_first='customer',
     notes_context = f'Agent call notes: "{call_notes}"' if call_notes else 'Agent wrote NO call notes after this call'
     customer_context = f'Customer: {account_name}' if account_name else ''
 
-    prompt = f"""You are an expert call center QA analyst. Evaluate every aspect of this call.
+    # Cap transcript to prevent oversized prompts
+    transcript_capped = transcript[:2500] if len(transcript) > 2500 else transcript
 
-═══ TRANSCRIPT ═══
-{transcript}
+    prompt = f"""You are a call center QA analyst. Score this call strictly and concisely.
 
-═══ CALL METADATA ═══
-{customer_context}
-Call ended by: {call_end_context}
-{qos_context}
-{notes_context}
+TRANSCRIPT (summarized):
+{transcript_capped}
 
-═══ AUDIO ANALYSIS ═══
-Customer emotion START: {emotion.get('customer_emotion_start')}
-Customer emotion END: {emotion.get('customer_emotion_end')}
-Customer frustration: {emotion.get('customer_frustration_level',0)}/100
-Customer satisfaction: {emotion.get('customer_satisfaction_level',0)}/100
-Customer repeated themselves: {emotion.get('customer_repeated_themselves',False)} ({emotion.get('customer_repeated_count',0)} times)
-Customer raised voice: {emotion.get('customer_raised_voice',False)}
-Customer sounds young (possible minor): {emotion.get('customer_sounds_young',False)}
-Agent tone: {emotion.get('agent_tone')}
-Agent stress: {emotion.get('agent_stress_level',0)}/100
-Agent speaking speed: {emotion.get('agent_speaking_speed')}
-Agent talk ratio: {emotion.get('agent_talk_ratio',50)}% (higher = agent dominated)
-Agent interrupted customer: {emotion.get('agent_interrupted_customer',False)}
-Long silences (>30s): {emotion.get('long_silences_detected',False)} — longest: {emotion.get('longest_silence_seconds',0)}s
-Agent uncertainty phrases: {uncertainty_phrases}
-Audio quality: {audio_quality.get('overall')} | Background noise: {audio_quality.get('background_noise',False)}
-Explicit content detected: {explicit_detected}
-Key moments: {json.dumps(emotion.get('key_emotional_moments',[]))}
+METADATA:
+{customer_context} | Ended by: {call_end_first} | {notes_context}
+Agent QoS: TX={agent_qos_tx} RX={agent_qos_rx} | Customer QoS: TX={customer_qos_tx} RX={customer_qos_rx}
+Emotion: {emotion.get('customer_emotion_start')}→{emotion.get('customer_emotion_end')} | Frustration:{emotion.get('customer_frustration_level',0)} | Satisfaction:{emotion.get('customer_satisfaction_level',0)}
+Agent tone:{emotion.get('agent_tone')} | Talk ratio:{emotion.get('agent_talk_ratio',50)}% | Uncertainty phrases:{uncertainty_phrases}
+Audio:{audio_quality.get('overall')} | Noise:{audio_quality.get('background_noise',False)} | Explicit:{explicit_detected}
 
-═══ ACTIVE QA RULES ═══
+QA RULES (evaluate each):
 {rules_text}
 
-═══ QA CATEGORIES ═══
-1. Accuracy & Information — correct info, followed policies
-2. Customer Service Quality — professional, empathetic, courteous  
-3. Active Listening — did not interrupt, acknowledged concerns, customer did not repeat
-4. Appropriate Actions — correct actions, workflows followed
-5. Compliance & Handling — identity verified, price confirmed, logged out
-6. Emotion Management — improved customer mood, handled frustration well
-7. Script & Language — no uncertainty phrases, professional language
-8. Documentation Quality — notes are detailed, accurate, match call content
-9. Audio & Technical — background noise, call quality, line issues considered
-10. Call Closure — proper goodbye, asked if anything else needed, appropriate who ended call
+CATEGORIES: accuracy_and_information, customer_service_quality, active_listening, appropriate_actions, compliance_and_handling, emotion_management, script_and_language, documentation_quality, audio_and_technical, call_closure
 
-═══ SPECIAL EVALUATIONS ═══
-NOTES EVALUATION: Score the call notes 0-100:
-- 0 = No notes written (Critical issue)
-- 1-40 = Vague notes ("helped customer") — Poor
-- 41-70 = Basic notes with some detail — Fair  
-- 71-85 = Good notes with account, action taken, outcome — Good
-- 86-100 = Excellent — detailed, professional, matches call perfectly
-Also check: do notes MATCH what actually happened? Flag mismatches.
+NOTES SCORING: 0=no notes, 1-40=vague, 41-70=basic, 71-85=good, 86-100=excellent. Check notes match call.
+CALL END: agent ended early + unresolved = flag. Drop + no callback = Critical.
+AGE CONCERN: young-sounding customer + adult requests = human review.
+OUTSIDE WORK: agent hinting at private work = Critical flag.
 
-CALL END EVALUATION:
-- If agent ended first AND call was incomplete/customer still had questions → Warning/Critical
-- If agent ended first AND call was fully resolved → OK, note it
-- If call dropped → flag; if no callback within 10min → Critical concern
+Respond ONLY with valid compact JSON (keep evidence under 60 chars each):
 
-AGE CONCERN: If customer sounds young AND requests phones, adult products, or account changes → flag for human review
-
-OUTSIDE WORK: If agent hints at working privately for customer, giving personal contact, or bypassing Proclick → Critical flag immediately
-
-Respond ONLY with this exact JSON:
-
-{{
-  "overall_score": 0-100,
-  "confidence": 0-100,
-  "status": "Passed or Review or Critical",
-  "requires_human_review": true/false,
-  "human_review_reason": "reason or empty",
-  "category_scores": {{
-    "accuracy_and_information": {{"score": 0-100, "evidence": "...", "passed": true/false}},
-    "customer_service_quality": {{"score": 0-100, "evidence": "...", "passed": true/false}},
-    "active_listening": {{"score": 0-100, "evidence": "...", "passed": true/false}},
-    "appropriate_actions": {{"score": 0-100, "evidence": "...", "passed": true/false}},
-    "compliance_and_handling": {{"score": 0-100, "evidence": "...", "passed": true/false}},
-    "emotion_management": {{"score": 0-100, "evidence": "emotion went from {emotion.get('customer_emotion_start')} to {emotion.get('customer_emotion_end')}", "passed": true/false}},
-    "script_and_language": {{"score": 0-100, "evidence": "...", "passed": true/false}},
-    "documentation_quality": {{"score": 0-100, "evidence": "assess notes quality and accuracy", "passed": true/false}},
-    "audio_and_technical": {{"score": 0-100, "evidence": "...", "passed": true/false}},
-    "call_closure": {{"score": 0-100, "evidence": "...", "passed": true/false}}
-  }},
-  "notes_score": 0-100,
-  "notes_feedback": "specific feedback on note quality and any mismatches with actual call",
-  "rules_evaluation": [
-    {{
-      "rule": "exact rule text",
-      "category": "category",
-      "severity": "Critical/Warning/Info",
-      "passed": true/false,
-      "confidence": 0-100,
-      "evidence": "specific quote or observation"
-    }}
-  ],
-  "flags": [
-    {{
-      "severity": "Critical or Warning",
-      "type": "flag type",
-      "title": "short title",
-      "description": "what happened and why it matters",
-      "timestamp": "time if known"
-    }}
-  ],
-  "emotion_delta": {{
-    "improved": true/false,
-    "start": "{emotion.get('customer_emotion_start','Unknown')}",
-    "end": "{emotion.get('customer_emotion_end','Unknown')}",
-    "summary": "one sentence on emotional arc"
-  }},
-  "age_concern": {{"flagged": true/false, "reason": ""}},
-  "call_end_assessment": "brief assessment of how/why call ended",
-  "coaching_notes": "2-3 specific actionable coaching points",
-  "positive_highlights": "1-2 things agent did well"
-}}"""
+{{"overall_score":0,"confidence":0,"status":"Passed/Review/Critical","requires_human_review":false,"human_review_reason":"","category_scores":{{"accuracy_and_information":{{"score":0,"evidence":"brief","passed":true}},"customer_service_quality":{{"score":0,"evidence":"brief","passed":true}},"active_listening":{{"score":0,"evidence":"brief","passed":true}},"appropriate_actions":{{"score":0,"evidence":"brief","passed":true}},"compliance_and_handling":{{"score":0,"evidence":"brief","passed":true}},"emotion_management":{{"score":0,"evidence":"brief","passed":true}},"script_and_language":{{"score":0,"evidence":"brief","passed":true}},"documentation_quality":{{"score":0,"evidence":"brief","passed":true}},"audio_and_technical":{{"score":0,"evidence":"brief","passed":true}},"call_closure":{{"score":0,"evidence":"brief","passed":true}}}},"notes_score":0,"notes_feedback":"brief","rules_evaluation":[{{"rule":"rule text","category":"cat","severity":"Critical/Warning/Info","passed":true,"confidence":0,"evidence":"brief"}}],"flags":[{{"title":"title","description":"under 100 chars","severity":"Critical/Warning","timestamp":""}}],"emotion_delta":{{"start":"{emotion.get('customer_emotion_start','Neutral')}","end":"{emotion.get('customer_emotion_end','Neutral')}","improved":false,"summary":"brief"}},"age_concern":{{"flagged":false,"reason":""}},"call_end_assessment":"brief","coaching_notes":"2-3 points max","positive_highlights":"1-2 points max"}}"""
 
     message = anthropic_client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=4000,
+        max_tokens=8000,
         messages=[{"role": "user", "content": prompt}]
     )
 
