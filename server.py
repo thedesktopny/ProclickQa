@@ -47,7 +47,35 @@ def init_db():
             email TEXT,
             photo TEXT,
             status TEXT DEFAULT 'active',
+            assigned_qa_user_id INTEGER,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    # QA users — people who review call agents (separate from call agents)
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            full_name TEXT,
+            role TEXT NOT NULL DEFAULT 'qa_user',
+            status TEXT DEFAULT 'active',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_login TIMESTAMP
+        )
+    ''')
+
+    # Resolution log — when a QA user handles a flagged call
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS resolutions (
+            id SERIAL PRIMARY KEY,
+            call_id TEXT NOT NULL,
+            qa_user_id INTEGER NOT NULL,
+            actions_taken TEXT NOT NULL,
+            ai_resolution_score INTEGER,
+            ai_resolution_feedback TEXT,
+            resolved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
 
@@ -137,12 +165,25 @@ def init_db():
         "ALTER TABLE calls ADD COLUMN IF NOT EXISTS confidence INTEGER DEFAULT 100",
         "ALTER TABLE calls ADD COLUMN IF NOT EXISTS summary TEXT",
         "CREATE UNIQUE INDEX IF NOT EXISTS agents_name_unique ON agents (name)",
+        "ALTER TABLE agents ADD COLUMN IF NOT EXISTS assigned_qa_user_id INTEGER",
     ]
     for sql in migrations:
         try:
             c.execute(sql)
         except Exception:
             pass
+
+    # Seed admin user into users table (from env vars)
+    try:
+        admin_user = os.getenv('ADMIN_USERNAME', 'david')
+        admin_pass_hash = hashlib.sha256(os.getenv('ADMIN_PASSWORD', 'admin123').encode()).hexdigest()
+        c.execute('SELECT id FROM users WHERE username = %s', (admin_user,))
+        if not c.fetchone():
+            c.execute('''INSERT INTO users (username, password_hash, full_name, role)
+                         VALUES (%s, %s, %s, 'admin')''',
+                      (admin_user, admin_pass_hash, 'Administrator'))
+    except Exception as e:
+        print(f'Admin seed skipped: {e}')
     c.execute('SELECT COUNT(*) FROM rules')
     if c.fetchone()[0] == 0:
         default_rules = [
@@ -169,10 +210,31 @@ def require_admin(f):
     from functools import wraps
     @wraps(f)
     def decorated(*args, **kwargs):
-        if not session.get('admin'):
+        if session.get('role') != 'admin' and not session.get('admin'):
             return jsonify({'error': 'Unauthorized'}), 401
         return f(*args, **kwargs)
     return decorated
+
+def require_login(f):
+    """Any logged-in user (admin or QA user)."""
+    from functools import wraps
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not session.get('user_id') and not session.get('admin'):
+            return jsonify({'error': 'Unauthorized'}), 401
+        return f(*args, **kwargs)
+    return decorated
+
+def current_user():
+    """Returns dict with id, role, username or None."""
+    if not session.get('user_id'):
+        return None
+    return {
+        'id': session.get('user_id'),
+        'role': session.get('role'),
+        'username': session.get('username'),
+        'full_name': session.get('full_name')
+    }
 
 def require_api_key(f):
     from functools import wraps
@@ -189,11 +251,38 @@ def require_api_key(f):
 @app.route('/api/login', methods=['POST'])
 def login():
     data = request.json
-    username = data.get('username', '')
-    password = hashlib.sha256(data.get('password', '').encode()).hexdigest()
-    if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+    username = (data.get('username', '') or '').strip()
+    password_hash = hashlib.sha256(data.get('password', '').encode()).hexdigest()
+
+    # Look up user in users table
+    try:
+        conn = get_db()
+        c = conn.cursor(cursor_factory=RealDictCursor)
+        c.execute('SELECT * FROM users WHERE username = %s AND status = %s', (username, 'active'))
+        user = c.fetchone()
+        if user and user['password_hash'] == password_hash:
+            session['user_id'] = user['id']
+            session['role'] = user['role']
+            session['username'] = user['username']
+            session['full_name'] = user['full_name'] or user['username']
+            if user['role'] == 'admin':
+                session['admin'] = True  # backward compatibility
+            c.execute('UPDATE users SET last_login = NOW() WHERE id = %s', (user['id'],))
+            conn.commit()
+            conn.close()
+            return jsonify({'success': True, 'role': user['role'], 'full_name': session['full_name']})
+        conn.close()
+    except Exception as e:
+        print(f'Login error: {e}')
+
+    # Fallback to env admin (in case users table not seeded yet)
+    if username == ADMIN_USERNAME and password_hash == ADMIN_PASSWORD:
         session['admin'] = True
-        return jsonify({'success': True})
+        session['role'] = 'admin'
+        session['username'] = username
+        session['full_name'] = 'Administrator'
+        return jsonify({'success': True, 'role': 'admin', 'full_name': 'Administrator'})
+
     return jsonify({'success': False, 'error': 'Invalid credentials'}), 401
 
 @app.route('/api/logout', methods=['POST'])
@@ -203,7 +292,13 @@ def logout():
 
 @app.route('/api/auth-check', methods=['GET'])
 def auth_check():
-    return jsonify({'authenticated': session.get('admin', False)})
+    authed = bool(session.get('user_id') or session.get('admin'))
+    return jsonify({
+        'authenticated': authed,
+        'role': session.get('role', 'admin' if session.get('admin') else None),
+        'username': session.get('username'),
+        'full_name': session.get('full_name')
+    })
 
 # ─── RULES ────────────────────────────────────────────────────────────────────
 @app.route('/api/rules', methods=['GET'])
@@ -729,7 +824,7 @@ def retry_stuck_calls():
         WHERE status IN ('Processing', 'Failed')
         AND overall_score = 0
         AND created_at < NOW() - INTERVAL '5 minutes'
-        ORDER BY created_at ASC
+        ORDER BY call_duration_seconds ASC NULLS LAST
         LIMIT 20
     ''')
     stuck_calls = [dict(c) for c in c.fetchall()]
@@ -771,7 +866,16 @@ def retry_stuck_calls():
 
                 try:
                     urllib.request.urlretrieve(recording_url, audio_path)
-                    size_mb = round(os.path.getsize(audio_path) / 1024 / 1024, 1)
+                    size_bytes = os.path.getsize(audio_path)
+                    size_mb = round(size_bytes / 1024 / 1024, 1)
+
+                    # Skip files over 25MB (very long calls) — process them last
+                    if size_mb > 25:
+                        retry_log.append({'time': time.strftime('%H:%M:%S'), 'msg': f'⏭️ [{i+1}/{len(stuck_calls)}] {agent} / {customer} — skipped ({size_mb}MB, too large for now)', 'type': 'warning'})
+                        try: os.remove(audio_path)
+                        except: pass
+                        continue
+
                     retry_log.append({'time': time.strftime('%H:%M:%S'), 'msg': f'🤖 [{i+1}/{len(stuck_calls)}] {agent} / {customer} — analyzing ({size_mb}MB)...', 'type': 'info'})
 
                     result = run_analysis(
