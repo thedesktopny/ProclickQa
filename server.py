@@ -372,17 +372,262 @@ def toggle_rule(rule_id):
     conn.close()
     return jsonify(updated)
 
+# ─── QA USERS (ADMIN ONLY) ────────────────────────────────────────────────────
+@app.route('/api/qa-users', methods=['GET'])
+@require_admin
+def get_qa_users():
+    conn = get_db()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('''
+        SELECT u.*,
+            COUNT(DISTINCT a.id) as assigned_agents,
+            COUNT(DISTINCT c.id) as total_calls_covered,
+            AVG(c.overall_score) as avg_score_covered,
+            COUNT(DISTINCT r.id) as resolutions_done,
+            AVG(r.ai_resolution_score) as avg_resolution_score
+        FROM users u
+        LEFT JOIN agents a ON a.assigned_qa_user_id = u.id
+        LEFT JOIN calls c ON c.agent_name = a.name AND c.status IN ('Review','Critical','Passed')
+        LEFT JOIN resolutions r ON r.qa_user_id = u.id
+        WHERE u.role = 'qa_user'
+        GROUP BY u.id
+        ORDER BY u.full_name ASC
+    ''')
+    users = [dict(u) for u in c.fetchall()]
+    conn.close()
+    # Remove password hash from response
+    for u in users:
+        u.pop('password_hash', None)
+    return jsonify(users)
+
+@app.route('/api/qa-users', methods=['POST'])
+@require_admin
+def create_qa_user():
+    data = request.json
+    username = (data.get('username') or '').strip()
+    password = data.get('password') or ''
+    full_name = (data.get('full_name') or '').strip()
+    if not username or not password:
+        return jsonify({'error': 'Username and password required'}), 400
+    password_hash = hashlib.sha256(password.encode()).hexdigest()
+    try:
+        conn = get_db()
+        c = conn.cursor(cursor_factory=RealDictCursor)
+        c.execute('''INSERT INTO users (username, password_hash, full_name, role)
+                     VALUES (%s, %s, %s, 'qa_user') RETURNING id, username, full_name, role, status, created_at''',
+                  (username, password_hash, full_name))
+        user = dict(c.fetchone())
+        conn.commit()
+        conn.close()
+        return jsonify(user), 201
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
+
+@app.route('/api/qa-users/<int:user_id>', methods=['PUT'])
+@require_admin
+def update_qa_user(user_id):
+    data = request.json
+    conn = get_db()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('SELECT * FROM users WHERE id=%s AND role=%s', (user_id, 'qa_user'))
+    user = c.fetchone()
+    if not user:
+        conn.close()
+        return jsonify({'error': 'Not found'}), 404
+    updates = {}
+    if data.get('full_name'): updates['full_name'] = data['full_name']
+    if data.get('status'): updates['status'] = data['status']
+    if data.get('password'):
+        updates['password_hash'] = hashlib.sha256(data['password'].encode()).hexdigest()
+    if updates:
+        set_clause = ', '.join(f'{k}=%s' for k in updates)
+        c.execute(f'UPDATE users SET {set_clause} WHERE id=%s', (*updates.values(), user_id))
+        conn.commit()
+    conn.close()
+    return jsonify({'success': True})
+
+@app.route('/api/qa-users/<int:user_id>', methods=['DELETE'])
+@require_admin
+def delete_qa_user(user_id):
+    conn = get_db()
+    c = conn.cursor()
+    # Unassign all agents from this user first
+    c.execute('UPDATE agents SET assigned_qa_user_id=NULL WHERE assigned_qa_user_id=%s', (user_id,))
+    c.execute('DELETE FROM users WHERE id=%s AND role=%s', (user_id, 'qa_user'))
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True})
+
+@app.route('/api/qa-users/<int:user_id>/assign', methods=['POST'])
+@require_admin
+def assign_agents_to_qa_user(user_id):
+    """Assign call agents to a QA user. Replaces existing assignments."""
+    data = request.json
+    agent_ids = data.get('agent_ids', [])
+    conn = get_db()
+    c = conn.cursor()
+    # Remove this QA user from all agents first
+    c.execute('UPDATE agents SET assigned_qa_user_id=NULL WHERE assigned_qa_user_id=%s', (user_id,))
+    # Assign selected agents
+    if agent_ids:
+        c.execute(f'UPDATE agents SET assigned_qa_user_id=%s WHERE id = ANY(%s)', (user_id, agent_ids))
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True, 'assigned': len(agent_ids)})
+
+@app.route('/api/qa-users/<int:user_id>/assignments', methods=['GET'])
+@require_admin
+def get_qa_user_assignments(user_id):
+    conn = get_db()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('''
+        SELECT a.*, COUNT(c.id) as total_calls, AVG(c.overall_score) as avg_score,
+            COUNT(CASE WHEN c.status IN (\'Review\',\'Critical\') AND c.overall_score > 0 THEN 1 END) as needs_review
+        FROM agents a
+        LEFT JOIN calls c ON c.agent_name = a.name
+        WHERE a.assigned_qa_user_id = %s
+        GROUP BY a.id ORDER BY a.name ASC
+    ''', (user_id,))
+    agents = [dict(a) for a in c.fetchall()]
+    conn.close()
+    return jsonify(agents)
+
+@app.route('/api/qa-users/performance', methods=['GET'])
+@require_admin
+def qa_user_performance():
+    """Admin view: how each QA user is performing."""
+    conn = get_db()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('''
+        SELECT
+            u.id, u.username, u.full_name, u.last_login,
+            COUNT(DISTINCT a.id) as assigned_agents,
+            COUNT(DISTINCT CASE WHEN c.status IN ('Review','Critical') AND c.overall_score > 0 THEN c.id END) as flagged_calls,
+            COUNT(DISTINCT r.call_id) as resolved_calls,
+            ROUND(AVG(r.ai_resolution_score)) as avg_resolution_score,
+            COUNT(DISTINCT CASE WHEN c.overall_score > 0 THEN c.id END) as total_scored_calls
+        FROM users u
+        LEFT JOIN agents a ON a.assigned_qa_user_id = u.id
+        LEFT JOIN calls c ON c.agent_name = a.name
+        LEFT JOIN resolutions r ON r.qa_user_id = u.id
+        WHERE u.role = 'qa_user'
+        GROUP BY u.id
+        ORDER BY u.full_name ASC
+    ''')
+    perf = [dict(p) for p in c.fetchall()]
+    conn.close()
+    return jsonify(perf)
+
+# ─── RESOLUTIONS ──────────────────────────────────────────────────────────────
+@app.route('/api/resolutions', methods=['POST'])
+@require_login
+def submit_resolution():
+    """QA user submits resolution for a flagged call."""
+    data = request.json
+    call_id = data.get('call_id')
+    actions_taken = (data.get('actions_taken') or '').strip()
+    user = current_user()
+    if not user:
+        return jsonify({'error': 'Not logged in'}), 401
+    if not call_id or not actions_taken:
+        return jsonify({'error': 'call_id and actions_taken required'}), 400
+
+    # Get call details for AI scoring
+    conn = get_db()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('SELECT * FROM calls WHERE call_id=%s', (call_id,))
+    call = c.fetchone()
+    if not call:
+        conn.close()
+        return jsonify({'error': 'Call not found'}), 404
+
+    # AI scores the resolution
+    ai_score = 0
+    ai_feedback = ''
+    try:
+        import anthropic as anthropic_lib
+        client = anthropic_lib.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
+        sc = call.get('scorecard') or '{}'
+        if isinstance(sc, str): sc = json.loads(sc)
+        flags = sc.get('flags', [])
+        flags_text = '\n'.join([f"- {f.get('title','')}: {f.get('description','')}" for f in flags]) or 'No flags'
+        prompt = f"""You are evaluating a QA reviewer's response to a flagged call center call.
+
+Call summary: {call.get('summary','N/A')}
+Call score: {call.get('overall_score',0)}%
+Flags identified:
+{flags_text}
+
+QA reviewer's actions taken:
+{actions_taken}
+
+Score the QA reviewer's response from 0-100 based on:
+- Did they correctly understand what went wrong? (30 points)
+- Were their actions appropriate and specific? (40 points)
+- Was their response thorough and professional? (30 points)
+
+Respond with ONLY valid JSON:
+{{"score": 0-100, "feedback": "2-3 sentence assessment of what they did well and what could be better"}}"""
+        msg = client.messages.create(
+            model='claude-sonnet-4-6',
+            max_tokens=300,
+            messages=[{'role': 'user', 'content': prompt}]
+        )
+        text = msg.content[0].text.strip()
+        start = text.find('{')
+        end = text.rfind('}') + 1
+        if start >= 0 and end > start:
+            result = json.loads(text[start:end])
+            ai_score = result.get('score', 0)
+            ai_feedback = result.get('feedback', '')
+    except Exception as e:
+        print(f'Resolution AI scoring failed: {e}')
+
+    # Save resolution
+    c.execute('''INSERT INTO resolutions (call_id, qa_user_id, actions_taken, ai_resolution_score, ai_resolution_feedback)
+                 VALUES (%s, %s, %s, %s, %s) RETURNING *''',
+              (call_id, user['id'], actions_taken, ai_score, ai_feedback))
+    resolution = dict(c.fetchone())
+    conn.commit()
+    conn.close()
+
+    return jsonify({'success': True, 'ai_score': ai_score, 'ai_feedback': ai_feedback, 'resolution': resolution})
+
+@app.route('/api/resolutions/<call_id>', methods=['GET'])
+@require_login
+def get_resolution(call_id):
+    conn = get_db()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('''SELECT r.*, u.full_name as qa_user_name
+                 FROM resolutions r JOIN users u ON r.qa_user_id = u.id
+                 WHERE r.call_id = %s ORDER BY r.resolved_at DESC LIMIT 1''', (call_id,))
+    res = c.fetchone()
+    conn.close()
+    return jsonify(dict(res) if res else {})
+
 # ─── AGENTS ───────────────────────────────────────────────────────────────────
 @app.route('/api/agents', methods=['GET'])
 def get_agents():
     conn = get_db()
     c = conn.cursor(cursor_factory=RealDictCursor)
-    c.execute('''
-        SELECT a.*, COUNT(c.id) as total_calls, AVG(c.overall_score) as avg_score
-        FROM agents a
-        LEFT JOIN calls c ON c.agent_name = a.name
-        GROUP BY a.id ORDER BY a.name ASC
-    ''')
+    user = current_user()
+    if user and user['role'] == 'qa_user':
+        c.execute('''
+            SELECT a.*, COUNT(c.id) as total_calls, AVG(c.overall_score) as avg_score
+            FROM agents a
+            LEFT JOIN calls c ON c.agent_name = a.name
+            WHERE a.assigned_qa_user_id = %s
+            GROUP BY a.id ORDER BY a.name ASC
+        ''', (user['id'],))
+    else:
+        c.execute('''
+            SELECT a.*, COUNT(c.id) as total_calls, AVG(c.overall_score) as avg_score,
+                u.full_name as qa_user_name, u.username as qa_user_username
+            FROM agents a
+            LEFT JOIN calls c ON c.agent_name = a.name
+            LEFT JOIN users u ON u.id = a.assigned_qa_user_id
+            GROUP BY a.id, u.id ORDER BY a.name ASC
+        ''')
     agents = [dict(a) for a in c.fetchall()]
     conn.close()
     return jsonify(agents)
@@ -437,7 +682,17 @@ def delete_agent(agent_id):
 def get_calls():
     conn = get_db()
     c = conn.cursor(cursor_factory=RealDictCursor)
-    c.execute('SELECT * FROM calls ORDER BY created_at DESC LIMIT 100')
+    user = current_user()
+    # QA users only see calls from their assigned agents
+    if user and user['role'] == 'qa_user':
+        c.execute('''
+            SELECT calls.* FROM calls
+            JOIN agents ON agents.name = calls.agent_name
+            WHERE agents.assigned_qa_user_id = %s
+            ORDER BY calls.created_at DESC LIMIT 100
+        ''', (user['id'],))
+    else:
+        c.execute('SELECT * FROM calls ORDER BY created_at DESC LIMIT 100')
     calls = [dict(c) for c in c.fetchall()]
     conn.close()
     return jsonify(calls)
