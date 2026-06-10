@@ -720,7 +720,7 @@ def retry_stuck_calls():
         AND overall_score = 0
         AND created_at < NOW() - INTERVAL '5 minutes'
         ORDER BY created_at ASC
-        LIMIT 10
+        LIMIT 20
     ''')
     stuck_calls = [dict(c) for c in c.fetchall()]
     conn.close()
@@ -809,8 +809,8 @@ def retry_stuck_calls():
                     try: os.remove(audio_path)
                     except: pass
 
-                # Wait 30 seconds between calls to avoid overloading
-                time.sleep(30)
+                # Wait 15 seconds between calls to avoid overloading
+                time.sleep(15)
 
             except Exception as e:
                 print(f"[Retry] ❌ Failed {call.get('call_id')}: {e}")
@@ -822,7 +822,7 @@ def retry_stuck_calls():
                     conn3.close()
                 except: pass
                 # Still wait before next call even on failure
-                time.sleep(10)
+                time.sleep(5)
 
     # Run in background thread
     thread = threading.Thread(target=process_batch, daemon=True)
