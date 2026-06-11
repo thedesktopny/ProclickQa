@@ -889,8 +889,18 @@ async function checkAuth(){
     if(roleEl) roleEl.textContent=currentRole==='admin'?'Admin':'QA Reviewer';
     document.querySelectorAll('.admin-only').forEach(el=>{el.style.display=isAdmin?'':'none';});
     document.body.style.visibility='visible';
-    await Promise.all([loadStats(),loadRules(),loadCalls(),loadAgents(),loadAnalytics(),loadBilling(),loadNotes()]);
-    renderAll();
+
+    // Load critical data first — show dashboard fast
+    await Promise.all([loadStats(), loadCalls()]);
+    renderDashboard();
+    renderCalls();
+    renderPagination();
+    updateBadges();
+
+    // Load rest in background — don't block UI
+    Promise.all([loadRules(), loadAgents(), loadAnalytics(), loadBilling(), loadNotes()])
+      .then(()=>{ renderRules(); renderAgents(); renderAnalytics(); renderBilling(); renderNotes(); renderAlerts(); renderHumanReview(); });
+
   }catch(e){
     if(e.message==='Unauthorized'){
       clearToken();

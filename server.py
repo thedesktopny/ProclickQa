@@ -25,7 +25,7 @@ def make_session_permanent():
     session.permanent = True
     if request.method == 'OPTIONS':
         return '', 204
-CORS(app, supports_credentials=True, resources={r"/api/*": {"origins": "*", "allow_headers": ["Content-Type", "Authorization", "X-Auth-Token"], "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"]}})
+CORS(app, resources={r"/api/*": {"origins": "*", "allow_headers": ["Content-Type", "Authorization", "X-Auth-Token"], "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"]}})
 
 ADMIN_USERNAME = os.getenv('ADMIN_USERNAME', 'david')
 ADMIN_PASSWORD = hashlib.sha256(os.getenv('ADMIN_PASSWORD', 'admin123').encode()).hexdigest()
@@ -1112,7 +1112,13 @@ def get_calls():
         c.execute('SELECT COUNT(*) FROM calls JOIN agents ON agents.name = calls.agent_name WHERE agents.assigned_qa_user_id = %s', (user['id'],))
         total = c.fetchone()['count']
         c.execute('''
-            SELECT calls.* FROM calls
+            SELECT calls.call_id, calls.agent_name, calls.account_name, calls.customer_account_id,
+                   calls.caller_id, calls.created_at, calls.duration, calls.billed_minutes,
+                   calls.overall_score, calls.status, calls.emotion, calls.flags,
+                   calls.call_end_first, calls.call_notes, calls.notes_score,
+                   calls.requires_human_review, calls.agent_qos_tx, calls.agent_qos_rx,
+                   calls.customer_qos_tx, calls.customer_qos_rx, calls.recording_url
+            FROM calls
             JOIN agents ON agents.name = calls.agent_name
             WHERE agents.assigned_qa_user_id = %s
             ORDER BY calls.created_at DESC LIMIT %s OFFSET %s
@@ -1120,7 +1126,14 @@ def get_calls():
     else:
         c.execute('SELECT COUNT(*) FROM calls')
         total = c.fetchone()['count']
-        c.execute('SELECT * FROM calls ORDER BY created_at DESC LIMIT %s OFFSET %s', (limit, offset))
+        c.execute('''
+            SELECT call_id, agent_name, account_name, customer_account_id, caller_id,
+                   created_at, duration, billed_minutes, overall_score, status, emotion,
+                   flags, call_end_first, call_notes, notes_score, requires_human_review,
+                   agent_qos_tx, agent_qos_rx, customer_qos_tx, customer_qos_rx, recording_url
+            FROM calls
+            ORDER BY created_at DESC LIMIT %s OFFSET %s
+        ''', (limit, offset))
     calls = [dict(c) for c in c.fetchall()]
     conn.close()
     return jsonify({
