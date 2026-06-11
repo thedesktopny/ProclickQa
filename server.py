@@ -23,7 +23,9 @@ app.config['SESSION_REFRESH_EACH_REQUEST'] = True
 @app.before_request
 def make_session_permanent():
     session.permanent = True
-CORS(app)
+    if request.method == 'OPTIONS':
+        return '', 204
+CORS(app, supports_credentials=True, resources={r"/api/*": {"origins": "*", "allow_headers": ["Content-Type", "Authorization", "X-Auth-Token"], "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"]}})
 
 ADMIN_USERNAME = os.getenv('ADMIN_USERNAME', 'david')
 ADMIN_PASSWORD = hashlib.sha256(os.getenv('ADMIN_PASSWORD', 'admin123').encode()).hexdigest()
@@ -211,6 +213,15 @@ def init_db():
         "ALTER TABLE calls ADD COLUMN IF NOT EXISTS summary TEXT",
         "CREATE UNIQUE INDEX IF NOT EXISTS agents_name_unique ON agents (name)",
         "ALTER TABLE agents ADD COLUMN IF NOT EXISTS assigned_qa_user_id INTEGER",
+        """CREATE TABLE IF NOT EXISTS auth_tokens (
+            token TEXT PRIMARY KEY,
+            user_id INTEGER,
+            role TEXT NOT NULL DEFAULT 'admin',
+            username TEXT,
+            full_name TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            expires_at TIMESTAMP
+        )""",
     ]
     for sql in migrations:
         try:
@@ -260,19 +271,18 @@ _token_cache = {}
 def create_token(user_data):
     token = secrets.token_urlsafe(32)
     _token_cache[token] = user_data
-    # Also save to DB for persistence across restarts
     try:
         conn = get_db()
         c = conn.cursor()
         c.execute('''INSERT INTO auth_tokens (token, user_id, role, username, full_name, expires_at)
-                     VALUES (%s, %s, %s, %s, %s, NOW() + INTERVAL '30 days')
-                     ON CONFLICT (token) DO NOTHING''',
-                  (token, user_data.get('id'), user_data.get('role'),
+                     VALUES (%s, %s, %s, %s, %s, NOW() + INTERVAL '30 days')''',
+                  (token, user_data.get('id'), user_data.get('role','admin'),
                    user_data.get('username'), user_data.get('full_name')))
         conn.commit()
         conn.close()
+        print(f"[Auth] Token created for {user_data.get('username')} and saved to DB")
     except Exception as e:
-        print(f'Token save warning: {e}')
+        print(f'[Auth] Token DB save failed (will use memory cache): {e}')
     return token
 
 def get_token_user(token):
@@ -1661,7 +1671,29 @@ def retry_stuck_calls():
         'call_ids': [c['call_id'] for c in stuck_calls]
     })
 
-@app.route('/api/analyze/status', methods=['GET'])
+@app.route('/api/auth-debug', methods=['GET'])
+def auth_debug():
+    """Debug endpoint to check token status."""
+    token = get_request_token()
+    cache_hit = token in _token_cache if token else False
+    db_result = None
+    try:
+        if token:
+            conn = get_db()
+            c = conn.cursor(cursor_factory=RealDictCursor)
+            c.execute('SELECT username, role, expires_at FROM auth_tokens WHERE token=%s', (token,))
+            row = c.fetchone()
+            db_result = dict(row) if row else 'not found in DB'
+            conn.close()
+    except Exception as e:
+        db_result = f'DB error: {str(e)}'
+    return jsonify({
+        'token_present': bool(token),
+        'token_prefix': token[:8] + '...' if token else None,
+        'cache_hit': cache_hit,
+        'db_result': db_result,
+        'cache_size': len(_token_cache)
+    })
 def analyze_status():
     anthropic_key = os.getenv('ANTHROPIC_API_KEY', '')
     gemini_key = os.getenv('GEMINI_API_KEY', '')
