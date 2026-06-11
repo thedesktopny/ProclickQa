@@ -1345,7 +1345,7 @@ async function openAgentProfile(agentName){
   document.getElementById('agent-profile-title').textContent = agentName;
   document.getElementById('agent-profile-body').innerHTML='<div style="text-align:center;padding:48px;color:var(--text3);">Loading profile...</div>';
   try{
-    const data=await API.get(`/api/agents/${encodeURIComponent(agentName)}/profile`);
+    const data=await API.get(`/api/agent-profile/${encodeURIComponent(agentName)}`);
     renderAgentProfile(data);
   }catch(e){
     document.getElementById('agent-profile-body').innerHTML=`<div style="text-align:center;padding:48px;color:var(--red);">Failed to load: ${e.message}</div>`;

@@ -916,7 +916,7 @@ def get_resolution(call_id):
     return jsonify(dict(res) if res else {})
 
 # ─── AGENTS ───────────────────────────────────────────────────────────────────
-@app.route('/api/agents/<agent_name>/profile', methods=['GET'])
+@app.route('/api/agent-profile/<path:agent_name>', methods=['GET'])
 def agent_profile(agent_name):
     conn = get_db()
     c = conn.cursor(cursor_factory=RealDictCursor)
@@ -1026,6 +1026,9 @@ def agent_profile(agent_name):
         'emotion_distribution': emotion_counts,
         'recent_calls': calls[:20]
     })
+
+@app.route('/api/agents', methods=['GET'])
+def get_agents():
     conn = get_db()
     c = conn.cursor(cursor_factory=RealDictCursor)
     user = current_user()
