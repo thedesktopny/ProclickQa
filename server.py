@@ -420,7 +420,87 @@ def auth_check():
     return jsonify({'authenticated': False})
 
 # ─── RULES ────────────────────────────────────────────────────────────────────
-@app.route('/api/rules', methods=['GET'])
+@app.route('/api/rules/<int:rule_id>/violations', methods=['GET'])
+def get_rule_violations(rule_id):
+    conn = get_db()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+
+    # Get rule info
+    c.execute('SELECT * FROM rules WHERE id=%s', (rule_id,))
+    rule = c.fetchone()
+    if not rule:
+        conn.close()
+        return jsonify({'error': 'Rule not found'}), 404
+
+    rule = dict(rule)
+    rule_desc = rule['description'].lower()
+
+    # Find calls where this rule was violated from rule_results table
+    c.execute('''
+        SELECT rr.call_id, rr.evidence, rr.confidence,
+               ca.agent_name, ca.account_name, ca.created_at,
+               ca.overall_score, ca.status, ca.emotion
+        FROM rule_results rr
+        JOIN calls ca ON ca.call_id = rr.call_id
+        WHERE rr.passed = false
+        AND LOWER(rr.rule_description) LIKE %s
+        ORDER BY ca.created_at DESC
+        LIMIT 100
+    ''', (f'%{rule_desc[:30]}%',))
+    violations = [dict(v) for v in c.fetchall()]
+
+    # Also search scorecard JSON for calls without rule_results entries
+    if len(violations) < 5:
+        c.execute('''
+            SELECT call_id, agent_name, account_name, created_at,
+                   overall_score, status, emotion, scorecard
+            FROM calls
+            WHERE overall_score > 0
+            AND scorecard IS NOT NULL
+            AND scorecard::text LIKE %s
+            ORDER BY created_at DESC
+            LIMIT 50
+        ''', (f'%{rule_desc[:20]}%',))
+        for row in c.fetchall():
+            if not any(v['call_id'] == row['call_id'] for v in violations):
+                try:
+                    sc = json.loads(row['scorecard']) if isinstance(row['scorecard'], str) else row['scorecard']
+                    for rule_eval in sc.get('rules_evaluation', []):
+                        if not rule_eval.get('passed') and rule_desc[:20].lower() in rule_eval.get('rule','').lower():
+                            violations.append({
+                                'call_id': row['call_id'],
+                                'agent_name': row['agent_name'],
+                                'account_name': row['account_name'],
+                                'created_at': row['created_at'],
+                                'overall_score': row['overall_score'],
+                                'status': row['status'],
+                                'emotion': row['emotion'],
+                                'evidence': rule_eval.get('evidence','')
+                            })
+                except: pass
+
+    # Aggregate by agent
+    agent_counts = {}
+    for v in violations:
+        name = v['agent_name'] or 'Unknown'
+        if name not in agent_counts:
+            agent_counts[name] = {'count': 0, 'calls': []}
+        agent_counts[name]['count'] += 1
+        if len(agent_counts[name]['calls']) < 5:
+            agent_counts[name]['calls'].append(v)
+
+    agents_summary = sorted(
+        [{'agent': k, 'count': v['count'], 'calls': v['calls']} for k, v in agent_counts.items()],
+        key=lambda x: x['count'], reverse=True
+    )
+
+    conn.close()
+    return jsonify({
+        'rule': rule,
+        'total_violations': len(violations),
+        'agents_summary': agents_summary,
+        'recent_violations': violations[:20]
+    })
 def get_rules():
     conn = get_db()
     c = conn.cursor(cursor_factory=RealDictCursor)

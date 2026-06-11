@@ -539,6 +539,37 @@ td.agent{color:var(--text);font-weight:500;}
       </div>
     </div>
     <div class="card" id="rules-list"></div>
+
+    <!-- Rule Violation Drill-down Panel -->
+    <div id="rule-violation-panel" style="display:none;margin-top:16px;">
+      <div style="background:var(--surface);border:2px solid var(--accent);border-radius:14px;padding:24px;">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:20px;">
+          <div>
+            <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:var(--text3);margin-bottom:6px;">Rule Violation Analysis</div>
+            <div id="rv-rule-text" style="font-size:15px;font-weight:600;max-width:700px;"></div>
+            <div id="rv-rule-meta" style="margin-top:6px;display:flex;gap:8px;"></div>
+          </div>
+          <button onclick="closeRuleViolations()" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:22px;flex-shrink:0;">✕</button>
+        </div>
+
+        <!-- Summary stats -->
+        <div id="rv-stats" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px;"></div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+          <!-- By agent -->
+          <div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:16px;">
+            <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:var(--text3);margin-bottom:12px;">👥 Violations by Agent</div>
+            <div id="rv-agents"></div>
+          </div>
+
+          <!-- Recent violations -->
+          <div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:16px;">
+            <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:var(--text3);margin-bottom:12px;">📋 Recent Violations</div>
+            <div id="rv-recent" style="max-height:320px;overflow-y:auto;"></div>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -2604,13 +2635,120 @@ function renderNotes(){
 function renderRules(){
   const container=document.getElementById('rules-list');
   if(!container)return;
-  set('rules-count',`${rules.filter(r=>r.active).length} active rules`);
+  set('rules-count',`${rules.filter(r=>r.active).length} active · ${rules.length} total`);
   if(rules.length===0){container.innerHTML='<div style="padding:24px;text-align:center;color:var(--text3)">No rules yet.</div>';return;}
-  container.innerHTML=rules.map(rule=>{
-    const sc=rule.severity==='Critical'?'badge-red':rule.severity==='Warning'?'badge-yellow':'badge-blue';
-    const dc=rule.severity==='Critical'?'var(--red)':rule.severity==='Warning'?'var(--yellow)':'var(--accent)';
-    return `<div class="rule-item"><div class="rule-dot" style="background:${dc}"></div><div class="rule-text">${rule.description}</div><span class="badge ${sc}" style="white-space:nowrap">${rule.category}</span><div class="toggle ${rule.active?'':'off'}" onclick="toggleRule(${rule.id})"></div>${isAdmin?`<button onclick="deleteRule(${rule.id})" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:16px;padding:4px 8px;">🗑</button>`:''}</div>`;
-  }).join('');
+  container.innerHTML=`
+    <div style="padding:12px 20px;font-size:11px;color:var(--text3);border-bottom:1px solid var(--border);">
+      Click any rule to see which agents violated it and which calls triggered it.
+    </div>
+    ${rules.map(rule=>{
+      const sc=rule.severity==='Critical'?'badge-red':rule.severity==='Warning'?'badge-yellow':'badge-blue';
+      const dc=rule.severity==='Critical'?'var(--red)':rule.severity==='Warning'?'var(--yellow)':'var(--accent)';
+      return `<div class="rule-item" style="cursor:pointer;transition:background 0.15s;" onclick="loadRuleViolations(${rule.id})" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background='none'">
+        <div class="rule-dot" style="background:${dc}"></div>
+        <div class="rule-text" style="flex:1;">${rule.description}</div>
+        <span class="badge ${sc}" style="white-space:nowrap;flex-shrink:0;">${rule.category}</span>
+        <span style="font-size:10px;color:var(--text3);margin:0 8px;flex-shrink:0;">Click to analyze →</span>
+        <div class="toggle ${rule.active?'':'off'}" onclick="event.stopPropagation();toggleRule(${rule.id})"></div>
+        ${isAdmin?`<button onclick="event.stopPropagation();deleteRule(${rule.id})" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:16px;padding:4px 8px;">🗑</button>`:''}
+      </div>`;
+    }).join('')}`;
+}
+
+async function loadRuleViolations(ruleId){
+  const panel = document.getElementById('rule-violation-panel');
+  panel.style.display = 'block';
+  panel.scrollIntoView({behavior:'smooth'});
+
+  // Show loading
+  document.getElementById('rv-rule-text').textContent = 'Loading...';
+  document.getElementById('rv-rule-meta').innerHTML = '';
+  document.getElementById('rv-stats').innerHTML = '';
+  document.getElementById('rv-agents').innerHTML = '<div style="color:var(--text3);font-size:12px;padding:12px;">Loading...</div>';
+  document.getElementById('rv-recent').innerHTML = '<div style="color:var(--text3);font-size:12px;padding:12px;">Loading...</div>';
+
+  try{
+    const data = await API.get(`/api/rules/${ruleId}/violations`);
+    renderRuleViolations(data);
+  }catch(e){
+    document.getElementById('rv-rule-text').textContent = 'Failed to load: ' + e.message;
+  }
+}
+
+function renderRuleViolations(data){
+  const {rule, total_violations, agents_summary, recent_violations} = data;
+  const sevColor = rule.severity==='Critical'?'var(--red)':rule.severity==='Warning'?'var(--yellow)':'var(--accent)';
+  const sevBadge = rule.severity==='Critical'?'badge-red':rule.severity==='Warning'?'badge-yellow':'badge-blue';
+
+  document.getElementById('rv-rule-text').textContent = rule.description;
+  document.getElementById('rv-rule-meta').innerHTML = `
+    <span class="badge ${sevBadge}">${rule.severity}</span>
+    <span class="badge badge-gray">${rule.category}</span>
+    <span class="badge ${rule.active?'badge-green':'badge-gray'}">${rule.active?'Active':'Inactive'}</span>`;
+
+  // Stats
+  const worstAgent = agents_summary[0];
+  document.getElementById('rv-stats').innerHTML = `
+    <div style="background:var(--surface2);border-radius:10px;padding:14px;text-align:center;border:1px solid ${sevColor}33;">
+      <div style="font-size:28px;font-weight:800;color:${sevColor};">${total_violations}</div>
+      <div style="font-size:11px;color:var(--text3);">Total Violations</div>
+    </div>
+    <div style="background:var(--surface2);border-radius:10px;padding:14px;text-align:center;">
+      <div style="font-size:28px;font-weight:800;color:var(--accent);">${agents_summary.length}</div>
+      <div style="font-size:11px;color:var(--text3);">Agents Involved</div>
+    </div>
+    <div style="background:var(--surface2);border-radius:10px;padding:14px;text-align:center;">
+      <div style="font-size:18px;font-weight:700;color:var(--red);">${worstAgent?worstAgent.agent:'—'}</div>
+      <div style="font-size:11px;color:var(--text3);">Most Violations</div>
+      <div style="font-size:10px;color:var(--text3);">${worstAgent?worstAgent.count+'x':''}</div>
+    </div>
+    <div style="background:var(--surface2);border-radius:10px;padding:14px;text-align:center;">
+      <div style="font-size:28px;font-weight:800;color:${total_violations===0?'var(--green)':'var(--red)'};">${total_violations===0?'✅':'⚠️'}</div>
+      <div style="font-size:11px;color:var(--text3);">${total_violations===0?'No Issues':'Needs Attention'}</div>
+    </div>`;
+
+  // By agent
+  const agentsEl = document.getElementById('rv-agents');
+  if(!agents_summary.length){
+    agentsEl.innerHTML = '<div style="color:var(--green);font-size:12px;text-align:center;padding:16px;">✅ No violations found for this rule!</div>';
+  } else {
+    const max = agents_summary[0].count;
+    agentsEl.innerHTML = agents_summary.map(a=>{
+      const pct = Math.round((a.count/max)*100);
+      const initials = a.agent.split(' ').map(n=>n[0]).join('').toUpperCase().slice(0,2);
+      return `<div style="margin-bottom:10px;">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+          <div style="width:28px;height:28px;border-radius:50%;background:rgba(242,78,78,0.15);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:var(--red);flex-shrink:0;">${initials}</div>
+          <span style="font-size:12px;font-weight:500;flex:1;">${a.agent}</span>
+          <span class="badge badge-red">${a.count}x</span>
+        </div>
+        <div style="height:6px;background:var(--surface);border-radius:3px;margin-left:36px;">
+          <div style="height:100%;width:${pct}%;background:var(--red);border-radius:3px;"></div>
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  // Recent violations
+  const recentEl = document.getElementById('rv-recent');
+  if(!recent_violations.length){
+    recentEl.innerHTML = '<div style="color:var(--green);font-size:12px;text-align:center;padding:16px;">✅ No violations found!</div>';
+  } else {
+    recentEl.innerHTML = recent_violations.map(v=>`
+      <div onclick="openCallDetail('${v.call_id}')" style="padding:10px;border-radius:8px;border:1px solid var(--border);margin-bottom:6px;cursor:pointer;transition:opacity 0.15s;" onmouseover="this.style.opacity='0.8'" onmouseout="this.style.opacity='1'">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+          <span style="font-size:12px;font-weight:600;">${v.agent_name||'—'}</span>
+          <span style="font-size:11px;font-weight:700;color:${(v.overall_score||0)>=80?'var(--green)':(v.overall_score||0)>=70?'var(--yellow)':'var(--red)'};">${v.overall_score||0}%</span>
+        </div>
+        <div style="font-size:11px;color:var(--text2);">${v.account_name||'—'} · ${formatDate(v.created_at)}</div>
+        ${v.evidence?`<div style="font-size:10px;color:var(--text3);margin-top:4px;font-style:italic;">${v.evidence}</div>`:''}
+        <div style="font-size:10px;color:var(--accent);margin-top:3px;">Click to open call →</div>
+      </div>`).join('');
+  }
+}
+
+function closeRuleViolations(){
+  document.getElementById('rule-violation-panel').style.display='none';
 }
 
 async function addRule(){
