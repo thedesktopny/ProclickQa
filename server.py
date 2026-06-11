@@ -1209,6 +1209,37 @@ def get_stats():
     needs_review = c.fetchone()['v']
     c.execute("SELECT COUNT(*) as v FROM calls WHERE call_end_first='drop' AND callback_made=false AND status != 'Processing'")
     unresolved_drops = c.fetchone()['v']
+
+    # Category averages from scorecard JSON
+    cat_avgs = {}
+    try:
+        c.execute("""
+            SELECT
+                ROUND(AVG((scorecard::json->'category_scores'->'accuracy_and_information'->>'score')::numeric)) as accuracy,
+                ROUND(AVG((scorecard::json->'category_scores'->'customer_service_quality'->>'score')::numeric)) as customer_service,
+                ROUND(AVG((scorecard::json->'category_scores'->'active_listening'->>'score')::numeric)) as active_listening,
+                ROUND(AVG((scorecard::json->'category_scores'->'compliance_and_handling'->>'score')::numeric)) as compliance,
+                ROUND(AVG((scorecard::json->'category_scores'->'emotion_management'->>'score')::numeric)) as emotion_management,
+                ROUND(AVG((scorecard::json->'category_scores'->'documentation_quality'->>'score')::numeric)) as documentation,
+                ROUND(AVG((scorecard::json->'category_scores'->'script_and_language'->>'score')::numeric)) as script,
+                ROUND(AVG((scorecard::json->'category_scores'->'call_closure'->>'score')::numeric)) as call_closure
+            FROM calls WHERE overall_score > 0 AND scorecard IS NOT NULL AND scorecard != '{}'
+        """)
+        row = c.fetchone()
+        if row:
+            cat_avgs = {
+                'accuracy_and_information': int(row['accuracy'] or 0),
+                'customer_service_quality': int(row['customer_service'] or 0),
+                'active_listening': int(row['active_listening'] or 0),
+                'compliance_and_handling': int(row['compliance'] or 0),
+                'emotion_management': int(row['emotion_management'] or 0),
+                'documentation_quality': int(row['documentation'] or 0),
+                'script_and_language': int(row['script'] or 0),
+                'call_closure': int(row['call_closure'] or 0),
+            }
+    except Exception as e:
+        print(f'Category avg error: {e}')
+
     conn.close()
     return jsonify({
         'total_calls': total_calls,
@@ -1218,7 +1249,8 @@ def get_stats():
         'active_rules': active_rules,
         'active_agents': active_agents,
         'needs_human_review': needs_review,
-        'unresolved_drops': unresolved_drops
+        'unresolved_drops': unresolved_drops,
+        'category_averages': cat_avgs
     })
 
 # ─── ANALYTICS ────────────────────────────────────────────────────────────────

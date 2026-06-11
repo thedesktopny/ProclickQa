@@ -1553,7 +1553,6 @@ function renderDashboard(){
 function renderCategoryScores(){
   const el=document.getElementById('category-scores-container');
   if(!el)return;
-  // Aggregate from recent calls
   const cats=[
     {key:'accuracy_and_information',label:'Accuracy & Information'},
     {key:'customer_service_quality',label:'Customer Service Quality'},
@@ -1564,15 +1563,30 @@ function renderCategoryScores(){
     {key:'script_and_language',label:'Script & Language'},
     {key:'call_closure',label:'Call Closure'},
   ];
-  const scored=calls.filter(c=>c.scorecard&&c.overall_score>0);
-  if(scored.length===0){el.innerHTML='<div style="color:var(--text3);font-size:12px;">No scored calls yet.</div>';return;}
+
+  // Use server-side category averages from stats (fast, no scorecard parsing)
+  const catAvgs = stats.category_averages || {};
+  const hasData = Object.values(catAvgs).some(v=>v>0);
+
+  if(!hasData){
+    // Fall back to scanning current page calls
+    const scored=calls.filter(c=>c.scorecard&&c.overall_score>0);
+    if(scored.length===0){el.innerHTML='<div style="color:var(--text3);font-size:12px;">No scored calls yet.</div>';return;}
+    el.innerHTML=cats.map(cat=>{
+      let total=0,count=0;
+      scored.forEach(c=>{
+        try{const sc=typeof c.scorecard==='string'?JSON.parse(c.scorecard):c.scorecard;
+          if(sc&&sc.category_scores&&sc.category_scores[cat.key]){total+=sc.category_scores[cat.key].score;count++;}}catch(e){}
+      });
+      const avg=count>0?Math.round(total/count):0;
+      const color=avg>=80?'var(--green)':avg>=70?'var(--yellow)':'var(--red)';
+      return `<div class="score-item"><div class="score-row"><span class="score-label">${cat.label}</span><span class="score-pct" style="color:${color}">${avg}%</span></div><div class="score-bar"><div class="score-fill" style="width:${avg}%;background:${color}"></div></div></div>`;
+    }).join('');
+    return;
+  }
+
   el.innerHTML=cats.map(cat=>{
-    let total=0,count=0;
-    scored.forEach(c=>{
-      try{const sc=typeof c.scorecard==='string'?JSON.parse(c.scorecard):c.scorecard;
-        if(sc.category_scores&&sc.category_scores[cat.key]){total+=sc.category_scores[cat.key].score;count++;}}catch(e){}
-    });
-    const avg=count>0?Math.round(total/count):0;
+    const avg=catAvgs[cat.key]||0;
     const color=avg>=80?'var(--green)':avg>=70?'var(--yellow)':'var(--red)';
     return `<div class="score-item"><div class="score-row"><span class="score-label">${cat.label}</span><span class="score-pct" style="color:${color}">${avg}%</span></div><div class="score-bar"><div class="score-fill" style="width:${avg}%;background:${color}"></div></div></div>`;
   }).join('');
@@ -2562,8 +2576,8 @@ function renderBilling(){
   if(!tbody)return;
   if(agents_data.length===0){tbody.innerHTML='<tr><td colspan="7" style="text-align:center;padding:32px;color:var(--text3)">No billing data yet.</td></tr>';return;}
   tbody.innerHTML=agents_data.map(a=>{
-    const actual=a.actual_minutes||0;
-    const billed=a.total_billed_minutes||0;
+    const actual=parseFloat(a.actual_minutes||0);
+    const billed=parseFloat(a.total_billed_minutes||0);
     const diff=billed-actual;
     const diffColor=Math.abs(diff)>5?'var(--red)':Math.abs(diff)>2?'var(--yellow)':'var(--green)';
     const diffText=(diff>=0?'+':'')+diff.toFixed(1);
