@@ -90,7 +90,7 @@ def analyze_audio_with_gemini(audio_path):
                 '.ogg':'audio/ogg','.flac':'audio/flac','.webm':'audio/webm'}
     mime_type = mime_map.get(ext, 'audio/wav')
 
-    prompt = """You are a call center audio analyst. Listen to this call carefully.
+    prompt = """You are a call center audio analyst. Listen to this call carefully, with special attention to WHEN things happen (exact timestamps).
 
 Respond ONLY with valid JSON — keep all text values SHORT (max 100 chars each) to avoid truncation:
 
@@ -126,8 +126,23 @@ Respond ONLY with valid JSON — keep all text values SHORT (max 100 chars each)
   "summary": "2-3 sentence summary max",
   "agent_uncertainty_phrases": ["phrase1", "phrase2"],
   "explicit_content_detected": true/false,
-  "explicit_content_description": ""
-}"""
+  "explicit_content_description": "",
+  "flagged_moments": [
+    {
+      "timestamp_seconds": 0,
+      "timestamp_display": "mm:ss",
+      "category": "explicit_content/policy_violation/compliance_failure/rudeness/no_verification/no_price_confirmation/no_logout_confirmation/outside_work_solicitation/minor_concern/other",
+      "speaker": "AGENT/CUSTOMER",
+      "quote": "exact or near-exact words spoken, max 80 chars",
+      "severity": "Critical/Warning",
+      "description": "what happened, max 80 chars"
+    }
+  ]
+}
+
+IMPORTANT for flagged_moments: only include moments that are CONCRETE, VERIFIABLE, and TIED TO A SPECIFIC POINT in the audio — not general impressions about the whole call. Each entry must have an accurate timestamp_seconds (total seconds from call start) so we can jump directly to that exact second in playback. Include things like: explicit/sexual language by either party, agent discussing outside work, agent failing to verify identity/price/logout at the specific moment that should have happened, rude or unprofessional remarks, policy violations. Do NOT include vague category-level issues (e.g. "agent seemed unprofessional overall") — only specific moments with an exact timestamp and quote. If nothing flag-worthy occurred, return an empty array."""
+
+
 
     response = model.generate_content(
         [{'mime_type': mime_type, 'data': audio_b64}, prompt],
@@ -175,9 +190,14 @@ Respond ONLY with valid JSON — keep all text values SHORT (max 100 chars each)
                 "summary": "Audio analysis could not be completed — file may be too large.",
                 "agent_uncertainty_phrases": [],
                 "explicit_content_detected": False,
-                "explicit_content_description": ""
+                "explicit_content_description": "",
+                "flagged_moments": []
             }
     print(f"[Gemini] Done. Emotion: {result['emotion_analysis']['customer_emotion_overall']}")
+
+    # Defensive: ensure flagged_moments always exists even if Gemini omits it
+    if 'flagged_moments' not in result:
+        result['flagged_moments'] = []
 
     # Track usage
     try:
@@ -204,6 +224,14 @@ def score_call_with_claude(gemini_result, rules, call_end_first='customer',
     summary = gemini_result.get('summary', '')
     uncertainty_phrases = gemini_result.get('agent_uncertainty_phrases', [])
     explicit_detected = gemini_result.get('explicit_content_detected', False)
+    flagged_moments = gemini_result.get('flagged_moments', [])
+
+    flagged_moments_text = ''
+    if flagged_moments:
+        flagged_moments_text = '\n'.join([
+            f"- [{m.get('timestamp_display','?')} / {m.get('timestamp_seconds',0)}s] {m.get('speaker','?')}: \"{m.get('quote','')}\" — {m.get('category','')} ({m.get('severity','Warning')})"
+            for m in flagged_moments
+        ])
 
     rules_text = '\n'.join([
         f"- [{r['severity'].upper()}] ({r['category']}) {r['description']}"
@@ -241,6 +269,9 @@ Emotion: {emotion.get('customer_emotion_start')}→{emotion.get('customer_emotio
 Agent tone:{emotion.get('agent_tone')} | Talk ratio:{emotion.get('agent_talk_ratio',50)}% | Uncertainty phrases:{uncertainty_phrases}
 Audio:{audio_quality.get('overall')} | Noise:{audio_quality.get('background_noise',False)} | Explicit:{explicit_detected}
 
+SPECIFIC TIMESTAMPED MOMENTS FOUND IN AUDIO (use these exact timestamps for any matching flag — do not invent your own):
+{flagged_moments_text if flagged_moments_text else 'None detected by audio analysis.'}
+
 QA RULES (evaluate each):
 {rules_text}
 
@@ -250,10 +281,11 @@ NOTES SCORING: 0=no notes, 1-40=vague, 41-70=basic, 71-85=good, 86-100=excellent
 CALL END: agent ended early + unresolved = flag. Drop + no callback = Critical.
 AGE CONCERN: young-sounding customer + adult requests = human review.
 OUTSIDE WORK: agent hinting at private work = Critical flag.
+FLAG TIMESTAMPS: when a flag corresponds to one of the specific timestamped moments above, copy its exact timestamp_seconds value into that flag's "timestamp_seconds" field and its quote into "evidence_quote", so the user can jump straight to that second in the recording. If a flag is a general pattern across the whole call with no single moment (e.g. "agent talked too fast overall"), leave timestamp_seconds as 0.
 
 Respond ONLY with valid compact JSON (keep evidence under 60 chars each):
 
-{{"overall_score":0,"confidence":0,"status":"Passed/Review/Critical","requires_human_review":false,"human_review_reason":"","category_scores":{{"accuracy_and_information":{{"score":0,"evidence":"brief","passed":true}},"customer_service_quality":{{"score":0,"evidence":"brief","passed":true}},"active_listening":{{"score":0,"evidence":"brief","passed":true}},"appropriate_actions":{{"score":0,"evidence":"brief","passed":true}},"compliance_and_handling":{{"score":0,"evidence":"brief","passed":true}},"emotion_management":{{"score":0,"evidence":"brief","passed":true}},"script_and_language":{{"score":0,"evidence":"brief","passed":true}},"documentation_quality":{{"score":0,"evidence":"brief","passed":true}},"audio_and_technical":{{"score":0,"evidence":"brief","passed":true}},"call_closure":{{"score":0,"evidence":"brief","passed":true}}}},"notes_score":0,"notes_feedback":"brief","rules_evaluation":[{{"rule":"rule text","category":"cat","severity":"Critical/Warning/Info","passed":true,"confidence":0,"evidence":"brief"}}],"flags":[{{"title":"title","description":"under 100 chars","severity":"Critical/Warning","timestamp":""}}],"emotion_delta":{{"start":"{emotion.get('customer_emotion_start','Neutral')}","end":"{emotion.get('customer_emotion_end','Neutral')}","improved":false,"summary":"brief"}},"age_concern":{{"flagged":false,"reason":""}},"call_end_assessment":"brief","coaching_notes":"2-3 points max","positive_highlights":"1-2 points max"}}"""
+{{"overall_score":0,"confidence":0,"status":"Passed/Review/Critical","requires_human_review":false,"human_review_reason":"","category_scores":{{"accuracy_and_information":{{"score":0,"evidence":"brief","passed":true}},"customer_service_quality":{{"score":0,"evidence":"brief","passed":true}},"active_listening":{{"score":0,"evidence":"brief","passed":true}},"appropriate_actions":{{"score":0,"evidence":"brief","passed":true}},"compliance_and_handling":{{"score":0,"evidence":"brief","passed":true}},"emotion_management":{{"score":0,"evidence":"brief","passed":true}},"script_and_language":{{"score":0,"evidence":"brief","passed":true}},"documentation_quality":{{"score":0,"evidence":"brief","passed":true}},"audio_and_technical":{{"score":0,"evidence":"brief","passed":true}},"call_closure":{{"score":0,"evidence":"brief","passed":true}}}},"notes_score":0,"notes_feedback":"brief","rules_evaluation":[{{"rule":"rule text","category":"cat","severity":"Critical/Warning/Info","passed":true,"confidence":0,"evidence":"brief"}}],"flags":[{{"title":"title","description":"under 100 chars","severity":"Critical/Warning","timestamp_seconds":0,"timestamp_display":"mm:ss","evidence_quote":"exact words if applicable, max 80 chars"}}],"emotion_delta":{{"start":"{emotion.get('customer_emotion_start','Neutral')}","end":"{emotion.get('customer_emotion_end','Neutral')}","improved":false,"summary":"brief"}},"age_concern":{{"flagged":false,"reason":""}},"call_end_assessment":"brief","coaching_notes":"2-3 points max","positive_highlights":"1-2 points max"}}"""
 
     message = anthropic_client.messages.create(
         model="claude-sonnet-4-6",
@@ -373,6 +405,7 @@ def analyze_call(audio_path, agent_name, call_id=None, call_end_first='customer'
         'notes_score': claude_result.get('notes_score', 0),
         'notes_feedback': claude_result.get('notes_feedback', ''),
         'call_end_assessment': claude_result.get('call_end_assessment', ''),
+        'flagged_moments': gemini_result.get('flagged_moments', []),
         'is_callback': False,
         'original_call_id': None,
     }

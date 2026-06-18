@@ -231,6 +231,7 @@ def init_db():
         "ALTER TABLE calls ADD COLUMN IF NOT EXISTS callback_call_id TEXT",
         "ALTER TABLE calls ADD COLUMN IF NOT EXISTS confidence INTEGER DEFAULT 100",
         "ALTER TABLE calls ADD COLUMN IF NOT EXISTS summary TEXT",
+        "ALTER TABLE calls ADD COLUMN IF NOT EXISTS flagged_moments TEXT",
         "CREATE UNIQUE INDEX IF NOT EXISTS agents_name_unique ON agents (name)",
         "ALTER TABLE agents ADD COLUMN IF NOT EXISTS assigned_qa_user_id INTEGER",
         """CREATE TABLE IF NOT EXISTS auth_tokens (
@@ -1689,7 +1690,7 @@ def analyze_call():
                         summary=%s, emotion_delta=%s, requires_human_review=%s,
                         human_review_reason=%s, age_concern=%s, coaching_notes=%s,
                         positive_highlights=%s, call_dropped=%s, notes_score=%s,
-                        notes_feedback=%s
+                        notes_feedback=%s, flagged_moments=%s
                     WHERE call_id=%s
                 ''', (
                     result.get('duration','--'), result['overall_score'],
@@ -1705,6 +1706,7 @@ def analyze_call():
                     result.get('call_dropped', False),
                     result.get('notes_score', 0),
                     result.get('notes_feedback',''),
+                    json.dumps(result.get('flagged_moments', [])),
                     call_id
                 ))
                 for rr in result.get('scorecard',{}).get('rules_evaluation',[]):
@@ -1850,7 +1852,7 @@ def retry_stuck_calls():
                             summary=%s, emotion_delta=%s, requires_human_review=%s,
                             human_review_reason=%s, age_concern=%s, coaching_notes=%s,
                             positive_highlights=%s, call_dropped=%s, notes_score=%s,
-                            notes_feedback=%s
+                            notes_feedback=%s, flagged_moments=%s
                         WHERE call_id=%s
                     ''', (
                         result.get('duration','--'), result['overall_score'],
@@ -1867,6 +1869,7 @@ def retry_stuck_calls():
                         result.get('call_dropped',False),
                         result.get('notes_score',0),
                         result.get('notes_feedback',''),
+                        json.dumps(result.get('flagged_moments', [])),
                         call_id
                     ))
                     for rr in result.get('scorecard',{}).get('rules_evaluation',[]):
@@ -2031,7 +2034,7 @@ def test_one_call():
                 emotion=%s, status=%s, flags=%s, scorecard=%s, transcript=%s, summary=%s,
                 emotion_delta=%s, requires_human_review=%s, human_review_reason=%s,
                 age_concern=%s, coaching_notes=%s, positive_highlights=%s,
-                call_dropped=%s, notes_score=%s, notes_feedback=%s WHERE call_id=%s''',
+                call_dropped=%s, notes_score=%s, notes_feedback=%s, flagged_moments=%s WHERE call_id=%s''',
                 (result.get('duration','--'), result['overall_score'], result.get('confidence',100),
                  result['emotion'], result['status'], result['flags'],
                  json.dumps(result.get('scorecard',{})), result.get('transcript',''),
@@ -2039,7 +2042,8 @@ def test_one_call():
                  result.get('requires_human_review',False), result.get('human_review_reason',''),
                  json.dumps(result.get('age_concern',{})), result.get('coaching_notes',''),
                  result.get('positive_highlights',''), result.get('call_dropped',False),
-                 result.get('notes_score',0), result.get('notes_feedback',''), call_id))
+                 result.get('notes_score',0), result.get('notes_feedback',''),
+                 json.dumps(result.get('flagged_moments', [])), call_id))
             conn2.commit()
             conn2.close()
             results['steps']['saved'] = 'OK — saved to database'
