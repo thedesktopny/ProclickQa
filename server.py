@@ -10,6 +10,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import urllib.request
 import urllib.error
+import urllib.parse
 
 load_dotenv()
 
@@ -54,6 +55,14 @@ ADMIN_PASSWORD = hashlib.sha256(os.getenv('ADMIN_PASSWORD', 'admin123').encode()
 VOICEGUARD_API_KEY = os.getenv('VOICEGUARD_API_KEY', 'vg-change-this-secret-key')
 DATABASE_URL = os.getenv('DATABASE_URL', '')
 
+# Recording relay — Central US Azure cannot reach main.getremail.com directly (regional
+# network block confirmed via diagnostics), so a small relay app in Canada Central
+# (where the recording server IS reachable) fetches recordings on our behalf.
+# If RELAY_URL is unset, falls back to direct download (useful for local testing or if
+# the network block ever resolves on its own).
+RELAY_URL = os.getenv('RELAY_URL', '')  # e.g. https://voiceguard-recording-relay.azurewebsites.net
+RELAY_SECRET = os.getenv('RELAY_SECRET', '')
+
 def get_db():
     conn = psycopg2.connect(DATABASE_URL, sslmode='require')
     return conn
@@ -63,26 +72,44 @@ def download_recording(url, dest_path, timeout=60, retries=2):
     Downloads a call recording with an explicit timeout and retry logic.
     Raises a descriptive exception on failure instead of hanging silently.
     Returns nothing on success — file is written to dest_path.
+
+    If RELAY_URL is configured, routes the download through a relay app hosted
+    in a different Azure region (Canada Central) that can actually reach the
+    recording server, since our main region (Central US) cannot — confirmed via
+    direct network diagnostics (DNS works, but TCP connection times out on both
+    port 80 and 443, specifically to that one host).
     """
     import socket
+
+    if RELAY_URL:
+        fetch_url = f"{RELAY_URL.rstrip('/')}/fetch?url={urllib.parse.quote(url, safe='')}"
+        headers = {'X-Relay-Secret': RELAY_SECRET}
+    else:
+        fetch_url = url
+        headers = {'User-Agent': 'VoiceGuard/1.0'}
 
     last_error = None
     for attempt in range(retries + 1):
         try:
-            req = urllib.request.Request(url, headers={'User-Agent': 'VoiceGuard/1.0'})
+            req = urllib.request.Request(fetch_url, headers=headers)
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = resp.read()
             if len(data) < 1000:
-                raise ValueError(f'Downloaded file suspiciously small ({len(data)} bytes) — likely an error page, not real audio')
+                # Relay may have returned a JSON error body instead of audio — surface it
+                try:
+                    err_json = json.loads(data)
+                    raise ValueError(f"Relay/server error: {err_json.get('error', data[:200])}")
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    raise ValueError(f'Downloaded file suspiciously small ({len(data)} bytes) — likely an error page, not real audio')
             with open(dest_path, 'wb') as f:
                 f.write(data)
             return  # success
         except socket.timeout as e:
-            last_error = f'Timed out after {timeout}s connecting to recording server (attempt {attempt+1}/{retries+1})'
+            last_error = f'Timed out after {timeout}s connecting to {"relay" if RELAY_URL else "recording server"} (attempt {attempt+1}/{retries+1})'
         except urllib.error.HTTPError as e:
-            last_error = f'Recording server returned HTTP {e.code} (attempt {attempt+1}/{retries+1})'
+            last_error = f'{"Relay" if RELAY_URL else "Recording server"} returned HTTP {e.code} (attempt {attempt+1}/{retries+1})'
         except urllib.error.URLError as e:
-            last_error = f'Could not reach recording server: {e.reason} (attempt {attempt+1}/{retries+1})'
+            last_error = f'Could not reach {"relay" if RELAY_URL else "recording server"}: {e.reason} (attempt {attempt+1}/{retries+1})'
         except Exception as e:
             last_error = f'{type(e).__name__}: {str(e)} (attempt {attempt+1}/{retries+1})'
 
@@ -2209,7 +2236,8 @@ def test_analyze():
     except Exception as e:
         results['gemini'] = f'FAIL: {str(e)}'
 
-    # Test 4: Can we reach the recording server at all?
+    # Test 4: Can we reach the recording server directly?
+    direct_test_url = None
     try:
         conn = get_db()
         c = conn.cursor()
@@ -2217,19 +2245,39 @@ def test_analyze():
         row = c.fetchone()
         conn.close()
         if row:
-            url = row[0].strip().rstrip(':').rstrip('/')
+            direct_test_url = row[0].strip().rstrip(':').rstrip('/')
             import time as _time
             start = _time.time()
-            req = urllib.request.Request(url, method='HEAD', headers={'User-Agent': 'VoiceGuard/1.0'})
-            urllib.request.urlopen(req, timeout=30)
+            req = urllib.request.Request(direct_test_url, method='HEAD', headers={'User-Agent': 'VoiceGuard/1.0'})
+            urllib.request.urlopen(req, timeout=15)
             elapsed = round(_time.time() - start, 1)
-            results['audio_url'] = f'OK — reachable in {elapsed}s: ...{url[-40:]}'
+            results['audio_url_direct'] = f'OK — reachable in {elapsed}s: ...{direct_test_url[-40:]}'
         else:
-            results['audio_url'] = 'No calls with recording URL'
+            results['audio_url_direct'] = 'No calls with recording URL'
     except urllib.error.HTTPError as e:
-        results['audio_url'] = f'FAIL: Server reachable but returned HTTP {e.code} (URL or auth may be wrong)'
+        results['audio_url_direct'] = f'FAIL: Server reachable but returned HTTP {e.code} (URL or auth may be wrong)'
     except Exception as e:
-        results['audio_url'] = f'FAIL: {type(e).__name__}: {str(e)} — recording server may be down, network-blocked, or DNS-unreachable from Azure'
+        results['audio_url_direct'] = f'FAIL (expected if relay configured): {type(e).__name__}: {str(e)}'
+
+    # Test 5: Can we reach the recording server through the relay (Canada Central)?
+    if RELAY_URL and direct_test_url:
+        try:
+            import time as _time
+            start = _time.time()
+            relay_fetch_url = f"{RELAY_URL.rstrip('/')}/fetch?url={urllib.parse.quote(direct_test_url, safe='')}"
+            req = urllib.request.Request(relay_fetch_url, headers={'X-Relay-Secret': RELAY_SECRET})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = resp.read(2048)
+            elapsed = round(_time.time() - start, 1)
+            results['audio_url_via_relay'] = f'OK — relay fetched {len(data)}+ bytes in {elapsed}s'
+        except urllib.error.HTTPError as e:
+            results['audio_url_via_relay'] = f'FAIL: Relay returned HTTP {e.code}'
+        except Exception as e:
+            results['audio_url_via_relay'] = f'FAIL: {type(e).__name__}: {str(e)}'
+    elif not RELAY_URL:
+        results['audio_url_via_relay'] = 'RELAY_URL not configured — set it in App Settings to enable'
+    else:
+        results['audio_url_via_relay'] = 'Skipped — no recording URL available to test'
 
     return jsonify(results)
 
