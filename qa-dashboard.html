@@ -896,23 +896,37 @@ let currentRole='admin';
 let currentUserData=null;
 
 async function checkAuth(){
+  // If no token at all, go straight to login
+  if(!getToken()){
+    document.body.style.visibility='visible';
+    showModal('login-modal');
+    return;
+  }
+
+  let r;
   try{
-    // If no token at all, go straight to login
-    if(!getToken()){
-      document.body.style.visibility='visible';
-      showModal('login-modal');
-      return;
-    }
-    const r=await API.get('/api/auth-check');
-    if(!r.authenticated){
-      clearToken();
-      document.body.style.visibility='visible';
-      showModal('login-modal');
-      return;
-    }
-    isAdmin=r.role==='admin';
-    currentRole=r.role||'admin';
-    currentUserData=r;
+    r = await API.get('/api/auth-check');
+  }catch(e){
+    // Auth check itself failed — genuine auth problem
+    clearToken();
+    document.body.style.visibility='visible';
+    showModal('login-modal');
+    return;
+  }
+
+  if(!r || !r.authenticated){
+    clearToken();
+    document.body.style.visibility='visible';
+    showModal('login-modal');
+    return;
+  }
+
+  // AUTH CONFIRMED — everything below this point must NEVER trigger a logout
+  isAdmin = r.role==='admin';
+  currentRole = r.role||'admin';
+  currentUserData = r;
+
+  try{
     if(r.full_name){
       const el=document.getElementById('sidebar-name');
       if(el) el.textContent=r.full_name;
@@ -922,31 +936,23 @@ async function checkAuth(){
     const roleEl=document.getElementById('sidebar-role');
     if(roleEl) roleEl.textContent=currentRole==='admin'?'Admin':'QA Reviewer';
     document.querySelectorAll('.admin-only').forEach(el=>{el.style.display=isAdmin?'':'none';});
-    document.body.style.visibility='visible';
+  }catch(e){ console.error('Sidebar update failed (non-fatal):', e); }
 
-    // Load critical data first — show dashboard fast
+  hideModal('login-modal');
+  document.body.style.visibility='visible';
+
+  try{
     await Promise.all([loadStats(), loadCalls()]);
     renderDashboard();
     renderCalls();
     renderPagination();
     updateBadges();
+  }catch(e){ console.error('Dashboard load failed (non-fatal):', e); }
 
-    // Load rest in background — don't block UI
-    Promise.all([loadRules(), loadAgents(), loadAnalytics(), loadBilling(), loadNotes()])
-      .then(()=>{ renderRules(); renderAgents(); renderAnalytics(); renderBilling(); renderNotes(); renderAlerts(); renderHumanReview(); });
-
-  }catch(e){
-    if(e.message==='Unauthorized'){
-      clearToken();
-      document.body.style.visibility='visible';
-      showModal('login-modal');
-    } else {
-      // Network error — still show something
-      isAdmin=false;
-      document.body.style.visibility='visible';
-      showModal('login-modal');
-    }
-  }
+  // Load rest in background — failures here must NEVER affect login state
+  Promise.all([loadRules(), loadAgents(), loadAnalytics(), loadBilling(), loadNotes()])
+    .then(()=>{ renderRules(); renderAgents(); renderAnalytics(); renderBilling(); renderNotes(); renderAlerts(); renderHumanReview(); })
+    .catch(e=>console.error('Background load failed (non-fatal):', e));
 }
 
 async function doLogout(){
