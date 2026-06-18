@@ -2096,6 +2096,63 @@ def test_one_call():
     except Exception as e:
         return jsonify({'error': str(e), 'traceback': traceback.format_exc()})
 
+@app.route('/api/network-diagnostic', methods=['GET'])
+def network_diagnostic():
+    """
+    Tests DNS resolution, TCP connection, and HTTP fetch separately against the
+    recording server, so we can pinpoint exactly which layer is failing from Azure.
+    """
+    import socket
+    import time as _time
+
+    target_host = 'main.getremail.com'
+    target_port = 80
+    test_url = request.args.get('url', 'http://main.getremail.com/recordings/1781754701.6117618.wav')
+
+    results = {}
+
+    # Test 1: DNS resolution
+    try:
+        start = _time.time()
+        ip = socket.gethostbyname(target_host)
+        results['dns'] = f'OK — {target_host} resolves to {ip} in {round(_time.time()-start,2)}s'
+    except Exception as e:
+        results['dns'] = f'FAIL: {type(e).__name__}: {str(e)}'
+        return jsonify(results)  # no point continuing if DNS itself fails
+
+    # Test 2: Raw TCP connection (bypasses HTTP entirely)
+    try:
+        start = _time.time()
+        sock = socket.create_connection((target_host, target_port), timeout=10)
+        sock.close()
+        results['tcp_connect'] = f'OK — connected to {target_host}:{target_port} in {round(_time.time()-start,2)}s'
+    except Exception as e:
+        results['tcp_connect'] = f'FAIL: {type(e).__name__}: {str(e)}'
+        return jsonify(results)
+
+    # Test 3: Full HTTP GET with short timeout (actual download attempt)
+    try:
+        start = _time.time()
+        req = urllib.request.Request(test_url, headers={'User-Agent': 'VoiceGuard/1.0'})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = resp.read(1024)  # just read first 1KB, don't need the whole file
+            status_code = resp.status
+        results['http_get'] = f'OK — HTTP {status_code}, got {len(data)} bytes in {round(_time.time()-start,2)}s'
+    except urllib.error.HTTPError as e:
+        results['http_get'] = f'FAIL: HTTP {e.code} — {e.reason}'
+    except Exception as e:
+        results['http_get'] = f'FAIL: {type(e).__name__}: {str(e)} after {round(_time.time()-start,2)}s'
+
+    # Test 4: Outbound IP this Azure instance is using
+    try:
+        req = urllib.request.Request('https://api.ipify.org?format=json')
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            results['azure_outbound_ip'] = json.loads(resp.read())
+    except Exception as e:
+        results['azure_outbound_ip'] = f'Could not determine: {str(e)}'
+
+    return jsonify(results)
+
 @app.route('/api/test-analyze', methods=['GET'])
 def test_analyze():
     """Test each component of the AI pipeline individually."""
