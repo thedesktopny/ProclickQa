@@ -2007,13 +2007,6 @@ def retry_stuck_calls():
                     size_bytes = os.path.getsize(audio_path)
                     size_mb = round(size_bytes / 1024 / 1024, 1)
 
-                    # Skip files over 25MB (very long calls) — process them last
-                    if size_mb > 25:
-                        retry_log.append({'time': datetime.now().strftime('%I:%M:%S %p'), 'msg': f'⏭️ [{i+1}/{len(stuck_calls)}] {agent} / {customer} — skipped ({size_mb}MB, too large for now)', 'type': 'warning'})
-                        try: os.remove(audio_path)
-                        except: pass
-                        continue
-
                     retry_log.append({'time': datetime.now().strftime('%I:%M:%S %p'), 'msg': f'🤖 [{i+1}/{len(stuck_calls)}] {agent} / {customer} — analyzing ({size_mb}MB)...', 'type': 'info'})
 
                     result = run_analysis(
