@@ -327,18 +327,37 @@ def init_db():
     c.execute('SELECT COUNT(*) FROM rules')
     if c.fetchone()[0] == 0:
         default_rules = [
+            # ── EXISTING RULES (kept) ──
             ('Agent must never use inappropriate, offensive, or sexual language of any kind', 'Forbidden Words', 'Critical'),
-            ('Agent must read the total price including shipping out loud before placing any order', 'Compliance', 'Critical'),
-            ('Agent must receive explicit verbal confirmation from customer before completing any purchase', 'Compliance', 'Critical'),
             ('Agent must verify the customer identity at the start of every call before accessing any account', 'Compliance', 'Critical'),
-            ('Agent must verbally confirm "I have logged out of your account" before ending any call where account access occurred', 'Compliance', 'Critical'),
-            ('Agent should not overuse the word "sir" — using it too frequently sounds robotic', 'Behavior', 'Warning'),
-            ('If a customer sounds frustrated or upset, agent must acknowledge their feelings before continuing', 'Behavior', 'Warning'),
             ('Agent must not discuss working outside of Proclick or solicit personal contact with customers', 'Conduct', 'Critical'),
-            ('Agent must not make promises or guarantees without authorization', 'Compliance', 'Warning'),
+            ('Agent should not overuse the word "sir" — using it too frequently sounds robotic', 'Behavior', 'Warning'),
+            ('If a customer sounds frustrated or upset, agent must acknowledge their feelings before continuing and identify the reason for the frustration', 'Behavior', 'Warning'),
             ('Agent must ask "Is there anything else I can help you with today?" before ending the call', 'Required Phrases', 'Info'),
-            ('If a customer mentions a competitor, agent must not speak negatively about them', 'Behavior', 'Info'),
             ('Agent must write detailed and accurate call notes after every call', 'Documentation', 'Warning'),
+            # ── NEW RULES FROM DOC ──
+            # 1. Active Listening
+            ('Agent must not ask the customer to repeat information already provided in the same call — if the customer repeats themselves or the agent uses incorrect details that were already stated, this is an active listening failure', 'Active Listening', 'Warning'),
+            # 2. Instruction Following
+            ('Agent must follow the customer\'s exact instructions — if the customer says a link, item, or order already exists on their account or was saved from a previous call, the agent must retrieve it instead of starting the search from scratch', 'Instruction Following', 'Warning'),
+            # 3. Customer Frustration & Complaints
+            ('If the AI detects genuine customer dissatisfaction — such as repeated explanations, complaints about prior service, or clear signs of escalating frustration — the agent must address the root cause directly and not continue as if nothing happened', 'Customer Frustration', 'Warning'),
+            # 4. Failure to Answer
+            ('Agent must directly answer the customer\'s question — if a customer asks a specific question, the agent must answer it before moving on; partially answering, changing the subject, or ignoring the question entirely is a violation', 'Customer Service', 'Warning'),
+            # 5. Dead Air
+            ('Agent must provide a verbal update to the customer if working in silence for more than 30 seconds — silence exceeding 30 seconds without any update or acknowledgment is a violation; flag should include how long the silence lasted', 'Dead Air', 'Warning'),
+            # 6. Audio Quality
+            ('Agent must ensure their environment is free from disruptive background noise during the call — background conversations, TV, fan noise, crying, animals, or poor microphone quality that interferes with the call is a violation', 'Audio Quality', 'Warning'),
+            # 7. Professionalism
+            ('Agent must maintain professional conduct at all times — obvious unprofessional behavior such as interrupting the customer, raising their voice, using sarcasm, giving dismissive responses, or using clearly inappropriate language is a violation', 'Professionalism', 'Warning'),
+            # 8. Call Drop & Callback
+            ('If a call disconnects while the customer\'s issue is unresolved, the agent must call back within 5 minutes — a drop where the agent ended the call mid-conversation is Critical if no callback occurs within 5 minutes; a drop from the customer side mid-conversation is a Warning if no callback occurs within 5 minutes', 'Call Drop', 'Critical'),
+            # 10. Restricted & Sensitive Content
+            ('If a caller appears to be or states they are under 18 and is requesting a smartphone, adult content, sexual content, or any age-restricted product or service, this must be flagged as Critical immediately regardless of how the agent handles it', 'Restricted Content', 'Critical'),
+            # 11. Region / Currency Mismatch
+            ('Agent must not reference the wrong country, region, currency, or website for the customer\'s context — if the customer is discussing UK services and the agent references US options, or the customer asks about Canadian pricing and the agent quotes USD, this is a mismatch violation', 'Region Mismatch', 'Warning'),
+            # 12. Billing Compliance (only when billed_minutes data is present)
+            ('When call billing data is available, the minutes charged must reasonably match the actual call activity — overcharging, undercharging, continuing assistance after minutes are exhausted, or failing to offer a refill when required are all billing compliance violations', 'Billing Compliance', 'Warning'),
         ]
         c.executemany('INSERT INTO rules (description, category, severity) VALUES (%s,%s,%s)', default_rules)
 
