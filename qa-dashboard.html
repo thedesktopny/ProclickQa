@@ -863,22 +863,25 @@ function authHeaders(){
 const API={
   async get(p){
     const r=await fetch(p,{headers:authHeaders()});
-    if(r.status===401){clearToken();showModal('login-modal');throw new Error('Unauthorized');}
+    if(r.status===401){
+      if(p==='/api/auth-check'){clearToken();showModal('login-modal');}
+      throw new Error('Unauthorized');
+    }
     return r.json();
   },
   async post(p,d){
     const r=await fetch(p,{method:'POST',headers:authHeaders(),body:JSON.stringify(d)});
-    if(r.status===401&&p!=='/api/login'){clearToken();showModal('login-modal');throw new Error('Unauthorized');}
+    if(r.status===401&&p!=='/api/login'){throw new Error('Unauthorized');}
     return r.json();
   },
   async put(p,d){
     const r=await fetch(p,{method:'PUT',headers:authHeaders(),body:JSON.stringify(d)});
-    if(r.status===401){clearToken();showModal('login-modal');throw new Error('Unauthorized');}
+    if(r.status===401){throw new Error('Unauthorized');}
     return r.json();
   },
   async del(p){
     const r=await fetch(p,{method:'DELETE',headers:authHeaders()});
-    if(r.status===401){clearToken();showModal('login-modal');throw new Error('Unauthorized');}
+    if(r.status===401){throw new Error('Unauthorized');}
     return r.json();
   }
 };
