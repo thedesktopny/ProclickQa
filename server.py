@@ -1848,6 +1848,100 @@ def retry_status():
         'log': retry_log[-50:]  # Last 50 entries
     })
 
+@app.route('/api/retry-call/<call_id>', methods=['POST'])
+@require_admin
+def retry_single_call(call_id):
+    """Retry analysis for a single specific call."""
+    conn = get_db()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('''
+        SELECT call_id, agent_name, agent_extension, recording_url,
+               call_duration_seconds, billed_minutes, caller_id,
+               customer_account_id, account_name, call_end_first,
+               agent_qos_tx, agent_qos_rx, customer_qos_tx, customer_qos_rx,
+               call_notes, call_dropped
+        FROM calls WHERE call_id = %s
+    ''', (call_id,))
+    call = c.fetchone()
+    if not call:
+        conn.close()
+        return jsonify({'error': 'Call not found'}), 404
+
+    # Reset status to Processing immediately so UI reflects it
+    c.execute("UPDATE calls SET status='Processing', error_message=NULL, overall_score=0 WHERE call_id=%s", (call_id,))
+    conn.commit()
+    conn.close()
+
+    import threading
+    def process_single():
+        from ai_engine import analyze_call as run_analysis
+        UPLOAD_DIR = os.path.join(os.getenv('HOME', '.'), 'uploads')
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
+        recording_url = (call.get('recording_url') or '').strip().rstrip(':').rstrip('/')
+        ext = os.path.splitext(recording_url)[1] or '.wav'
+        audio_path = os.path.join(UPLOAD_DIR, f"retry_{call_id}_{int(time.time())}{ext}")
+
+        try:
+            download_recording(recording_url, audio_path, timeout=60, retries=2)
+            result = run_analysis(
+                audio_path,
+                call.get('agent_name', 'Unknown'),
+                call_id,
+                call_end_first=call.get('call_end_first', 'customer'),
+                call_notes=call.get('call_notes', ''),
+                account_name=call.get('account_name', ''),
+                agent_qos_tx=call.get('agent_qos_tx', 'Good'),
+                agent_qos_rx=call.get('agent_qos_rx', 'Good'),
+                customer_qos_tx=call.get('customer_qos_tx', 'Good'),
+                customer_qos_rx=call.get('customer_qos_rx', 'Good')
+            )
+            conn2 = get_db()
+            c2 = conn2.cursor()
+            c2.execute('''UPDATE calls SET duration=%s, overall_score=%s, confidence=%s,
+                emotion=%s, status=%s, flags=%s, scorecard=%s, transcript=%s, summary=%s,
+                emotion_delta=%s, requires_human_review=%s, human_review_reason=%s,
+                age_concern=%s, coaching_notes=%s, positive_highlights=%s,
+                call_dropped=%s, notes_score=%s, notes_feedback=%s, flagged_moments=%s,
+                error_message=NULL WHERE call_id=%s''',
+                (result.get('duration','--'), result['overall_score'], result.get('confidence',100),
+                 result['emotion'], result['status'], result['flags'],
+                 json.dumps(result.get('scorecard',{})), result.get('transcript',''),
+                 result.get('summary',''), json.dumps(result.get('emotion_delta',{})),
+                 result.get('requires_human_review',False), result.get('human_review_reason',''),
+                 json.dumps(result.get('age_concern',{})), result.get('coaching_notes',''),
+                 result.get('positive_highlights',''), result.get('call_dropped',False),
+                 result.get('notes_score',0), result.get('notes_feedback',''),
+                 json.dumps(result.get('flagged_moments',[])), call_id))
+            # Save rule results
+            c2.execute('DELETE FROM rule_results WHERE call_id=%s', (call_id,))
+            sc = result.get('scorecard', {})
+            for rule_eval in sc.get('rules_evaluation', []):
+                c2.execute('''INSERT INTO rule_results (call_id, rule_description, category, severity, passed, confidence, evidence)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s)''',
+                    (call_id, rule_eval.get('rule',''), rule_eval.get('category',''),
+                     rule_eval.get('severity','Warning'), rule_eval.get('passed',True),
+                     rule_eval.get('confidence',80), rule_eval.get('evidence','')))
+            conn2.commit()
+            conn2.close()
+            print(f"[RetryCall] ✅ {call_id} scored: {result['overall_score']}%")
+        except Exception as e:
+            error_str = str(e)[:500]
+            print(f"[RetryCall] ❌ {call_id} failed: {error_str}")
+            try:
+                conn3 = get_db()
+                c3 = conn3.cursor()
+                c3.execute("UPDATE calls SET status='Failed', error_message=%s WHERE call_id=%s", (error_str, call_id))
+                conn3.commit()
+                conn3.close()
+            except: pass
+        finally:
+            try: os.remove(audio_path)
+            except: pass
+
+    threading.Thread(target=process_single, daemon=True).start()
+    return jsonify({'success': True, 'message': f'Retry started for call {call_id}', 'call_id': call_id})
+
+
 @app.route('/api/retry-stuck', methods=['POST'])
 @require_admin
 def retry_stuck_calls():
@@ -1869,7 +1963,7 @@ def retry_stuck_calls():
         WHERE status IN ('Processing', 'Failed')
         AND overall_score = 0
         AND created_at < NOW() - INTERVAL '5 minutes'
-        ORDER BY call_duration_seconds ASC NULLS LAST
+        ORDER BY created_at DESC
         LIMIT 20
     ''')
     stuck_calls = [dict(c) for c in c.fetchall()]

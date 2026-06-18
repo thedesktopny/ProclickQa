@@ -1915,6 +1915,9 @@ function renderCalls(list){
     const playBtn=c.recording_url
       ?`<button onclick="playAudio('${c.recording_url}','${c.call_id}');event.stopPropagation();" style="background:rgba(79,110,247,0.15);border:none;color:var(--accent);cursor:pointer;border-radius:6px;padding:4px 8px;font-size:13px;" title="Play recording">▶</button>`
       :'—';
+    const retryBtn = c.status==='Failed'
+      ? `<button id="retry-btn-${c.call_id}" onclick="retryCall('${c.call_id}');event.stopPropagation();" style="background:rgba(245,166,35,0.15);border:1px solid rgba(245,166,35,0.3);color:var(--yellow);cursor:pointer;border-radius:6px;padding:3px 8px;font-size:11px;font-weight:600;" title="Retry this call">↺ Retry</button>`
+      : '';
     const expBtn=`<button onclick="toggleRow('${c.call_id}');event.stopPropagation();" id="exp-btn-${c.call_id}" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:15px;padding:2px 4px;">${isExp?'▾':'▸'}</button>`;
 
     return `<tr id="row-${c.call_id}" style="border-bottom:${isExp?'none':'1px solid var(--border)'};">
@@ -1932,7 +1935,7 @@ function renderCalls(list){
       <td>${endIcon}</td>
       <td>${flagBadge}</td>
       <td>${playBtn}</td>
-      <td>${stBadge}</td>
+      <td style="white-space:nowrap;">${stBadge}${retryBtn}</td>
     </tr>
     <tr id="expand-${c.call_id}" style="display:${isExp?'table-row':'none'};background:var(--bg);">
       <td colspan="15" style="padding:0;">
@@ -3185,6 +3188,84 @@ function showToast(msg,isError=false){
   if(!t){t=document.createElement('div');t.id='toast';t.style.cssText='position:fixed;bottom:24px;right:24px;padding:12px 20px;border-radius:10px;font-size:13px;font-weight:600;z-index:9999;transition:opacity 0.3s;box-shadow:0 4px 20px rgba(0,0,0,0.4)';document.body.appendChild(t);}
   t.textContent=msg;t.style.background=isError?'var(--red)':'var(--green)';t.style.color='white';t.style.opacity='1';
   clearTimeout(t._t);t._t=setTimeout(()=>{t.style.opacity='0';},3000);
+}
+
+async function retryCall(callId){
+  const btn = document.getElementById(`retry-btn-${callId}`);
+  const row = document.getElementById(`row-${callId}`);
+  if(btn){
+    btn.disabled = true;
+    btn.textContent = '⏳ Retrying...';
+    btn.style.opacity = '0.6';
+  }
+
+  try{
+    await API.post(`/api/retry-call/${callId}`, {});
+    showToast(`Retry started for call #${callId.slice(-8)}`);
+
+    // Poll every 3 seconds until status changes from Processing
+    let polls = 0;
+    const maxPolls = 40; // ~2 minutes max
+    const interval = setInterval(async ()=>{
+      polls++;
+      try{
+        const res = await API.get(`/api/calls/${callId}`);
+        const status = res.status;
+        const score = res.overall_score;
+
+        // Update the status cell live
+        const statusCell = row ? row.querySelector('td:last-child') : null;
+        if(statusCell){
+          const badge = statusBadge(status, res.error_message);
+          const newRetryBtn = status==='Failed'
+            ? `<button id="retry-btn-${callId}" onclick="retryCall('${callId}');event.stopPropagation();" style="background:rgba(245,166,35,0.15);border:1px solid rgba(245,166,35,0.3);color:var(--yellow);cursor:pointer;border-radius:6px;padding:3px 8px;font-size:11px;font-weight:600;">↺ Retry</button>`
+            : '';
+          statusCell.innerHTML = badge + newRetryBtn;
+        }
+
+        // Update score cell live
+        if(score > 0 && row){
+          const scoreCells = row.querySelectorAll('td');
+          if(scoreCells[8]){ // QA Score column
+            const cls = score>=80?'sc-green':score>=70?'sc-yellow':'sc-red';
+            scoreCells[8].innerHTML = `<div class="score-circle ${cls}">${score}%</div>`;
+          }
+        }
+
+        if(status !== 'Processing'){
+          clearInterval(interval);
+          if(status === 'Passed' || status === 'Review' || status === 'Critical'){
+            showToast(`✅ Call #${callId.slice(-8)} scored: ${score}%`);
+            // Refresh the expanded row if it's open
+            if(expandedRows.has(callId)){
+              expandedRows.delete(callId);
+              expandedRows.add(callId);
+              const expandContent = document.getElementById(`expand-content-${callId}`);
+              if(expandContent){
+                const fullCall = await API.get(`/api/calls/${callId}`);
+                expandContent.innerHTML = buildExpandContent(fullCall);
+              }
+            }
+          } else if(status === 'Failed'){
+            showToast(`❌ Retry failed for #${callId.slice(-8)} — check error tooltip`, true);
+          }
+        }
+      }catch(e){ console.error('Poll error:', e); }
+
+      if(polls >= maxPolls){
+        clearInterval(interval);
+        showToast(`Retry timed out for #${callId.slice(-8)} — still processing`, true);
+      }
+    }, 3000);
+
+  }catch(e){
+    showToast(`Failed to start retry: ${e.message}`, true);
+    if(btn){
+      btn.disabled = false;
+      btn.textContent = '↺ Retry';
+      btn.style.opacity = '1';
+    }
+  }
 }
 
 async function retryStuck(){
