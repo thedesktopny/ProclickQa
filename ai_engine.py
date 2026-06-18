@@ -81,9 +81,30 @@ def analyze_audio_with_gemini(audio_path):
     print(f"[Gemini] Analyzing: {audio_path}")
     model = genai.GenerativeModel('gemini-2.5-flash')
 
-    with open(audio_path, 'rb') as f:
-        audio_data = f.read()
-    audio_b64 = base64.b64encode(audio_data).decode('utf-8')
+    INLINE_SIZE_LIMIT_MB = 18  # Gemini's safe inline limit is ~20MB; use File API above this
+
+    audio_size_mb = os.path.getsize(audio_path) / 1024 / 1024
+    print(f"[Gemini] File size: {round(audio_size_mb, 1)} MB")
+
+    if audio_size_mb <= INLINE_SIZE_LIMIT_MB:
+        # Small file — send inline as base64 (fast, no upload needed)
+        with open(audio_path, 'rb') as f:
+            audio_data = f.read()
+        audio_b64 = base64.b64encode(audio_data).decode('utf-8')
+        audio_part = {'mime_type': mime_type, 'data': audio_b64}
+    else:
+        # Large file — upload via Gemini File API first, then reference it
+        print(f"[Gemini] File too large for inline ({round(audio_size_mb,1)}MB > {INLINE_SIZE_LIMIT_MB}MB), uploading via File API...")
+        uploaded = genai.upload_file(audio_path, mime_type=mime_type)
+        # Wait for file to become ACTIVE (usually instant for audio)
+        import time as _time
+        for _ in range(10):
+            file_status = genai.get_file(uploaded.name)
+            if file_status.state.name == 'ACTIVE':
+                break
+            _time.sleep(2)
+        audio_part = uploaded  # Gemini accepts the file object directly
+        print(f"[Gemini] File uploaded: {uploaded.name}")
 
     ext = os.path.splitext(audio_path)[1].lower()
     mime_map = {'.mp3':'audio/mp3','.wav':'audio/wav','.m4a':'audio/mp4',
@@ -155,12 +176,20 @@ Do NOT include vague category-level issues (e.g. "agent seemed unprofessional ov
 
 
     response = model.generate_content(
-        [{'mime_type': mime_type, 'data': audio_b64}, prompt],
+        [audio_part, prompt],
         generation_config=genai.GenerationConfig(
             max_output_tokens=8192,
             temperature=0.1
         )
     )
+
+    # Clean up uploaded file if we used the File API (avoid storage buildup)
+    if audio_size_mb > INLINE_SIZE_LIMIT_MB:
+        try:
+            genai.delete_file(audio_part.name)
+            print(f"[Gemini] Cleaned up uploaded file: {audio_part.name}")
+        except Exception as e:
+            print(f"[Gemini] Could not delete uploaded file: {e}")
 
     text = response.text.strip()
     if '```' in text:

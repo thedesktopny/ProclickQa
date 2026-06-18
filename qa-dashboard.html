@@ -1923,7 +1923,7 @@ function renderCalls(list){
       <td class="agent">${c.agent_name||'—'}</td>
       <td style="color:var(--text);max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${c.account_name||c.customer_account_id||'—'}</td>
       <td style="white-space:nowrap;">${formatDate(c.created_at)}</td>
-      <td>${c.duration||'—'}</td>
+      <td>${formatDuration(c)}</td>
       <td>${billed}</td>
       <td>${emotion}</td>
       <td>${sc}</td>
@@ -1959,7 +1959,7 @@ function buildExpandContent(c){
         <span style="color:var(--text3)">Customer</span><span style="color:var(--text);font-weight:500">${c.account_name||'—'}</span>
         <span style="color:var(--text3)">Account</span><span style="color:var(--text2)">${c.customer_account_id||'—'}</span>
         <span style="color:var(--text3)">Caller ID</span><span style="color:var(--text2)">${c.caller_id||'—'}</span>
-        <span style="color:var(--text3)">Duration</span><span style="color:var(--text2)">${c.duration||'—'} / billed ${c.billed_minutes||0}m</span>
+        <span style="color:var(--text3)">Duration</span><span style="color:var(--text2)">${formatDuration(c)} / billed ${c.billed_minutes||0}m</span>
         <span style="color:var(--text3)">Ended by</span><span style="color:${c.call_end_first==='drop'?'var(--red)':c.call_end_first==='agent'?'var(--yellow)':'var(--green)'}">${c.call_end_first==='drop'?'📵 Dropped':c.call_end_first==='agent'?'⚠️ Agent first':'✓ Customer'}</span>
         <span style="color:var(--text3)">Agent QoS</span><span style="color:var(--text2)">↑${c.agent_qos_tx||'—'} ↓${c.agent_qos_rx||'—'}</span>
         <span style="color:var(--text3)">Cust QoS</span><span style="color:var(--text2)">↑${c.customer_qos_tx||'—'} ↓${c.customer_qos_rx||'—'}</span>
@@ -2288,7 +2288,7 @@ function renderCallDetail(call){
   el.innerHTML=`
     <div class="call-meta">
       <div class="meta-card"><div class="meta-val" style="color:${call.overall_score>=80?'var(--green)':call.overall_score>=70?'var(--yellow)':'var(--red)'}">${call.overall_score||0}%</div><div class="meta-lbl">QA Score</div></div>
-      <div class="meta-card"><div class="meta-val">${call.duration||'—'}</div><div class="meta-lbl">Duration</div></div>
+      <div class="meta-card"><div class="meta-val">${formatDuration(call)}</div><div class="meta-lbl">Duration</div></div>
       <div class="meta-card"><div class="meta-val">${call.billed_minutes||0}m</div><div class="meta-lbl">Billed</div></div>
       <div class="meta-card"><div class="meta-val">${call.flags||0}</div><div class="meta-lbl">Flags</div></div>
       <div class="meta-card"><div class="meta-val" style="font-size:14px;">${call.emotion||'—'}</div><div class="meta-lbl">Emotion</div></div>
@@ -2808,7 +2808,7 @@ async function openAgentDrilldown(agentName){
         <div style="font-size:16px;font-weight:700;color:${color};width:42px;text-align:center;">${sc}%</div>
         <div style="flex:1;">
           <div style="font-size:12px;font-weight:500;">${c.account_name||c.customer_account_id||'Unknown'}</div>
-          <div style="font-size:10px;color:var(--text3);">${formatDate(c.created_at)} · ${c.duration||'--'} · ${c.emotion||'—'}</div>
+          <div style="font-size:10px;color:var(--text3);">${formatDate(c.created_at)} · ${formatDuration(c)} · ${c.emotion||'—'}</div>
         </div>
         <div style="display:flex;gap:6px;align-items:center;">
           ${c.flags>0?`<span class="badge badge-red">${c.flags} flags</span>`:''}
@@ -3156,6 +3156,17 @@ function statusBadge(status, errorMessage){
 function emotionEmoji(e){
   const map={Happy:'😊',Satisfied:'😊',Neutral:'😐',Frustrated:'😤',Angry:'😠',Confused:'😕'};
   return map[e]||'😐';
+}
+
+function formatDuration(c){
+  // Use formatted duration string if valid, otherwise calculate from raw seconds
+  if(c.duration && c.duration !== '--' && c.duration !== '—') return c.duration;
+  if(c.call_duration_seconds && c.call_duration_seconds > 0){
+    const mins = Math.floor(c.call_duration_seconds / 60);
+    const secs = c.call_duration_seconds % 60;
+    return `${mins}:${String(secs).padStart(2,'0')}`;
+  }
+  return '—';
 }
 
 function formatDate(str){

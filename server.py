@@ -1386,8 +1386,8 @@ def get_calls():
         c.execute(f'''
             SELECT calls.call_id, calls.agent_name, calls.account_name, calls.customer_account_id,
                    calls.caller_id, calls.created_at, calls.duration, calls.billed_minutes,
-                   calls.overall_score, calls.status, calls.emotion, calls.flags,
-                   calls.call_end_first, calls.call_notes, calls.notes_score,
+                   calls.call_duration_seconds, calls.overall_score, calls.status, calls.emotion,
+                   calls.flags, calls.call_end_first, calls.call_notes, calls.notes_score,
                    calls.requires_human_review, calls.agent_qos_tx, calls.agent_qos_rx,
                    calls.customer_qos_tx, calls.customer_qos_rx, calls.recording_url,
                    calls.error_message
@@ -1402,10 +1402,10 @@ def get_calls():
         total = c.fetchone()['count']
         c.execute(f'''
             SELECT call_id, agent_name, account_name, customer_account_id, caller_id,
-                   created_at, duration, billed_minutes, overall_score, status, emotion,
-                   flags, call_end_first, call_notes, notes_score, requires_human_review,
-                   agent_qos_tx, agent_qos_rx, customer_qos_tx, customer_qos_rx, recording_url,
-                   error_message
+                   created_at, duration, billed_minutes, call_duration_seconds, overall_score,
+                   status, emotion, flags, call_end_first, call_notes, notes_score,
+                   requires_human_review, agent_qos_tx, agent_qos_rx, customer_qos_tx,
+                   customer_qos_rx, recording_url, error_message
             FROM calls
             {where_clause}
             ORDER BY created_at DESC LIMIT %s OFFSET %s
@@ -1706,7 +1706,19 @@ def analyze_call():
                              customer_qos_tx, customer_qos_rx, call_notes, call_dropped,
                              status, overall_score, flags)
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-            ON CONFLICT (call_id) DO NOTHING
+            ON CONFLICT (call_id) DO UPDATE SET
+                recording_url = EXCLUDED.recording_url,
+                call_duration_seconds = EXCLUDED.call_duration_seconds,
+                billed_minutes = EXCLUDED.billed_minutes,
+                duration = EXCLUDED.duration,
+                call_notes = EXCLUDED.call_notes,
+                call_end_first = EXCLUDED.call_end_first,
+                agent_qos_tx = EXCLUDED.agent_qos_tx,
+                agent_qos_rx = EXCLUDED.agent_qos_rx,
+                customer_qos_tx = EXCLUDED.customer_qos_tx,
+                customer_qos_rx = EXCLUDED.customer_qos_rx,
+                call_dropped = EXCLUDED.call_dropped,
+                status = CASE WHEN calls.status IN ('Failed','Processing') THEN 'Processing' ELSE calls.status END
         ''', (call_id, agent_name, agent_extension, caller_id, customer_account_id, account_name,
               recording_url, call_duration_seconds, billed_minutes, duration_display,
               call_end_first, agent_qos_tx, agent_qos_rx, customer_qos_tx, customer_qos_rx,
