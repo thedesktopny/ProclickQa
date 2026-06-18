@@ -813,8 +813,8 @@ td.agent{color:var(--text);font-weight:500;}
 </div>
 
 <!-- LOGIN MODAL -->
-<div class="modal" id="login-modal" style="background:rgba(0,0,0,0.85);">
-  <div class="modal-box" style="width:380px;">
+<div class="modal" id="login-modal" style="background:#000;">
+  <div class="modal-box" style="width:380px;background:var(--surface);border:1px solid var(--border);">
     <div style="text-align:center;margin-bottom:24px;">
       <div style="font-size:28px;margin-bottom:8px;">🎧</div>
       <div style="font-family:'Space Grotesk',sans-serif;font-size:20px;font-weight:800;color:var(--text);">VoiceGuard</div>
@@ -2648,16 +2648,21 @@ function renderRules(){
   if(rules.length===0){container.innerHTML='<div style="padding:24px;text-align:center;color:var(--text3)">No rules yet.</div>';return;}
   container.innerHTML=`
     <div style="padding:12px 20px;font-size:11px;color:var(--text3);border-bottom:1px solid var(--border);">
-      Click any rule to see which agents violated it and which calls triggered it.
+      Click a rule's text to see violations. Use the dropdown to change severity — past calls relabel instantly.
     </div>
     ${rules.map(rule=>{
       const sc=rule.severity==='Critical'?'badge-red':rule.severity==='Warning'?'badge-yellow':'badge-blue';
       const dc=rule.severity==='Critical'?'var(--red)':rule.severity==='Warning'?'var(--yellow)':'var(--accent)';
-      return `<div class="rule-item" style="cursor:pointer;transition:background 0.15s;" onclick="loadRuleViolations(${rule.id})" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background='none'">
+      return `<div class="rule-item" style="transition:background 0.15s;" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background='none'">
         <div class="rule-dot" style="background:${dc}"></div>
-        <div class="rule-text" style="flex:1;">${rule.description}</div>
+        <div class="rule-text" style="flex:1;cursor:pointer;" onclick="loadRuleViolations(${rule.id})">${rule.description}</div>
         <span class="badge ${sc}" style="white-space:nowrap;flex-shrink:0;">${rule.category}</span>
-        <span style="font-size:10px;color:var(--text3);margin:0 8px;flex-shrink:0;">Click to analyze →</span>
+        ${isAdmin?`<select onchange="changeRuleSeverity(${rule.id}, this.value)" onclick="event.stopPropagation()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);font-size:11px;padding:4px 8px;border-radius:6px;flex-shrink:0;">
+          <option value="Critical" ${rule.severity==='Critical'?'selected':''}>Critical</option>
+          <option value="Warning" ${rule.severity==='Warning'?'selected':''}>Warning</option>
+          <option value="Info" ${rule.severity==='Info'?'selected':''}>Info</option>
+        </select>`:''}
+        <span style="font-size:10px;color:var(--text3);margin:0 4px;flex-shrink:0;" onclick="loadRuleViolations(${rule.id})">→</span>
         <div class="toggle ${rule.active?'':'off'}" onclick="event.stopPropagation();toggleRule(${rule.id})"></div>
         ${isAdmin?`<button onclick="event.stopPropagation();deleteRule(${rule.id})" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:16px;padding:4px 8px;">🗑</button>`:''}
       </div>`;
@@ -2779,6 +2784,40 @@ async function toggleRule(id){
   if(idx!==-1){rules[idx]=updated;renderRules();}
 }
 
+async function changeRuleSeverity(id, newSeverity){
+  if(!isAdmin){showModal('login-modal');return;}
+  const rule = rules.find(r=>r.id===id);
+  if(!rule || rule.severity===newSeverity) return;
+
+  showToast('Updating severity and relabeling past calls...');
+  try{
+    const updated = await API.put(`/api/rules/${id}`, {
+      description: rule.description,
+      category: rule.category,
+      severity: newSeverity,
+      active: rule.active
+    });
+    const idx = rules.findIndex(r=>r.id===id);
+    if(idx!==-1) rules[idx] = updated;
+    renderRules();
+
+    const count = updated.relabeled_calls || 0;
+    showToast(count > 0
+      ? `✅ Severity updated — ${count} past call${count!==1?'s':''} relabeled`
+      : '✅ Severity updated');
+
+    // Refresh stats and dashboard/calls so counts reflect the change everywhere
+    await loadStats();
+    await loadCalls();
+    renderDashboard();
+    renderCalls();
+    updateBadges();
+  }catch(e){
+    showToast('Failed to update severity', true);
+    renderRules(); // revert dropdown to original state
+  }
+}
+
 async function deleteRule(id){
   if(!isAdmin){showModal('login-modal');return;}
   if(!confirm('Delete this rule?'))return;
@@ -2788,13 +2827,26 @@ async function deleteRule(id){
 }
 
 // ─── ALERTS ───────────────────────────────────────────────────────────────────
-function renderAlerts(){
+async function renderAlerts(){
   const container=document.getElementById('alerts-container');
   if(!container)return;
-  const criticals=calls.filter(c=>c.status==='Critical'&&c.overall_score>0);
+  container.innerHTML='<div style="padding:32px;text-align:center;color:var(--text3)">Loading...</div>';
+
+  let criticals=[];
+  try{
+    const res = await API.get('/api/calls?page=1&limit=500');
+    const allCalls = Array.isArray(res) ? res : (res.calls||[]);
+    criticals = allCalls.filter(c=>c.status==='Critical'&&c.overall_score>0);
+  }catch(e){
+    container.innerHTML='<div style="padding:32px;text-align:center;color:var(--red)">Failed to load. Refresh and try again.</div>';
+    return;
+  }
+
   set('nb-alerts',criticals.length||'0');
   set('alerts-count-badge',criticals.length+' Unresolved');
+
   if(criticals.length===0){container.innerHTML='<div style="padding:32px;text-align:center;color:var(--green)">✅ No critical alerts right now.</div>';return;}
+
   container.innerHTML=criticals.map(c=>{
     let flags=[];
     try{const sc=typeof c.scorecard==='string'?JSON.parse(c.scorecard):c.scorecard;if(sc&&sc.flags)flags=sc.flags;}catch(e){}

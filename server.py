@@ -11,6 +11,26 @@ from psycopg2.extras import RealDictCursor
 
 load_dotenv()
 
+import re
+
+def _rule_keywords(text):
+    stopwords = {'the','a','an','to','of','in','on','at','before','after','must','should',
+                 'agent','any','call','is','are','for','with','and','or','not','this','that'}
+    words = re.findall(r'\b[a-z]{3,}\b', text.lower())
+    return set(w for w in words if w not in stopwords)
+
+def _rules_match(rule_text_a, rule_text_b, threshold=0.5):
+    """True if two rule descriptions share enough keywords to be considered the same rule.
+    Needed because Claude paraphrases/shortens rule text when scoring, so it rarely matches
+    the original rule description verbatim."""
+    kw_a = _rule_keywords(rule_text_a)
+    kw_b = _rule_keywords(rule_text_b)
+    if not kw_a or not kw_b:
+        return False
+    overlap = len(kw_a & kw_b)
+    smaller = min(len(kw_a), len(kw_b))
+    return (overlap / smaller) >= threshold if smaller else False
+
 app = Flask(__name__, static_folder='.')
 app.secret_key = os.getenv('SECRET_KEY', 'voiceguard-secret-2024-proclick-xK9mP2nQ')
 app.config['SESSION_COOKIE_SECURE'] = False
@@ -433,21 +453,25 @@ def get_rule_violations(rule_id):
         return jsonify({'error': 'Rule not found'}), 404
 
     rule = dict(rule)
-    rule_desc = rule['description'].lower()
+    rule_desc = rule['description']
 
-    # Find calls where this rule was violated from rule_results table
+    # Find calls where this rule was violated from rule_results table — fetch then fuzzy match in Python
+    # since Claude paraphrases rule text and exact substring matching misses most real matches
     c.execute('''
-        SELECT rr.call_id, rr.evidence, rr.confidence,
+        SELECT rr.call_id, rr.rule_description, rr.evidence, rr.confidence,
                ca.agent_name, ca.account_name, ca.created_at,
                ca.overall_score, ca.status, ca.emotion
         FROM rule_results rr
         JOIN calls ca ON ca.call_id = rr.call_id
         WHERE rr.passed = false
-        AND LOWER(rr.rule_description) LIKE %s
         ORDER BY ca.created_at DESC
-        LIMIT 100
-    ''', (f'%{rule_desc[:30]}%',))
-    violations = [dict(v) for v in c.fetchall()]
+        LIMIT 2000
+    ''')
+    all_failed_results = c.fetchall()
+    violations = []
+    for row in all_failed_results:
+        if row['rule_description'] and _rules_match(rule_desc, row['rule_description']):
+            violations.append(dict(row))
 
     # Also search scorecard JSON for calls without rule_results entries
     if len(violations) < 5:
@@ -457,27 +481,28 @@ def get_rule_violations(rule_id):
             FROM calls
             WHERE overall_score > 0
             AND scorecard IS NOT NULL
-            AND scorecard::text LIKE %s
             ORDER BY created_at DESC
-            LIMIT 50
-        ''', (f'%{rule_desc[:20]}%',))
+            LIMIT 300
+        ''')
         for row in c.fetchall():
-            if not any(v['call_id'] == row['call_id'] for v in violations):
-                try:
-                    sc = json.loads(row['scorecard']) if isinstance(row['scorecard'], str) else row['scorecard']
-                    for rule_eval in sc.get('rules_evaluation', []):
-                        if not rule_eval.get('passed') and rule_desc[:20].lower() in rule_eval.get('rule','').lower():
-                            violations.append({
-                                'call_id': row['call_id'],
-                                'agent_name': row['agent_name'],
-                                'account_name': row['account_name'],
-                                'created_at': row['created_at'],
-                                'overall_score': row['overall_score'],
-                                'status': row['status'],
-                                'emotion': row['emotion'],
-                                'evidence': rule_eval.get('evidence','')
-                            })
-                except: pass
+            if any(v['call_id'] == row['call_id'] for v in violations):
+                continue
+            try:
+                sc = json.loads(row['scorecard']) if isinstance(row['scorecard'], str) else row['scorecard']
+                for rule_eval in sc.get('rules_evaluation', []):
+                    if not rule_eval.get('passed') and _rules_match(rule_desc, rule_eval.get('rule','')):
+                        violations.append({
+                            'call_id': row['call_id'],
+                            'agent_name': row['agent_name'],
+                            'account_name': row['account_name'],
+                            'created_at': row['created_at'],
+                            'overall_score': row['overall_score'],
+                            'status': row['status'],
+                            'emotion': row['emotion'],
+                            'evidence': rule_eval.get('evidence','')
+                        })
+                        break
+            except: pass
 
     # Aggregate by agent
     agent_counts = {}
@@ -501,6 +526,8 @@ def get_rule_violations(rule_id):
         'agents_summary': agents_summary,
         'recent_violations': violations[:20]
     })
+
+@app.route('/api/rules', methods=['GET'])
 def get_rules():
     conn = get_db()
     c = conn.cursor(cursor_factory=RealDictCursor)
@@ -536,13 +563,101 @@ def update_rule(rule_id):
     if not rule:
         conn.close()
         return jsonify({'error': 'Not found'}), 404
+
+    old_severity = rule['severity']
+    new_severity = data.get('severity', rule['severity'])
+    new_description = data.get('description', rule['description'])
+
     c.execute('UPDATE rules SET description=%s, category=%s, severity=%s, active=%s WHERE id=%s RETURNING *',
-              (data.get('description', rule['description']), data.get('category', rule['category']),
-               data.get('severity', rule['severity']), data.get('active', rule['active']), rule_id))
+              (new_description, data.get('category', rule['category']),
+               new_severity, data.get('active', rule['active']), rule_id))
     updated = dict(c.fetchone())
     conn.commit()
+
+    relabeled_count = 0
+    if new_severity != old_severity:
+        relabeled_count = relabel_rule_severity_in_past_calls(c, conn, rule['description'], new_severity)
+
     conn.close()
+    updated['relabeled_calls'] = relabeled_count
     return jsonify(updated)
+
+def relabel_rule_severity_in_past_calls(c, conn, rule_description, new_severity):
+    """
+    Updates severity of this rule across all past calls' rule_results and scorecard JSON,
+    then recalculates flag counts and status for any affected call.
+    Does NOT re-run AI scoring — overall_score is left untouched.
+    Uses fuzzy keyword matching since Claude paraphrases rule text when scoring.
+    """
+    rule_keywords = _rule_keywords(rule_description)
+    if not rule_keywords:
+        return 0
+
+    # 1. Update rule_results table — fetch all distinct rule_description values once, match in Python
+    c.execute('SELECT DISTINCT rule_description, call_id FROM rule_results WHERE passed IS NOT NULL')
+    all_results = c.fetchall()
+    matching_call_ids_from_results = set()
+    matching_descriptions = set()
+    for row in all_results:
+        if row['rule_description'] and _rules_match(rule_description, row['rule_description']):
+            matching_descriptions.add(row['rule_description'])
+            matching_call_ids_from_results.add(row['call_id'])
+
+    if matching_descriptions:
+        for desc in matching_descriptions:
+            c.execute('UPDATE rule_results SET severity=%s WHERE rule_description=%s', (new_severity, desc))
+
+    # 2. Find calls whose scorecard JSON mentions a similar rule (covers calls without rule_results rows)
+    c.execute('''
+        SELECT call_id, scorecard FROM calls
+        WHERE scorecard IS NOT NULL AND scorecard != '{}'
+        AND overall_score > 0
+    ''')
+    scorecard_rows = c.fetchall()
+
+    affected_calls = set(matching_call_ids_from_results)
+
+    for row in scorecard_rows:
+        call_id = row['call_id']
+        try:
+            sc = json.loads(row['scorecard']) if isinstance(row['scorecard'], str) else row['scorecard']
+            changed = False
+            matched_rule_texts = set()
+
+            for rule_eval in sc.get('rules_evaluation', []):
+                rtext = rule_eval.get('rule', '')
+                if rtext and _rules_match(rule_description, rtext):
+                    rule_eval['severity'] = new_severity
+                    matched_rule_texts.add(rtext.lower())
+                    changed = True
+
+            if matched_rule_texts:
+                for flag in sc.get('flags', []):
+                    flag_text = (flag.get('title','') + ' ' + flag.get('description','')).lower()
+                    if any(_rules_match(rtext, flag_text, threshold=0.3) for rtext in matched_rule_texts):
+                        flag['severity'] = new_severity
+                        changed = True
+
+            if changed:
+                new_critical_count = sum(1 for f in sc.get('flags', []) if f.get('severity') == 'Critical')
+                new_warning_count = sum(1 for f in sc.get('flags', []) if f.get('severity') == 'Warning')
+                total_flags = len(sc.get('flags', []))
+
+                if new_critical_count > 0:
+                    new_status = 'Critical'
+                elif new_warning_count > 0 or total_flags > 0:
+                    new_status = 'Review'
+                else:
+                    new_status = 'Passed'
+
+                c.execute('UPDATE calls SET scorecard=%s, flags=%s, status=%s WHERE call_id=%s',
+                          (json.dumps(sc), total_flags, new_status, call_id))
+                affected_calls.add(call_id)
+        except Exception as e:
+            print(f'[Relabel] Skipped call {call_id}: {e}')
+
+    conn.commit()
+    return len(affected_calls)
 
 @app.route('/api/rules/<int:rule_id>', methods=['DELETE'])
 @require_admin
@@ -1253,6 +1368,8 @@ def proxy_recording(call_id):
         )
     except Exception as e:
         return jsonify({'error': f'Could not download recording: {str(e)}'}), 500
+
+@app.route('/api/calls/<call_id>', methods=['GET'])
 def get_call(call_id):
     conn = get_db()
     c = conn.cursor(cursor_factory=RealDictCursor)
@@ -1277,7 +1394,7 @@ def get_stats():
     total_calls = c.fetchone()['v']
     c.execute("SELECT AVG(overall_score) as v FROM calls WHERE overall_score > 0")
     avg_score = c.fetchone()['v'] or 0
-    c.execute("SELECT COUNT(*) as v FROM calls WHERE status='Critical'")
+    c.execute("SELECT COUNT(*) as v FROM calls WHERE status='Critical' AND overall_score > 0")
     critical_flags = c.fetchone()['v']
     c.execute("SELECT COUNT(DISTINCT agent_name) as v FROM calls WHERE overall_score < 70 AND overall_score > 0")
     needs_coaching = c.fetchone()['v']
@@ -1822,6 +1939,8 @@ def auth_debug():
         'db_result': db_result,
         'cache_size': len(_token_cache)
     })
+
+@app.route('/api/analyze/status', methods=['GET'])
 def analyze_status():
     anthropic_key = os.getenv('ANTHROPIC_API_KEY', '')
     gemini_key = os.getenv('GEMINI_API_KEY', '')
@@ -1936,6 +2055,8 @@ def test_one_call():
 
     except Exception as e:
         return jsonify({'error': str(e), 'traceback': traceback.format_exc()})
+
+@app.route('/api/test-analyze', methods=['GET'])
 def test_analyze():
     """Test each component of the AI pipeline individually."""
     results = {}
