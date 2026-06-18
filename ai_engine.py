@@ -81,6 +81,11 @@ def analyze_audio_with_gemini(audio_path):
     print(f"[Gemini] Analyzing: {audio_path}")
     model = genai.GenerativeModel('gemini-2.5-flash')
 
+    ext = os.path.splitext(audio_path)[1].lower()
+    mime_map = {'.mp3':'audio/mp3','.wav':'audio/wav','.m4a':'audio/mp4',
+                '.ogg':'audio/ogg','.flac':'audio/flac','.webm':'audio/webm'}
+    mime_type = mime_map.get(ext, 'audio/wav')
+
     INLINE_SIZE_LIMIT_MB = 18  # Gemini's safe inline limit is ~20MB; use File API above this
 
     audio_size_mb = os.path.getsize(audio_path) / 1024 / 1024
@@ -105,11 +110,6 @@ def analyze_audio_with_gemini(audio_path):
             _time.sleep(2)
         audio_part = uploaded  # Gemini accepts the file object directly
         print(f"[Gemini] File uploaded: {uploaded.name}")
-
-    ext = os.path.splitext(audio_path)[1].lower()
-    mime_map = {'.mp3':'audio/mp3','.wav':'audio/wav','.m4a':'audio/mp4',
-                '.ogg':'audio/ogg','.flac':'audio/flac','.webm':'audio/webm'}
-    mime_type = mime_map.get(ext, 'audio/wav')
 
     prompt = """You are a call center audio analyst. Listen to this call carefully, with special attention to WHEN things happen (exact timestamps).
 
