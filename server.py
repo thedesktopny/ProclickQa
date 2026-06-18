@@ -2100,50 +2100,67 @@ def test_one_call():
 def network_diagnostic():
     """
     Tests DNS resolution, TCP connection, and HTTP fetch separately against the
-    recording server, so we can pinpoint exactly which layer is failing from Azure.
+    recording server, plus comparison tests against other hosts/ports, so we can
+    pinpoint exactly which layer is failing from Azure and whether it's specific
+    to this host or a broader outbound restriction.
     """
     import socket
     import time as _time
 
     target_host = 'main.getremail.com'
-    target_port = 80
     test_url = request.args.get('url', 'http://main.getremail.com/recordings/1781754701.6117618.wav')
 
     results = {}
 
-    # Test 1: DNS resolution
+    # Test 1: DNS resolution of target host
     try:
         start = _time.time()
         ip = socket.gethostbyname(target_host)
-        results['dns'] = f'OK — {target_host} resolves to {ip} in {round(_time.time()-start,2)}s'
+        results['dns_target'] = f'OK \u2014 {target_host} resolves to {ip} in {round(_time.time()-start,2)}s'
     except Exception as e:
-        results['dns'] = f'FAIL: {type(e).__name__}: {str(e)}'
-        return jsonify(results)  # no point continuing if DNS itself fails
+        results['dns_target'] = f'FAIL: {type(e).__name__}: {str(e)}'
 
-    # Test 2: Raw TCP connection (bypasses HTTP entirely)
+    # Test 2: Raw TCP connection to target host, port 80
     try:
         start = _time.time()
-        sock = socket.create_connection((target_host, target_port), timeout=10)
+        sock = socket.create_connection((target_host, 80), timeout=10)
         sock.close()
-        results['tcp_connect'] = f'OK — connected to {target_host}:{target_port} in {round(_time.time()-start,2)}s'
+        results['tcp_target_port80'] = f'OK \u2014 connected in {round(_time.time()-start,2)}s'
     except Exception as e:
-        results['tcp_connect'] = f'FAIL: {type(e).__name__}: {str(e)}'
-        return jsonify(results)
+        results['tcp_target_port80'] = f'FAIL: {type(e).__name__}: {str(e)}'
 
-    # Test 3: Full HTTP GET with short timeout (actual download attempt)
+    # Test 3: Raw TCP connection to target host, port 443 (does HTTPS work where HTTP doesn't?)
+    try:
+        start = _time.time()
+        sock = socket.create_connection((target_host, 443), timeout=10)
+        sock.close()
+        results['tcp_target_port443'] = f'OK \u2014 connected in {round(_time.time()-start,2)}s'
+    except Exception as e:
+        results['tcp_target_port443'] = f'FAIL: {type(e).__name__}: {str(e)}'
+
+    # Test 4: Raw TCP to a totally unrelated, well-known host on port 80 (is ALL outbound port 80 blocked, or just this host?)
+    try:
+        start = _time.time()
+        sock = socket.create_connection(('example.com', 80), timeout=10)
+        sock.close()
+        results['tcp_unrelated_host_port80'] = f'OK \u2014 connected to example.com:80 in {round(_time.time()-start,2)}s'
+    except Exception as e:
+        results['tcp_unrelated_host_port80'] = f'FAIL: {type(e).__name__}: {str(e)}'
+
+    # Test 5: Full HTTP GET attempt on the actual recording URL
     try:
         start = _time.time()
         req = urllib.request.Request(test_url, headers={'User-Agent': 'VoiceGuard/1.0'})
         with urllib.request.urlopen(req, timeout=20) as resp:
-            data = resp.read(1024)  # just read first 1KB, don't need the whole file
+            data = resp.read(1024)
             status_code = resp.status
-        results['http_get'] = f'OK — HTTP {status_code}, got {len(data)} bytes in {round(_time.time()-start,2)}s'
+        results['http_get_target'] = f'OK \u2014 HTTP {status_code}, got {len(data)} bytes in {round(_time.time()-start,2)}s'
     except urllib.error.HTTPError as e:
-        results['http_get'] = f'FAIL: HTTP {e.code} — {e.reason}'
+        results['http_get_target'] = f'FAIL: HTTP {e.code} \u2014 {e.reason}'
     except Exception as e:
-        results['http_get'] = f'FAIL: {type(e).__name__}: {str(e)} after {round(_time.time()-start,2)}s'
+        results['http_get_target'] = f'FAIL: {type(e).__name__}: {str(e)} after {round(_time.time()-start,2)}s'
 
-    # Test 4: Outbound IP this Azure instance is using
+    # Test 6: Outbound IP this Azure instance is currently using
     try:
         req = urllib.request.Request('https://api.ipify.org?format=json')
         with urllib.request.urlopen(req, timeout=10) as resp:
