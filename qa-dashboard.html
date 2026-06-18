@@ -37,6 +37,23 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);displ
 .page-title{font-family:'Space Grotesk',sans-serif;font-size:18px;font-weight:600;}
 .topbar-right{display:flex;align-items:center;gap:12px;}
 .date-filter{background:var(--surface2);border:1px solid var(--border);color:var(--text2);padding:7px 14px;border-radius:8px;font-size:12px;font-family:'Inter',sans-serif;cursor:pointer;outline:none;}
+.daterange-wrap{position:relative;display:inline-block;}
+.daterange-btn{background:var(--surface2);border:1px solid var(--border);color:var(--text2);padding:7px 14px;border-radius:8px;font-size:12px;font-family:'Inter',sans-serif;cursor:pointer;outline:none;display:flex;align-items:center;gap:6px;white-space:nowrap;}
+.daterange-btn:hover{border-color:var(--accent);}
+.daterange-btn.active{border-color:var(--accent);color:var(--accent);background:rgba(79,110,247,0.08);}
+.daterange-popover{position:absolute;top:calc(100% + 8px);right:0;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:8px;box-shadow:0 12px 32px rgba(0,0,0,0.5);z-index:200;min-width:200px;display:none;}
+.daterange-popover.open{display:block;}
+.daterange-preset{padding:9px 12px;border-radius:8px;font-size:12px;color:var(--text2);cursor:pointer;transition:background 0.12s;}
+.daterange-preset:hover{background:var(--surface2);}
+.daterange-preset.selected{background:rgba(79,110,247,0.12);color:var(--accent);font-weight:600;}
+.daterange-divider{height:1px;background:var(--border);margin:6px 0;}
+.daterange-custom{padding:8px 12px;}
+.daterange-custom label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;display:block;margin-bottom:4px;margin-top:8px;}
+.daterange-custom input[type="date"],.daterange-custom input[type="time"]{background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:6px;font-size:12px;font-family:'Inter',sans-serif;width:100%;outline:none;}
+.daterange-custom-row{display:flex;gap:6px;}
+.daterange-apply-btn{margin-top:10px;width:100%;background:var(--accent);border:none;color:#fff;padding:8px;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;}
+.daterange-clear-btn{margin-top:6px;width:100%;background:none;border:none;color:var(--text3);padding:6px;font-size:11px;cursor:pointer;}
+.daterange-clear-btn:hover{color:var(--text2);}
 .btn{padding:8px 16px;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;border:none;font-family:'Inter',sans-serif;}
 .btn-primary{background:var(--accent);color:white;}
 .btn-outline{background:transparent;border:1px solid var(--border);color:var(--text2);}
@@ -278,6 +295,7 @@ td.agent{color:var(--text);font-weight:500;}
     <div class="page-title">Call Review</div>
     <div class="topbar-right">
       <button class="btn btn-outline" onclick="retryStuck()" style="color:var(--yellow)">🔄 Retry Stuck</button>
+      <div id="calls-daterange-container"></div>
       <select class="date-filter" id="calls-filter" onchange="filterCalls()">
         <option value="">All calls</option>
         <option value="Critical">Critical only</option>
@@ -337,6 +355,7 @@ td.agent{color:var(--text);font-weight:500;}
   <div class="topbar">
     <div class="page-title">👁 Human Review Queue</div>
     <div class="topbar-right">
+      <div id="human-review-daterange-container"></div>
       <span style="font-size:12px;color:var(--text3)">Calls flagged for human verification</span>
     </div>
   </div>
@@ -578,6 +597,7 @@ td.agent{color:var(--text);font-weight:500;}
   <div class="topbar">
     <div class="page-title">🚨 Live Alerts</div>
     <div class="topbar-right">
+      <div id="alerts-daterange-container"></div>
       <span class="badge badge-red" id="alerts-count-badge" style="font-size:12px;padding:6px 14px;">0 Unresolved</span>
     </div>
   </div>
@@ -963,9 +983,12 @@ async function doLogout(){
 
 async function loadStats(){try{stats=await API.get('/api/stats');}catch(e){}}
 async function loadRules(){try{rules=await API.get('/api/rules');}catch(e){rules=[];}}
-async function loadCalls(page=1){
+async function loadCalls(page=1, dateFrom='', dateTo=''){
   try{
-    const res=await API.get(`/api/calls?page=${page}&limit=25`);
+    let url = `/api/calls?page=${page}&limit=25`;
+    if(dateFrom) url += `&date_from=${encodeURIComponent(dateFrom)}`;
+    if(dateTo) url += `&date_to=${encodeURIComponent(dateTo)}`;
+    const res=await API.get(url);
     // Handle both old array response and new paginated response
     if(Array.isArray(res)){
       calls=res; allCalls=[...res]; totalPages=1; totalCalls=res.length;
@@ -988,6 +1011,135 @@ async function loadNotes(){try{notesData=await API.get('/api/analytics/notes-qua
 // Note: renderAlerts() and renderHumanReview() are intentionally NOT auto-loaded on login.
 // They fetch live data on-demand only when the user navigates to that specific page
 // (see showPage() below), which avoids race conditions between background loads and page clicks.
+
+// ─── DATE RANGE PICKER (reusable across Calls, Human Review, Alerts) ──────────
+// Global state: each instance is keyed by a unique id so multiple pickers can exist on different pages
+let dateRangeState = {}; // { [pickerId]: { from: 'YYYY-MM-DDTHH:mm' or '', to: '...', label: 'All time' } }
+
+function initDateRangePicker(pickerId, onApply){
+  if(!dateRangeState[pickerId]) dateRangeState[pickerId] = {from:'', to:'', label:'All time'};
+  dateRangeState[pickerId]._onApply = onApply;
+}
+
+function dateRangePickerHtml(pickerId){
+  return `<div class="daterange-wrap" id="dr-wrap-${pickerId}">
+    <button class="daterange-btn" id="dr-btn-${pickerId}" onclick="toggleDateRangePopover('${pickerId}')">
+      📅 <span id="dr-label-${pickerId}">All time</span>
+    </button>
+    <div class="daterange-popover" id="dr-popover-${pickerId}">
+      <div class="daterange-preset" onclick="applyDatePreset('${pickerId}','today')">Today</div>
+      <div class="daterange-preset" onclick="applyDatePreset('${pickerId}','yesterday')">Yesterday</div>
+      <div class="daterange-preset" onclick="applyDatePreset('${pickerId}','last7')">Last 7 days</div>
+      <div class="daterange-preset" onclick="applyDatePreset('${pickerId}','last30')">Last 30 days</div>
+      <div class="daterange-preset" onclick="applyDatePreset('${pickerId}','thismonth')">This month</div>
+      <div class="daterange-preset" onclick="applyDatePreset('${pickerId}','all')">All time</div>
+      <div class="daterange-divider"></div>
+      <div class="daterange-custom">
+        <label>From</label>
+        <div class="daterange-custom-row">
+          <input type="date" id="dr-from-date-${pickerId}">
+          <input type="time" id="dr-from-time-${pickerId}" value="00:00">
+        </div>
+        <label>To</label>
+        <div class="daterange-custom-row">
+          <input type="date" id="dr-to-date-${pickerId}">
+          <input type="time" id="dr-to-time-${pickerId}" value="23:59">
+        </div>
+        <button class="daterange-apply-btn" onclick="applyCustomDateRange('${pickerId}')">Apply</button>
+        <button class="daterange-clear-btn" onclick="applyDatePreset('${pickerId}','all')">Clear filter</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function toggleDateRangePopover(pickerId){
+  const pop = document.getElementById(`dr-popover-${pickerId}`);
+  const isOpen = pop.classList.contains('open');
+  // Close any other open popovers first
+  document.querySelectorAll('.daterange-popover.open').forEach(p=>p.classList.remove('open'));
+  if(!isOpen) pop.classList.add('open');
+}
+
+// Close popover when clicking outside it
+document.addEventListener('click', (e)=>{
+  if(!e.target.closest('.daterange-wrap')){
+    document.querySelectorAll('.daterange-popover.open').forEach(p=>p.classList.remove('open'));
+  }
+});
+
+function _fmtLocalDatetime(d){
+  // Format a JS Date as YYYY-MM-DDTHH:mm:ss in LOCAL time (not UTC) for the datetime input/API params
+  const pad=(n)=>String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function applyDatePreset(pickerId, preset){
+  const now = new Date();
+  let from='', to='', label='All time';
+
+  if(preset==='today'){
+    from = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0,0,0);
+    to = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23,59,59);
+    label='Today';
+  } else if(preset==='yesterday'){
+    const y = new Date(now); y.setDate(y.getDate()-1);
+    from = new Date(y.getFullYear(), y.getMonth(), y.getDate(), 0,0,0);
+    to = new Date(y.getFullYear(), y.getMonth(), y.getDate(), 23,59,59);
+    label='Yesterday';
+  } else if(preset==='last7'){
+    from = new Date(now); from.setDate(from.getDate()-7); from.setHours(0,0,0);
+    to = new Date(now);
+    label='Last 7 days';
+  } else if(preset==='last30'){
+    from = new Date(now); from.setDate(from.getDate()-30); from.setHours(0,0,0);
+    to = new Date(now);
+    label='Last 30 days';
+  } else if(preset==='thismonth'){
+    from = new Date(now.getFullYear(), now.getMonth(), 1, 0,0,0);
+    to = new Date(now);
+    label='This month';
+  } else if(preset==='all'){
+    from=''; to=''; label='All time';
+  }
+
+  dateRangeState[pickerId].from = from ? _fmtLocalDatetime(from) : '';
+  dateRangeState[pickerId].to = to ? _fmtLocalDatetime(to) : '';
+  dateRangeState[pickerId].label = label;
+
+  document.getElementById(`dr-label-${pickerId}`).textContent = label;
+  document.getElementById(`dr-btn-${pickerId}`).classList.toggle('active', preset!=='all');
+  document.querySelectorAll(`#dr-popover-${pickerId} .daterange-popover.open`).forEach(p=>p.classList.remove('open'));
+  document.getElementById(`dr-popover-${pickerId}`).classList.remove('open');
+
+  if(dateRangeState[pickerId]._onApply) dateRangeState[pickerId]._onApply(dateRangeState[pickerId].from, dateRangeState[pickerId].to);
+}
+
+function applyCustomDateRange(pickerId){
+  const fromDate = document.getElementById(`dr-from-date-${pickerId}`).value;
+  const fromTime = document.getElementById(`dr-from-time-${pickerId}`).value || '00:00';
+  const toDate = document.getElementById(`dr-to-date-${pickerId}`).value;
+  const toTime = document.getElementById(`dr-to-time-${pickerId}`).value || '23:59';
+
+  if(!fromDate && !toDate){ showToast('Pick at least one date', true); return; }
+
+  const from = fromDate ? `${fromDate}T${fromTime}:00` : '';
+  const to = toDate ? `${toDate}T${toTime}:00` : '';
+
+  let label='Custom range';
+  if(fromDate && toDate) label = `${fromDate} → ${toDate}`;
+  else if(fromDate) label = `From ${fromDate}`;
+  else if(toDate) label = `Until ${toDate}`;
+
+  dateRangeState[pickerId].from = from;
+  dateRangeState[pickerId].to = to;
+  dateRangeState[pickerId].label = label;
+
+  document.getElementById(`dr-label-${pickerId}`).textContent = label;
+  document.getElementById(`dr-btn-${pickerId}`).classList.add('active');
+  document.getElementById(`dr-popover-${pickerId}`).classList.remove('open');
+
+  if(dateRangeState[pickerId]._onApply) dateRangeState[pickerId]._onApply(from, to);
+}
 
 // ─── PAGE NAV ─────────────────────────────────────────────────────────────────
 // ─── COSTS PAGE ───────────────────────────────────────────────────────────────
@@ -1531,8 +1683,37 @@ function showPage(id){
   if(id==='qa-users') loadQAUsers();
   if(id==='analytics') renderAnalytics();
   if(id==='costs'){ initCostsMonthSelector(); loadCosts(); }
-  if(id==='human-review') renderHumanReview();
-  if(id==='alerts') renderAlerts();
+  if(id==='human-review'){ mountHumanReviewDatePicker(); renderHumanReview(); }
+  if(id==='alerts'){ mountAlertsDatePicker(); renderAlerts(); }
+  if(id==='calls') mountCallsDatePicker();
+}
+
+function mountCallsDatePicker(){
+  const container = document.getElementById('calls-daterange-container');
+  if(!container || container.dataset.mounted) return;
+  container.innerHTML = dateRangePickerHtml('calls');
+  container.dataset.mounted = '1';
+  initDateRangePicker('calls', async (from, to)=>{
+    await loadCalls(1, from, to);
+    renderCalls();
+    renderPagination();
+  });
+}
+
+function mountHumanReviewDatePicker(){
+  const container = document.getElementById('human-review-daterange-container');
+  if(!container || container.dataset.mounted) return;
+  container.innerHTML = dateRangePickerHtml('humanreview');
+  container.dataset.mounted = '1';
+  initDateRangePicker('humanreview', ()=>{ renderHumanReview(); });
+}
+
+function mountAlertsDatePicker(){
+  const container = document.getElementById('alerts-daterange-container');
+  if(!container || container.dataset.mounted) return;
+  container.innerHTML = dateRangePickerHtml('alerts');
+  container.dataset.mounted = '1';
+  initDateRangePicker('alerts', ()=>{ renderAlerts(); });
 }
 
 function updateBadges(){
@@ -1820,11 +2001,15 @@ function buildExpandContent(c){
         const safeTitle=(f.title||'Flag').replace(/'/g,"\\'").replace(/"/g,'&quot;');
         const safeDesc=(f.description||'').replace(/'/g,"\\'").replace(/"/g,'&quot;');
         const safeSev=(f.severity||'Warning');
-        const safeTime=(f.timestamp||'');
-        return `<div onclick="showFlagModal('${safeTitle}','${safeDesc}','${safeSev}','${safeTime}')" style="background:${f.severity==='Critical'?'rgba(242,78,78,0.1)':'rgba(245,166,35,0.1)'};border:1px solid ${f.severity==='Critical'?'rgba(242,78,78,0.3)':'rgba(245,166,35,0.3)'};border-radius:8px;padding:10px 14px;cursor:pointer;transition:all 0.15s;max-width:240px;" onmouseover="this.style.transform='translateY(-1px)'" onmouseout="this.style.transform='none'">
-          <div style="font-size:11px;font-weight:600;color:${f.severity==='Critical'?'var(--red)':'var(--yellow)'};margin-bottom:4px;">${f.severity==='Critical'?'🚨':'⚠️'} ${f.title||'Flag'}</div>
-          <div style="font-size:10px;color:var(--text3);line-height:1.4;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;">${f.description||''}</div>
-          <div style="font-size:10px;color:var(--accent);margin-top:6px;font-weight:500;">Tap to read full ↗</div>
+        const safeTime=(f.timestamp_display||f.timestamp||'');
+        const hasTimestamp = f.timestamp_seconds && f.timestamp_seconds > 0 && c.recording_url;
+        return `<div style="background:${f.severity==='Critical'?'rgba(242,78,78,0.1)':'rgba(245,166,35,0.1)'};border:1px solid ${f.severity==='Critical'?'rgba(242,78,78,0.3)':'rgba(245,166,35,0.3)'};border-radius:8px;padding:10px 14px;max-width:260px;">
+          <div onclick="showFlagModal('${safeTitle}','${safeDesc}','${safeSev}','${safeTime}')" style="cursor:pointer;">
+            <div style="font-size:11px;font-weight:600;color:${f.severity==='Critical'?'var(--red)':'var(--yellow)'};margin-bottom:4px;">${f.severity==='Critical'?'🚨':'⚠️'} ${f.title||'Flag'}</div>
+            <div style="font-size:10px;color:var(--text3);line-height:1.4;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;">${f.description||''}</div>
+            <div style="font-size:10px;color:var(--accent);margin-top:6px;font-weight:500;">Tap to read full ↗</div>
+          </div>
+          ${hasTimestamp?`<button onclick="event.stopPropagation();jumpToTimestamp(${f.timestamp_seconds},'${c.recording_url}','${c.call_id}')" style="margin-top:8px;width:100%;background:rgba(79,110,247,0.15);border:none;color:var(--accent);cursor:pointer;border-radius:6px;padding:5px 8px;font-size:10px;font-weight:600;">▶ Play moment (${safeTime})</button>`:''}
         </div>`;
       }).join('')}
     </div>
@@ -1951,18 +2136,41 @@ async function toggleRow(callId){
 // ─── AUDIO PLAYER ─────────────────────────────────────────────────────────────
 let currentAudio = null;
 
-function jumpToTimestamp(seconds){
-  const audio = document.getElementById('call-detail-audio');
+function jumpToTimestamp(seconds, recordingUrl, callId){
+  // Use whichever audio player is actually present on the page right now.
+  // Call Detail page has a persistent <audio id="call-detail-audio">.
+  // Calls list / expanded rows use the floating mini-player instead.
+  let audio = document.getElementById('call-detail-audio');
+
   if(!audio){
-    showToast('Recording not loaded on this page', true);
+    // No detail-page player present — use (or open) the floating mini-player
+    if(recordingUrl && callId){
+      playAudio(recordingUrl, callId); // creates/refreshes #mini-audio-el
+      audio = document.getElementById('mini-audio-el');
+    } else {
+      audio = document.getElementById('mini-audio-el');
+    }
+  }
+
+  if(!audio){
+    showToast('Recording not available on this page', true);
     return;
   }
-  audio.currentTime = seconds;
-  audio.play().catch(()=>{}); // some browsers block autoplay until user interacts; controls still work
-  audio.scrollIntoView({behavior:'smooth', block:'center'});
-  // Brief highlight so it's obvious the player jumped
-  audio.style.outline = '2px solid var(--accent)';
-  setTimeout(()=>{ audio.style.outline = 'none'; }, 1200);
+
+  // If we just created the mini-player, give the <audio> element a moment to be ready
+  const seekAndPlay = () => {
+    audio.currentTime = seconds;
+    audio.play().catch(()=>{});
+    audio.scrollIntoView({behavior:'smooth', block:'center'});
+    audio.style.outline = '2px solid var(--accent)';
+    setTimeout(()=>{ audio.style.outline = 'none'; }, 1200);
+  };
+
+  if(audio.readyState >= 1){ // metadata already loaded
+    seekAndPlay();
+  } else {
+    audio.addEventListener('loadedmetadata', seekAndPlay, {once:true});
+  }
 }
 
 function playAudio(url, callId) {
@@ -1989,7 +2197,8 @@ function playAudio(url, callId) {
 async function goToPage(page){
   if(page<1||page>totalPages)return;
   currentPage=page;
-  await loadCalls(page);
+  const dr = dateRangeState['calls'] || {from:'',to:''};
+  await loadCalls(page, dr.from, dr.to);
   renderCalls();
   renderPagination();
   // Scroll to top of calls table
@@ -2221,7 +2430,11 @@ async function renderHumanReview(){
   let hr=[];
   try{
     // Fetch large page to get all flagged calls, not just current 25
-    const res = await API.get('/api/calls?page=1&limit=500');
+    const dr = dateRangeState['humanreview'] || {from:'',to:''};
+    let url = '/api/calls?page=1&limit=500';
+    if(dr.from) url += `&date_from=${encodeURIComponent(dr.from)}`;
+    if(dr.to) url += `&date_to=${encodeURIComponent(dr.to)}`;
+    const res = await API.get(url);
     const allCalls = Array.isArray(res) ? res : (res.calls||[]);
     hr = allCalls.filter(c=>
       c.overall_score>0 &&
@@ -2847,7 +3060,11 @@ async function renderAlerts(){
 
   let criticals=[];
   try{
-    const res = await API.get('/api/calls?page=1&limit=500');
+    const dr = dateRangeState['alerts'] || {from:'',to:''};
+    let url = '/api/calls?page=1&limit=500';
+    if(dr.from) url += `&date_from=${encodeURIComponent(dr.from)}`;
+    if(dr.to) url += `&date_to=${encodeURIComponent(dr.to)}`;
+    const res = await API.get(url);
     const allCalls = Array.isArray(res) ? res : (res.calls||[]);
     criticals = allCalls.filter(c=>c.status==='Critical'&&c.overall_score>0);
   }catch(e){

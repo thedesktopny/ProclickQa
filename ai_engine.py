@@ -131,7 +131,7 @@ Respond ONLY with valid JSON — keep all text values SHORT (max 100 chars each)
     {
       "timestamp_seconds": 0,
       "timestamp_display": "mm:ss",
-      "category": "explicit_content/policy_violation/compliance_failure/rudeness/no_verification/no_price_confirmation/no_logout_confirmation/outside_work_solicitation/minor_concern/other",
+      "category": "explicit_content/policy_violation/compliance_failure/rudeness/no_verification/no_price_confirmation/no_logout_confirmation/outside_work_solicitation/minor_concern/ignored_instruction/unanswered_question/call_drop_no_callback/wrong_region_currency/other",
       "speaker": "AGENT/CUSTOMER",
       "quote": "exact or near-exact words spoken, max 80 chars",
       "severity": "Critical/Warning",
@@ -140,7 +140,17 @@ Respond ONLY with valid JSON — keep all text values SHORT (max 100 chars each)
   ]
 }
 
-IMPORTANT for flagged_moments: only include moments that are CONCRETE, VERIFIABLE, and TIED TO A SPECIFIC POINT in the audio — not general impressions about the whole call. Each entry must have an accurate timestamp_seconds (total seconds from call start) so we can jump directly to that exact second in playback. Include things like: explicit/sexual language by either party, agent discussing outside work, agent failing to verify identity/price/logout at the specific moment that should have happened, rude or unprofessional remarks, policy violations. Do NOT include vague category-level issues (e.g. "agent seemed unprofessional overall") — only specific moments with an exact timestamp and quote. If nothing flag-worthy occurred, return an empty array."""
+IMPORTANT for flagged_moments: only include moments that are CONCRETE, VERIFIABLE, and TIED TO A SPECIFIC POINT in the audio — not general impressions about the whole call. Each entry must have an accurate timestamp_seconds (total seconds from call start) so we can jump directly to that exact second in playback. Include things like:
+- explicit/sexual language by either party
+- agent discussing outside work
+- agent failing to verify identity/price/logout at the specific moment that should have happened
+- rude or unprofessional remarks
+- policy violations
+- ignored_instruction: customer explicitly says something was already provided/saved/discussed (e.g. "I already gave you that," "it's saved on the account," "I told you this already") and the agent proceeds as if starting fresh anyway
+- unanswered_question: customer asks a direct, specific question and the agent's next response never actually answers it (changes subject, answers a different question, or ignores it)
+- call_drop_no_callback: the exact moment the call disconnects unexpectedly, especially if the issue was unresolved and no callback was arranged
+- wrong_region_currency: agent states a currency, region, or country that contradicts what the customer stated or what's implied by their account/context
+Do NOT include vague category-level issues (e.g. "agent seemed unprofessional overall") — only specific moments with an exact timestamp and quote. If nothing flag-worthy occurred, return an empty array."""
 
 
 
@@ -281,6 +291,9 @@ NOTES SCORING: 0=no notes, 1-40=vague, 41-70=basic, 71-85=good, 86-100=excellent
 CALL END: agent ended early + unresolved = flag. Drop + no callback = Critical.
 AGE CONCERN: young-sounding customer + adult requests = human review.
 OUTSIDE WORK: agent hinting at private work = Critical flag.
+IGNORED INSTRUCTIONS: if customer states something was already provided/saved/discussed and agent proceeds as if starting fresh, flag under active_listening — this is distinct from simply not understanding something, it's specifically disregarding what the customer already told them.
+UNANSWERED QUESTIONS: if customer asks a direct question and the agent's response never actually answers it (changes subject, answers something else, ignores it entirely), flag under customer_service_quality.
+WRONG REGION/CURRENCY: if agent states a currency/region/country that contradicts the customer's stated context, flag under accuracy_and_information.
 FLAG TIMESTAMPS: when a flag corresponds to one of the specific timestamped moments above, copy its exact timestamp_seconds value into that flag's "timestamp_seconds" field and its quote into "evidence_quote", so the user can jump straight to that second in the recording. If a flag is a general pattern across the whole call with no single moment (e.g. "agent talked too fast overall"), leave timestamp_seconds as 0.
 
 Respond ONLY with valid compact JSON (keep evidence under 60 chars each):

@@ -1367,10 +1367,23 @@ def get_calls():
     offset = (page - 1) * limit
     user = current_user()
 
+    date_from = request.args.get('date_from', '')  # ISO format: 2026-06-17T00:00:00
+    date_to = request.args.get('date_to', '')
+
+    date_clause = ''
+    date_params = []
+    if date_from:
+        date_clause += ' AND calls.created_at >= %s'
+        date_params.append(date_from)
+    if date_to:
+        date_clause += ' AND calls.created_at <= %s'
+        date_params.append(date_to)
+
     if user and user['role'] == 'qa_user':
-        c.execute('SELECT COUNT(*) FROM calls JOIN agents ON agents.name = calls.agent_name WHERE agents.assigned_qa_user_id = %s', (user['id'],))
+        c.execute(f'SELECT COUNT(*) FROM calls JOIN agents ON agents.name = calls.agent_name WHERE agents.assigned_qa_user_id = %s{date_clause}',
+                  [user['id']] + date_params)
         total = c.fetchone()['count']
-        c.execute('''
+        c.execute(f'''
             SELECT calls.call_id, calls.agent_name, calls.account_name, calls.customer_account_id,
                    calls.caller_id, calls.created_at, calls.duration, calls.billed_minutes,
                    calls.overall_score, calls.status, calls.emotion, calls.flags,
@@ -1380,21 +1393,23 @@ def get_calls():
                    calls.error_message
             FROM calls
             JOIN agents ON agents.name = calls.agent_name
-            WHERE agents.assigned_qa_user_id = %s
+            WHERE agents.assigned_qa_user_id = %s{date_clause}
             ORDER BY calls.created_at DESC LIMIT %s OFFSET %s
-        ''', (user['id'], limit, offset))
+        ''', [user['id']] + date_params + [limit, offset])
     else:
-        c.execute('SELECT COUNT(*) FROM calls')
+        where_clause = date_clause.replace(' AND ', 'WHERE ', 1) if date_clause else ''
+        c.execute(f'SELECT COUNT(*) FROM calls {where_clause}', date_params)
         total = c.fetchone()['count']
-        c.execute('''
+        c.execute(f'''
             SELECT call_id, agent_name, account_name, customer_account_id, caller_id,
                    created_at, duration, billed_minutes, overall_score, status, emotion,
                    flags, call_end_first, call_notes, notes_score, requires_human_review,
                    agent_qos_tx, agent_qos_rx, customer_qos_tx, customer_qos_rx, recording_url,
                    error_message
             FROM calls
+            {where_clause}
             ORDER BY created_at DESC LIMIT %s OFFSET %s
-        ''', (limit, offset))
+        ''', date_params + [limit, offset])
     calls = [dict(c) for c in c.fetchall()]
     conn.close()
     return jsonify({
