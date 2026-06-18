@@ -8,6 +8,8 @@ from datetime import datetime
 from dotenv import load_dotenv
 import psycopg2
 from psycopg2.extras import RealDictCursor
+import urllib.request
+import urllib.error
 
 load_dotenv()
 
@@ -55,6 +57,39 @@ DATABASE_URL = os.getenv('DATABASE_URL', '')
 def get_db():
     conn = psycopg2.connect(DATABASE_URL, sslmode='require')
     return conn
+
+def download_recording(url, dest_path, timeout=60, retries=2):
+    """
+    Downloads a call recording with an explicit timeout and retry logic.
+    Raises a descriptive exception on failure instead of hanging silently.
+    Returns nothing on success — file is written to dest_path.
+    """
+    import socket
+
+    last_error = None
+    for attempt in range(retries + 1):
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'VoiceGuard/1.0'})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = resp.read()
+            if len(data) < 1000:
+                raise ValueError(f'Downloaded file suspiciously small ({len(data)} bytes) — likely an error page, not real audio')
+            with open(dest_path, 'wb') as f:
+                f.write(data)
+            return  # success
+        except socket.timeout as e:
+            last_error = f'Timed out after {timeout}s connecting to recording server (attempt {attempt+1}/{retries+1})'
+        except urllib.error.HTTPError as e:
+            last_error = f'Recording server returned HTTP {e.code} (attempt {attempt+1}/{retries+1})'
+        except urllib.error.URLError as e:
+            last_error = f'Could not reach recording server: {e.reason} (attempt {attempt+1}/{retries+1})'
+        except Exception as e:
+            last_error = f'{type(e).__name__}: {str(e)} (attempt {attempt+1}/{retries+1})'
+
+        if attempt < retries:
+            time.sleep(3)  # brief pause before retry
+
+    raise Exception(f'Recording download failed after {retries+1} attempts. Last error: {last_error}. URL: {url}')
 
 def init_db():
     conn = get_db()
@@ -232,6 +267,7 @@ def init_db():
         "ALTER TABLE calls ADD COLUMN IF NOT EXISTS confidence INTEGER DEFAULT 100",
         "ALTER TABLE calls ADD COLUMN IF NOT EXISTS summary TEXT",
         "ALTER TABLE calls ADD COLUMN IF NOT EXISTS flagged_moments TEXT",
+        "ALTER TABLE calls ADD COLUMN IF NOT EXISTS error_message TEXT",
         "CREATE UNIQUE INDEX IF NOT EXISTS agents_name_unique ON agents (name)",
         "ALTER TABLE agents ADD COLUMN IF NOT EXISTS assigned_qa_user_id INTEGER",
         """CREATE TABLE IF NOT EXISTS auth_tokens (
@@ -1313,7 +1349,8 @@ def get_calls():
                    calls.overall_score, calls.status, calls.emotion, calls.flags,
                    calls.call_end_first, calls.call_notes, calls.notes_score,
                    calls.requires_human_review, calls.agent_qos_tx, calls.agent_qos_rx,
-                   calls.customer_qos_tx, calls.customer_qos_rx, calls.recording_url
+                   calls.customer_qos_tx, calls.customer_qos_rx, calls.recording_url,
+                   calls.error_message
             FROM calls
             JOIN agents ON agents.name = calls.agent_name
             WHERE agents.assigned_qa_user_id = %s
@@ -1326,7 +1363,8 @@ def get_calls():
             SELECT call_id, agent_name, account_name, customer_account_id, caller_id,
                    created_at, duration, billed_minutes, overall_score, status, emotion,
                    flags, call_end_first, call_notes, notes_score, requires_human_review,
-                   agent_qos_tx, agent_qos_rx, customer_qos_tx, customer_qos_rx, recording_url
+                   agent_qos_tx, agent_qos_rx, customer_qos_tx, customer_qos_rx, recording_url,
+                   error_message
             FROM calls
             ORDER BY created_at DESC LIMIT %s OFFSET %s
         ''', (limit, offset))
@@ -1343,7 +1381,6 @@ def get_calls():
 @app.route('/api/calls/<call_id>/recording', methods=['GET'])
 def proxy_recording(call_id):
     """Proxy the recording file so browser can download it."""
-    import urllib.request
     conn = get_db()
     c = conn.cursor(cursor_factory=RealDictCursor)
     c.execute('SELECT recording_url, agent_name, account_name FROM calls WHERE call_id=%s', (call_id,))
@@ -1662,7 +1699,6 @@ def analyze_call():
 
         def process_new_call():
             from ai_engine import analyze_call as run_analysis
-            import urllib.request
 
             url_path = recording_url.split('?')[0]
             ext = os.path.splitext(url_path)[1].lower()
@@ -1674,7 +1710,7 @@ def analyze_call():
             audio_path = os.path.join(UPLOAD_DIR, f"call_{call_id}_{int(time.time())}{ext}")
 
             try:
-                urllib.request.urlretrieve(recording_url, audio_path)
+                download_recording(recording_url, audio_path, timeout=60, retries=2)
                 result = run_analysis(audio_path, agent_name, call_id,
                                     call_end_first=call_end_first,
                                     call_notes=call_notes,
@@ -1721,11 +1757,12 @@ def analyze_call():
                 print(f"[AutoProcess] ✅ {call_id} scored: {result['overall_score']}%")
 
             except Exception as e:
-                print(f"[AutoProcess] ❌ {call_id} failed: {e}")
+                error_str = str(e)[:500]
+                print(f"[AutoProcess] ❌ {call_id} failed: {error_str}")
                 try:
                     conn3 = get_db()
                     c3 = conn3.cursor()
-                    c3.execute("UPDATE calls SET status='Failed' WHERE call_id=%s", (call_id,))
+                    c3.execute("UPDATE calls SET status='Failed', error_message=%s WHERE call_id=%s", (error_str, call_id))
                     conn3.commit()
                     conn3.close()
                 except: pass
@@ -1794,7 +1831,6 @@ def retry_stuck_calls():
         global retry_running
         retry_running = True
         from ai_engine import analyze_call as run_analysis
-        import urllib.request
 
         for i, call in enumerate(stuck_calls):
             try:
@@ -1819,7 +1855,7 @@ def retry_stuck_calls():
                 audio_path = os.path.join(UPLOAD_DIR, f"retry_{call_id}_{int(time.time())}{ext}")
 
                 try:
-                    urllib.request.urlretrieve(recording_url, audio_path)
+                    download_recording(recording_url, audio_path, timeout=60, retries=1)
                     size_bytes = os.path.getsize(audio_path)
                     size_mb = round(size_bytes / 1024 / 1024, 1)
 
@@ -1897,11 +1933,12 @@ def retry_stuck_calls():
             except Exception as e:
                 call_id = call.get('call_id','?')
                 agent = (call.get('agent_name') or '?').strip()
-                retry_log.append({'time': datetime.now().strftime('%I:%M:%S %p'), 'msg': f'❌ {agent} #{call_id[-8:]} — {str(e)[:80]}', 'type': 'error'})
+                error_str = str(e)[:500]
+                retry_log.append({'time': datetime.now().strftime('%I:%M:%S %p'), 'msg': f'❌ {agent} #{call_id[-8:]} — {error_str[:80]}', 'type': 'error'})
                 try:
                     conn3 = get_db()
                     c3 = conn3.cursor()
-                    c3.execute("UPDATE calls SET status='Failed' WHERE call_id=%s", (call_id,))
+                    c3.execute("UPDATE calls SET status='Failed', error_message=%s WHERE call_id=%s", (error_str, call_id))
                     conn3.commit()
                     conn3.close()
                 except: pass
@@ -1961,7 +1998,6 @@ def analyze_status():
 @app.route('/api/test-one-call', methods=['GET'])
 def test_one_call():
     """Process one stuck call and return detailed result."""
-    import urllib.request
     import traceback
 
     try:
@@ -2000,7 +2036,7 @@ def test_one_call():
         audio_path = os.path.join(UPLOAD_DIR, f"test_{call_id}{ext}")
 
         try:
-            urllib.request.urlretrieve(recording_url, audio_path)
+            download_recording(recording_url, audio_path, timeout=60, retries=1)
             size = os.path.getsize(audio_path)
             results['steps']['download'] = f'OK — {size} bytes ({round(size/1024/1024,1)} MB)'
         except Exception as e:
@@ -2099,23 +2135,27 @@ def test_analyze():
     except Exception as e:
         results['gemini'] = f'FAIL: {str(e)}'
 
-    # Test 4: Can we download a recording?
+    # Test 4: Can we reach the recording server at all?
     try:
-        import urllib.request
         conn = get_db()
         c = conn.cursor()
-        c.execute("SELECT recording_url, call_id FROM calls WHERE recording_url IS NOT NULL AND recording_url != '' LIMIT 1")
+        c.execute("SELECT recording_url, call_id FROM calls WHERE recording_url IS NOT NULL AND recording_url != '' ORDER BY created_at DESC LIMIT 1")
         row = c.fetchone()
         conn.close()
         if row:
             url = row[0].strip().rstrip(':').rstrip('/')
-            req = urllib.request.Request(url, method='HEAD')
-            urllib.request.urlopen(req, timeout=10)
-            results['audio_url'] = f'OK — accessible: {url[-40:]}'
+            import time as _time
+            start = _time.time()
+            req = urllib.request.Request(url, method='HEAD', headers={'User-Agent': 'VoiceGuard/1.0'})
+            urllib.request.urlopen(req, timeout=30)
+            elapsed = round(_time.time() - start, 1)
+            results['audio_url'] = f'OK — reachable in {elapsed}s: ...{url[-40:]}'
         else:
             results['audio_url'] = 'No calls with recording URL'
+    except urllib.error.HTTPError as e:
+        results['audio_url'] = f'FAIL: Server reachable but returned HTTP {e.code} (URL or auth may be wrong)'
     except Exception as e:
-        results['audio_url'] = f'FAIL: {str(e)}'
+        results['audio_url'] = f'FAIL: {type(e).__name__}: {str(e)} — recording server may be down, network-blocked, or DNS-unreachable from Azure'
 
     return jsonify(results)
 

@@ -951,7 +951,7 @@ async function checkAuth(){
 
   // Load rest in background — failures here must NEVER affect login state
   Promise.all([loadRules(), loadAgents(), loadAnalytics(), loadBilling(), loadNotes()])
-    .then(()=>{ renderRules(); renderAgents(); renderAnalytics(); renderBilling(); renderNotes(); renderAlerts(); renderHumanReview(); })
+    .then(()=>{ renderRules(); renderAgents(); renderAnalytics(); renderBilling(); renderNotes(); })
     .catch(e=>console.error('Background load failed (non-fatal):', e));
 }
 
@@ -985,12 +985,9 @@ async function loadAnalytics(){
 async function loadBilling(){try{billingData=await API.get('/api/analytics/billing');}catch(e){billingData={};}}
 async function loadNotes(){try{notesData=await API.get('/api/analytics/notes-quality');}catch(e){notesData=[];}}
 
-function renderAll(){
-  renderDashboard();renderCalls();renderRules();renderAgents();
-  renderPagination();
-  renderAnalytics();renderBilling();renderNotes();renderAlerts();renderHumanReview();
-  updateBadges();
-}
+// Note: renderAlerts() and renderHumanReview() are intentionally NOT auto-loaded on login.
+// They fetch live data on-demand only when the user navigates to that specific page
+// (see showPage() below), which avoids race conditions between background loads and page clicks.
 
 // ─── PAGE NAV ─────────────────────────────────────────────────────────────────
 // ─── COSTS PAGE ───────────────────────────────────────────────────────────────
@@ -1723,7 +1720,7 @@ function renderCalls(list){
   if(data.length===0){tbody.innerHTML='<tr><td colspan="15" style="text-align:center;padding:32px;color:var(--text3)">No calls yet.</td></tr>';return;}
   tbody.innerHTML=data.map(c=>{
     const sc=c.overall_score>0?scoreCircle(c.overall_score):`<div class="score-circle sc-gray" style="font-size:10px;color:var(--text3);">...</div>`;
-    const stBadge=statusBadge(c.status);
+    const stBadge=statusBadge(c.status, c.error_message);
     const flagBadge=c.flags>0?`<span class="badge ${c.flags>=2?'badge-red':'badge-yellow'}">${c.flags}</span>`:`<span class="badge badge-green">0</span>`;
     const endIcon=c.call_end_first==='agent'?'<span title="Agent ended first" style="color:var(--yellow)">⚠️A</span>':c.call_end_first==='drop'?'<span title="Call dropped" style="color:var(--red)">📵</span>':'<span title="Customer ended" style="color:var(--green)">✓C</span>';
     const notesScore=c.notes_score>0?`<span class="badge ${c.notes_score>=70?'badge-green':c.notes_score>=40?'badge-yellow':'badge-red'}">${c.notes_score}%</span>`:c.overall_score>0?`<span class="badge badge-red">0%</span>`:`<span class="badge badge-gray">—</span>`;
@@ -2062,7 +2059,7 @@ function renderCallDetail(call){
   const flags=sc.flags||[];
   const emotionDelta=sc.emotion_delta||call.emotion_delta||{};
   const ageConcern=sc.age_concern||call.age_concern||{};
-  const statusBadgeHtml=statusBadge(call.status);
+  const statusBadgeHtml=statusBadge(call.status, call.error_message);
   document.getElementById('detail-status-badge').outerHTML=`<span id="detail-status-badge" class="badge ${call.status==='Critical'?'badge-red':call.status==='Passed'?'badge-green':'badge-yellow'}" style="font-size:12px;padding:6px 12px;">${call.status||'Unknown'}</span>`;
 
   const catLabels={
@@ -2931,9 +2928,12 @@ function scoreCircle(score){
   return `<div class="score-circle ${cls}">${score}%</div>`;
 }
 
-function statusBadge(status){
+function statusBadge(status, errorMessage){
   const map={Critical:'badge-red',Passed:'badge-green',Review:'badge-yellow',Processing:'badge-gray',Failed:'badge-red'};
-  return `<span class="badge ${map[status]||'badge-gray'}">${status||'—'}</span>`;
+  const safeMsg = errorMessage ? errorMessage.replace(/"/g,'&quot;').replace(/'/g,"\\'") : '';
+  const titleAttr = (status==='Failed' && safeMsg) ? ` title="${safeMsg}"` : '';
+  const cursorStyle = (status==='Failed' && safeMsg) ? ' style="cursor:help;"' : '';
+  return `<span class="badge ${map[status]||'badge-gray'}"${titleAttr}${cursorStyle}>${status||'—'}${(status==='Failed'&&safeMsg)?' ℹ️':''}</span>`;
 }
 
 function emotionEmoji(e){
