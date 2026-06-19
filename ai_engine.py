@@ -3,6 +3,7 @@ import json
 import re
 import time
 import base64
+import requests
 import anthropic
 import google.generativeai as genai
 from dotenv import load_dotenv
@@ -98,18 +99,75 @@ def analyze_audio_with_gemini(audio_path):
         audio_b64 = base64.b64encode(audio_data).decode('utf-8')
         audio_part = {'mime_type': mime_type, 'data': audio_b64}
     else:
-        # Large file — upload via Gemini File API first, then reference it
-        print(f"[Gemini] File too large for inline ({round(audio_size_mb,1)}MB > {INLINE_SIZE_LIMIT_MB}MB), uploading via File API...")
-        uploaded = genai.upload_file(audio_path, mime_type=mime_type)
-        # Wait for file to become ACTIVE (usually instant for audio)
-        import time as _time
-        for _ in range(10):
-            file_status = genai.get_file(uploaded.name)
-            if file_status.state.name == 'ACTIVE':
+        # Large file — upload via Gemini File API using direct REST calls.
+        # NOTE: genai.upload_file()/get_file() in the SDK can hit an internal discovery/auth
+        # path that doesn't reliably use our configured API key in server environments —
+        # confirmed via a real API_KEY_INVALID error during testing. Direct REST calls
+        # guarantee the key is sent exactly as provided.
+        print(f"[Gemini] File too large for inline ({round(audio_size_mb,1)}MB > {INLINE_SIZE_LIMIT_MB}MB), uploading via File API (REST)...")
+        api_key = os.getenv('GEMINI_API_KEY')
+        file_size = os.path.getsize(audio_path)
+
+        # Step 1: Start resumable upload session
+        start_resp = requests.post(
+            f'https://generativelanguage.googleapis.com/upload/v1beta/files?key={api_key}',
+            headers={
+                'X-Goog-Upload-Protocol': 'resumable',
+                'X-Goog-Upload-Command': 'start',
+                'X-Goog-Upload-Header-Content-Length': str(file_size),
+                'X-Goog-Upload-Header-Content-Type': mime_type,
+                'Content-Type': 'application/json',
+            },
+            json={'file': {'display_name': os.path.basename(audio_path)}},
+            timeout=30
+        )
+        start_resp.raise_for_status()
+        upload_url = start_resp.headers.get('X-Goog-Upload-URL')
+        if not upload_url:
+            raise Exception(f'Gemini File API did not return an upload URL: {start_resp.text[:200]}')
+
+        # Step 2: Upload the actual file bytes
+        with open(audio_path, 'rb') as f:
+            file_data = f.read()
+        upload_resp = requests.post(
+            upload_url,
+            headers={
+                'X-Goog-Upload-Offset': '0',
+                'X-Goog-Upload-Command': 'upload, finalize',
+                'Content-Length': str(file_size),
+            },
+            data=file_data,
+            timeout=120
+        )
+        upload_resp.raise_for_status()
+        file_info = upload_resp.json().get('file', {})
+        file_uri = file_info.get('uri')
+        file_name = file_info.get('name')
+        file_state = file_info.get('state', 'PROCESSING')
+
+        if not file_uri:
+            raise Exception(f'Gemini File API upload did not return a file URI: {upload_resp.text[:200]}')
+
+        # Step 3: Poll until file becomes ACTIVE (usually instant for audio)
+        for _ in range(15):
+            if file_state == 'ACTIVE':
                 break
-            _time.sleep(2)
-        audio_part = uploaded  # Gemini accepts the file object directly
-        print(f"[Gemini] File uploaded: {uploaded.name}")
+            check_resp = requests.get(
+                f'https://generativelanguage.googleapis.com/v1beta/{file_name}?key={api_key}',
+                timeout=15
+            )
+            check_resp.raise_for_status()
+            file_state = check_resp.json().get('state', 'PROCESSING')
+            if file_state == 'ACTIVE':
+                break
+            time.sleep(2)
+
+        if file_state != 'ACTIVE':
+            raise Exception(f'Gemini File API upload never became ACTIVE (stuck at {file_state})')
+
+        audio_part = {'file_data': {'mime_type': mime_type, 'file_uri': file_uri}}
+        uploaded_file_name = file_name  # remembered for cleanup after analysis
+        print(f"[Gemini] File uploaded and ACTIVE: {file_name}")
 
     prompt = """You are a call center audio analyst. Listen to this call carefully, with special attention to WHEN things happen (exact timestamps).
 
@@ -186,8 +244,12 @@ Do NOT include vague category-level issues (e.g. "agent seemed unprofessional ov
     # Clean up uploaded file if we used the File API (avoid storage buildup)
     if audio_size_mb > INLINE_SIZE_LIMIT_MB:
         try:
-            genai.delete_file(audio_part.name)
-            print(f"[Gemini] Cleaned up uploaded file: {audio_part.name}")
+            api_key = os.getenv('GEMINI_API_KEY')
+            requests.delete(
+                f'https://generativelanguage.googleapis.com/v1beta/{uploaded_file_name}?key={api_key}',
+                timeout=15
+            )
+            print(f"[Gemini] Cleaned up uploaded file: {uploaded_file_name}")
         except Exception as e:
             print(f"[Gemini] Could not delete uploaded file: {e}")
 
