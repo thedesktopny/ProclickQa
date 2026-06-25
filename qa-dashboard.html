@@ -391,6 +391,7 @@ td.agent{color:var(--text);font-weight:500;}
     </div>
     <div class="topbar-right">
       <span id="detail-status-badge" class="badge" style="font-size:12px;padding:6px 12px;"></span>
+      <button class="btn btn-outline" id="compare-pipelines-btn" onclick="runPipelineComparison()" style="color:var(--accent);display:none;" title="Run this call through Gemini-only pipeline and compare against current Claude+Gemini results">🧪 Compare AI</button>
       <button class="btn btn-outline" id="coaching-btn">Send to Coaching</button>
     </div>
   </div>
@@ -2266,6 +2267,10 @@ async function openCallDetail(callId){
 }
 
 function renderCallDetail(call){
+  currentCallId = call.call_id;
+  const compareBtn = document.getElementById('compare-pipelines-btn');
+  if(compareBtn) compareBtn.style.display = isAdmin ? 'inline-block' : 'none';
+
   const sc=call.scorecard?JSON.parse(typeof call.scorecard==='string'?call.scorecard:'{}'):{};
   const catScores=sc.category_scores||{};
   const flags=sc.flags||[];
@@ -3188,6 +3193,77 @@ function showToast(msg,isError=false){
   if(!t){t=document.createElement('div');t.id='toast';t.style.cssText='position:fixed;bottom:24px;right:24px;padding:12px 20px;border-radius:10px;font-size:13px;font-weight:600;z-index:9999;transition:opacity 0.3s;box-shadow:0 4px 20px rgba(0,0,0,0.4)';document.body.appendChild(t);}
   t.textContent=msg;t.style.background=isError?'var(--red)':'var(--green)';t.style.color='white';t.style.opacity='1';
   clearTimeout(t._t);t._t=setTimeout(()=>{t.style.opacity='0';},3000);
+}
+
+async function runPipelineComparison(){
+  if(!currentCallId){ showToast('No call selected', true); return; }
+  const btn = document.getElementById('compare-pipelines-btn');
+  if(btn){ btn.disabled = true; btn.textContent = '⏳ Running both pipelines...'; }
+  showToast('Running side-by-side comparison — this takes ~30-60s...');
+
+  try{
+    const results = await API.post(`/api/compare-pipelines/${currentCallId}`, {});
+    showPipelineComparisonModal(results);
+  }catch(e){
+    showToast('Comparison failed: ' + e.message, true);
+  }finally{
+    if(btn){ btn.disabled = false; btn.textContent = '🧪 Compare AI'; }
+  }
+}
+
+function showPipelineComparisonModal(results){
+  const cg = results.claude_gemini || {};
+  const go = results.gemini_only || {};
+
+  const renderSide = (data, label) => {
+    if(data.error) return `<div style="color:var(--red);padding:16px;">❌ ${label} failed: ${data.error}</div>`;
+    const rulesHtml = (data.rules_evaluation||[]).map(r=>
+      `<div style="padding:8px 0;border-bottom:1px solid var(--border);">
+        <div style="font-size:11px;font-weight:600;color:${r.passed?'var(--green)':'var(--red)'};">${r.passed?'✓':'✗'} ${r.rule}</div>
+        <div style="font-size:11px;color:var(--text3);margin-top:2px;">${r.evidence||''}</div>
+      </div>`
+    ).join('');
+    const flagsHtml = (data.flags||[]).map(f=>
+      `<div style="font-size:11px;padding:4px 0;color:${f.severity==='Critical'?'var(--red)':'var(--yellow)'};">${f.severity==='Critical'?'🚨':'⚠️'} ${f.title}</div>`
+    ).join('') || '<div style="font-size:11px;color:var(--text3);">No flags</div>';
+
+    return `
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:13px;font-weight:700;margin-bottom:10px;">${label}</div>
+        <div style="display:flex;gap:10px;margin-bottom:12px;">
+          <div class="score-circle ${data.overall_score>=80?'sc-green':data.overall_score>=70?'sc-yellow':'sc-red'}" style="width:50px;height:50px;font-size:14px;">${data.overall_score||0}%</div>
+          <div>
+            <div style="font-size:12px;font-weight:600;">${data.status||'Unknown'}</div>
+            <div style="font-size:11px;color:var(--text3);">Notes score: ${data.notes_score||0}%</div>
+          </div>
+        </div>
+        <div style="font-size:11px;color:var(--text3);font-weight:600;text-transform:uppercase;margin-bottom:4px;">Flags (${(data.flags||[]).length})</div>
+        ${flagsHtml}
+        <div style="font-size:11px;color:var(--text3);font-weight:600;text-transform:uppercase;margin:12px 0 4px;">Rules Evaluation</div>
+        <div style="max-height:280px;overflow-y:auto;">${rulesHtml}</div>
+        ${data.coaching_notes?`<div style="font-size:11px;color:var(--text3);font-weight:600;text-transform:uppercase;margin:12px 0 4px;">Coaching Notes</div><div style="font-size:11px;color:var(--text2);">${data.coaching_notes}</div>`:''}
+      </div>`;
+  };
+
+  const modalHtml = `
+    <div class="modal open" id="pipeline-compare-modal" style="display:flex;">
+      <div class="modal-box" style="width:900px;max-width:95vw;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+          <div style="font-size:16px;font-weight:700;">🧪 Pipeline Comparison — Call #${(results.call_id||'').slice(-8)}</div>
+          <button onclick="document.getElementById('pipeline-compare-modal').remove()" style="background:none;border:none;color:var(--text3);font-size:20px;cursor:pointer;">✕</button>
+        </div>
+        <div style="display:flex;gap:24px;">
+          ${renderSide(cg, 'Current: Gemini + Claude')}
+          <div style="width:1px;background:var(--border);"></div>
+          ${renderSide(go, 'Test: Gemini Only')}
+        </div>
+        <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border);font-size:11px;color:var(--text3);">
+          💡 Compare scores, flags, and especially the specificity of rule evidence between both columns before deciding whether Gemini-only matches quality. Check Costs page for per-pipeline cost tracking under "gemini-only" service.
+        </div>
+      </div>
+    </div>`;
+
+  document.body.insertAdjacentHTML('beforeend', modalHtml);
 }
 
 async function retryCall(callId){

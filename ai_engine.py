@@ -530,6 +530,195 @@ def analyze_call(audio_path, agent_name, call_id=None, call_end_first='customer'
         'original_call_id': None,
     }
 
+# ─── GEMINI-ONLY PIPELINE (for side-by-side cost/quality comparison) ──────────
+# Listens to audio AND scores against rules in a SINGLE Gemini call, instead of
+# Gemini (listen) + Claude (score) as two separate calls. Used to evaluate whether
+# Gemini alone can match Claude's scoring quality before fully switching over.
+
+def analyze_and_score_with_gemini_only(audio_path, rules, call_end_first='customer',
+                                         call_notes='', account_name='', agent_qos_tx='Good',
+                                         agent_qos_rx='Good', customer_qos_tx='Good', customer_qos_rx='Good'):
+    """
+    Single-call Gemini pipeline: listens to the audio AND evaluates it against
+    the QA rules in one request, producing the same JSON shape as Claude's
+    score_call_with_claude() so results are directly comparable.
+    """
+    print(f"[Gemini-Only] Analyzing + scoring: {audio_path}")
+    model = genai.GenerativeModel('gemini-2.5-flash')
+
+    ext = os.path.splitext(audio_path)[1].lower()
+    mime_map = {'.mp3':'audio/mp3','.wav':'audio/wav','.m4a':'audio/mp4',
+                '.ogg':'audio/ogg','.flac':'audio/flac','.webm':'audio/webm'}
+    mime_type = mime_map.get(ext, 'audio/wav')
+
+    INLINE_SIZE_LIMIT_MB = 18
+    audio_size_mb = os.path.getsize(audio_path) / 1024 / 1024
+
+    if audio_size_mb <= INLINE_SIZE_LIMIT_MB:
+        with open(audio_path, 'rb') as f:
+            audio_data = f.read()
+        audio_b64 = base64.b64encode(audio_data).decode('utf-8')
+        audio_part = {'mime_type': mime_type, 'data': audio_b64}
+        uploaded_file_name = None
+    else:
+        api_key = os.getenv('GEMINI_API_KEY')
+        file_size = os.path.getsize(audio_path)
+        start_resp = requests.post(
+            f'https://generativelanguage.googleapis.com/upload/v1beta/files?key={api_key}',
+            headers={
+                'X-Goog-Upload-Protocol': 'resumable', 'X-Goog-Upload-Command': 'start',
+                'X-Goog-Upload-Header-Content-Length': str(file_size),
+                'X-Goog-Upload-Header-Content-Type': mime_type, 'Content-Type': 'application/json',
+            },
+            json={'file': {'display_name': os.path.basename(audio_path)}}, timeout=30
+        )
+        start_resp.raise_for_status()
+        upload_url = start_resp.headers.get('X-Goog-Upload-URL')
+        with open(audio_path, 'rb') as f:
+            file_data = f.read()
+        upload_resp = requests.post(upload_url, headers={
+            'X-Goog-Upload-Offset': '0', 'X-Goog-Upload-Command': 'upload, finalize',
+            'Content-Length': str(file_size),
+        }, data=file_data, timeout=120)
+        upload_resp.raise_for_status()
+        file_info = upload_resp.json().get('file', {})
+        file_uri = file_info.get('uri')
+        file_name = file_info.get('name')
+        file_state = file_info.get('state', 'PROCESSING')
+        for _ in range(15):
+            if file_state == 'ACTIVE': break
+            check_resp = requests.get(f'https://generativelanguage.googleapis.com/v1beta/{file_name}?key={api_key}', timeout=15)
+            file_state = check_resp.json().get('state', 'PROCESSING')
+            if file_state == 'ACTIVE': break
+            time.sleep(2)
+        audio_part = {'file_data': {'mime_type': mime_type, 'file_uri': file_uri}}
+        uploaded_file_name = file_name
+
+    rules_text = '\n'.join([f"- [{r['severity'].upper()}] ({r['category']}) {r['description']}" for r in rules])
+    call_end_context = {
+        'agent': 'AGENT ended the call first — evaluate if call was fully resolved before hangup',
+        'customer': 'Customer ended the call normally',
+        'drop': 'Call DROPPED unexpectedly — evaluate if agent attempted callback'
+    }.get(call_end_first, 'Unknown')
+    notes_context = f'Agent call notes: "{call_notes}"' if call_notes else 'Agent wrote NO call notes after this call'
+    customer_context = f'Customer: {account_name}' if account_name else ''
+
+    prompt = f"""You are a call center QA analyst. Listen to this call recording carefully and score it strictly and concisely against the rules below — you must BOTH transcribe/understand the audio AND evaluate compliance in this single pass.
+
+METADATA:
+{customer_context} | Call end: {call_end_context} | {notes_context}
+Agent QoS: TX={agent_qos_tx} RX={agent_qos_rx} | Customer QoS: TX={customer_qos_tx} RX={customer_qos_rx}
+
+QA RULES (evaluate each against what you hear in the audio):
+{rules_text}
+
+EVIDENCE REQUIREMENT — APPLIES TO EVERY SINGLE RULE: the "evidence" field must always name the SPECIFIC thing that happened in THIS call — a real quote, timestamp, or concrete observation — never a generic restatement of the rule. This applies whether the rule passed or failed.
+
+NEVER acceptable: "Compliance violation", "No audio to verify", "Passed", "Restricted content violated", "Age concern", "Dead air detected", "Professionalism issue".
+
+ALWAYS required: name the exact moment, words, or behavior, e.g. "Customer said 'I already told you this twice' at 3:10; agent moved on without acknowledging it" or "Agent went silent for 52 seconds at 4:15 while searching with no update given."
+
+CATEGORIES: accuracy_and_information, customer_service_quality, active_listening, appropriate_actions, compliance_and_handling, emotion_management, script_and_language, documentation_quality, audio_and_technical, call_closure
+
+NOTES SCORING: 0=no notes, 1-40=vague, 41-70=basic, 71-85=good, 86-100=excellent. Check notes match call content.
+CALL END: agent ended early + unresolved = flag. Drop + no callback = Critical.
+AGE CONCERN: young-sounding customer + adult requests = human review.
+OUTSIDE WORK: agent hinting at private work = Critical flag.
+IGNORED INSTRUCTIONS: if customer states something was already provided/saved/discussed and agent proceeds as if starting fresh, flag under active_listening.
+UNANSWERED QUESTIONS: if customer asks a direct question and agent's response never answers it, flag under customer_service_quality.
+WRONG REGION/CURRENCY: if agent states a currency/region/country contradicting the customer's context, flag under accuracy_and_information.
+FLAG TIMESTAMPS: for any flag tied to a specific moment you hear, include the real timestamp_seconds and evidence_quote. If a flag is a general whole-call pattern, leave timestamp_seconds as 0.
+AUDIO QUALITY: assess background noise, audio cuts/drops, and overall clarity directly from what you hear.
+EMOTION: track customer's emotional arc from start to end of the call directly from tone of voice.
+
+Respond ONLY with valid compact JSON (evidence fields up to 140 chars):
+
+{{"transcript":"Summarized transcript max 2500 chars, label AGENT: and CUSTOMER:","duration_estimate":"mm:ss","summary":"2-3 sentence summary","overall_score":0,"confidence":0,"status":"Passed/Review/Critical","requires_human_review":false,"human_review_reason":"","emotion_start":"Happy/Satisfied/Neutral/Frustrated/Angry/Confused","emotion_end":"Happy/Satisfied/Neutral/Frustrated/Angry/Confused","audio_quality_overall":"Good/Fair/Poor","background_noise":false,"category_scores":{{"accuracy_and_information":{{"score":0,"evidence":"brief","passed":true}},"customer_service_quality":{{"score":0,"evidence":"brief","passed":true}},"active_listening":{{"score":0,"evidence":"brief","passed":true}},"appropriate_actions":{{"score":0,"evidence":"brief","passed":true}},"compliance_and_handling":{{"score":0,"evidence":"brief","passed":true}},"emotion_management":{{"score":0,"evidence":"brief","passed":true}},"script_and_language":{{"score":0,"evidence":"brief","passed":true}},"documentation_quality":{{"score":0,"evidence":"brief","passed":true}},"audio_and_technical":{{"score":0,"evidence":"brief","passed":true}},"call_closure":{{"score":0,"evidence":"brief","passed":true}}}},"notes_score":0,"notes_feedback":"brief","rules_evaluation":[{{"rule":"rule text","category":"cat","severity":"Critical/Warning/Info","passed":true,"confidence":0,"evidence":"SPECIFIC detail, max 140 chars"}}],"flags":[{{"title":"title","description":"under 100 chars","severity":"Critical/Warning","timestamp_seconds":0,"timestamp_display":"mm:ss","evidence_quote":"exact words if applicable, max 80 chars"}}],"emotion_delta":{{"start":"Neutral","end":"Neutral","improved":false,"summary":"brief"}},"age_concern":{{"flagged":false,"reason":""}},"call_end_assessment":"brief","coaching_notes":"2-3 points max","positive_highlights":"1-2 points max"}}"""
+
+    response = model.generate_content(
+        [audio_part, prompt],
+        generation_config=genai.GenerationConfig(max_output_tokens=8192, temperature=0.1)
+    )
+
+    if uploaded_file_name:
+        try:
+            api_key = os.getenv('GEMINI_API_KEY')
+            requests.delete(f'https://generativelanguage.googleapis.com/v1beta/{uploaded_file_name}?key={api_key}', timeout=15)
+        except Exception as e:
+            print(f"[Gemini-Only] Could not delete uploaded file: {e}")
+
+    text = response.text.strip()
+    if text.startswith('```'):
+        text = re.sub(r'^```(?:json)?\s*', '', text)
+        text = re.sub(r'\s*```$', '', text)
+
+    try:
+        result = json.loads(text)
+    except json.JSONDecodeError as e:
+        print(f"[Gemini-Only] JSON parse failed: {e}")
+        result = {
+            "transcript": "Analysis failed — could not parse Gemini response.",
+            "overall_score": 0, "confidence": 0, "status": "Review",
+            "requires_human_review": True, "human_review_reason": "Gemini-only analysis failed to parse.",
+            "category_scores": {}, "notes_score": 0, "notes_feedback": "",
+            "rules_evaluation": [], "flags": [], "emotion_delta": {}, "age_concern": {},
+            "call_end_assessment": "", "coaching_notes": "", "positive_highlights": "",
+            "summary": "", "duration_estimate": "--", "emotion_start": "Neutral",
+            "emotion_end": "Neutral", "audio_quality_overall": "Unknown", "background_noise": False
+        }
+
+    # Track usage (input/output tokens) the same way as the two-call pipeline, so
+    # cost comparisons in the dashboard are accurate
+    try:
+        estimated_mins = max(1, round(audio_size_mb))
+        output_tokens = len(text) // 4  # rough token estimate
+        try:
+            usage = response.usage_metadata
+            input_tokens = usage.prompt_token_count
+            output_tokens = usage.candidates_token_count
+        except Exception:
+            input_tokens = 0  # fall back to rough estimate above if SDK doesn't expose usage_metadata
+        gemini_only_cost = (estimated_mins * GEMINI_AUDIO_COST_PER_MIN) + (output_tokens / 1_000_000 * GEMINI_OUTPUT_COST_PER_M)
+        track_usage('gemini-only', None, input_tokens, output_tokens, estimated_mins * 60, round(gemini_only_cost, 6))
+    except Exception as e:
+        print(f"[Gemini-Only] Could not track usage: {e}")
+
+    emotion_label_map = {'Happy':'😊','Satisfied':'😊','Neutral':'😐','Frustrated':'😤','Angry':'😠','Confused':'😕'}
+    emotion_overall = result.get('emotion_end', 'Neutral')
+    emotion_label = f"{emotion_label_map.get(emotion_overall,'😐')} {emotion_overall}"
+
+    confidence = result.get('confidence', 100)
+    requires_human_review = result.get('requires_human_review', False)
+    if confidence < 70:
+        requires_human_review = True
+        if not result.get('human_review_reason'):
+            result['human_review_reason'] = f'Low AI confidence ({confidence}%) — needs human verification'
+
+    return {
+        'duration': result.get('duration_estimate', '--'),
+        'overall_score': result.get('overall_score', 0),
+        'confidence': confidence,
+        'status': result.get('status', 'Review'),
+        'emotion': emotion_label,
+        'emotion_delta': result.get('emotion_delta', {}),
+        'flags': len(result.get('flags', [])),
+        'transcript': result.get('transcript', ''),
+        'summary': result.get('summary', ''),
+        'scorecard': result,
+        'audio_quality': {'overall': result.get('audio_quality_overall', 'Unknown'), 'background_noise': result.get('background_noise', False)},
+        'requires_human_review': requires_human_review,
+        'human_review_reason': result.get('human_review_reason', ''),
+        'age_concern': result.get('age_concern', {}),
+        'coaching_notes': result.get('coaching_notes', ''),
+        'positive_highlights': result.get('positive_highlights', ''),
+        'notes_score': result.get('notes_score', 0),
+        'notes_feedback': result.get('notes_feedback', ''),
+        'call_end_assessment': result.get('call_end_assessment', ''),
+        'flagged_moments': result.get('flags', []),  # reuse flags as moments for this simplified pipeline
+        'pipeline': 'gemini-only',
+    }
+
+
 if __name__ == '__main__':
     import sys
     if len(sys.argv) >= 3:

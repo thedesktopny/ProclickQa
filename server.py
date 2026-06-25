@@ -265,6 +265,18 @@ def init_db():
     ''')
 
     c.execute('''
+        CREATE TABLE IF NOT EXISTS pipeline_comparisons (
+            id SERIAL PRIMARY KEY,
+            call_id TEXT,
+            claude_gemini_scorecard TEXT,
+            gemini_only_scorecard TEXT,
+            claude_gemini_cost NUMERIC DEFAULT 0,
+            gemini_only_cost NUMERIC DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    c.execute('''
         CREATE TABLE IF NOT EXISTS audit_log (
             id SERIAL PRIMARY KEY,
             action TEXT,
@@ -1874,6 +1886,107 @@ def retry_status():
         'running': retry_running,
         'log': retry_log[-50:]  # Last 50 entries
     })
+
+@app.route('/api/compare-pipelines/<call_id>', methods=['POST'])
+@require_admin
+def compare_pipelines(call_id):
+    """
+    Runs BOTH the current Claude+Gemini pipeline AND the Gemini-only pipeline
+    on the same call's recording, for side-by-side cost/quality comparison.
+    Does NOT modify the call's real production scorecard — results are stored
+    separately in pipeline_comparisons for review.
+    """
+    conn = get_db()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('SELECT recording_url, agent_name, call_end_first, call_notes, account_name, '
+               'agent_qos_tx, agent_qos_rx, customer_qos_tx, customer_qos_rx FROM calls WHERE call_id=%s', (call_id,))
+    call = c.fetchone()
+    conn.close()
+    if not call:
+        return jsonify({'error': 'Call not found'}), 404
+
+    UPLOAD_DIR = os.path.join(os.getenv('HOME', '.'), 'uploads')
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    recording_url = (call.get('recording_url') or '').strip().rstrip(':').rstrip('/')
+    ext = os.path.splitext(recording_url)[1] or '.wav'
+    audio_path = os.path.join(UPLOAD_DIR, f"compare_{call_id}_{int(time.time())}{ext}")
+
+    try:
+        download_recording(recording_url, audio_path, timeout=60, retries=2)
+    except Exception as e:
+        return jsonify({'error': f'Download failed: {str(e)}'}), 500
+
+    from ai_engine import analyze_audio_with_gemini, score_call_with_claude, analyze_and_score_with_gemini_only, load_active_rules
+
+    rules = load_active_rules()
+    common_args = dict(
+        call_end_first=call.get('call_end_first', 'customer'),
+        call_notes=call.get('call_notes', ''),
+        account_name=call.get('account_name', ''),
+        agent_qos_tx=call.get('agent_qos_tx', 'Good'),
+        agent_qos_rx=call.get('agent_qos_rx', 'Good'),
+        customer_qos_tx=call.get('customer_qos_tx', 'Good'),
+        customer_qos_rx=call.get('customer_qos_rx', 'Good'),
+    )
+
+    results = {'call_id': call_id, 'agent_name': call.get('agent_name')}
+
+    # Pipeline A: current production approach (Gemini listens, Claude scores)
+    try:
+        gemini_result = analyze_audio_with_gemini(audio_path)
+        claude_result = score_call_with_claude(gemini_result, rules, **common_args)
+        results['claude_gemini'] = {
+            'overall_score': claude_result.get('overall_score'),
+            'status': claude_result.get('status'),
+            'flags': claude_result.get('flags', []),
+            'rules_evaluation': claude_result.get('rules_evaluation', []),
+            'coaching_notes': claude_result.get('coaching_notes', ''),
+            'notes_score': claude_result.get('notes_score'),
+        }
+    except Exception as e:
+        results['claude_gemini'] = {'error': str(e)}
+
+    # Pipeline B: Gemini-only (single call does both listening and scoring)
+    try:
+        gemini_only_result = analyze_and_score_with_gemini_only(audio_path, rules, **common_args)
+        sc = gemini_only_result.get('scorecard', {})
+        results['gemini_only'] = {
+            'overall_score': sc.get('overall_score'),
+            'status': sc.get('status'),
+            'flags': sc.get('flags', []),
+            'rules_evaluation': sc.get('rules_evaluation', []),
+            'coaching_notes': sc.get('coaching_notes', ''),
+            'notes_score': sc.get('notes_score'),
+        }
+    except Exception as e:
+        results['gemini_only'] = {'error': str(e)}
+
+    try: os.remove(audio_path)
+    except: pass
+
+    # Save comparison for later review
+    try:
+        conn2 = get_db()
+        c2 = conn2.cursor()
+        c2.execute('''INSERT INTO pipeline_comparisons (call_id, claude_gemini_scorecard, gemini_only_scorecard)
+                      VALUES (%s, %s, %s)''',
+                   (call_id, json.dumps(results.get('claude_gemini', {})), json.dumps(results.get('gemini_only', {}))))
+        conn2.commit()
+        conn2.close()
+    except Exception as e:
+        print(f"[Compare] Could not save comparison: {e}")
+
+    return jsonify(results)
+
+@app.route('/api/compare-pipelines', methods=['GET'])
+def get_pipeline_comparisons():
+    """Returns all saved side-by-side comparisons for review."""
+    conn = get_db()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('SELECT * FROM pipeline_comparisons ORDER BY created_at DESC LIMIT 50')
+    comparisons = [dict(row) for row in c.fetchall()]
+    conn.close()
+    return jsonify({'comparisons': comparisons})
 
 @app.route('/api/retry-call/<call_id>', methods=['POST'])
 @require_admin
