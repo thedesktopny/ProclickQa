@@ -219,6 +219,14 @@ td.agent{color:var(--text);font-weight:500;}
     <div class="nav-item" onclick="showPage('alerts')"><span class="icon">🚨</span>Alerts<span class="nav-badge" id="nb-alerts">0</span></div>
     <div class="nav-item" onclick="showPage('qa-users')"><span class="icon">🛡️</span>QA Users</div>
   </div>
+  <div class="nav-section admin-only" style="margin-top:12px;">
+    <div class="nav-label">Processing</div>
+    <div id="processing-toggle-container" style="padding:10px 16px;">
+      <button id="processing-pause-btn" onclick="toggleProcessing()" style="width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text2);padding:10px;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px;">
+        ⏳ Checking...
+      </button>
+    </div>
+  </div>
   <div class="sidebar-footer">
     <div class="avatar" id="sidebar-avatar">DV</div>
     <div>
@@ -963,7 +971,7 @@ async function checkAuth(){
   document.body.style.visibility='visible';
 
   try{
-    await Promise.all([loadStats(), loadCalls()]);
+    await Promise.all([loadStats(), loadCalls(), loadProcessingStatus()]);
     renderDashboard();
     renderCalls();
     renderPagination();
@@ -984,6 +992,67 @@ async function doLogout(){
 
 async function loadStats(){try{stats=await API.get('/api/stats');}catch(e){}}
 async function loadRules(){try{rules=await API.get('/api/rules');}catch(e){rules=[];}}
+async function loadProcessingStatus(){
+  try{
+    const res = await API.get('/api/processing-status');
+    updateProcessingUI(res.paused);
+  }catch(e){
+    console.error('Could not load processing status:', e);
+  }
+}
+
+function updateProcessingUI(paused){
+  const btn = document.getElementById('processing-pause-btn');
+  if(btn){
+    if(paused){
+      btn.innerHTML = '▶️ Resume Processing';
+      btn.style.background = 'rgba(242,78,78,0.15)';
+      btn.style.borderColor = 'rgba(242,78,78,0.4)';
+      btn.style.color = 'var(--red)';
+    } else {
+      btn.innerHTML = '⏸️ Pause Processing';
+      btn.style.background = 'var(--surface2)';
+      btn.style.borderColor = 'var(--border)';
+      btn.style.color = 'var(--text2)';
+    }
+  }
+
+  // Show/hide a persistent banner at the top of the page when paused
+  let banner = document.getElementById('processing-paused-banner');
+  if(paused){
+    if(!banner){
+      banner = document.createElement('div');
+      banner.id = 'processing-paused-banner';
+      banner.style.cssText = 'background:rgba(242,78,78,0.15);border-bottom:1px solid rgba(242,78,78,0.4);color:var(--red);padding:10px 24px;font-size:13px;font-weight:600;text-align:center;position:sticky;top:0;z-index:150;';
+      banner.innerHTML = '⏸️ Call processing is PAUSED — new calls are being saved but not analyzed. Click "Resume Processing" in the sidebar to continue.';
+      document.querySelector('.main')?.prepend(banner);
+    }
+  } else if(banner){
+    banner.remove();
+  }
+}
+
+async function toggleProcessing(){
+  const btn = document.getElementById('processing-pause-btn');
+  const currentlyPaused = btn.innerHTML.includes('Resume');
+  const newPausedState = !currentlyPaused;
+
+  if(newPausedState){
+    if(!confirm('Pause all call processing? New calls will be saved but NOT analyzed until you resume. Already-processing calls already in flight may still complete.')) return;
+  }
+
+  btn.disabled = true;
+  try{
+    const res = await API.post('/api/processing-status', {paused: newPausedState});
+    updateProcessingUI(res.paused);
+    showToast(res.paused ? '⏸️ Processing paused' : '▶️ Processing resumed');
+  }catch(e){
+    showToast('Failed to update processing status: ' + e.message, true);
+  }finally{
+    btn.disabled = false;
+  }
+}
+
 async function loadCalls(page=1, dateFrom='', dateTo=''){
   try{
     let url = `/api/calls?page=${page}&limit=25`;
@@ -3154,7 +3223,7 @@ function scoreCircle(score){
 }
 
 function statusBadge(status, errorMessage){
-  const map={Critical:'badge-red',Passed:'badge-green',Review:'badge-yellow',Processing:'badge-gray',Failed:'badge-red'};
+  const map={Critical:'badge-red',Passed:'badge-green',Review:'badge-yellow',Processing:'badge-gray',Failed:'badge-red',Paused:'badge-yellow'};
   const safeMsg = errorMessage ? errorMessage.replace(/"/g,'&quot;').replace(/'/g,"\\'") : '';
   const titleAttr = (status==='Failed' && safeMsg) ? ` title="${safeMsg}"` : '';
   const cursorStyle = (status==='Failed' && safeMsg) ? ' style="cursor:help;"' : '';

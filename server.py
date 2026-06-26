@@ -63,6 +63,17 @@ DATABASE_URL = os.getenv('DATABASE_URL', '')
 RELAY_URL = os.getenv('RELAY_URL', '')  # e.g. https://voiceguard-recording-relay.azurewebsites.net
 RELAY_SECRET = os.getenv('RELAY_SECRET', '')
 
+# Global pause switch — when True, incoming calls are saved but AI analysis is skipped.
+# Toggle via /api/processing-status (admin only). Checked fresh on every request, not
+# cached, so changes take effect immediately without needing a restart.
+def is_processing_paused():
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT value FROM app_settings WHERE key='processing_paused'")
+    row = c.fetchone()
+    conn.close()
+    return row and row[0] == 'true'
+
 def get_db():
     conn = psycopg2.connect(DATABASE_URL, sslmode='require')
     return conn
@@ -261,6 +272,14 @@ def init_db():
             confidence INTEGER DEFAULT 100,
             evidence TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
 
@@ -1793,6 +1812,17 @@ def analyze_call():
         def process_new_call():
             from ai_engine import analyze_call as run_analysis
 
+            if is_processing_paused():
+                print(f"[AutoProcess] ⏸️  Processing is paused — call {call_id} saved but not analyzed.")
+                try:
+                    conn_pause = get_db()
+                    c_pause = conn_pause.cursor()
+                    c_pause.execute("UPDATE calls SET status='Paused' WHERE call_id=%s", (call_id,))
+                    conn_pause.commit()
+                    conn_pause.close()
+                except: pass
+                return
+
             url_path = recording_url.split('?')[0]
             ext = os.path.splitext(url_path)[1].lower()
             if ext not in ['.mp3', '.wav', '.m4a', '.ogg', '.webm', '.flac']:
@@ -1992,6 +2022,9 @@ def get_pipeline_comparisons():
 @require_admin
 def retry_single_call(call_id):
     """Retry analysis for a single specific call."""
+    if is_processing_paused():
+        return jsonify({'error': 'Processing is currently paused. Resume processing first before retrying calls.'}), 409
+
     conn = get_db()
     c = conn.cursor(cursor_factory=RealDictCursor)
     c.execute('''
@@ -2087,6 +2120,9 @@ def retry_single_call(call_id):
 def retry_stuck_calls():
     global retry_log, retry_running
     import threading
+
+    if is_processing_paused():
+        return jsonify({'error': 'Processing is currently paused. Resume processing first via the pause toggle before retrying calls.'}), 409
 
     if retry_running:
         return jsonify({'message': 'Retry already running', 'log': retry_log[-10:]})
@@ -2376,6 +2412,24 @@ def test_one_call():
 
     except Exception as e:
         return jsonify({'error': str(e), 'traceback': traceback.format_exc()})
+
+@app.route('/api/processing-status', methods=['GET'])
+def get_processing_status():
+    return jsonify({'paused': is_processing_paused()})
+
+@app.route('/api/processing-status', methods=['POST'])
+@require_admin
+def set_processing_status():
+    data = request.json
+    paused = bool(data.get('paused', False))
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('''INSERT INTO app_settings (key, value, updated_at) VALUES ('processing_paused', %s, CURRENT_TIMESTAMP)
+                 ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=CURRENT_TIMESTAMP''',
+              ('true' if paused else 'false',))
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True, 'paused': paused})
 
 @app.route('/api/network-diagnostic', methods=['GET'])
 def network_diagnostic():
