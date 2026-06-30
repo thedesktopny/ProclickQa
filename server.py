@@ -989,7 +989,7 @@ def get_qa_users():
         LEFT JOIN agents a ON a.assigned_qa_user_id = u.id
         LEFT JOIN calls c ON c.agent_name = a.name AND c.status IN ('Review','Critical','Passed')
         LEFT JOIN resolutions r ON r.qa_user_id = u.id
-        WHERE u.role = 'qa_user'
+        WHERE u.role IN ('qa_user', 'manager')
         GROUP BY u.id
         ORDER BY u.full_name ASC
     ''')
@@ -1007,6 +1007,9 @@ def create_qa_user():
     username = (data.get('username') or '').strip()
     password = data.get('password') or ''
     full_name = (data.get('full_name') or '').strip()
+    role = data.get('role', 'qa_user')
+    if role not in ('qa_user', 'manager'):
+        role = 'qa_user'
     if not username or not password:
         return jsonify({'error': 'Username and password required'}), 400
     password_hash = hashlib.sha256(password.encode()).hexdigest()
@@ -1014,8 +1017,8 @@ def create_qa_user():
         conn = get_db()
         c = conn.cursor(cursor_factory=RealDictCursor)
         c.execute('''INSERT INTO users (username, password_hash, full_name, role)
-                     VALUES (%s, %s, %s, 'qa_user') RETURNING id, username, full_name, role, status, created_at''',
-                  (username, password_hash, full_name))
+                     VALUES (%s, %s, %s, %s) RETURNING id, username, full_name, role, status, created_at''',
+                  (username, password_hash, full_name, role))
         user = dict(c.fetchone())
         conn.commit()
         conn.close()
@@ -1184,7 +1187,7 @@ def qa_user_performance():
         LEFT JOIN agents a ON a.assigned_qa_user_id = u.id
         LEFT JOIN calls c ON c.agent_name = a.name
         LEFT JOIN resolutions r ON r.qa_user_id = u.id
-        WHERE u.role = 'qa_user'
+        WHERE u.role IN ('qa_user', 'manager')
         GROUP BY u.id
         ORDER BY u.full_name ASC
     ''')
@@ -2462,6 +2465,144 @@ def test_one_call():
 
     except Exception as e:
         return jsonify({'error': str(e), 'traceback': traceback.format_exc()})
+
+@app.route('/api/manager-queue', methods=['GET'])
+@require_manager
+def get_manager_queue():
+    """Returns all flag reviews marked as AI mistakes that are pending manager decision."""
+    conn = get_db()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('''
+        SELECT fr.*, c.agent_name, c.account_name, c.recording_url, c.overall_score
+        FROM flag_reviews fr
+        LEFT JOIN calls c ON c.call_id = fr.call_id
+        WHERE fr.marked_ai_mistake = TRUE AND fr.manager_status = 'pending'
+        ORDER BY fr.reviewed_at DESC
+    ''')
+    queue = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return jsonify({'queue': queue})
+
+@app.route('/api/manager-queue/count', methods=['GET'])
+@require_login
+def get_manager_queue_count():
+    """Lightweight count for the sidebar badge."""
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM flag_reviews WHERE marked_ai_mistake=TRUE AND manager_status='pending'")
+    count = c.fetchone()[0]
+    conn.close()
+    return jsonify({'count': count})
+
+@app.route('/api/manager-suggest-rule-fix', methods=['POST'])
+@require_manager
+def manager_suggest_rule_fix():
+    """
+    AI-assisted rule rewriter: given the rule that mis-fired and a description of the
+    situation it got wrong, ask Claude to propose a more precise rule wording that would
+    NOT flag this situation while preserving the rule's original intent.
+    """
+    data = request.json or {}
+    current_rule = data.get('current_rule', '')
+    situation = data.get('situation', '')
+    if not current_rule:
+        return jsonify({'error': 'current_rule required'}), 400
+
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        prompt = f"""You are helping refine a call-center QA rule that produced a false positive.
+
+CURRENT RULE: "{current_rule}"
+
+SITUATION THE AI WRONGLY FLAGGED: {situation or "(manager did not describe a specific situation; infer a likely false-positive scenario for this rule)"}
+
+Propose a single improved version of this rule that:
+1. Keeps the rule's original protective intent
+2. Adds just enough precision so this specific kind of situation is NOT wrongly flagged
+3. Stays one clear sentence, written the same plain style as the original
+
+Respond ONLY with valid JSON:
+{{"suggested_rule":"the improved rule text","explanation":"one sentence on what changed and why this stops the false positive"}}"""
+
+        resp = client.messages.create(
+            model='claude-sonnet-4-6', max_tokens=500,
+            messages=[{'role':'user','content':prompt}]
+        )
+        text = resp.content[0].text.strip()
+        if text.startswith('```'):
+            import re as _re
+            text = _re.sub(r'^```(?:json)?\s*','',text); text = _re.sub(r'\s*```$','',text)
+        suggestion = json.loads(text)
+        return jsonify(suggestion)
+    except Exception as e:
+        return jsonify({'error': f'Could not generate suggestion: {str(e)[:200]}'}), 500
+
+@app.route('/api/manager-decision/<int:review_id>', methods=['POST'])
+@require_manager
+def manager_decision(review_id):
+    """
+    Manager approves or rejects an AI-mistake flag.
+    On approve, the manager chooses resolution_type:
+      - 'rule_fix': update the rule's wording (data.new_rule_text + rule_id)
+      - 'exception': add a learned exception (data.exception_text + rule_id)
+    On reject: the flag stands, nothing learned.
+    """
+    user = current_user()
+    data = request.json or {}
+    decision = data.get('decision')  # 'approve' or 'reject'
+    resolution_type = data.get('resolution_type')  # 'rule_fix' or 'exception' (when approving)
+    manager_note = (data.get('manager_note') or '').strip()
+
+    conn = get_db()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('SELECT * FROM flag_reviews WHERE id=%s', (review_id,))
+    review = c.fetchone()
+    if not review:
+        conn.close()
+        return jsonify({'error': 'Review not found'}), 404
+
+    if decision == 'reject':
+        c.execute('''UPDATE flag_reviews SET manager_status='rejected', manager_id=%s, manager_note=%s
+                     WHERE id=%s''', (user.get('id') if user else None, manager_note, review_id))
+        conn.commit()
+        conn.close()
+        return jsonify({'success': True, 'status': 'rejected'})
+
+    # decision == 'approve' — apply the chosen resolution
+    rule_id = data.get('rule_id')
+
+    if resolution_type == 'rule_fix':
+        new_rule_text = (data.get('new_rule_text') or '').strip()
+        if not new_rule_text or not rule_id:
+            conn.close()
+            return jsonify({'error': 'rule_fix requires new_rule_text and rule_id'}), 400
+        c.execute('UPDATE rules SET description=%s WHERE id=%s', (new_rule_text, rule_id))
+
+    elif resolution_type == 'exception':
+        exception_text = (data.get('exception_text') or '').strip()
+        if not exception_text:
+            conn.close()
+            return jsonify({'error': 'exception requires exception_text'}), 400
+        # Look up rule description for storage
+        rule_desc = ''
+        if rule_id:
+            c.execute('SELECT description FROM rules WHERE id=%s', (rule_id,))
+            rr = c.fetchone()
+            rule_desc = rr['description'] if rr else ''
+        c.execute('''INSERT INTO learned_exceptions
+            (rule_id, rule_description, exception_text, source_call_id, approved_by, active)
+            VALUES (%s,%s,%s,%s,%s,TRUE)''',
+            (rule_id, rule_desc, exception_text, review['call_id'], user.get('id') if user else None))
+    else:
+        conn.close()
+        return jsonify({'error': 'approve requires resolution_type of rule_fix or exception'}), 400
+
+    c.execute('''UPDATE flag_reviews SET manager_status='approved', manager_id=%s, manager_note=%s, resolution_type=%s
+                 WHERE id=%s''', (user.get('id') if user else None, manager_note, resolution_type, review_id))
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True, 'status': 'approved', 'resolution_type': resolution_type})
 
 @app.route('/api/flag-reviews/<call_id>', methods=['GET'])
 @require_login

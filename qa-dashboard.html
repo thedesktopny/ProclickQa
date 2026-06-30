@@ -219,6 +219,10 @@ td.agent{color:var(--text);font-weight:500;}
     <div class="nav-item" onclick="showPage('alerts')"><span class="icon">🚨</span>Alerts<span class="nav-badge" id="nb-alerts">0</span></div>
     <div class="nav-item" onclick="showPage('qa-users')"><span class="icon">🛡️</span>QA Users</div>
   </div>
+  <div class="nav-section manager-only" style="margin-top:12px;display:none;">
+    <div class="nav-label">Manager</div>
+    <div class="nav-item" onclick="showPage('manager-queue')"><span class="icon">🧑‍⚖️</span>AI Mistake Review<span class="nav-badge" id="nb-manager">0</span></div>
+  </div>
   <div class="nav-section admin-only" style="margin-top:12px;">
     <div class="nav-label">Processing</div>
     <div id="processing-toggle-container" style="padding:10px 16px;">
@@ -665,6 +669,24 @@ td.agent{color:var(--text);font-weight:500;}
 </div>
 
 <!-- ===== QA USERS (ADMIN ONLY) ===== -->
+<div class="page" id="page-manager-queue">
+  <div class="topbar">
+    <div class="page-title">🧑‍⚖️ AI Mistake Review</div>
+    <div class="topbar-right">
+      <span style="font-size:12px;color:var(--text3)">Reviewers flagged these as AI errors — confirm or reject each</span>
+    </div>
+  </div>
+  <div style="padding:28px;">
+    <div class="alert-bar" style="margin-bottom:20px;background:rgba(245,166,35,0.08);border-color:rgba(245,166,35,0.2)">
+      <span style="font-size:18px;">💡</span>
+      <span style="font-size:12px;color:var(--text2);flex:1;">When you approve an AI mistake, you can either <strong>refine the rule's wording</strong> (so it stops making this kind of error — costs nothing extra) or <strong>add a specific exception</strong> (for genuine edge cases). Rejecting keeps the original flag.</span>
+    </div>
+    <div id="manager-queue-container">
+      <div style="padding:32px;text-align:center;color:var(--text3)">Loading review queue...</div>
+    </div>
+  </div>
+</div>
+
 <div class="page" id="page-qa-users">
   <div class="topbar">
     <div class="page-title">🛡️ QA Users</div>
@@ -799,6 +821,13 @@ td.agent{color:var(--text);font-weight:500;}
       <div>
         <div style="font-size:11px;color:var(--text3);margin-bottom:5px;">Password</div>
         <input id="new-qa-password" type="password" placeholder="Temporary password" style="width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:9px 12px;border-radius:8px;font-size:13px;box-sizing:border-box;">
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:5px;">Role</div>
+        <select id="new-qa-role" style="width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:9px 12px;border-radius:8px;font-size:13px;box-sizing:border-box;">
+          <option value="qa_user">QA Reviewer — reviews calls, resolves flags</option>
+          <option value="manager">Manager — also approves/rejects AI-mistake flags</option>
+        </select>
       </div>
     </div>
     <div style="display:flex;gap:10px;margin-top:20px;">
@@ -965,6 +994,9 @@ async function checkAuth(){
     const roleEl=document.getElementById('sidebar-role');
     if(roleEl) roleEl.textContent=currentRole==='admin'?'Admin':'QA Reviewer';
     document.querySelectorAll('.admin-only').forEach(el=>{el.style.display=isAdmin?'':'none';});
+    const isManager = currentRole==='manager' || isAdmin;
+    document.querySelectorAll('.manager-only').forEach(el=>{el.style.display=isManager?'':'none';});
+    if(isManager) loadManagerQueueCount();
   }catch(e){ console.error('Sidebar update failed (non-fatal):', e); }
 
   hideModal('login-modal');
@@ -1547,14 +1579,15 @@ async function createQAUser(){
   const fullName=document.getElementById('new-qa-fullname').value.trim();
   const username=document.getElementById('new-qa-username').value.trim();
   const password=document.getElementById('new-qa-password').value;
+  const role=document.getElementById('new-qa-role')?.value||'qa_user';
   if(!username||!password){showToast('Username and password required',true);return;}
   try{
-    await API.post('/api/qa-users',{full_name:fullName,username,password});
+    await API.post('/api/qa-users',{full_name:fullName,username,password,role});
     hideModal('create-qa-user-modal');
     document.getElementById('new-qa-fullname').value='';
     document.getElementById('new-qa-username').value='';
     document.getElementById('new-qa-password').value='';
-    showToast('QA user created!');
+    showToast(role==='manager'?'Manager created!':'QA user created!');
     loadQAUsers();
   }catch(e){showToast('Failed: '+e.message,true);}
 }
@@ -1756,6 +1789,7 @@ function showPage(id){
   if(id==='human-review'){ mountHumanReviewDatePicker(); renderHumanReview(); }
   if(id==='alerts'){ mountAlertsDatePicker(); renderAlerts(); }
   if(id==='calls') mountCallsDatePicker();
+  if(id==='manager-queue') renderManagerQueue();
 }
 
 function mountCallsDatePicker(){
@@ -2256,6 +2290,155 @@ async function loadExistingFlagReviews(callId){
     });
     updateFlagReviewState();
   }catch(e){ console.error('Could not load existing flag reviews:', e); }
+}
+
+// ─── MANAGER REVIEW QUEUE (Stage 3) ───────────────────────────────────────────
+let managerQueueData = [];
+
+async function loadManagerQueueCount(){
+  try{
+    const res = await API.get('/api/manager-queue/count');
+    const badge = document.getElementById('nb-manager');
+    if(badge) badge.textContent = res.count || 0;
+  }catch(e){}
+}
+
+async function renderManagerQueue(){
+  const container = document.getElementById('manager-queue-container');
+  if(!container) return;
+  container.innerHTML = '<div style="padding:32px;text-align:center;color:var(--text3)">Loading review queue...</div>';
+  try{
+    const res = await API.get('/api/manager-queue');
+    managerQueueData = res.queue || [];
+  }catch(e){
+    container.innerHTML = '<div style="padding:32px;text-align:center;color:var(--red)">Failed to load. You may not have manager access.</div>';
+    return;
+  }
+
+  if(!managerQueueData.length){
+    container.innerHTML = '<div class="card"><div style="padding:40px;text-align:center;color:var(--text3)">✓ No pending AI-mistake reviews. All caught up.</div></div>';
+    return;
+  }
+
+  container.innerHTML = managerQueueData.map(item=>{
+    const safeRule = (item.flag_rule||item.flag_title||'').replace(/"/g,'&quot;');
+    return `<div class="card" style="margin-bottom:16px;" id="mq-item-${item.id}">
+      <div class="card-body" style="padding:18px;">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;">
+          <div style="flex:1;min-width:240px;">
+            <div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;">Flag marked as AI mistake</div>
+            <div style="font-size:15px;font-weight:700;margin-bottom:6px;">${item.flag_title||'Flag'}</div>
+            <div style="font-size:12px;color:var(--text2);margin-bottom:8px;">Rule: "${item.flag_rule||'—'}"</div>
+            <div style="font-size:11px;color:var(--text3);">
+              Call #${(item.call_id||'').slice(-8)} · Agent ${item.agent_name||'—'} · ${item.account_name||'—'} ·
+              Reviewed by <strong>${item.reviewer_name||'Unknown'}</strong>
+            </div>
+            ${item.resolution_note?`<div style="margin-top:8px;padding:8px 10px;background:var(--surface2);border-radius:8px;font-size:12px;color:var(--text2);"><strong>Reviewer's note:</strong> ${item.resolution_note}</div>`:''}
+          </div>
+          <a href="#" onclick="event.preventDefault();openCallFromManager('${item.call_id}')" style="font-size:12px;color:var(--accent);white-space:nowrap;">Open call →</a>
+        </div>
+
+        <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border);">
+          <div style="font-size:12px;font-weight:600;margin-bottom:10px;">Your decision:</div>
+          <div style="display:flex;gap:10px;flex-wrap:wrap;">
+            <button onclick="managerOpenApprove(${item.id}, '${safeRule}', ${item.rule_id||'null'})" style="background:rgba(16,212,142,0.15);border:1px solid rgba(16,212,142,0.3);color:var(--green);font-size:12px;font-weight:600;padding:8px 16px;border-radius:8px;cursor:pointer;">✓ Approve — AI was wrong</button>
+            <button onclick="managerReject(${item.id})" style="background:rgba(242,78,78,0.12);border:1px solid rgba(242,78,78,0.3);color:var(--red);font-size:12px;font-weight:600;padding:8px 16px;border-radius:8px;cursor:pointer;">✗ Reject — flag is valid</button>
+          </div>
+          <div id="mq-approve-panel-${item.id}" style="display:none;margin-top:14px;padding:14px;background:var(--surface2);border-radius:10px;"></div>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function openCallFromManager(callId){
+  loadCallDetail(callId);
+  showPage('call-detail');
+}
+
+function managerOpenApprove(reviewId, ruleText, ruleId){
+  const panel = document.getElementById(`mq-approve-panel-${reviewId}`);
+  if(!panel) return;
+  panel.style.display = 'block';
+  panel.innerHTML = `
+    <div style="font-size:12px;font-weight:600;margin-bottom:10px;">How should the AI learn from this?</div>
+    <div style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
+      <button onclick="managerChooseRuleFix(${reviewId}, '${ruleText.replace(/'/g,"\\'")}', ${ruleId})" style="background:var(--surface);border:1px solid var(--accent);color:var(--accent);font-size:12px;font-weight:600;padding:8px 14px;border-radius:8px;cursor:pointer;">✏️ Refine the rule wording (recommended)</button>
+      <button onclick="managerChooseException(${reviewId}, ${ruleId})" style="background:var(--surface);border:1px solid var(--border);color:var(--text2);font-size:12px;font-weight:600;padding:8px 14px;border-radius:8px;cursor:pointer;">➕ Add a specific exception</button>
+    </div>
+    <div id="mq-resolution-detail-${reviewId}"></div>
+  `;
+}
+
+async function managerChooseRuleFix(reviewId, ruleText, ruleId){
+  const detail = document.getElementById(`mq-resolution-detail-${reviewId}`);
+  detail.innerHTML = `
+    <div style="font-size:11px;color:var(--text3);margin-bottom:6px;">Describe the situation the AI got wrong (optional but helps the AI suggest a better rule):</div>
+    <textarea id="mq-situation-${reviewId}" placeholder="e.g. The agent said 'sir' only twice and it was polite, not robotic" style="width:100%;background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px;font-size:12px;min-height:44px;font-family:'Inter',sans-serif;"></textarea>
+    <button onclick="managerGenerateRuleFix(${reviewId}, '${ruleText.replace(/'/g,"\\'")}', ${ruleId})" class="btn btn-primary" style="margin-top:8px;font-size:12px;">🤖 Suggest improved rule</button>
+    <div id="mq-suggestion-${reviewId}" style="margin-top:12px;"></div>
+  `;
+}
+
+async function managerGenerateRuleFix(reviewId, ruleText, ruleId){
+  const situation = (document.getElementById(`mq-situation-${reviewId}`)?.value||'').trim();
+  const out = document.getElementById(`mq-suggestion-${reviewId}`);
+  out.innerHTML = '<div style="font-size:12px;color:var(--text3)">⏳ Asking AI for a better rule wording...</div>';
+  try{
+    const res = await API.post('/api/manager-suggest-rule-fix', {current_rule: ruleText, situation});
+    if(res.error){ out.innerHTML = `<div style="color:var(--red);font-size:12px;">${res.error}</div>`; return; }
+    out.innerHTML = `
+      <div style="font-size:11px;color:var(--text3);margin-bottom:4px;">Suggested rule (edit if needed):</div>
+      <textarea id="mq-newrule-${reviewId}" style="width:100%;background:var(--surface);border:1px solid var(--accent);color:var(--text);border-radius:8px;padding:8px;font-size:12px;min-height:60px;font-family:'Inter',sans-serif;">${res.suggested_rule||''}</textarea>
+      <div style="font-size:11px;color:var(--text3);font-style:italic;margin:6px 0;">${res.explanation||''}</div>
+      <button onclick="managerSubmitDecision(${reviewId}, 'approve', 'rule_fix', ${ruleId})" class="btn btn-primary" style="font-size:12px;">✓ Approve & update rule</button>
+    `;
+  }catch(e){
+    out.innerHTML = `<div style="color:var(--red);font-size:12px;">Error: ${e.message}</div>`;
+  }
+}
+
+function managerChooseException(reviewId, ruleId){
+  const detail = document.getElementById(`mq-resolution-detail-${reviewId}`);
+  detail.innerHTML = `
+    <div style="font-size:11px;color:var(--text3);margin-bottom:6px;">Describe the exception — the specific situation where this rule should NOT flag (this gets added to the AI's instructions for this rule going forward):</div>
+    <textarea id="mq-exception-${reviewId}" placeholder="e.g. Do not flag dead air when the agent told the customer they'd be on hold and the customer agreed" style="width:100%;background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px;font-size:12px;min-height:60px;font-family:'Inter',sans-serif;"></textarea>
+    <button onclick="managerSubmitDecision(${reviewId}, 'approve', 'exception', ${ruleId})" class="btn btn-primary" style="margin-top:8px;font-size:12px;">✓ Approve & add exception</button>
+  `;
+}
+
+async function managerSubmitDecision(reviewId, decision, resolutionType, ruleId){
+  const payload = {decision, resolution_type: resolutionType, rule_id: ruleId};
+  if(resolutionType === 'rule_fix'){
+    payload.new_rule_text = (document.getElementById(`mq-newrule-${reviewId}`)?.value||'').trim();
+    if(!payload.new_rule_text){ showToast('Rule text is empty', true); return; }
+  } else if(resolutionType === 'exception'){
+    payload.exception_text = (document.getElementById(`mq-exception-${reviewId}`)?.value||'').trim();
+    if(!payload.exception_text){ showToast('Please describe the exception', true); return; }
+  }
+  try{
+    const res = await API.post(`/api/manager-decision/${reviewId}`, payload);
+    if(res.success){
+      showToast(resolutionType==='rule_fix'?'✅ Approved — rule updated':'✅ Approved — exception added');
+      document.getElementById(`mq-item-${reviewId}`)?.remove();
+      loadManagerQueueCount();
+      if(rules) await loadRules();  // refresh rules cache since wording may have changed
+    } else {
+      showToast(res.error||'Failed', true);
+    }
+  }catch(e){ showToast('Error: '+e.message, true); }
+}
+
+async function managerReject(reviewId){
+  const note = prompt('Optional note on why the flag is valid (the reviewer was wrong):') || '';
+  try{
+    const res = await API.post(`/api/manager-decision/${reviewId}`, {decision:'reject', manager_note: note});
+    if(res.success){
+      showToast('Flag kept — reviewer marked it wrongly');
+      document.getElementById(`mq-item-${reviewId}`)?.remove();
+      loadManagerQueueCount();
+    }
+  }catch(e){ showToast('Error: '+e.message, true); }
 }
 
 async function submitResolution(callId){
