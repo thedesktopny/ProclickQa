@@ -684,6 +684,16 @@ td.agent{color:var(--text);font-weight:500;}
     <div id="manager-queue-container">
       <div style="padding:32px;text-align:center;color:var(--text3)">Loading review queue...</div>
     </div>
+
+    <div style="margin-top:32px;">
+      <div style="font-size:14px;font-weight:700;margin-bottom:12px;display:flex;align-items:center;gap:8px;">
+        📚 Learned Exceptions
+        <span style="font-size:11px;color:var(--text3);font-weight:400;">— situations the AI has been told not to flag (only active-rule exceptions are applied)</span>
+      </div>
+      <div id="learned-exceptions-container">
+        <div style="padding:20px;text-align:center;color:var(--text3);font-size:12px;">Loading...</div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -992,7 +1002,7 @@ async function checkAuth(){
       if(av) av.textContent=r.full_name.split(' ').map(w=>w[0]).join('').toUpperCase().slice(0,2);
     }
     const roleEl=document.getElementById('sidebar-role');
-    if(roleEl) roleEl.textContent=currentRole==='admin'?'Admin':'QA Reviewer';
+    if(roleEl) roleEl.textContent=currentRole==='admin'?'Admin':currentRole==='manager'?'Manager':'QA Reviewer';
     document.querySelectorAll('.admin-only').forEach(el=>{el.style.display=isAdmin?'':'none';});
     const isManager = currentRole==='manager' || isAdmin;
     document.querySelectorAll('.manager-only').forEach(el=>{el.style.display=isManager?'':'none';});
@@ -2271,13 +2281,21 @@ async function loadExistingFlagReviews(callId){
     const reviews = res.reviews || [];
     if(!reviews.length) return;
     reviews.forEach(r=>{
-      const item = document.querySelector(`.flag-review-item[data-flag-index="${r.flag_index}"]`);
+      // Match by flag title first (survives re-scoring that reorders flags),
+      // fall back to flag_index if no title match found.
+      let item = null;
+      if(r.flag_title){
+        item = Array.from(document.querySelectorAll('.flag-review-item'))
+          .find(el => el.dataset.flagTitle === r.flag_title);
+      }
+      if(!item){
+        item = document.querySelector(`.flag-review-item[data-flag-index="${r.flag_index}"]`);
+      }
       if(item){
         const noteField = item.querySelector('.flag-resolution-note');
         const mistakeBox = item.querySelector('.flag-ai-mistake');
         if(noteField && r.resolution_note) noteField.value = r.resolution_note;
         if(mistakeBox) mistakeBox.checked = r.marked_ai_mistake;
-        // Show manager status if this was sent for review
         if(r.marked_ai_mistake && r.manager_status && r.manager_status !== 'none'){
           const badge = document.createElement('div');
           const statusColor = r.manager_status==='approved'?'var(--green)':r.manager_status==='rejected'?'var(--red)':'var(--yellow)';
@@ -2317,10 +2335,8 @@ async function renderManagerQueue(){
 
   if(!managerQueueData.length){
     container.innerHTML = '<div class="card"><div style="padding:40px;text-align:center;color:var(--text3)">✓ No pending AI-mistake reviews. All caught up.</div></div>';
-    return;
-  }
-
-  container.innerHTML = managerQueueData.map(item=>{
+  } else {
+    container.innerHTML = managerQueueData.map(item=>{
     const safeRule = (item.flag_rule||item.flag_title||'').replace(/"/g,'&quot;');
     return `<div class="card" style="margin-bottom:16px;" id="mq-item-${item.id}">
       <div class="card-body" style="padding:18px;">
@@ -2348,7 +2364,51 @@ async function renderManagerQueue(){
         </div>
       </div>
     </div>`;
-  }).join('');
+    }).join('');
+  }
+
+  // Always (re)load the exceptions management list
+  renderLearnedExceptions();
+}
+
+async function renderLearnedExceptions(){
+  const container = document.getElementById('learned-exceptions-container');
+  if(!container) return;
+  let exceptions = [];
+  try{
+    const res = await API.get('/api/learned-exceptions');
+    exceptions = res.exceptions || [];
+  }catch(e){
+    container.innerHTML = '<div style="padding:16px;color:var(--red);font-size:12px;">Could not load exceptions.</div>';
+    return;
+  }
+  if(!exceptions.length){
+    container.innerHTML = '<div class="card"><div style="padding:24px;text-align:center;color:var(--text3);font-size:12px;">No learned exceptions yet. They appear here when you approve an AI mistake as an exception.</div></div>';
+    return;
+  }
+  container.innerHTML = '<div class="card"><div class="card-body" style="padding:8px 0;">' + exceptions.map(e=>{
+    const ruleActive = e.rule_active === 1 || e.rule_active === true;
+    const isOn = e.active;
+    const dim = isOn ? '' : 'opacity:0.45;';
+    return `<div style="padding:12px 18px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:flex-start;gap:14px;${dim}">
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:13px;color:var(--text);${isOn?'':'text-decoration:line-through;'}">${e.exception_text||''}</div>
+        <div style="font-size:11px;color:var(--text3);margin-top:3px;">
+          Rule: "${(e.rule_description||'—').slice(0,80)}${(e.rule_description||'').length>80?'…':''}"
+          ${!ruleActive?'<span style="color:var(--yellow);"> · rule is OFF (not applied)</span>':''}
+        </div>
+      </div>
+      <button onclick="toggleException(${e.id})" style="flex-shrink:0;background:${isOn?'rgba(242,78,78,0.12)':'rgba(16,212,142,0.12)'};border:1px solid ${isOn?'rgba(242,78,78,0.3)':'rgba(16,212,142,0.3)'};color:${isOn?'var(--red)':'var(--green)'};font-size:11px;font-weight:600;padding:5px 12px;border-radius:6px;cursor:pointer;">${isOn?'Turn off':'Turn on'}</button>
+    </div>`;
+  }).join('') + '</div></div>';
+}
+
+async function toggleException(id){
+  try{
+    await API.post(`/api/learned-exceptions/${id}/toggle`, {});
+    renderLearnedExceptions();
+    showToast('Exception updated');
+  }catch(e){ showToast('Failed: '+e.message, true); }
 }
 
 function openCallFromManager(callId){

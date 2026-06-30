@@ -1996,9 +1996,10 @@ def compare_pipelines(call_id):
     except Exception as e:
         return jsonify({'error': f'Download failed: {str(e)}'}), 500
 
-    from ai_engine import analyze_audio_with_gemini, score_call_with_claude, analyze_and_score_with_gemini_only, load_active_rules
+    from ai_engine import analyze_audio_with_gemini, score_call_with_claude, analyze_and_score_with_gemini_only, load_active_rules, load_active_exceptions
 
     rules = load_active_rules()
+    exceptions = load_active_exceptions()
     common_args = dict(
         call_end_first=call.get('call_end_first', 'customer'),
         call_notes=call.get('call_notes', ''),
@@ -2014,7 +2015,7 @@ def compare_pipelines(call_id):
     # Pipeline A: current production approach (Gemini listens, Claude scores)
     try:
         gemini_result = analyze_audio_with_gemini(audio_path)
-        claude_result = score_call_with_claude(gemini_result, rules, **common_args)
+        claude_result = score_call_with_claude(gemini_result, rules, exceptions=exceptions, **common_args)
         results['claude_gemini'] = {
             'overall_score': claude_result.get('overall_score'),
             'status': claude_result.get('status'),
@@ -2028,7 +2029,7 @@ def compare_pipelines(call_id):
 
     # Pipeline B: Gemini-only (single call does both listening and scoring)
     try:
-        gemini_only_result = analyze_and_score_with_gemini_only(audio_path, rules, **common_args)
+        gemini_only_result = analyze_and_score_with_gemini_only(audio_path, rules, exceptions=exceptions, **common_args)
         sc = gemini_only_result.get('scorecard', {})
         results['gemini_only'] = {
             'overall_score': sc.get('overall_score'),
@@ -2466,6 +2467,40 @@ def test_one_call():
     except Exception as e:
         return jsonify({'error': str(e), 'traceback': traceback.format_exc()})
 
+@app.route('/api/learned-exceptions', methods=['GET'])
+@require_manager
+def list_learned_exceptions():
+    """List all learned exceptions with their rule and active status."""
+    conn = get_db()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('''
+        SELECT le.*, r.active AS rule_active
+        FROM learned_exceptions le
+        LEFT JOIN rules r ON le.rule_id = r.id
+        ORDER BY le.created_at DESC
+    ''')
+    exceptions = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return jsonify({'exceptions': exceptions})
+
+@app.route('/api/learned-exceptions/<int:exc_id>/toggle', methods=['POST'])
+@require_manager
+def toggle_learned_exception(exc_id):
+    """Turn a learned exception on or off without deleting it."""
+    conn = get_db()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('SELECT active FROM learned_exceptions WHERE id=%s', (exc_id,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        return jsonify({'error': 'Not found'}), 404
+    new_active = not row['active']
+    c.execute('UPDATE learned_exceptions SET active=%s WHERE id=%s RETURNING *', (new_active, exc_id))
+    updated = dict(c.fetchone())
+    conn.commit()
+    conn.close()
+    return jsonify(updated)
+
 @app.route('/api/manager-queue', methods=['GET'])
 @require_manager
 def get_manager_queue():
@@ -2572,11 +2607,28 @@ def manager_decision(review_id):
     # decision == 'approve' — apply the chosen resolution
     rule_id = data.get('rule_id')
 
+    # If rule_id wasn't provided (flags don't always carry one), resolve it from the
+    # flag's stored rule/title text by matching against the rules table.
+    if not rule_id:
+        flag_text = (review.get('flag_rule') or review.get('flag_title') or '').strip()
+        if flag_text:
+            # Try exact match first, then a loose contains match
+            c.execute('SELECT id FROM rules WHERE description = %s LIMIT 1', (flag_text,))
+            rr = c.fetchone()
+            if not rr:
+                c.execute("SELECT id FROM rules WHERE description ILIKE %s LIMIT 1", (f'%{flag_text[:40]}%',))
+                rr = c.fetchone()
+            if rr:
+                rule_id = rr['id']
+
     if resolution_type == 'rule_fix':
         new_rule_text = (data.get('new_rule_text') or '').strip()
-        if not new_rule_text or not rule_id:
+        if not new_rule_text:
             conn.close()
-            return jsonify({'error': 'rule_fix requires new_rule_text and rule_id'}), 400
+            return jsonify({'error': 'rule_fix requires new_rule_text'}), 400
+        if not rule_id:
+            conn.close()
+            return jsonify({'error': 'Could not match this flag to a specific rule. Use "Add exception" instead, or fix the rule manually in Rules Engine.'}), 400
         c.execute('UPDATE rules SET description=%s WHERE id=%s', (new_rule_text, rule_id))
 
     elif resolution_type == 'exception':
@@ -2590,6 +2642,9 @@ def manager_decision(review_id):
             c.execute('SELECT description FROM rules WHERE id=%s', (rule_id,))
             rr = c.fetchone()
             rule_desc = rr['description'] if rr else ''
+        else:
+            # No rule matched — store the flag text so the text-fallback in load_active_exceptions can still work
+            rule_desc = (review.get('flag_rule') or review.get('flag_title') or '')
         c.execute('''INSERT INTO learned_exceptions
             (rule_id, rule_description, exception_text, source_call_id, approved_by, active)
             VALUES (%s,%s,%s,%s,%s,TRUE)''',
