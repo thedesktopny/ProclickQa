@@ -2947,18 +2947,24 @@ function renderNotes(){
 function renderRules(){
   const container=document.getElementById('rules-list');
   if(!container)return;
-  set('rules-count',`${rules.filter(r=>r.active).length} active · ${rules.length} total`);
+  const activeCount = rules.filter(r=>r.active).length;
+  set('rules-count',`${activeCount} active · ${rules.length} total`);
   if(rules.length===0){container.innerHTML='<div style="padding:24px;text-align:center;color:var(--text3)">No rules yet.</div>';return;}
   container.innerHTML=`
-    <div style="padding:12px 20px;font-size:11px;color:var(--text3);border-bottom:1px solid var(--border);">
-      Click a rule's text to see violations. Use the dropdown to change severity — past calls relabel instantly.
+    <div style="padding:12px 20px;font-size:11px;color:var(--text3);border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
+      <span>Toggle a rule OFF to completely remove it from AI analysis — disabled rules produce zero flags and zero violations. Click a rule's text to see its violations.</span>
+      ${isAdmin?`<div style="display:flex;gap:8px;flex-shrink:0;">
+        <button onclick="bulkToggleRules(false)" style="background:rgba(242,78,78,0.12);border:1px solid rgba(242,78,78,0.3);color:var(--red);font-size:11px;font-weight:600;padding:6px 12px;border-radius:6px;cursor:pointer;">Disable All</button>
+        <button onclick="bulkToggleRules(true)" style="background:rgba(34,197,94,0.12);border:1px solid rgba(34,197,94,0.3);color:var(--green);font-size:11px;font-weight:600;padding:6px 12px;border-radius:6px;cursor:pointer;">Enable All</button>
+      </div>`:''}
     </div>
     ${rules.map(rule=>{
       const sc=rule.severity==='Critical'?'badge-red':rule.severity==='Warning'?'badge-yellow':'badge-blue';
       const dc=rule.severity==='Critical'?'var(--red)':rule.severity==='Warning'?'var(--yellow)':'var(--accent)';
-      return `<div class="rule-item" style="transition:background 0.15s;" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background='none'">
-        <div class="rule-dot" style="background:${dc}"></div>
-        <div class="rule-text" style="flex:1;cursor:pointer;" onclick="loadRuleViolations(${rule.id})">${rule.description}</div>
+      const dimStyle = rule.active ? '' : 'opacity:0.4;';
+      return `<div class="rule-item" style="transition:background 0.15s;${dimStyle}" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background='none'">
+        <div class="rule-dot" style="background:${rule.active?dc:'var(--text3)'}"></div>
+        <div class="rule-text" style="flex:1;cursor:pointer;${rule.active?'':'text-decoration:line-through;'}" onclick="loadRuleViolations(${rule.id})">${rule.description}</div>
         <span class="badge ${sc}" style="white-space:nowrap;flex-shrink:0;">${rule.category}</span>
         ${isAdmin?`<select onchange="changeRuleSeverity(${rule.id}, this.value)" onclick="event.stopPropagation()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);font-size:11px;padding:4px 8px;border-radius:6px;flex-shrink:0;">
           <option value="Critical" ${rule.severity==='Critical'?'selected':''}>Critical</option>
@@ -2966,10 +2972,33 @@ function renderRules(){
           <option value="Info" ${rule.severity==='Info'?'selected':''}>Info</option>
         </select>`:''}
         <span style="font-size:10px;color:var(--text3);margin:0 4px;flex-shrink:0;" onclick="loadRuleViolations(${rule.id})">→</span>
-        <div class="toggle ${rule.active?'':'off'}" onclick="event.stopPropagation();toggleRule(${rule.id})"></div>
+        <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
+          <span style="font-size:10px;font-weight:700;color:${rule.active?'var(--green)':'var(--text3)'};width:24px;">${rule.active?'ON':'OFF'}</span>
+          <div class="toggle ${rule.active?'':'off'}" onclick="event.stopPropagation();toggleRule(${rule.id})"></div>
+        </div>
         ${isAdmin?`<button onclick="event.stopPropagation();deleteRule(${rule.id})" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:16px;padding:4px 8px;">🗑</button>`:''}
       </div>`;
     }).join('')}`;
+}
+
+async function bulkToggleRules(enable){
+  const action = enable ? 'enable ALL' : 'disable ALL';
+  const targets = rules.filter(r => enable ? !r.active : r.active);
+  if(targets.length === 0){ showToast(enable?'All rules already enabled':'All rules already disabled'); return; }
+  if(!confirm(`This will ${action} ${targets.length} rule(s). ${enable?'':'Disabled rules produce zero AI output.'} Continue?`)) return;
+
+  showToast(`Updating ${targets.length} rules...`);
+  for(const rule of targets){
+    try{
+      const updated = await API.post(`/api/rules/${rule.id}/toggle`, {});
+      const idx = rules.findIndex(r=>r.id===rule.id);
+      if(idx!==-1) rules[idx] = updated;
+    }catch(e){ console.error(`Failed to toggle rule ${rule.id}:`, e); }
+  }
+  renderRules();
+  await loadStats();
+  renderDashboard();
+  showToast(enable ? '✅ All rules enabled' : '✅ All rules disabled — enable them one at a time as you work through each');
 }
 
 async function loadRuleViolations(ruleId){
@@ -3085,6 +3114,9 @@ async function toggleRule(id){
   const updated=await API.post(`/api/rules/${id}/toggle`,{});
   const idx=rules.findIndex(r=>r.id===id);
   if(idx!==-1){rules[idx]=updated;renderRules();}
+  showToast(updated.active ? '✅ Rule enabled' : '🔕 Rule disabled — AI will no longer flag it');
+  await loadStats();
+  renderDashboard();
 }
 
 async function changeRuleSeverity(id, newSeverity){
