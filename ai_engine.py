@@ -647,7 +647,22 @@ Respond ONLY with valid compact JSON (evidence fields up to 140 chars):
         except Exception as e:
             print(f"[Gemini-Only] Could not delete uploaded file: {e}")
 
-    text = response.text.strip()
+    # Robustly extract text — response.text throws if Gemini returned no valid candidate
+    # (blocked content, safety filter, or empty response). Capture the real reason.
+    text = ''
+    try:
+        text = response.text.strip()
+    except Exception as e:
+        finish_reason = 'unknown'
+        try:
+            finish_reason = str(response.candidates[0].finish_reason) if response.candidates else 'no candidates'
+        except Exception:
+            pass
+        raise Exception(f"Gemini returned no usable text (finish_reason={finish_reason}): {str(e)[:200]}")
+
+    if not text:
+        raise Exception("Gemini returned an empty response for the combined listen+score request")
+
     if text.startswith('```'):
         text = re.sub(r'^```(?:json)?\s*', '', text)
         text = re.sub(r'\s*```$', '', text)

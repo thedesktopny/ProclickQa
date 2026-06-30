@@ -284,6 +284,39 @@ def init_db():
     ''')
 
     c.execute('''
+        CREATE TABLE IF NOT EXISTS flag_reviews (
+            id SERIAL PRIMARY KEY,
+            call_id TEXT,
+            flag_index INTEGER,
+            flag_title TEXT,
+            flag_rule TEXT,
+            resolution_note TEXT,
+            marked_ai_mistake BOOLEAN DEFAULT FALSE,
+            reviewed_by INTEGER,
+            reviewer_name TEXT,
+            manager_status TEXT DEFAULT 'none',
+            manager_id INTEGER,
+            manager_note TEXT,
+            resolution_type TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            reviewed_at TIMESTAMP
+        )
+    ''')
+
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS learned_exceptions (
+            id SERIAL PRIMARY KEY,
+            rule_id INTEGER,
+            rule_description TEXT,
+            exception_text TEXT,
+            source_call_id TEXT,
+            approved_by INTEGER,
+            active BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    c.execute('''
         CREATE TABLE IF NOT EXISTS pipeline_comparisons (
             id SERIAL PRIMARY KEY,
             call_id TEXT,
@@ -466,6 +499,20 @@ def require_admin(f):
             user = {'role': 'admin', 'id': None, 'username': session.get('username'), 'full_name': session.get('full_name')}
         if not user or user.get('role') != 'admin':
             return jsonify({'error': 'Unauthorized'}), 401
+        return f(*args, **kwargs)
+    return decorated
+
+def require_manager(f):
+    """Allows users with role 'manager' OR 'admin' (admin outranks manager)."""
+    from functools import wraps
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        user = get_token_user(get_request_token())
+        if not user and (session.get('role') in ('admin','manager') or session.get('admin')):
+            user = {'role': session.get('role','admin'), 'id': session.get('user_id'),
+                    'username': session.get('username'), 'full_name': session.get('full_name')}
+        if not user or user.get('role') not in ('manager', 'admin'):
+            return jsonify({'error': 'Manager or admin access required'}), 401
         return f(*args, **kwargs)
     return decorated
 
@@ -1989,7 +2036,10 @@ def compare_pipelines(call_id):
             'notes_score': sc.get('notes_score'),
         }
     except Exception as e:
-        results['gemini_only'] = {'error': str(e)}
+        import traceback
+        tb = traceback.format_exc()
+        print(f"[Compare] Gemini-only pipeline failed:\n{tb}")
+        results['gemini_only'] = {'error': str(e)[:300] or 'Unknown error (empty exception)'}
 
     try: os.remove(audio_path)
     except: pass
