@@ -2463,6 +2463,56 @@ def test_one_call():
     except Exception as e:
         return jsonify({'error': str(e), 'traceback': traceback.format_exc()})
 
+@app.route('/api/flag-reviews/<call_id>', methods=['GET'])
+@require_login
+def get_flag_reviews(call_id):
+    """Get all saved flag reviews for a call."""
+    conn = get_db()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('SELECT * FROM flag_reviews WHERE call_id=%s ORDER BY flag_index', (call_id,))
+    reviews = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return jsonify({'reviews': reviews})
+
+@app.route('/api/flag-reviews/<call_id>', methods=['POST'])
+@require_login
+def save_flag_reviews(call_id):
+    """
+    Save per-flag resolution notes + AI-mistake flags for a call.
+    Expects: {reviews: [{flag_index, flag_title, flag_rule, resolution_note, marked_ai_mistake}]}
+    Every flag must have a non-empty note unless marked as an AI mistake.
+    """
+    user = current_user()
+    data = request.json or {}
+    reviews = data.get('reviews', [])
+
+    # Validate: each flag needs either a note OR to be marked an AI mistake
+    for r in reviews:
+        note = (r.get('resolution_note') or '').strip()
+        is_mistake = r.get('marked_ai_mistake', False)
+        if not note and not is_mistake:
+            return jsonify({'error': f"Flag '{r.get('flag_title','?')}' needs a resolution note or must be marked as an AI mistake."}), 400
+
+    conn = get_db()
+    c = conn.cursor()
+    # Clear existing reviews for this call, then re-insert (full replace on save)
+    c.execute('DELETE FROM flag_reviews WHERE call_id=%s', (call_id,))
+    for r in reviews:
+        is_mistake = bool(r.get('marked_ai_mistake', False))
+        manager_status = 'pending' if is_mistake else 'none'
+        c.execute('''INSERT INTO flag_reviews
+            (call_id, flag_index, flag_title, flag_rule, resolution_note, marked_ai_mistake,
+             reviewed_by, reviewer_name, manager_status, reviewed_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,CURRENT_TIMESTAMP)''',
+            (call_id, r.get('flag_index'), r.get('flag_title',''), r.get('flag_rule',''),
+             (r.get('resolution_note') or '').strip(), is_mistake,
+             user.get('id') if user else None, user.get('full_name') or user.get('username') if user else 'Unknown',
+             manager_status))
+    conn.commit()
+    conn.close()
+    pending_count = sum(1 for r in reviews if r.get('marked_ai_mistake'))
+    return jsonify({'success': True, 'saved': len(reviews), 'sent_to_manager': pending_count})
+
 @app.route('/api/processing-status', methods=['GET'])
 def get_processing_status():
     return jsonify({'paused': is_processing_paused()})

@@ -2156,6 +2156,108 @@ async function loadResolution(callId){
   }
 }
 
+// ─── PER-FLAG REVIEW (Stage 2) ────────────────────────────────────────────────
+function updateFlagReviewState(){
+  const items = document.querySelectorAll('.flag-review-item');
+  const statusEl = document.getElementById('flag-review-status');
+  const saveBtn = document.getElementById('save-flag-reviews-btn');
+  if(!items.length || !saveBtn) return;
+
+  let incomplete = 0;
+  let mistakeCount = 0;
+  items.forEach(item=>{
+    const idx = item.dataset.flagIndex;
+    const note = (item.querySelector('.flag-resolution-note')?.value||'').trim();
+    const isMistake = item.querySelector('.flag-ai-mistake')?.checked;
+    if(isMistake) mistakeCount++;
+    // A flag is "complete" if it has a note OR is marked an AI mistake
+    if(!note && !isMistake){
+      incomplete++;
+      item.style.borderColor = 'var(--border)';
+    } else {
+      item.style.borderColor = isMistake ? 'rgba(245,166,35,0.4)' : 'rgba(16,212,142,0.3)';
+    }
+    // When marked AI mistake, the note becomes optional and the field dims
+    const noteField = item.querySelector('.flag-resolution-note');
+    if(noteField){
+      if(isMistake){ noteField.placeholder = 'Optional: why was this wrong? (helps the manager)'; }
+      else { noteField.placeholder = 'What did you do about this issue? (required)'; }
+    }
+  });
+
+  if(incomplete > 0){
+    statusEl.innerHTML = `<span style="color:var(--yellow)">${incomplete} flag(s) still need a note or AI-mistake mark before you can save.</span>`;
+    saveBtn.disabled = true;
+    saveBtn.style.opacity = '0.5';
+  } else {
+    let msg = '✓ All flags reviewed.';
+    if(mistakeCount > 0) msg += ` ${mistakeCount} marked as AI mistake — will go to manager for review.`;
+    statusEl.innerHTML = `<span style="color:var(--green)">${msg}</span>`;
+    saveBtn.disabled = false;
+    saveBtn.style.opacity = '1';
+  }
+}
+
+async function saveFlagReviews(callId){
+  const items = document.querySelectorAll('.flag-review-item');
+  const reviews = [];
+  items.forEach(item=>{
+    reviews.push({
+      flag_index: parseInt(item.dataset.flagIndex),
+      flag_title: item.dataset.flagTitle || '',
+      flag_rule: item.dataset.flagRule || '',
+      resolution_note: (item.querySelector('.flag-resolution-note')?.value||'').trim(),
+      marked_ai_mistake: item.querySelector('.flag-ai-mistake')?.checked || false,
+    });
+  });
+
+  const saveBtn = document.getElementById('save-flag-reviews-btn');
+  if(saveBtn){ saveBtn.disabled = true; saveBtn.textContent = '⏳ Saving...'; }
+
+  try{
+    const res = await API.post(`/api/flag-reviews/${callId}`, {reviews});
+    if(res.success){
+      let msg = `✅ Review saved (${res.saved} flags)`;
+      if(res.sent_to_manager > 0) msg += ` — ${res.sent_to_manager} sent to manager`;
+      showToast(msg);
+    } else {
+      showToast(res.error || 'Failed to save', true);
+    }
+  }catch(e){
+    showToast('Error: ' + (e.message||'could not save review'), true);
+  }finally{
+    if(saveBtn){ saveBtn.disabled = false; saveBtn.textContent = 'Save Review'; }
+    updateFlagReviewState();
+  }
+}
+
+async function loadExistingFlagReviews(callId){
+  try{
+    const res = await API.get(`/api/flag-reviews/${callId}`);
+    const reviews = res.reviews || [];
+    if(!reviews.length) return;
+    reviews.forEach(r=>{
+      const item = document.querySelector(`.flag-review-item[data-flag-index="${r.flag_index}"]`);
+      if(item){
+        const noteField = item.querySelector('.flag-resolution-note');
+        const mistakeBox = item.querySelector('.flag-ai-mistake');
+        if(noteField && r.resolution_note) noteField.value = r.resolution_note;
+        if(mistakeBox) mistakeBox.checked = r.marked_ai_mistake;
+        // Show manager status if this was sent for review
+        if(r.marked_ai_mistake && r.manager_status && r.manager_status !== 'none'){
+          const badge = document.createElement('div');
+          const statusColor = r.manager_status==='approved'?'var(--green)':r.manager_status==='rejected'?'var(--red)':'var(--yellow)';
+          const statusText = r.manager_status==='approved'?'✓ Manager approved — AI will learn from this':r.manager_status==='rejected'?'✗ Manager rejected — flag stands':'⏳ Awaiting manager review';
+          badge.style.cssText = `font-size:11px;color:${statusColor};margin-top:6px;font-weight:600;`;
+          badge.textContent = statusText;
+          item.appendChild(badge);
+        }
+      }
+    });
+    updateFlagReviewState();
+  }catch(e){ console.error('Could not load existing flag reviews:', e); }
+}
+
 async function submitResolution(callId){
   const text = (document.getElementById(`resolution-text-${callId}`)?.value||'').trim();
   if(!text){ showToast('Please describe the actions you took', true); return; }
@@ -2457,26 +2559,36 @@ function renderCallDetail(call){
       <!-- Flags & Coaching -->
       <div style="display:flex;flex-direction:column;gap:16px;">
         <div class="card">
-          <div class="card-header"><span class="card-title">🚩 Flags</span><span class="badge badge-red">${flags.length}</span></div>
+          <div class="card-header"><span class="card-title">🚩 Flags — Review Each</span><span class="badge badge-red">${flags.length}</span></div>
           <div class="card-body" style="padding:12px 16px;">
-            ${flags.length===0?'<div style="color:var(--text3);font-size:12px;">No flags on this call.</div>':flags.map(f=>{
+            ${flags.length===0?'<div style="color:var(--text3);font-size:12px;">No flags on this call. Nothing to review.</div>':flags.map((f,fi)=>{
               const safeTitle=(f.title||'Flag').replace(/'/g,"\\'").replace(/"/g,'&quot;');
               const safeDesc=(f.description||'').replace(/'/g,"\\'").replace(/"/g,'&quot;');
               const safeTime=(f.timestamp_display||f.timestamp||'').replace(/'/g,"\\'");
               const hasTimestamp = f.timestamp_seconds && f.timestamp_seconds > 0 && call.recording_url;
-              const safeQuote=(f.evidence_quote||'').replace(/'/g,"\\'").replace(/"/g,'&quot;');
-              return `<div class="flag-item" style="transition:opacity 0.15s;padding:10px;" onmouseover="this.style.opacity='0.8'" onmouseout="this.style.opacity='1'">
-                <div class="flag-icon ${f.severity==='Critical'?'red':'yellow'}">${f.severity==='Critical'?'🚨':'⚠️'}</div>
-                <div style="flex:1;cursor:pointer;" onclick="showFlagModal('${safeTitle}','${safeDesc}','${f.severity||'Warning'}','${safeTime}')">
-                  <div class="flag-title">${f.title||'Flag'}</div>
-                  <div class="flag-desc" style="overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;">${f.description||''}</div>
-                  ${f.evidence_quote?`<div style="font-size:11px;color:var(--text3);font-style:italic;margin-top:3px;">"${f.evidence_quote}"</div>`:''}
-                  ${safeTime?`<div class="flag-time">⏱ ${safeTime}</div>`:''}
-                  <div style="font-size:10px;color:var(--accent);margin-top:3px;">Click to read full ↗</div>
+              const safeRule=(f.rule||f.title||'').replace(/'/g,"\\'").replace(/"/g,'&quot;');
+              return `<div class="flag-review-item" data-flag-index="${fi}" data-flag-title="${safeTitle}" data-flag-rule="${safeRule}" style="border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:12px;">
+                <div style="display:flex;gap:10px;align-items:flex-start;">
+                  <div class="flag-icon ${f.severity==='Critical'?'red':'yellow'}" style="flex-shrink:0;">${f.severity==='Critical'?'🚨':'⚠️'}</div>
+                  <div style="flex:1;min-width:0;">
+                    <div class="flag-title">${f.title||'Flag'}</div>
+                    <div class="flag-desc" style="font-size:11px;color:var(--text3);margin-top:2px;">${f.description||''}</div>
+                    ${f.evidence_quote?`<div style="font-size:11px;color:var(--text3);font-style:italic;margin-top:3px;">"${f.evidence_quote}"</div>`:''}
+                    ${safeTime?`<div class="flag-time" style="margin-top:3px;">⏱ ${safeTime}</div>`:''}
+                  </div>
+                  ${hasTimestamp?`<button onclick="jumpToTimestamp(${f.timestamp_seconds})" style="background:rgba(79,110,247,0.15);border:none;color:var(--accent);cursor:pointer;border-radius:6px;padding:6px 10px;font-size:11px;font-weight:600;white-space:nowrap;flex-shrink:0;" title="Jump to this moment">▶ Play</button>`:''}
                 </div>
-                ${hasTimestamp?`<button onclick="event.stopPropagation();jumpToTimestamp(${f.timestamp_seconds})" style="background:rgba(79,110,247,0.15);border:none;color:var(--accent);cursor:pointer;border-radius:6px;padding:6px 10px;font-size:11px;font-weight:600;white-space:nowrap;flex-shrink:0;" title="Jump to this moment in the recording">▶ Play moment</button>`:''}
+                <textarea class="flag-resolution-note" data-flag-index="${fi}" placeholder="What did you do about this issue? (required)" style="width:100%;margin-top:10px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:12px;font-family:'Inter',sans-serif;resize:vertical;min-height:48px;" oninput="updateFlagReviewState()"></textarea>
+                <label style="display:flex;align-items:center;gap:8px;margin-top:8px;font-size:12px;color:var(--text2);cursor:pointer;">
+                  <input type="checkbox" class="flag-ai-mistake" data-flag-index="${fi}" onchange="updateFlagReviewState()" style="width:16px;height:16px;cursor:pointer;accent-color:var(--accent);">
+                  <span>🤖 AI got this wrong — this isn't actually a problem (sends to manager for review)</span>
+                </label>
               </div>`;
             }).join('')}
+            ${flags.length>0?`
+              <div id="flag-review-status" style="font-size:11px;color:var(--text3);margin:8px 0;"></div>
+              <button id="save-flag-reviews-btn" onclick="saveFlagReviews('${call.call_id}')" class="btn btn-primary" style="width:100%;" disabled>Save Review</button>
+            `:''}
           </div>
         </div>
         <div class="card">
@@ -2489,6 +2601,8 @@ function renderCallDetail(call){
       </div>
     </div>
 
+
+
     <!-- Transcript -->
     <div class="card">
       <div class="card-header"><span class="card-title">Transcript</span><span style="font-size:11px;color:var(--text3)">Credentials redacted for security</span></div>
@@ -2496,6 +2610,11 @@ function renderCallDetail(call){
         <div class="transcript-box">${formatTranscript(call.transcript||'No transcript available.')}</div>
       </div>
     </div>`;
+
+  // After rendering, hydrate any existing per-flag reviews and set the save-button state
+  if((sc.flags||[]).length > 0){
+    setTimeout(()=>{ loadExistingFlagReviews(call.call_id); updateFlagReviewState(); }, 50);
+  }
 }
 
 // ─── HUMAN REVIEW ─────────────────────────────────────────────────────────────
