@@ -206,24 +206,24 @@ td.agent{color:var(--text);font-weight:500;}
     <div class="nav-item" onclick="showPage('human-review')"><span class="icon">👁</span>Human Review<span class="nav-badge" id="nb-human">0</span></div>
     <div class="nav-item" onclick="showPage('agents')"><span class="icon">👥</span>Agents</div>
   </div>
-  <div class="nav-section admin-only" style="margin-top:12px;">
+  <div class="nav-section manager-plus" style="margin-top:12px;display:none;">
     <div class="nav-label">Analytics</div>
     <div class="nav-item" onclick="showPage('analytics')"><span class="icon">📈</span>Trends</div>
     <div class="nav-item" onclick="showPage('billing')"><span class="icon">💰</span>Billing</div>
     <div class="nav-item" onclick="showPage('notes')"><span class="icon">📝</span>Notes Quality</div>
-    <div class="nav-item" onclick="showPage('costs')"><span class="icon">💳</span>Costs</div>
+    <div class="nav-item admin-only" onclick="showPage('costs')"><span class="icon">💳</span>Costs</div>
   </div>
-  <div class="nav-section admin-only" style="margin-top:12px;">
+  <div class="nav-section manager-plus" style="margin-top:12px;display:none;">
     <div class="nav-label">Config</div>
     <div class="nav-item" onclick="showPage('rules')"><span class="icon">⚙️</span>Rules Engine</div>
     <div class="nav-item" onclick="showPage('alerts')"><span class="icon">🚨</span>Alerts<span class="nav-badge" id="nb-alerts">0</span></div>
-    <div class="nav-item" onclick="showPage('qa-users')"><span class="icon">🛡️</span>QA Users</div>
+    <div class="nav-item" onclick="showPage('qa-users')"><span class="icon">🛡️</span>Users</div>
   </div>
-  <div class="nav-section manager-only" style="margin-top:12px;display:none;">
+  <div class="nav-section manager-plus" style="margin-top:12px;display:none;">
     <div class="nav-label">Manager</div>
     <div class="nav-item" onclick="showPage('manager-queue')"><span class="icon">🧑‍⚖️</span>AI Mistake Review<span class="nav-badge" id="nb-manager">0</span></div>
   </div>
-  <div class="nav-section admin-only" style="margin-top:12px;">
+  <div class="nav-section manager-plus" style="margin-top:12px;display:none;">
     <div class="nav-label">Processing</div>
     <div id="processing-toggle-container" style="padding:10px 16px;">
       <button id="processing-pause-btn" onclick="toggleProcessing()" style="width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text2);padding:10px;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px;">
@@ -699,9 +699,9 @@ td.agent{color:var(--text);font-weight:500;}
 
 <div class="page" id="page-qa-users">
   <div class="topbar">
-    <div class="page-title">🛡️ QA Users</div>
+    <div class="page-title">🛡️ Users</div>
     <div class="topbar-right">
-      <button class="btn btn-primary" onclick="showModal('create-qa-user-modal')">+ New QA User</button>
+      <button class="btn btn-primary" onclick="showModal('create-qa-user-modal')">+ New User</button>
     </div>
   </div>
   <div style="padding:28px;">
@@ -836,7 +836,7 @@ td.agent{color:var(--text);font-weight:500;}
         <div style="font-size:11px;color:var(--text3);margin-bottom:5px;">Role</div>
         <select id="new-qa-role" style="width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:9px 12px;border-radius:8px;font-size:13px;box-sizing:border-box;">
           <option value="qa_user">QA Reviewer — reviews calls, resolves flags</option>
-          <option value="manager">Manager — also approves/rejects AI-mistake flags</option>
+          <option value="manager" class="admin-only-option">Manager — also approves/rejects AI-mistake flags</option>
         </select>
       </div>
     </div>
@@ -1003,10 +1003,14 @@ async function checkAuth(){
     }
     const roleEl=document.getElementById('sidebar-role');
     if(roleEl) roleEl.textContent=currentRole==='admin'?'Admin':currentRole==='manager'?'Manager':'QA Reviewer';
-    document.querySelectorAll('.admin-only').forEach(el=>{el.style.display=isAdmin?'':'none';});
     const isManager = currentRole==='manager' || isAdmin;
+    // admin-only: only full admins (e.g. Costs). manager-plus: managers AND admins.
+    document.querySelectorAll('.admin-only').forEach(el=>{el.style.display=isAdmin?'':'none';});
+    document.querySelectorAll('.manager-plus').forEach(el=>{el.style.display=isManager?'':'none';});
     document.querySelectorAll('.manager-only').forEach(el=>{el.style.display=isManager?'':'none';});
     if(isManager) loadManagerQueueCount();
+    // The 'Manager' role option in create-user is admin-only (managers create only reviewers)
+    document.querySelectorAll('.admin-only-option').forEach(el=>{ el.style.display = isAdmin?'':'none'; el.disabled = !isAdmin; });
   }catch(e){ console.error('Sidebar update failed (non-fatal):', e); }
 
   hideModal('login-modal');
@@ -1470,7 +1474,7 @@ function renderQAUsers(users, perf){
   const container = document.getElementById('qa-perf-cards');
   if(!container) return;
   if(!users.length){
-    container.innerHTML = '<div style="color:var(--text3);font-size:13px;padding:32px;text-align:center;grid-column:1/-1;">No QA users yet. Click &quot;+ New QA User&quot; to create one.</div>';
+    container.innerHTML = '<div style="color:var(--text3);font-size:13px;padding:32px;text-align:center;grid-column:1/-1;">No QA users yet. Click &quot;+ New User&quot; to create one.</div>';
     return;
   }
   const perfMap = {};
@@ -1786,6 +1790,13 @@ function renderAgentProfile(data){
 }
 
 function showPage(id){
+  // Access control: qa_users see only their own work; costs is admin-only
+  const managerPages = ['analytics','billing','notes','rules','alerts','qa-users','manager-queue'];
+  const adminPages = ['costs'];
+  const isManager = currentRole==='manager' || isAdmin;
+  if(adminPages.includes(id) && !isAdmin){ showToast('Admin access only', true); return; }
+  if(managerPages.includes(id) && !isManager){ showToast('You don\'t have access to that page', true); return; }
+
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
   const page = document.getElementById('page-'+id);

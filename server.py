@@ -706,7 +706,7 @@ def get_rules():
     return jsonify(rules)
 
 @app.route('/api/rules', methods=['POST'])
-@require_admin
+@require_manager
 def add_rule():
     data = request.json
     description = data.get('description', '').strip()
@@ -722,7 +722,7 @@ def add_rule():
     return jsonify(rule), 201
 
 @app.route('/api/rules/<int:rule_id>', methods=['PUT'])
-@require_admin
+@require_manager
 def update_rule(rule_id):
     data = request.json
     conn = get_db()
@@ -829,7 +829,7 @@ def relabel_rule_severity_in_past_calls(c, conn, rule_description, new_severity)
     return len(affected_calls)
 
 @app.route('/api/rules/<int:rule_id>', methods=['DELETE'])
-@require_admin
+@require_manager
 def delete_rule(rule_id):
     conn = get_db()
     c = conn.cursor()
@@ -839,7 +839,7 @@ def delete_rule(rule_id):
     return jsonify({'success': True})
 
 @app.route('/api/rules/<int:rule_id>/toggle', methods=['POST'])
-@require_admin
+@require_manager
 def toggle_rule(rule_id):
     conn = get_db()
     c = conn.cursor(cursor_factory=RealDictCursor)
@@ -974,7 +974,7 @@ def delete_manual_cost(cost_id):
     conn.close()
     return jsonify({'success': True})
 @app.route('/api/qa-users', methods=['GET'])
-@require_admin
+@require_manager
 def get_qa_users():
     conn = get_db()
     c = conn.cursor(cursor_factory=RealDictCursor)
@@ -1001,8 +1001,10 @@ def get_qa_users():
     return jsonify(users)
 
 @app.route('/api/qa-users', methods=['POST'])
-@require_admin
+@require_manager
 def create_qa_user():
+    acting_user = current_user()
+    acting_role = acting_user.get('role') if acting_user else 'admin'
     data = request.json
     username = (data.get('username') or '').strip()
     password = data.get('password') or ''
@@ -1010,6 +1012,9 @@ def create_qa_user():
     role = data.get('role', 'qa_user')
     if role not in ('qa_user', 'manager'):
         role = 'qa_user'
+    # Only admins can create managers. A manager can only create qa_users.
+    if role == 'manager' and acting_role != 'admin':
+        return jsonify({'error': 'Only an admin can create manager accounts.'}), 403
     if not username or not password:
         return jsonify({'error': 'Username and password required'}), 400
     password_hash = hashlib.sha256(password.encode()).hexdigest()
@@ -1027,7 +1032,7 @@ def create_qa_user():
         return jsonify({'error': str(e)}), 400
 
 @app.route('/api/qa-users/<int:user_id>/drilldown', methods=['GET'])
-@require_admin
+@require_manager
 def qa_user_drilldown(user_id):
     conn = get_db()
     c = conn.cursor(cursor_factory=RealDictCursor)
@@ -1101,7 +1106,7 @@ def qa_user_drilldown(user_id):
     })
 
 @app.route('/api/qa-users/<int:user_id>', methods=['PUT'])
-@require_admin
+@require_manager
 def update_qa_user(user_id):
     data = request.json
     conn = get_db()
@@ -1124,7 +1129,7 @@ def update_qa_user(user_id):
     return jsonify({'success': True})
 
 @app.route('/api/qa-users/<int:user_id>', methods=['DELETE'])
-@require_admin
+@require_manager
 def delete_qa_user(user_id):
     conn = get_db()
     c = conn.cursor()
@@ -1136,7 +1141,7 @@ def delete_qa_user(user_id):
     return jsonify({'success': True})
 
 @app.route('/api/qa-users/<int:user_id>/assign', methods=['POST'])
-@require_admin
+@require_manager
 def assign_agents_to_qa_user(user_id):
     """Assign call agents to a QA user. Replaces existing assignments."""
     data = request.json
@@ -1153,7 +1158,7 @@ def assign_agents_to_qa_user(user_id):
     return jsonify({'success': True, 'assigned': len(agent_ids)})
 
 @app.route('/api/qa-users/<int:user_id>/assignments', methods=['GET'])
-@require_admin
+@require_manager
 def get_qa_user_assignments(user_id):
     conn = get_db()
     c = conn.cursor(cursor_factory=RealDictCursor)
@@ -1170,7 +1175,7 @@ def get_qa_user_assignments(user_id):
     return jsonify(agents)
 
 @app.route('/api/qa-users/performance', methods=['GET'])
-@require_admin
+@require_manager
 def qa_user_performance():
     """Admin view: how each QA user is performing."""
     conn = get_db()
