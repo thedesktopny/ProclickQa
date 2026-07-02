@@ -3676,10 +3676,14 @@ async function runPipelineComparison(){
   showToast('Running side-by-side comparison — this takes ~30-60s...');
 
   try{
-    const results = await API.post(`/api/compare-pipelines/${currentCallId}`, {});
+    const results = await API.post(`/api/compare-pipelines/${encodeURIComponent(currentCallId)}`, {});
     showPipelineComparisonModal(results);
   }catch(e){
-    showToast('Comparison failed: ' + e.message, true);
+    let msg = e.message || 'unknown error';
+    if(msg.includes('<') || msg.includes('doctype') || msg.includes('JSON')){
+      msg = 'The server took too long or hit an error running both pipelines. This call may have a very large/long recording. Try a shorter call, or check the server logs.';
+    }
+    showToast('Comparison failed: ' + msg, true);
   }finally{
     if(btn){ btn.disabled = false; btn.textContent = '🧪 Compare AI'; }
   }

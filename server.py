@@ -1972,7 +1972,7 @@ def retry_status():
         'log': retry_log[-50:]  # Last 50 entries
     })
 
-@app.route('/api/compare-pipelines/<call_id>', methods=['POST'])
+@app.route('/api/compare-pipelines/<path:call_id>', methods=['POST'])
 @require_admin
 def compare_pipelines(call_id):
     """
