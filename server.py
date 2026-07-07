@@ -63,6 +63,33 @@ DATABASE_URL = os.getenv('DATABASE_URL', '')
 RELAY_URL = os.getenv('RELAY_URL', '')  # e.g. https://voiceguard-recording-relay.azurewebsites.net
 RELAY_SECRET = os.getenv('RELAY_SECRET', '')
 
+# ---- AgentMonitor call forwarding (screen-recording review) ----
+# Sends each completed call to AgentMonitor so its screen recording can be found
+# and reviewed. Fire-and-forget in a background thread — if AgentMonitor is unset,
+# down, or slow, this fails quietly and VoiceGuard keeps working exactly as before.
+AGENTMONITOR_INGEST_URL = os.getenv('AGENTMONITOR_INGEST_URL', '')  # e.g. https://<your-api>/calls/ingest
+AGENTMONITOR_API_KEY = os.getenv('AGENTMONITOR_API_KEY', '')
+
+def forward_call_to_agentmonitor(data):
+    if not AGENTMONITOR_INGEST_URL or not data:
+        return
+    import threading
+    def _send():
+        try:
+            payload = dict(data)
+            payload['api_key'] = AGENTMONITOR_API_KEY   # swap VG key for AgentMonitor key
+            body = json.dumps(payload, default=str).encode('utf-8')
+            req = urllib.request.Request(
+                AGENTMONITOR_INGEST_URL, data=body, method='POST',
+                headers={'Content-Type': 'application/json',
+                         'X-API-Key': AGENTMONITOR_API_KEY})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                resp.read()
+            print(f"[AgentMonitor] forwarded call {data.get('call_id')}")
+        except Exception as e:
+            print(f"[AgentMonitor] forward failed (ignored): {e}")
+    threading.Thread(target=_send, daemon=True).start()
+
 # Global pause switch — when True, incoming calls are saved but AI analysis is skipped.
 # Toggle via /api/processing-status (admin only). Checked fresh on every request, not
 # cached, so changes take effect immediately without needing a restart.
@@ -1838,6 +1865,9 @@ def analyze_call():
               call_notes, call_dropped, 'Processing', 0, 0))
         conn.commit()
         conn.close()
+
+        # Forward this call to AgentMonitor for screen-recording review (safe, non-blocking)
+        forward_call_to_agentmonitor(data)
 
         # Check for callback (same customer_account_id, drop within 10 min)
         if customer_account_id and call_dropped:
