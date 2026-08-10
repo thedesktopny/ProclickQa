@@ -2622,6 +2622,8 @@ function editWeeklyFor(name){
   showModal('weekly-schedule-modal');
 }
 
+let _pendingClockerWorkbook = null;
+
 async function handleClockerUpload(evt){
   const file = evt.target.files[0];
   if(!file) return;
@@ -2629,108 +2631,162 @@ async function handleClockerUpload(evt){
   try{
     const data = await file.arrayBuffer();
     const wb = XLSX.read(data, {cellDates:true});
+    _pendingClockerWorkbook = wb;
 
-    // Try every sheet until one yields usable rows
-    let events = [], foundHeaders = null, triedSheets = [];
-
+    // Scan every sheet and collect the ones that look like clocker data
+    const candidates = [];
+    const skipped = [];
     for(const sheetName of wb.SheetNames){
-      const sheet = wb.Sheets[sheetName];
-      // Read as raw rows so we can locate the header line ourselves
-      const grid = XLSX.utils.sheet_to_json(sheet, {header:1, raw:false, blankrows:false});
-      if(!grid.length) continue;
-
-      // Normalize a cell to a comparable key: lowercase, strip spaces/underscores/dots
-      const norm = v => String(v==null?'':v).toLowerCase().replace(/[\s_\-./()]/g,'');
-
-      // Column aliases we accept
-      const EMP = ['employeeid','employee','employeename','agent','agentname','name','user','username'];
-      const TIME = ['created','createdat','time','timestamp','datetime','date','eventtime','logtime'];
-      const STAT = ['status','state','action','event','type','activity'];
-      const BRK  = ['breakminutes','breakmins','break','minutes','breakduration','duration'];
-      const RSN  = ['breakreason','reason','notes','remark','remarks','comment'];
-
-      // Find the header row: the first row where we can match employee + time + status
-      let headerRow = -1, colMap = null;
-      for(let i=0; i<Math.min(grid.length, 25); i++){
-        const row = grid[i] || [];
-        const keys = row.map(norm);
-        const findCol = aliases => keys.findIndex(k => k && aliases.includes(k));
-        const eIdx = findCol(EMP), tIdx = findCol(TIME), sIdx = findCol(STAT);
-        if(eIdx !== -1 && tIdx !== -1 && sIdx !== -1){
-          headerRow = i;
-          colMap = {emp:eIdx, time:tIdx, stat:sIdx, brk:findCol(BRK), rsn:findCol(RSN)};
-          foundHeaders = row.filter(x=>x!=null && String(x).trim()!=='');
-          break;
-        }
+      const info = _scanClockerSheet(wb.Sheets[sheetName]);
+      if(info.ok){
+        candidates.push({sheetName, ...info});
+      } else {
+        skipped.push(`${sheetName}: [${(info.firstRow||[]).slice(0,6).join(', ')}]`);
       }
-
-      if(headerRow === -1){
-        // Record what this sheet's first non-empty row looked like, for diagnostics
-        const firstRow = (grid.find(r=>r && r.some(c=>c!=null && String(c).trim()!==''))||[]).slice(0,10);
-        triedSheets.push(`${sheetName}: [${firstRow.join(', ')}]`);
-        continue;
-      }
-
-      // Parse data rows below the header
-      for(let i=headerRow+1; i<grid.length; i++){
-        const row = grid[i] || [];
-        const empRaw = row[colMap.emp];
-        const timeRaw = row[colMap.time];
-        const statRaw = row[colMap.stat];
-        if(empRaw==null || timeRaw==null || statRaw==null) continue;
-
-        const emp = String(empRaw).trim();
-        const stat = String(statRaw).trim();
-        if(!emp || !stat) continue;
-
-        // Parse the timestamp — handles Date objects, Excel serials, and text
-        let iso = null;
-        let d = null;
-        if(timeRaw instanceof Date){
-          d = timeRaw;
-        } else if(typeof timeRaw === 'number'){
-          const parsed = XLSX.SSF.parse_date_code(timeRaw);
-          if(parsed) d = new Date(parsed.y, parsed.m-1, parsed.d, parsed.H||0, parsed.M||0, Math.floor(parsed.S||0));
-        } else {
-          d = new Date(String(timeRaw).trim());
-        }
-        if(!d || isNaN(d)) continue;
-        iso = new Date(d.getTime() - d.getTimezoneOffset()*60000).toISOString().slice(0,19);
-
-        let bm = colMap.brk !== -1 ? row[colMap.brk] : null;
-        bm = (bm===undefined || bm===null || String(bm).trim()==='') ? null : parseFloat(bm);
-        if(isNaN(bm)) bm = null;
-
-        events.push({
-          employee_name: emp,
-          event_time: iso,
-          status: stat,
-          break_minutes: bm,
-          break_reason: colMap.rsn !== -1 ? (row[colMap.rsn] ?? null) : null,
-        });
-      }
-      if(events.length) break;  // got what we need from this sheet
     }
 
-    if(!events.length){
-      const detail = foundHeaders
-        ? `Found headers [${foundHeaders.join(', ')}] but no readable data rows.`
-        : `Could not locate a header row. First rows seen — ${triedSheets.join(' | ') || 'file appears empty'}`;
-      showToast(detail, true);
-      console.error('[Clocker upload] ' + detail);
+    if(!candidates.length){
+      const msg = `No clocker data found. Sheets checked — ${skipped.slice(0,4).join(' | ')}`;
+      showToast(msg, true);
+      console.error('[Clocker upload] ' + msg, skipped);
       return;
     }
 
-    showToast(`Uploading ${events.length} events...`);
-    const res = await API.post('/api/clocker-upload', {events});
-    showToast(`✅ Uploaded — ${res.inserted} new events (${res.received - res.inserted} already on file)`);
-    await loadClockerEmployees();
-    loadTimeReport();
+    if(candidates.length === 1){
+      await _uploadClockerSheet(candidates[0].sheetName);
+    } else {
+      // More than one sheet looks like clocker data — let the user choose
+      showClockerSheetPicker(candidates);
+    }
   }catch(e){
     showToast('Upload failed: ' + (e.message||'could not read file'), true);
     console.error('[Clocker upload]', e);
   }finally{
     evt.target.value = '';
+  }
+}
+
+function _scanClockerSheet(sheet){
+  const grid = XLSX.utils.sheet_to_json(sheet, {header:1, raw:false, blankrows:false});
+  if(!grid.length) return {ok:false, firstRow:[]};
+
+  const norm = v => String(v==null?'':v).toLowerCase().replace(/[\s_\-./()]/g,'');
+  const EMP = ['employeeid','employee','employeename','agent','agentname','name','user','username'];
+  const TIME = ['created','createdat','time','timestamp','datetime','date','eventtime','logtime'];
+  const STAT = ['status','state','action','event','type','activity'];
+  const BRK  = ['breakminutes','breakmins','break','minutes','breakduration','duration'];
+  const RSN  = ['breakreason','reason','notes','remark','remarks','comment'];
+
+  for(let i=0; i<Math.min(grid.length, 25); i++){
+    const row = grid[i] || [];
+    const keys = row.map(norm);
+    const findCol = aliases => keys.findIndex(k => k && aliases.includes(k));
+    const eIdx = findCol(EMP), tIdx = findCol(TIME), sIdx = findCol(STAT);
+    if(eIdx !== -1 && tIdx !== -1 && sIdx !== -1){
+      // Confirm the rows below actually contain In/Out/OnBreak-style values
+      let dataRows = 0, firstDate = null, lastDate = null;
+      for(let j=i+1; j<grid.length; j++){
+        const r = grid[j] || [];
+        if(r[eIdx]==null || r[tIdx]==null || r[sIdx]==null) continue;
+        dataRows++;
+        const d = _parseClockerDate(r[tIdx]);
+        if(d){
+          if(!firstDate || d < firstDate) firstDate = d;
+          if(!lastDate || d > lastDate) lastDate = d;
+        }
+      }
+      if(dataRows > 0){
+        return {ok:true, headerRow:i, dataRows, firstDate, lastDate,
+                colMap:{emp:eIdx, time:tIdx, stat:sIdx, brk:findCol(BRK), rsn:findCol(RSN)},
+                headers: row.filter(x=>x!=null && String(x).trim()!=='')};
+      }
+    }
+  }
+  const firstRow = grid.find(r=>r && r.some(c=>c!=null && String(c).trim()!=='')) || [];
+  return {ok:false, firstRow};
+}
+
+function _parseClockerDate(raw){
+  if(raw instanceof Date) return isNaN(raw) ? null : raw;
+  if(typeof raw === 'number'){
+    const p = XLSX.SSF.parse_date_code(raw);
+    if(!p) return null;
+    const d = new Date(p.y, p.m-1, p.d, p.H||0, p.M||0, Math.floor(p.S||0));
+    return isNaN(d) ? null : d;
+  }
+  const d = new Date(String(raw).trim());
+  return isNaN(d) ? null : d;
+}
+
+function showClockerSheetPicker(candidates){
+  const fmt = d => d ? d.toLocaleDateString() : '?';
+  const rowsHtml = candidates.map((c,i)=>`
+    <div onclick="_pickClockerSheet('${c.sheetName.replace(/'/g,"\\'")}')"
+         style="padding:12px 14px;border:1px solid var(--border);border-radius:10px;margin-bottom:8px;cursor:pointer;transition:border-color .15s;"
+         onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'">
+      <div style="font-size:13px;font-weight:600;">${c.sheetName}</div>
+      <div style="font-size:11px;color:var(--text3);margin-top:3px;">
+        ${c.dataRows} rows · ${fmt(c.firstDate)} → ${fmt(c.lastDate)}
+      </div>
+    </div>`).join('');
+
+  const html = `
+    <div class="modal open" id="clocker-sheet-modal" style="display:flex;">
+      <div class="modal-box" style="width:460px;max-width:95vw;">
+        <div style="font-size:16px;font-weight:700;margin-bottom:4px;">Which sheet has the clocker data?</div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:14px;">This workbook has several sheets that look like clocker exports. Pick the one you want to import.</div>
+        ${rowsHtml}
+        <button onclick="document.getElementById('clocker-sheet-modal').remove()" class="btn btn-outline" style="width:100%;margin-top:8px;">Cancel</button>
+      </div>
+    </div>`;
+  document.body.insertAdjacentHTML('beforeend', html);
+}
+
+async function _pickClockerSheet(sheetName){
+  document.getElementById('clocker-sheet-modal')?.remove();
+  await _uploadClockerSheet(sheetName);
+}
+
+async function _uploadClockerSheet(sheetName){
+  const wb = _pendingClockerWorkbook;
+  if(!wb){ showToast('Please re-select the file', true); return; }
+  const sheet = wb.Sheets[sheetName];
+  const info = _scanClockerSheet(sheet);
+  if(!info.ok){ showToast(`Sheet "${sheetName}" has no readable clocker rows`, true); return; }
+
+  const grid = XLSX.utils.sheet_to_json(sheet, {header:1, raw:false, blankrows:false});
+  const {emp, time, stat, brk, rsn} = info.colMap;
+  const events = [];
+  for(let i=info.headerRow+1; i<grid.length; i++){
+    const row = grid[i] || [];
+    if(row[emp]==null || row[time]==null || row[stat]==null) continue;
+    const name = String(row[emp]).trim();
+    const status = String(row[stat]).trim();
+    if(!name || !status) continue;
+    const d = _parseClockerDate(row[time]);
+    if(!d) continue;
+    let bm = brk !== -1 ? row[brk] : null;
+    bm = (bm===undefined || bm===null || String(bm).trim()==='') ? null : parseFloat(bm);
+    if(isNaN(bm)) bm = null;
+    events.push({
+      employee_name: name,
+      event_time: new Date(d.getTime() - d.getTimezoneOffset()*60000).toISOString().slice(0,19),
+      status,
+      break_minutes: bm,
+      break_reason: rsn !== -1 ? (row[rsn] ?? null) : null,
+    });
+  }
+
+  if(!events.length){ showToast(`No readable rows in "${sheetName}"`, true); return; }
+
+  showToast(`Uploading ${events.length} events from "${sheetName}"...`);
+  try{
+    const res = await API.post('/api/clocker-upload', {events});
+    showToast(`✅ Uploaded — ${res.inserted} new events (${res.received - res.inserted} already on file)`);
+    await loadClockerEmployees();
+    loadTimeReport();
+  }catch(e){
+    showToast('Upload failed: '+e.message, true);
   }
 }
 
