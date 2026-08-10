@@ -2900,12 +2900,19 @@ def time_report():
         name = s['employee_name']
         sched_in, sched_out = s['scheduled_in'], s['scheduled_out']
         break_allowed = s['break_minutes'] or 0
-        # Find the actual shift whose login is nearest the scheduled start (within 12h)
-        best, best_delta = None, None
+        # Collect ALL shift segments that belong to this scheduled window.
+        # An agent may log out mid-shift and log back in later the same shift —
+        # those segments must merge into ONE shift, with the gap counted as a
+        # mid-shift absence rather than an early exit.
+        WINDOW_PAD = _td(hours=4)
+        win_start = sched_in - WINDOW_PAD
+        win_end = sched_out + WINDOW_PAD
+        segments = []
         for sh in shifts_by_emp.get(name, []):
-            delta = abs((sh['login'] - sched_in).total_seconds())
-            if delta <= 12*3600 and (best_delta is None or delta < best_delta):
-                best, best_delta = sh, delta
+            if win_start <= sh['login'] <= win_end:
+                segments.append(sh)
+        segments.sort(key=lambda x: x['login'])
+        best = segments[0] if segments else None
 
         issues = []
         row = {
@@ -2922,12 +2929,37 @@ def time_report():
             row.update({'status': 'No Show', 'actual_in': None, 'actual_out': None,
                         'break_taken': 0, 'break_count': 0, 'gross_hours': None,
                         'net_hours': None, 'late_minutes': None, 'early_out_minutes': None,
-                        'net_variance': None, 'issues': ['No clock-in found for this scheduled shift']})
+                        'net_variance': None, 'away_minutes': 0, 'segment_count': 0,
+                        'issues': ['No clock-in found for this scheduled shift']})
             rows.append(row); continue
 
-        matched_shift_keys.add((name, best['login'].isoformat()))
-        login, logout = best['login'], best['logout']
-        break_taken = sum(b['minutes'] for b in best['breaks'])
+        # Mark every merged segment as consumed so it isn't double-reported as unscheduled
+        for seg in segments:
+            matched_shift_keys.add((name, seg['login'].isoformat()))
+
+        login = segments[0]['login']
+        logout = segments[-1]['logout']
+        break_taken = sum(b['minutes'] for seg in segments for b in seg['breaks'])
+        break_count = sum(len(seg['breaks']) for seg in segments)
+
+        # Time actually clocked in = sum of each segment, so mid-shift gaps don't count
+        worked_seconds = 0
+        for seg in segments:
+            if seg['logout']:
+                worked_seconds += (seg['logout'] - seg['login']).total_seconds()
+
+        # Gaps between segments = logged out mid-shift
+        away_minutes = 0
+        for prev, nxt in zip(segments, segments[1:]):
+            if prev['logout']:
+                gap = (nxt['login'] - prev['logout']).total_seconds()/60
+                if gap > 0:
+                    away_minutes += gap
+                    issues.append(
+                        f"Logged out mid-shift for {gap:.0f} min "
+                        f"({prev['logout'].strftime('%-I:%M %p')}–{nxt['login'].strftime('%-I:%M %p')})"
+                    )
+
         late_min = (login - sched_in).total_seconds()/60
         if late_min > grace: issues.append(f'Late login by {late_min:.0f} min')
         elif late_min < -grace: issues.append(f'Early login by {abs(late_min):.0f} min')
@@ -2938,21 +2970,24 @@ def time_report():
             early_out_min = (sched_out - logout).total_seconds()/60
             if early_out_min > grace: issues.append(f'Left early by {early_out_min:.0f} min')
             elif early_out_min < -grace: issues.append(f'Stayed late by {abs(early_out_min):.0f} min')
-            gross = (logout - login).total_seconds()/3600
-            net = gross - break_taken/60
+            gross = (logout - login).total_seconds()/3600           # full span of the shift
+            net = worked_seconds/3600 - break_taken/60              # actual paid time
         else:
             issues.append('Never clocked out')
 
         break_over = break_taken - break_allowed
         if break_over > grace: issues.append(f'Break over by {break_over:.0f} min')
-        if best.get('partial'): issues.append('Login not captured in uploaded report')
+        if any(seg.get('partial') for seg in segments):
+            issues.append('Login not captured in uploaded report')
 
         row.update({
             'status': 'OK' if not issues else 'Variance',
             'actual_in': login.isoformat(),
             'actual_out': logout.isoformat() if logout else None,
             'break_taken': round(break_taken),
-            'break_count': len(best['breaks']),
+            'break_count': break_count,
+            'away_minutes': round(away_minutes),
+            'segment_count': len(segments),
             'gross_hours': round(gross,2) if gross is not None else None,
             'net_hours': round(net,2) if net is not None else None,
             'late_minutes': round(late_min),

@@ -2857,8 +2857,8 @@ async function loadTimeReport(){
         <td style="white-space:nowrap;font-size:11px;color:var(--text3);">${fmtSched(r)}${r.break_allowed!=null?`<span style="display:block;">${r.break_allowed}m brk ${r.from_recurring?'<span title="From weekly schedule">🔁</span>':''}</span>`:''}</td>
         <td style="white-space:nowrap;">${fmtT(r.actual_in)}${lateTag}</td>
         <td style="white-space:nowrap;">${fmtT(r.actual_out)}</td>
-        <td>${r.break_taken}m${r.break_count?`<span style="font-size:10px;color:var(--text3);display:block;">${r.break_count} break(s)</span>`:''}</td>
-        <td>${r.gross_hours!=null?r.gross_hours.toFixed(2)+'h':'—'}</td>
+        <td>${r.break_taken}m${r.break_count?`<span style="font-size:10px;color:var(--text3);display:block;">${r.break_count} break(s)</span>`:''}${r.away_minutes?`<span style="font-size:10px;color:var(--yellow);display:block;">+${r.away_minutes}m away</span>`:''}</td>
+        <td>${r.gross_hours!=null?r.gross_hours.toFixed(2)+'h':'—'}${r.segment_count>1?`<span style="font-size:10px;color:var(--text3);display:block;">${r.segment_count} sessions</span>`:''}</td>
         <td style="font-weight:600;">${r.net_hours!=null?r.net_hours.toFixed(2)+'h':'—'}</td>
         <td style="color:${varColor};font-weight:600;">${r.net_variance!=null?(r.net_variance>0?'+':'')+r.net_variance.toFixed(2)+'h':'—'}</td>
         <td><span class="badge ${statusBadgeCls(r.status)}">${r.status}</span></td>
