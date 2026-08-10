@@ -702,7 +702,8 @@ td.agent{color:var(--text);font-weight:500;}
   <div class="topbar">
     <div class="page-title">⏰ Time Report</div>
     <div class="topbar-right">
-      <button class="btn btn-outline" onclick="showModal('add-schedule-modal')">+ Add Schedule</button>
+      <button class="btn btn-outline" onclick="openWeeklyScheduleModal()">📅 Weekly Schedule</button>
+      <button class="btn btn-outline" onclick="showModal('add-schedule-modal')">+ One-Off</button>
       <label class="btn btn-primary" style="cursor:pointer;margin:0;">
         📤 Upload Clocker Report
         <input type="file" id="clocker-file-input" accept=".xlsx,.xls,.csv" style="display:none;" onchange="handleClockerUpload(event)">
@@ -712,7 +713,7 @@ td.agent{color:var(--text);font-weight:500;}
   <div style="padding:28px;">
     <div class="alert-bar" style="margin-bottom:20px;background:rgba(79,110,247,0.08);border-color:rgba(79,110,247,0.2)">
       <span style="font-size:18px;">💡</span>
-      <span style="font-size:12px;color:var(--text2);flex:1;">Enter each agent's scheduled shift, then upload the Clocker export from CMS. The system reconstructs actual shifts (handling breaks, mid-shift logouts, and shifts crossing midnight) and flags any variance from schedule.</span>
+      <span style="font-size:12px;color:var(--text2);flex:1;">Set each agent's <strong>Weekly Schedule</strong> once and it repeats every week automatically. Use <strong>+ One-Off</strong> only for exceptions — a one-off entry always overrides the weekly pattern for that date. Then upload the Clocker export from CMS to compare actual vs scheduled.</span>
     </div>
 
     <div style="display:flex;gap:12px;margin-bottom:20px;flex-wrap:wrap;align-items:center;">
@@ -754,17 +755,58 @@ td.agent{color:var(--text);font-weight:500;}
     </div>
 
     <div style="margin-top:28px;">
-      <div style="font-size:14px;font-weight:700;margin-bottom:12px;">📅 Entered Schedules</div>
+      <div style="font-size:14px;font-weight:700;margin-bottom:12px;">🔁 Weekly Schedules <span style="font-size:11px;color:var(--text3);font-weight:400;">— these repeat every week automatically</span></div>
+      <div class="card">
+        <div style="overflow-x:auto;">
+          <table class="data-table">
+            <thead><tr><th>Agent</th><th>Mon</th><th>Tue</th><th>Wed</th><th>Thu</th><th>Fri</th><th>Sat</th><th>Sun</th><th>Break</th><th></th></tr></thead>
+            <tbody id="tr-recurring-tbody">
+              <tr><td colspan="10" style="text-align:center;padding:24px;color:var(--text3)">No weekly schedules set. Click "📅 Weekly Schedule" to add one.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div style="margin-top:28px;">
+      <div style="font-size:14px;font-weight:700;margin-bottom:12px;">📌 One-Off Overrides <span style="font-size:11px;color:var(--text3);font-weight:400;">— these replace the weekly pattern on specific dates</span></div>
       <div class="card">
         <div style="overflow-x:auto;">
           <table class="data-table">
             <thead><tr><th>Agent</th><th>Date</th><th>Scheduled In</th><th>Scheduled Out</th><th>Break</th><th></th></tr></thead>
             <tbody id="tr-schedules-tbody">
-              <tr><td colspan="6" style="text-align:center;padding:24px;color:var(--text3)">No schedules entered yet.</td></tr>
+              <tr><td colspan="6" style="text-align:center;padding:24px;color:var(--text3)">No one-off overrides.</td></tr>
             </tbody>
           </table>
         </div>
       </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="weekly-schedule-modal">
+  <div class="modal-box" style="width:620px;max-width:95vw;">
+    <div style="font-size:16px;font-weight:700;margin-bottom:4px;">📅 Weekly Schedule</div>
+    <div style="font-size:11px;color:var(--text3);margin-bottom:16px;">Set once — it applies every week from now on. Uncheck a day to mark it as a day off.</div>
+    <div style="margin-bottom:14px;">
+      <div style="font-size:11px;color:var(--text3);margin-bottom:5px;">Agent name (must match Clocker EmployeeId)</div>
+      <input id="wk-name" list="sched-name-list" placeholder="e.g. Miafrel" onchange="loadWeeklyForAgent()" style="width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:9px 12px;border-radius:8px;font-size:13px;box-sizing:border-box;">
+    </div>
+    <div id="wk-days" style="display:flex;flex-direction:column;gap:8px;max-height:340px;overflow-y:auto;"></div>
+    <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border);display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;">
+      <div style="flex:1;min-width:150px;">
+        <div style="font-size:11px;color:var(--text3);margin-bottom:5px;">Apply to all checked days</div>
+        <div style="display:flex;gap:6px;">
+          <input id="wk-bulk-in" type="time" value="14:00" style="flex:1;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:7px;border-radius:6px;font-size:12px;">
+          <input id="wk-bulk-out" type="time" value="00:00" style="flex:1;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:7px;border-radius:6px;font-size:12px;">
+          <input id="wk-bulk-break" type="number" value="50" min="0" title="Break minutes" style="width:70px;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:7px;border-radius:6px;font-size:12px;">
+        </div>
+      </div>
+      <button onclick="applyWeeklyBulk()" class="btn btn-outline" style="font-size:12px;">Apply to all</button>
+    </div>
+    <div style="display:flex;gap:10px;margin-top:18px;">
+      <button onclick="hideModal('weekly-schedule-modal')" class="btn btn-outline" style="flex:1;">Cancel</button>
+      <button onclick="saveWeeklySchedule()" class="btn btn-primary" style="flex:1;">Save Weekly Schedule</button>
     </div>
   </div>
 </div>
@@ -1923,7 +1965,17 @@ function showPage(id){
   if(id==='alerts'){ mountAlertsDatePicker(); renderAlerts(); }
   if(id==='calls') mountCallsDatePicker();
   if(id==='manager-queue') renderManagerQueue();
-  if(id==='time-report'){ loadClockerEmployees(); loadTimeReport(); }
+  if(id==='time-report'){
+    // Recurring schedules expand across a date range, so ensure one is set
+    const f = document.getElementById('tr-date-from'), t = document.getElementById('tr-date-to');
+    if(f && !f.value){
+      const today = new Date();
+      const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate()-6);
+      f.value = weekAgo.toISOString().slice(0,10);
+      if(t) t.value = today.toISOString().slice(0,10);
+    }
+    loadClockerEmployees(); loadTimeReport();
+  }
 }
 
 function mountCallsDatePicker(){
@@ -2446,6 +2498,130 @@ async function loadManagerQueueCount(){
 }
 
 // ─── TIME REPORT / ATTENDANCE ─────────────────────────────────────────────────
+// ─── WEEKLY (RECURRING) SCHEDULES ─────────────────────────────────────────────
+const DOW_NAMES = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
+let recurringCache = [];
+
+function openWeeklyScheduleModal(){
+  document.getElementById('wk-name').value = '';
+  renderWeeklyDays(null);
+  showModal('weekly-schedule-modal');
+}
+
+function renderWeeklyDays(existing){
+  const wrap = document.getElementById('wk-days');
+  if(!wrap) return;
+  wrap.innerHTML = DOW_NAMES.map((name, dow)=>{
+    const e = existing ? existing.find(x=>x.day_of_week===dow) : null;
+    const on = e ? e.active : (dow <= 4); // default Mon-Fri on, weekend off
+    return `<div style="display:flex;align-items:center;gap:8px;padding:8px;background:var(--surface2);border-radius:8px;">
+      <label style="display:flex;align-items:center;gap:6px;width:110px;cursor:pointer;flex-shrink:0;">
+        <input type="checkbox" class="wk-day-on" data-dow="${dow}" ${on?'checked':''} onchange="toggleWeeklyDay(${dow})" style="width:15px;height:15px;accent-color:var(--accent);">
+        <span style="font-size:12px;font-weight:600;">${name}</span>
+      </label>
+      <input type="time" class="wk-in" data-dow="${dow}" value="${e?e.scheduled_in_time:'14:00'}" ${on?'':'disabled'} style="flex:1;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:6px;border-radius:6px;font-size:12px;">
+      <span style="font-size:11px;color:var(--text3);">→</span>
+      <input type="time" class="wk-out" data-dow="${dow}" value="${e?e.scheduled_out_time:'00:00'}" ${on?'':'disabled'} style="flex:1;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:6px;border-radius:6px;font-size:12px;">
+      <label style="display:flex;align-items:center;gap:4px;cursor:pointer;flex-shrink:0;" title="Shift ends the next day">
+        <input type="checkbox" class="wk-overnight" data-dow="${dow}" ${(e?e.overnight:true)?'checked':''} ${on?'':'disabled'} style="width:14px;height:14px;accent-color:var(--accent);">
+        <span style="font-size:10px;color:var(--text3);">+1d</span>
+      </label>
+      <input type="number" class="wk-break" data-dow="${dow}" value="${e?e.break_minutes:50}" min="0" title="Break minutes" ${on?'':'disabled'} style="width:60px;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:6px;border-radius:6px;font-size:12px;">
+    </div>`;
+  }).join('');
+}
+
+function toggleWeeklyDay(dow){
+  const on = document.querySelector(`.wk-day-on[data-dow="${dow}"]`).checked;
+  ['wk-in','wk-out','wk-overnight','wk-break'].forEach(cls=>{
+    const el = document.querySelector(`.${cls}[data-dow="${dow}"]`);
+    if(el) el.disabled = !on;
+  });
+}
+
+function applyWeeklyBulk(){
+  const inT = document.getElementById('wk-bulk-in').value;
+  const outT = document.getElementById('wk-bulk-out').value;
+  const brk = document.getElementById('wk-bulk-break').value;
+  document.querySelectorAll('.wk-day-on').forEach(cb=>{
+    if(!cb.checked) return;
+    const dow = cb.dataset.dow;
+    document.querySelector(`.wk-in[data-dow="${dow}"]`).value = inT;
+    document.querySelector(`.wk-out[data-dow="${dow}"]`).value = outT;
+    document.querySelector(`.wk-break[data-dow="${dow}"]`).value = brk;
+  });
+  showToast('Applied to all checked days');
+}
+
+async function loadWeeklyForAgent(){
+  const name = document.getElementById('wk-name').value.trim();
+  if(!name){ renderWeeklyDays(null); return; }
+  const existing = recurringCache.filter(r=>r.employee_name.toLowerCase()===name.toLowerCase());
+  renderWeeklyDays(existing.length ? existing : null);
+}
+
+async function saveWeeklySchedule(){
+  const name = document.getElementById('wk-name').value.trim();
+  if(!name){ showToast('Enter the agent name', true); return; }
+  const days = [];
+  document.querySelectorAll('.wk-day-on').forEach(cb=>{
+    const dow = parseInt(cb.dataset.dow);
+    days.push({
+      day_of_week: dow,
+      active: cb.checked,
+      scheduled_in_time: document.querySelector(`.wk-in[data-dow="${dow}"]`).value || '09:00',
+      scheduled_out_time: document.querySelector(`.wk-out[data-dow="${dow}"]`).value || '17:00',
+      overnight: document.querySelector(`.wk-overnight[data-dow="${dow}"]`).checked,
+      break_minutes: parseInt(document.querySelector(`.wk-break[data-dow="${dow}"]`).value||'0'),
+    });
+  });
+  try{
+    await API.post('/api/recurring-schedules/bulk', {employee_name: name, days});
+    hideModal('weekly-schedule-modal');
+    showToast(`✅ Weekly schedule saved for ${name} — repeats automatically`);
+    loadTimeReport();
+  }catch(e){ showToast('Failed: '+e.message, true); }
+}
+
+async function loadRecurringList(){
+  const tbody = document.getElementById('tr-recurring-tbody');
+  if(!tbody) return;
+  try{
+    const res = await API.get('/api/recurring-schedules');
+    recurringCache = res.recurring || [];
+  }catch(e){ return; }
+
+  if(!recurringCache.length){
+    tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;padding:24px;color:var(--text3)">No weekly schedules set. Click "📅 Weekly Schedule" to add one.</td></tr>';
+    return;
+  }
+  // Group by agent
+  const byAgent = {};
+  recurringCache.forEach(r=>{ (byAgent[r.employee_name] = byAgent[r.employee_name] || []).push(r); });
+
+  tbody.innerHTML = Object.entries(byAgent).map(([name, days])=>{
+    const cells = [0,1,2,3,4,5,6].map(dow=>{
+      const d = days.find(x=>x.day_of_week===dow);
+      if(!d || !d.active) return '<td style="color:var(--text3);font-size:11px;">off</td>';
+      const on = d.overnight ? '<span style="font-size:9px;color:var(--text3);">+1d</span>' : '';
+      return `<td style="font-size:11px;white-space:nowrap;">${d.scheduled_in_time}–${d.scheduled_out_time} ${on}</td>`;
+    }).join('');
+    const brk = days.find(d=>d.active)?.break_minutes ?? 0;
+    return `<tr>
+      <td style="font-weight:600;">${name}</td>
+      ${cells}
+      <td>${brk}m</td>
+      <td><button onclick="editWeeklyFor('${name.replace(/'/g,"\\'")}')" style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:11px;">Edit</button></td>
+    </tr>`;
+  }).join('');
+}
+
+function editWeeklyFor(name){
+  document.getElementById('wk-name').value = name;
+  loadWeeklyForAgent();
+  showModal('weekly-schedule-modal');
+}
+
 async function handleClockerUpload(evt){
   const file = evt.target.files[0];
   if(!file) return;
@@ -2453,30 +2629,95 @@ async function handleClockerUpload(evt){
   try{
     const data = await file.arrayBuffer();
     const wb = XLSX.read(data, {cellDates:true});
-    const sheet = wb.Sheets[wb.SheetNames[0]];
-    const rows = XLSX.utils.sheet_to_json(sheet, {raw:false, dateNF:'yyyy-mm-dd hh:mm:ss'});
-    if(!rows.length){ showToast('That file appears to be empty', true); return; }
 
-    // Map the CMS export columns → our schema
-    const events = rows.map(r=>{
-      const rawTime = r.Created || r.created || r.Time || r.Timestamp;
-      let iso = null;
-      if(rawTime){
-        const d = (rawTime instanceof Date) ? rawTime : new Date(rawTime);
-        if(!isNaN(d)) iso = new Date(d.getTime() - d.getTimezoneOffset()*60000).toISOString().slice(0,19);
+    // Try every sheet until one yields usable rows
+    let events = [], foundHeaders = null, triedSheets = [];
+
+    for(const sheetName of wb.SheetNames){
+      const sheet = wb.Sheets[sheetName];
+      // Read as raw rows so we can locate the header line ourselves
+      const grid = XLSX.utils.sheet_to_json(sheet, {header:1, raw:false, blankrows:false});
+      if(!grid.length) continue;
+
+      // Normalize a cell to a comparable key: lowercase, strip spaces/underscores/dots
+      const norm = v => String(v==null?'':v).toLowerCase().replace(/[\s_\-./()]/g,'');
+
+      // Column aliases we accept
+      const EMP = ['employeeid','employee','employeename','agent','agentname','name','user','username'];
+      const TIME = ['created','createdat','time','timestamp','datetime','date','eventtime','logtime'];
+      const STAT = ['status','state','action','event','type','activity'];
+      const BRK  = ['breakminutes','breakmins','break','minutes','breakduration','duration'];
+      const RSN  = ['breakreason','reason','notes','remark','remarks','comment'];
+
+      // Find the header row: the first row where we can match employee + time + status
+      let headerRow = -1, colMap = null;
+      for(let i=0; i<Math.min(grid.length, 25); i++){
+        const row = grid[i] || [];
+        const keys = row.map(norm);
+        const findCol = aliases => keys.findIndex(k => k && aliases.includes(k));
+        const eIdx = findCol(EMP), tIdx = findCol(TIME), sIdx = findCol(STAT);
+        if(eIdx !== -1 && tIdx !== -1 && sIdx !== -1){
+          headerRow = i;
+          colMap = {emp:eIdx, time:tIdx, stat:sIdx, brk:findCol(BRK), rsn:findCol(RSN)};
+          foundHeaders = row.filter(x=>x!=null && String(x).trim()!=='');
+          break;
+        }
       }
-      const bm = r.BreakMinutes ?? r.breakMinutes;
-      return {
-        employee_name: (r.EmployeeId || r.employeeId || r.Employee || '').toString().trim(),
-        event_time: iso,
-        status: (r.Status || r.status || '').toString().trim(),
-        break_minutes: (bm === undefined || bm === null || bm === '') ? null : parseFloat(bm),
-        break_reason: r.BreakReason || r.breakReason || null,
-      };
-    }).filter(e => e.employee_name && e.event_time && e.status);
+
+      if(headerRow === -1){
+        // Record what this sheet's first non-empty row looked like, for diagnostics
+        const firstRow = (grid.find(r=>r && r.some(c=>c!=null && String(c).trim()!==''))||[]).slice(0,10);
+        triedSheets.push(`${sheetName}: [${firstRow.join(', ')}]`);
+        continue;
+      }
+
+      // Parse data rows below the header
+      for(let i=headerRow+1; i<grid.length; i++){
+        const row = grid[i] || [];
+        const empRaw = row[colMap.emp];
+        const timeRaw = row[colMap.time];
+        const statRaw = row[colMap.stat];
+        if(empRaw==null || timeRaw==null || statRaw==null) continue;
+
+        const emp = String(empRaw).trim();
+        const stat = String(statRaw).trim();
+        if(!emp || !stat) continue;
+
+        // Parse the timestamp — handles Date objects, Excel serials, and text
+        let iso = null;
+        let d = null;
+        if(timeRaw instanceof Date){
+          d = timeRaw;
+        } else if(typeof timeRaw === 'number'){
+          const parsed = XLSX.SSF.parse_date_code(timeRaw);
+          if(parsed) d = new Date(parsed.y, parsed.m-1, parsed.d, parsed.H||0, parsed.M||0, Math.floor(parsed.S||0));
+        } else {
+          d = new Date(String(timeRaw).trim());
+        }
+        if(!d || isNaN(d)) continue;
+        iso = new Date(d.getTime() - d.getTimezoneOffset()*60000).toISOString().slice(0,19);
+
+        let bm = colMap.brk !== -1 ? row[colMap.brk] : null;
+        bm = (bm===undefined || bm===null || String(bm).trim()==='') ? null : parseFloat(bm);
+        if(isNaN(bm)) bm = null;
+
+        events.push({
+          employee_name: emp,
+          event_time: iso,
+          status: stat,
+          break_minutes: bm,
+          break_reason: colMap.rsn !== -1 ? (row[colMap.rsn] ?? null) : null,
+        });
+      }
+      if(events.length) break;  // got what we need from this sheet
+    }
 
     if(!events.length){
-      showToast('Could not find EmployeeId / Created / Status columns in that file', true);
+      const detail = foundHeaders
+        ? `Found headers [${foundHeaders.join(', ')}] but no readable data rows.`
+        : `Could not locate a header row. First rows seen — ${triedSheets.join(' | ') || 'file appears empty'}`;
+      showToast(detail, true);
+      console.error('[Clocker upload] ' + detail);
       return;
     }
 
@@ -2487,6 +2728,7 @@ async function handleClockerUpload(evt){
     loadTimeReport();
   }catch(e){
     showToast('Upload failed: ' + (e.message||'could not read file'), true);
+    console.error('[Clocker upload]', e);
   }finally{
     evt.target.value = '';
   }
@@ -2556,7 +2798,7 @@ async function loadTimeReport(){
       return `<tr>
         <td style="font-weight:600;">${r.employee_name}</td>
         <td style="white-space:nowrap;">${r.shift_date}</td>
-        <td style="white-space:nowrap;font-size:11px;color:var(--text3);">${fmtSched(r)}${r.break_allowed!=null?`<span style="display:block;">${r.break_allowed}m brk</span>`:''}</td>
+        <td style="white-space:nowrap;font-size:11px;color:var(--text3);">${fmtSched(r)}${r.break_allowed!=null?`<span style="display:block;">${r.break_allowed}m brk ${r.from_recurring?'<span title="From weekly schedule">🔁</span>':''}</span>`:''}</td>
         <td style="white-space:nowrap;">${fmtT(r.actual_in)}${lateTag}</td>
         <td style="white-space:nowrap;">${fmtT(r.actual_out)}</td>
         <td>${r.break_taken}m${r.break_count?`<span style="font-size:10px;color:var(--text3);display:block;">${r.break_count} break(s)</span>`:''}</td>
@@ -2571,6 +2813,7 @@ async function loadTimeReport(){
     tbody.innerHTML = `<tr><td colspan="11" style="text-align:center;padding:24px;color:var(--red)">Failed to load: ${e.message}</td></tr>`;
   }
   loadSchedulesList();
+  loadRecurringList();
 }
 
 function trTile(label, val, color){
@@ -2621,7 +2864,7 @@ async function loadSchedulesList(){
     const res = await API.get('/api/schedules' + params);
     const rows = res.schedules || [];
     if(!rows.length){
-      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:24px;color:var(--text3)">No schedules entered yet.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:24px;color:var(--text3)">No one-off overrides.</td></tr>';
       return;
     }
     const fmt = iso => new Date(iso).toLocaleString([], {month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'});

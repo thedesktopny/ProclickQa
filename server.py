@@ -63,33 +63,6 @@ DATABASE_URL = os.getenv('DATABASE_URL', '')
 RELAY_URL = os.getenv('RELAY_URL', '')  # e.g. https://voiceguard-recording-relay.azurewebsites.net
 RELAY_SECRET = os.getenv('RELAY_SECRET', '')
 
-# ---- AgentMonitor call forwarding (screen-recording review) ----
-# Sends each completed call to AgentMonitor so its screen recording can be found
-# and reviewed. Fire-and-forget in a background thread — if AgentMonitor is unset,
-# down, or slow, this fails quietly and VoiceGuard keeps working exactly as before.
-AGENTMONITOR_INGEST_URL = os.getenv('AGENTMONITOR_INGEST_URL', '')  # e.g. https://<your-api>/calls/ingest
-AGENTMONITOR_API_KEY = os.getenv('AGENTMONITOR_API_KEY', '')
-
-def forward_call_to_agentmonitor(data):
-    if not AGENTMONITOR_INGEST_URL or not data:
-        return
-    import threading
-    def _send():
-        try:
-            payload = dict(data)
-            payload['api_key'] = AGENTMONITOR_API_KEY   # swap VG key for AgentMonitor key
-            body = json.dumps(payload, default=str).encode('utf-8')
-            req = urllib.request.Request(
-                AGENTMONITOR_INGEST_URL, data=body, method='POST',
-                headers={'Content-Type': 'application/json',
-                         'X-API-Key': AGENTMONITOR_API_KEY})
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                resp.read()
-            print(f"[AgentMonitor] forwarded call {data.get('call_id')}")
-        except Exception as e:
-            print(f"[AgentMonitor] forward failed (ignored): {e}")
-    threading.Thread(target=_send, daemon=True).start()
-
 # Global pause switch — when True, incoming calls are saved but AI analysis is skipped.
 # Toggle via /api/processing-status (admin only). Checked fresh on every request, not
 # cached, so changes take effect immediately without needing a restart.
@@ -299,6 +272,21 @@ def init_db():
             confidence INTEGER DEFAULT 100,
             evidence TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS recurring_schedules (
+            id SERIAL PRIMARY KEY,
+            employee_name TEXT NOT NULL,
+            day_of_week INTEGER NOT NULL,
+            scheduled_in_time TEXT NOT NULL,
+            scheduled_out_time TEXT NOT NULL,
+            overnight BOOLEAN DEFAULT FALSE,
+            break_minutes INTEGER DEFAULT 0,
+            active BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(employee_name, day_of_week)
         )
     ''')
 
@@ -1893,9 +1881,6 @@ def analyze_call():
         conn.commit()
         conn.close()
 
-        # Forward this call to AgentMonitor for screen-recording review (safe, non-blocking)
-        forward_call_to_agentmonitor(data)
-
         # Check for callback (same customer_account_id, drop within 10 min)
         if customer_account_id and call_dropped:
             try:
@@ -2592,42 +2577,204 @@ def toggle_learned_exception(exc_id):
     return jsonify(updated)
 
 # ─── TIME REPORT / ATTENDANCE ─────────────────────────────────────────────────
-def _build_shifts_from_events(events, dedup_seconds=60):
+def _build_shifts_from_events(events):
     """
     Reconstruct shifts from raw clocker events for ONE employee.
     events: list of dicts with keys event_time (datetime), status, break_minutes
-    Handles: duplicate In events seconds apart, 'In' after break = return (not new login),
-             shifts crossing midnight, and reports whose window starts mid-shift.
+
+    Rule (confirmed with CMS side): take only the EARLIEST 'In' of a shift and ignore
+    every later 'In' — regardless of how far apart they are — UNLESS an 'Out' or an
+    'OnBreak' happened in between. Duplicate 'In' rows can be seconds OR hours apart,
+    so elapsed time is not a valid signal; only an intervening Out/OnBreak makes a
+    later 'In' meaningful (a genuine re-login or a return from break).
+
+    Also handles shifts crossing midnight and reports whose window starts mid-shift.
     """
     events = sorted(events, key=lambda e: e['event_time'])
-    clean = []
-    for e in events:
-        if clean:
-            prev = clean[-1]
-            gap = (e['event_time'] - prev['event_time']).total_seconds()
-            if e['status'] == prev['status'] and gap <= dedup_seconds:
-                continue
-        clean.append(e)
 
     shifts, cur = [], None
-    for e in clean:
+    on_break = False  # True between an OnBreak and the 'In' that ends it
+
+    for e in events:
         st, t = e['status'], e['event_time']
+
         if st == 'In':
             if cur is None:
+                # First login of a new shift
                 cur = {'login': t, 'logout': None, 'breaks': [], 'partial': False}
+                on_break = False
+            elif on_break:
+                # Returning from a break — legitimate, but not a new login
+                on_break = False
+            else:
+                # Repeat 'In' with no Out/OnBreak in between → duplicate, ignore entirely
+                continue
+
         elif st == 'OnBreak':
             if cur is None:
                 # Break with no preceding login = report window began mid-shift
                 cur = {'login': t, 'logout': None, 'breaks': [], 'partial': True}
             cur['breaks'].append({'start': t, 'minutes': float(e.get('break_minutes') or 0)})
+            on_break = True
+
         elif st == 'Out':
             if cur is not None:
                 cur['logout'] = t
                 shifts.append(cur)
                 cur = None
+                on_break = False
+
     if cur:
         shifts.append(cur)  # still clocked in
     return shifts
+
+@app.route('/api/recurring-schedules', methods=['GET'])
+@require_manager
+def get_recurring_schedules():
+    conn = get_db()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('SELECT * FROM recurring_schedules ORDER BY employee_name, day_of_week')
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return jsonify({'recurring': rows})
+
+@app.route('/api/recurring-schedules', methods=['POST'])
+@require_manager
+def save_recurring_schedule():
+    """
+    Save one weekday of an agent's permanent weekly schedule.
+    Body: employee_name, day_of_week (0=Mon..6=Sun), scheduled_in_time 'HH:MM',
+          scheduled_out_time 'HH:MM', overnight (bool), break_minutes.
+    Pass active=false to mark that weekday as a day off.
+    """
+    d = request.json or {}
+    name = (d.get('employee_name') or '').strip()
+    dow = d.get('day_of_week')
+    in_t = d.get('scheduled_in_time')
+    out_t = d.get('scheduled_out_time')
+    if not name or dow is None or not in_t or not out_t:
+        return jsonify({'error': 'employee_name, day_of_week, scheduled_in_time, scheduled_out_time required'}), 400
+    conn = get_db()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('''INSERT INTO recurring_schedules
+                 (employee_name, day_of_week, scheduled_in_time, scheduled_out_time, overnight, break_minutes, active)
+                 VALUES (%s,%s,%s,%s,%s,%s,%s)
+                 ON CONFLICT (employee_name, day_of_week) DO UPDATE SET
+                   scheduled_in_time=EXCLUDED.scheduled_in_time,
+                   scheduled_out_time=EXCLUDED.scheduled_out_time,
+                   overnight=EXCLUDED.overnight,
+                   break_minutes=EXCLUDED.break_minutes,
+                   active=EXCLUDED.active
+                 RETURNING *''',
+              (name, int(dow), in_t, out_t, bool(d.get('overnight', False)),
+               int(d.get('break_minutes') or 0), bool(d.get('active', True))))
+    row = dict(c.fetchone())
+    conn.commit(); conn.close()
+    return jsonify(row)
+
+@app.route('/api/recurring-schedules/bulk', methods=['POST'])
+@require_manager
+def save_recurring_bulk():
+    """
+    Save a full week for one agent in a single call.
+    Body: {employee_name, days: [{day_of_week, scheduled_in_time, scheduled_out_time,
+           overnight, break_minutes, active}]}
+    """
+    d = request.json or {}
+    name = (d.get('employee_name') or '').strip()
+    days = d.get('days', [])
+    if not name or not days:
+        return jsonify({'error': 'employee_name and days required'}), 400
+    conn = get_db(); c = conn.cursor()
+    for day in days:
+        c.execute('''INSERT INTO recurring_schedules
+                     (employee_name, day_of_week, scheduled_in_time, scheduled_out_time, overnight, break_minutes, active)
+                     VALUES (%s,%s,%s,%s,%s,%s,%s)
+                     ON CONFLICT (employee_name, day_of_week) DO UPDATE SET
+                       scheduled_in_time=EXCLUDED.scheduled_in_time,
+                       scheduled_out_time=EXCLUDED.scheduled_out_time,
+                       overnight=EXCLUDED.overnight,
+                       break_minutes=EXCLUDED.break_minutes,
+                       active=EXCLUDED.active''',
+                  (name, int(day.get('day_of_week')), day.get('scheduled_in_time','09:00'),
+                   day.get('scheduled_out_time','17:00'), bool(day.get('overnight', False)),
+                   int(day.get('break_minutes') or 0), bool(day.get('active', True))))
+    conn.commit(); conn.close()
+    return jsonify({'success': True, 'saved': len(days)})
+
+@app.route('/api/recurring-schedules/<int:rec_id>', methods=['DELETE'])
+@require_manager
+def delete_recurring_schedule(rec_id):
+    conn = get_db(); c = conn.cursor()
+    c.execute('DELETE FROM recurring_schedules WHERE id=%s', (rec_id,))
+    conn.commit(); conn.close()
+    return jsonify({'success': True})
+
+def _resolve_schedules(date_from, date_to, employee=''):
+    """
+    Builds the effective schedule list for a date range.
+    A specific agent_schedules row for a date ALWAYS wins (an override for that day);
+    otherwise the agent's recurring weekly pattern generates the schedule for that date.
+    Returns a list of dicts shaped like agent_schedules rows.
+    """
+    from datetime import date as _date, datetime as _dt, timedelta as _td
+
+    conn = get_db()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+
+    # Specific per-date overrides
+    sq = 'SELECT * FROM agent_schedules'
+    sparams, swhere = [], []
+    if date_from: swhere.append('shift_date >= %s'); sparams.append(date_from)
+    if date_to: swhere.append('shift_date <= %s'); sparams.append(date_to)
+    if employee: swhere.append('employee_name = %s'); sparams.append(employee)
+    if swhere: sq += ' WHERE ' + ' AND '.join(swhere)
+    c.execute(sq, sparams)
+    specific = [dict(r) for r in c.fetchall()]
+    override_keys = {(s['employee_name'], str(s['shift_date'])) for s in specific}
+
+    # Recurring weekly patterns
+    rq = 'SELECT * FROM recurring_schedules WHERE active = TRUE'
+    rparams = []
+    if employee:
+        rq += ' AND employee_name = %s'; rparams.append(employee)
+    c.execute(rq, rparams)
+    recurring = [dict(r) for r in c.fetchall()]
+    conn.close()
+
+    generated = []
+    if recurring and date_from and date_to:
+        start = _dt.strptime(date_from, '%Y-%m-%d').date()
+        end = _dt.strptime(date_to, '%Y-%m-%d').date()
+        by_dow = {}
+        for r in recurring:
+            by_dow.setdefault(r['day_of_week'], []).append(r)
+
+        cur = start
+        while cur <= end:
+            dow = cur.weekday()  # Monday=0 .. Sunday=6
+            for r in by_dow.get(dow, []):
+                if (r['employee_name'], str(cur)) in override_keys:
+                    continue  # a specific entry for that date wins
+                in_h, in_m = [int(x) for x in str(r['scheduled_in_time']).split(':')[:2]]
+                out_h, out_m = [int(x) for x in str(r['scheduled_out_time']).split(':')[:2]]
+                sched_in = _dt.combine(cur, _dt.min.time()).replace(hour=in_h, minute=in_m)
+                out_date = cur + _td(days=1) if r['overnight'] else cur
+                sched_out = _dt.combine(out_date, _dt.min.time()).replace(hour=out_h, minute=out_m)
+                generated.append({
+                    'id': None,
+                    'employee_name': r['employee_name'],
+                    'shift_date': cur,
+                    'scheduled_in': sched_in,
+                    'scheduled_out': sched_out,
+                    'break_minutes': r['break_minutes'] or 0,
+                    'from_recurring': True,
+                })
+            cur += _td(days=1)
+
+    for s in specific:
+        s['from_recurring'] = False
+    return specific + generated
 
 @app.route('/api/schedules', methods=['GET'])
 @require_manager
@@ -2735,15 +2882,8 @@ def time_report():
     c.execute(q, params)
     all_events = [dict(r) for r in c.fetchall()]
 
-    # Pull schedules for the window
-    sq = 'SELECT * FROM agent_schedules'
-    sparams, swhere = [], []
-    if date_from: swhere.append('shift_date >= %s'); sparams.append(date_from)
-    if date_to: swhere.append('shift_date <= %s'); sparams.append(date_to)
-    if employee: swhere.append('employee_name = %s'); sparams.append(employee)
-    if swhere: sq += ' WHERE ' + ' AND '.join(swhere)
-    c.execute(sq, sparams)
-    schedules = [dict(r) for r in c.fetchall()]
+    # Pull schedules for the window — specific dates plus expanded recurring patterns
+    schedules = _resolve_schedules(date_from, date_to, employee)
     conn.close()
 
     # Group events per employee and reconstruct shifts
@@ -2774,6 +2914,7 @@ def time_report():
             'scheduled_in': sched_in.isoformat(),
             'scheduled_out': sched_out.isoformat(),
             'break_allowed': break_allowed,
+            'from_recurring': s.get('from_recurring', False),
             'scheduled_net_hours': round(((sched_out - sched_in).total_seconds()/3600) - break_allowed/60, 2),
         }
 
