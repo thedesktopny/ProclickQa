@@ -276,6 +276,33 @@ def init_db():
     ''')
 
     c.execute('''
+        CREATE TABLE IF NOT EXISTS agent_schedules (
+            id SERIAL PRIMARY KEY,
+            employee_name TEXT NOT NULL,
+            shift_date DATE NOT NULL,
+            scheduled_in TIMESTAMP NOT NULL,
+            scheduled_out TIMESTAMP NOT NULL,
+            break_minutes INTEGER DEFAULT 0,
+            notes TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(employee_name, shift_date)
+        )
+    ''')
+
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS clocker_events (
+            id SERIAL PRIMARY KEY,
+            employee_name TEXT NOT NULL,
+            event_time TIMESTAMP NOT NULL,
+            status TEXT NOT NULL,
+            break_minutes NUMERIC,
+            break_reason TEXT,
+            uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(employee_name, event_time, status)
+        )
+    ''')
+
+    c.execute('''
         CREATE TABLE IF NOT EXISTS app_settings (
             key TEXT PRIMARY KEY,
             value TEXT,
@@ -2017,10 +2044,30 @@ def compare_pipelines(call_id):
 
     results = {'call_id': call_id, 'agent_name': call.get('agent_name')}
 
+    # Cost constants (match your real measured per-call averages)
+    CLAUDE_INPUT_PER_M = 3.00
+    CLAUDE_OUTPUT_PER_M = 15.00
+    GEMINI_INPUT_PER_M = 0.30
+    GEMINI_OUTPUT_PER_M = 3.50
+    GEMINI_AUDIO_PER_MIN = 0.001
+
+    audio_mb = 0
+    try: audio_mb = os.path.getsize(audio_path) / 1024 / 1024
+    except: pass
+    # Rough audio-minutes proxy from file size (WAV ~1MB/min is a conservative default)
+    est_audio_min = max(1, round(audio_mb))
+
     # Pipeline A: current production approach (Gemini listens, Claude scores)
     try:
         gemini_result = analyze_audio_with_gemini(audio_path)
         claude_result = score_call_with_claude(gemini_result, rules, exceptions=exceptions, **common_args)
+        # Estimate cost: Gemini audio-in + Claude scoring tokens
+        cg_transcript = gemini_result.get('transcript', '') or ''
+        claude_in_tokens = (len(cg_transcript) + 4000) / 4   # transcript + prompt overhead
+        claude_out_tokens = len(json.dumps(claude_result)) / 4
+        cg_cost = (est_audio_min * GEMINI_AUDIO_PER_MIN) \
+                  + (claude_in_tokens/1_000_000 * CLAUDE_INPUT_PER_M) \
+                  + (claude_out_tokens/1_000_000 * CLAUDE_OUTPUT_PER_M)
         results['claude_gemini'] = {
             'overall_score': claude_result.get('overall_score'),
             'status': claude_result.get('status'),
@@ -2028,14 +2075,19 @@ def compare_pipelines(call_id):
             'rules_evaluation': claude_result.get('rules_evaluation', []),
             'coaching_notes': claude_result.get('coaching_notes', ''),
             'notes_score': claude_result.get('notes_score'),
+            'cost_usd': round(cg_cost, 4),
         }
     except Exception as e:
         results['claude_gemini'] = {'error': str(e)}
+        cg_cost = 0
 
     # Pipeline B: Gemini-only (single call does both listening and scoring)
     try:
         gemini_only_result = analyze_and_score_with_gemini_only(audio_path, rules, exceptions=exceptions, **common_args)
         sc = gemini_only_result.get('scorecard', {})
+        go_out_tokens = len(json.dumps(sc)) / 4
+        go_cost = (est_audio_min * GEMINI_AUDIO_PER_MIN) \
+                  + (go_out_tokens/1_000_000 * GEMINI_OUTPUT_PER_M)
         results['gemini_only'] = {
             'overall_score': sc.get('overall_score'),
             'status': sc.get('status'),
@@ -2043,23 +2095,26 @@ def compare_pipelines(call_id):
             'rules_evaluation': sc.get('rules_evaluation', []),
             'coaching_notes': sc.get('coaching_notes', ''),
             'notes_score': sc.get('notes_score'),
+            'cost_usd': round(go_cost, 4),
         }
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
         print(f"[Compare] Gemini-only pipeline failed:\n{tb}")
         results['gemini_only'] = {'error': str(e)[:300] or 'Unknown error (empty exception)'}
+        go_cost = 0
 
     try: os.remove(audio_path)
     except: pass
 
-    # Save comparison for later review
+    # Save comparison for later review (now with costs)
     try:
         conn2 = get_db()
         c2 = conn2.cursor()
-        c2.execute('''INSERT INTO pipeline_comparisons (call_id, claude_gemini_scorecard, gemini_only_scorecard)
-                      VALUES (%s, %s, %s)''',
-                   (call_id, json.dumps(results.get('claude_gemini', {})), json.dumps(results.get('gemini_only', {}))))
+        c2.execute('''INSERT INTO pipeline_comparisons (call_id, claude_gemini_scorecard, gemini_only_scorecard, claude_gemini_cost, gemini_only_cost)
+                      VALUES (%s, %s, %s, %s, %s)''',
+                   (call_id, json.dumps(results.get('claude_gemini', {})), json.dumps(results.get('gemini_only', {})),
+                    cg_cost, go_cost))
         conn2.commit()
         conn2.close()
     except Exception as e:
@@ -2505,6 +2560,276 @@ def toggle_learned_exception(exc_id):
     conn.commit()
     conn.close()
     return jsonify(updated)
+
+# ─── TIME REPORT / ATTENDANCE ─────────────────────────────────────────────────
+def _build_shifts_from_events(events, dedup_seconds=60):
+    """
+    Reconstruct shifts from raw clocker events for ONE employee.
+    events: list of dicts with keys event_time (datetime), status, break_minutes
+    Handles: duplicate In events seconds apart, 'In' after break = return (not new login),
+             shifts crossing midnight, and reports whose window starts mid-shift.
+    """
+    events = sorted(events, key=lambda e: e['event_time'])
+    clean = []
+    for e in events:
+        if clean:
+            prev = clean[-1]
+            gap = (e['event_time'] - prev['event_time']).total_seconds()
+            if e['status'] == prev['status'] and gap <= dedup_seconds:
+                continue
+        clean.append(e)
+
+    shifts, cur = [], None
+    for e in clean:
+        st, t = e['status'], e['event_time']
+        if st == 'In':
+            if cur is None:
+                cur = {'login': t, 'logout': None, 'breaks': [], 'partial': False}
+        elif st == 'OnBreak':
+            if cur is None:
+                # Break with no preceding login = report window began mid-shift
+                cur = {'login': t, 'logout': None, 'breaks': [], 'partial': True}
+            cur['breaks'].append({'start': t, 'minutes': float(e.get('break_minutes') or 0)})
+        elif st == 'Out':
+            if cur is not None:
+                cur['logout'] = t
+                shifts.append(cur)
+                cur = None
+    if cur:
+        shifts.append(cur)  # still clocked in
+    return shifts
+
+@app.route('/api/schedules', methods=['GET'])
+@require_manager
+def get_schedules():
+    date_from = request.args.get('date_from', '')
+    date_to = request.args.get('date_to', '')
+    conn = get_db()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    q = 'SELECT * FROM agent_schedules'
+    params, where = [], []
+    if date_from: where.append('shift_date >= %s'); params.append(date_from)
+    if date_to: where.append('shift_date <= %s'); params.append(date_to)
+    if where: q += ' WHERE ' + ' AND '.join(where)
+    q += ' ORDER BY shift_date DESC, employee_name ASC'
+    c.execute(q, params)
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return jsonify({'schedules': rows})
+
+@app.route('/api/schedules', methods=['POST'])
+@require_manager
+def save_schedule():
+    """Create or update a scheduled shift. Body: employee_name, shift_date,
+    scheduled_in (ISO), scheduled_out (ISO), break_minutes."""
+    d = request.json or {}
+    name = (d.get('employee_name') or '').strip()
+    shift_date = d.get('shift_date')
+    sched_in = d.get('scheduled_in')
+    sched_out = d.get('scheduled_out')
+    break_min = int(d.get('break_minutes') or 0)
+    if not (name and shift_date and sched_in and sched_out):
+        return jsonify({'error': 'employee_name, shift_date, scheduled_in and scheduled_out are required'}), 400
+    conn = get_db()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('''INSERT INTO agent_schedules (employee_name, shift_date, scheduled_in, scheduled_out, break_minutes, notes)
+                 VALUES (%s,%s,%s,%s,%s,%s)
+                 ON CONFLICT (employee_name, shift_date) DO UPDATE SET
+                   scheduled_in=EXCLUDED.scheduled_in, scheduled_out=EXCLUDED.scheduled_out,
+                   break_minutes=EXCLUDED.break_minutes, notes=EXCLUDED.notes
+                 RETURNING *''',
+              (name, shift_date, sched_in, sched_out, break_min, d.get('notes','')))
+    row = dict(c.fetchone())
+    conn.commit(); conn.close()
+    return jsonify(row)
+
+@app.route('/api/schedules/<int:sched_id>', methods=['DELETE'])
+@require_manager
+def delete_schedule(sched_id):
+    conn = get_db(); c = conn.cursor()
+    c.execute('DELETE FROM agent_schedules WHERE id=%s', (sched_id,))
+    conn.commit(); conn.close()
+    return jsonify({'success': True})
+
+@app.route('/api/clocker-upload', methods=['POST'])
+@require_manager
+def clocker_upload():
+    """
+    Accepts parsed clocker rows from the CMS export.
+    Body: {events: [{employee_name, event_time (ISO), status, break_minutes, break_reason}]}
+    Duplicates are ignored so the same report can be re-uploaded safely.
+    """
+    d = request.json or {}
+    events = d.get('events', [])
+    if not events:
+        return jsonify({'error': 'No events provided'}), 400
+    conn = get_db(); c = conn.cursor()
+    inserted = 0
+    for e in events:
+        try:
+            c.execute('''INSERT INTO clocker_events (employee_name, event_time, status, break_minutes, break_reason)
+                         VALUES (%s,%s,%s,%s,%s)
+                         ON CONFLICT (employee_name, event_time, status) DO NOTHING''',
+                      (e.get('employee_name'), e.get('event_time'), e.get('status'),
+                       e.get('break_minutes'), e.get('break_reason')))
+            inserted += c.rowcount
+        except Exception as ex:
+            print(f"[Clocker] Skipped row: {ex}")
+    conn.commit(); conn.close()
+    return jsonify({'success': True, 'received': len(events), 'inserted': inserted})
+
+@app.route('/api/time-report', methods=['GET'])
+@require_manager
+def time_report():
+    """
+    Builds the attendance report: reconstructs actual shifts from clocker_events and
+    compares each against the matching agent_schedules row.
+    Query params: date_from, date_to (YYYY-MM-DD), employee (optional), grace_minutes.
+    """
+    date_from = request.args.get('date_from', '')
+    date_to = request.args.get('date_to', '')
+    employee = request.args.get('employee', '')
+    grace = int(request.args.get('grace_minutes', 5))
+
+    conn = get_db()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+
+    # Pull events with a 1-day pad so shifts crossing midnight are complete
+    q = 'SELECT employee_name, event_time, status, break_minutes FROM clocker_events'
+    params, where = [], []
+    if date_from: where.append("event_time >= %s::date - INTERVAL '1 day'"); params.append(date_from)
+    if date_to: where.append("event_time <= %s::date + INTERVAL '2 days'"); params.append(date_to)
+    if employee: where.append('employee_name = %s'); params.append(employee)
+    if where: q += ' WHERE ' + ' AND '.join(where)
+    q += ' ORDER BY employee_name, event_time'
+    c.execute(q, params)
+    all_events = [dict(r) for r in c.fetchall()]
+
+    # Pull schedules for the window
+    sq = 'SELECT * FROM agent_schedules'
+    sparams, swhere = [], []
+    if date_from: swhere.append('shift_date >= %s'); sparams.append(date_from)
+    if date_to: swhere.append('shift_date <= %s'); sparams.append(date_to)
+    if employee: swhere.append('employee_name = %s'); sparams.append(employee)
+    if swhere: sq += ' WHERE ' + ' AND '.join(swhere)
+    c.execute(sq, sparams)
+    schedules = [dict(r) for r in c.fetchall()]
+    conn.close()
+
+    # Group events per employee and reconstruct shifts
+    by_emp = {}
+    for e in all_events:
+        by_emp.setdefault(e['employee_name'], []).append(e)
+    shifts_by_emp = {name: _build_shifts_from_events(evs) for name, evs in by_emp.items()}
+
+    rows = []
+    matched_shift_keys = set()
+
+    # 1) Every scheduled shift — matched against actual
+    for s in schedules:
+        name = s['employee_name']
+        sched_in, sched_out = s['scheduled_in'], s['scheduled_out']
+        break_allowed = s['break_minutes'] or 0
+        # Find the actual shift whose login is nearest the scheduled start (within 12h)
+        best, best_delta = None, None
+        for sh in shifts_by_emp.get(name, []):
+            delta = abs((sh['login'] - sched_in).total_seconds())
+            if delta <= 12*3600 and (best_delta is None or delta < best_delta):
+                best, best_delta = sh, delta
+
+        issues = []
+        row = {
+            'employee_name': name,
+            'shift_date': str(s['shift_date']),
+            'scheduled_in': sched_in.isoformat(),
+            'scheduled_out': sched_out.isoformat(),
+            'break_allowed': break_allowed,
+            'scheduled_net_hours': round(((sched_out - sched_in).total_seconds()/3600) - break_allowed/60, 2),
+        }
+
+        if not best:
+            row.update({'status': 'No Show', 'actual_in': None, 'actual_out': None,
+                        'break_taken': 0, 'break_count': 0, 'gross_hours': None,
+                        'net_hours': None, 'late_minutes': None, 'early_out_minutes': None,
+                        'net_variance': None, 'issues': ['No clock-in found for this scheduled shift']})
+            rows.append(row); continue
+
+        matched_shift_keys.add((name, best['login'].isoformat()))
+        login, logout = best['login'], best['logout']
+        break_taken = sum(b['minutes'] for b in best['breaks'])
+        late_min = (login - sched_in).total_seconds()/60
+        if late_min > grace: issues.append(f'Late login by {late_min:.0f} min')
+        elif late_min < -grace: issues.append(f'Early login by {abs(late_min):.0f} min')
+
+        early_out_min = None
+        gross = net = None
+        if logout:
+            early_out_min = (sched_out - logout).total_seconds()/60
+            if early_out_min > grace: issues.append(f'Left early by {early_out_min:.0f} min')
+            elif early_out_min < -grace: issues.append(f'Stayed late by {abs(early_out_min):.0f} min')
+            gross = (logout - login).total_seconds()/3600
+            net = gross - break_taken/60
+        else:
+            issues.append('Never clocked out')
+
+        break_over = break_taken - break_allowed
+        if break_over > grace: issues.append(f'Break over by {break_over:.0f} min')
+        if best.get('partial'): issues.append('Login not captured in uploaded report')
+
+        row.update({
+            'status': 'OK' if not issues else 'Variance',
+            'actual_in': login.isoformat(),
+            'actual_out': logout.isoformat() if logout else None,
+            'break_taken': round(break_taken),
+            'break_count': len(best['breaks']),
+            'gross_hours': round(gross,2) if gross is not None else None,
+            'net_hours': round(net,2) if net is not None else None,
+            'late_minutes': round(late_min),
+            'early_out_minutes': round(early_out_min) if early_out_min is not None else None,
+            'net_variance': round(net - row['scheduled_net_hours'],2) if net is not None else None,
+            'issues': issues,
+        })
+        rows.append(row)
+
+    # 2) Worked shifts with NO matching schedule (unscheduled work)
+    for name, shs in shifts_by_emp.items():
+        for sh in shs:
+            key = (name, sh['login'].isoformat())
+            if key in matched_shift_keys: continue
+            # Only include if its login date falls inside the requested window
+            d = sh['login'].date()
+            if date_from and str(d) < date_from: continue
+            if date_to and str(d) > date_to: continue
+            break_taken = sum(b['minutes'] for b in sh['breaks'])
+            gross = net = None
+            if sh['logout']:
+                gross = (sh['logout'] - sh['login']).total_seconds()/3600
+                net = gross - break_taken/60
+            rows.append({
+                'employee_name': name, 'shift_date': str(d),
+                'scheduled_in': None, 'scheduled_out': None, 'break_allowed': None,
+                'scheduled_net_hours': None, 'status': 'Unscheduled',
+                'actual_in': sh['login'].isoformat(),
+                'actual_out': sh['logout'].isoformat() if sh['logout'] else None,
+                'break_taken': round(break_taken), 'break_count': len(sh['breaks']),
+                'gross_hours': round(gross,2) if gross is not None else None,
+                'net_hours': round(net,2) if net is not None else None,
+                'late_minutes': None, 'early_out_minutes': None, 'net_variance': None,
+                'issues': ['No schedule entered for this shift'] + (['Never clocked out'] if not sh['logout'] else []),
+            })
+
+    rows.sort(key=lambda r: (r['shift_date'], r['employee_name']), reverse=True)
+    return jsonify({'report': rows, 'count': len(rows)})
+
+@app.route('/api/clocker-employees', methods=['GET'])
+@require_manager
+def clocker_employees():
+    """Distinct employee names seen in uploaded clocker data — for the schedule dropdown."""
+    conn = get_db(); c = conn.cursor()
+    c.execute('SELECT DISTINCT employee_name FROM clocker_events ORDER BY employee_name')
+    names = [r[0] for r in c.fetchall()]
+    conn.close()
+    return jsonify({'employees': names})
 
 @app.route('/api/manager-queue', methods=['GET'])
 @require_manager

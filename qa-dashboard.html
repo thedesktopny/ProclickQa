@@ -222,6 +222,7 @@ td.agent{color:var(--text);font-weight:500;}
   <div class="nav-section manager-plus" style="margin-top:12px;display:none;">
     <div class="nav-label">Manager</div>
     <div class="nav-item" onclick="showPage('manager-queue')"><span class="icon">🧑‍⚖️</span>AI Mistake Review<span class="nav-badge" id="nb-manager">0</span></div>
+    <div class="nav-item" onclick="showPage('time-report')"><span class="icon">⏰</span>Time Report</div>
   </div>
   <div class="nav-section manager-plus" style="margin-top:12px;display:none;">
     <div class="nav-label">Processing</div>
@@ -697,6 +698,116 @@ td.agent{color:var(--text);font-weight:500;}
   </div>
 </div>
 
+<div class="page" id="page-time-report">
+  <div class="topbar">
+    <div class="page-title">⏰ Time Report</div>
+    <div class="topbar-right">
+      <button class="btn btn-outline" onclick="showModal('add-schedule-modal')">+ Add Schedule</button>
+      <label class="btn btn-primary" style="cursor:pointer;margin:0;">
+        📤 Upload Clocker Report
+        <input type="file" id="clocker-file-input" accept=".xlsx,.xls,.csv" style="display:none;" onchange="handleClockerUpload(event)">
+      </label>
+    </div>
+  </div>
+  <div style="padding:28px;">
+    <div class="alert-bar" style="margin-bottom:20px;background:rgba(79,110,247,0.08);border-color:rgba(79,110,247,0.2)">
+      <span style="font-size:18px;">💡</span>
+      <span style="font-size:12px;color:var(--text2);flex:1;">Enter each agent's scheduled shift, then upload the Clocker export from CMS. The system reconstructs actual shifts (handling breaks, mid-shift logouts, and shifts crossing midnight) and flags any variance from schedule.</span>
+    </div>
+
+    <div style="display:flex;gap:12px;margin-bottom:20px;flex-wrap:wrap;align-items:center;">
+      <div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:4px;">From</div>
+        <input type="date" id="tr-date-from" onchange="loadTimeReport()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px 10px;border-radius:8px;font-size:13px;">
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:4px;">To</div>
+        <input type="date" id="tr-date-to" onchange="loadTimeReport()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px 10px;border-radius:8px;font-size:13px;">
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:4px;">Agent</div>
+        <select id="tr-employee" onchange="loadTimeReport()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px 10px;border-radius:8px;font-size:13px;min-width:150px;">
+          <option value="">All agents</option>
+        </select>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:4px;">Grace (min)</div>
+        <input type="number" id="tr-grace" value="5" min="0" max="60" onchange="loadTimeReport()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px 10px;border-radius:8px;font-size:13px;width:80px;">
+      </div>
+    </div>
+
+    <div id="tr-summary" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px;margin-bottom:20px;"></div>
+
+    <div class="card">
+      <div class="card-header"><span class="card-title">Attendance vs Schedule</span><span id="tr-count" style="font-size:11px;color:var(--text3)"></span></div>
+      <div style="overflow-x:auto;">
+        <table class="data-table" style="min-width:1100px;">
+          <thead><tr>
+            <th>Agent</th><th>Date</th><th>Scheduled</th><th>Actual In</th><th>Actual Out</th>
+            <th>Break</th><th>Gross</th><th>Net</th><th>Variance</th><th>Status</th><th>Issues</th>
+          </tr></thead>
+          <tbody id="tr-tbody">
+            <tr><td colspan="11" style="text-align:center;padding:32px;color:var(--text3)">Upload a Clocker report and add schedules to see the report.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div style="margin-top:28px;">
+      <div style="font-size:14px;font-weight:700;margin-bottom:12px;">📅 Entered Schedules</div>
+      <div class="card">
+        <div style="overflow-x:auto;">
+          <table class="data-table">
+            <thead><tr><th>Agent</th><th>Date</th><th>Scheduled In</th><th>Scheduled Out</th><th>Break</th><th></th></tr></thead>
+            <tbody id="tr-schedules-tbody">
+              <tr><td colspan="6" style="text-align:center;padding:24px;color:var(--text3)">No schedules entered yet.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="add-schedule-modal">
+  <div class="modal-box" style="width:440px;">
+    <div style="font-size:16px;font-weight:700;margin-bottom:16px;">Add / Update Schedule</div>
+    <div style="display:flex;flex-direction:column;gap:12px;">
+      <div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:5px;">Agent name (must match Clocker EmployeeId)</div>
+        <input id="sched-name" list="sched-name-list" placeholder="e.g. Miafrel" style="width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:9px 12px;border-radius:8px;font-size:13px;box-sizing:border-box;">
+        <datalist id="sched-name-list"></datalist>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:5px;">Shift date (the day the shift STARTS)</div>
+        <input id="sched-date" type="date" style="width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:9px 12px;border-radius:8px;font-size:13px;box-sizing:border-box;">
+      </div>
+      <div style="display:flex;gap:10px;">
+        <div style="flex:1;">
+          <div style="font-size:11px;color:var(--text3);margin-bottom:5px;">Time in</div>
+          <input id="sched-in-time" type="time" value="14:00" style="width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:9px 12px;border-radius:8px;font-size:13px;box-sizing:border-box;">
+        </div>
+        <div style="flex:1;">
+          <div style="font-size:11px;color:var(--text3);margin-bottom:5px;">Time out</div>
+          <input id="sched-out-time" type="time" value="00:00" style="width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:9px 12px;border-radius:8px;font-size:13px;box-sizing:border-box;">
+        </div>
+      </div>
+      <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text2);cursor:pointer;">
+        <input type="checkbox" id="sched-overnight" checked style="width:16px;height:16px;accent-color:var(--accent);">
+        <span>Shift ends the NEXT day (overnight)</span>
+      </label>
+      <div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:5px;">Total break allowed (minutes)</div>
+        <input id="sched-break" type="number" value="50" min="0" style="width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:9px 12px;border-radius:8px;font-size:13px;box-sizing:border-box;">
+      </div>
+    </div>
+    <div style="display:flex;gap:10px;margin-top:18px;">
+      <button onclick="hideModal('add-schedule-modal')" class="btn btn-outline" style="flex:1;">Cancel</button>
+      <button onclick="saveSchedule()" class="btn btn-primary" style="flex:1;">Save Schedule</button>
+    </div>
+  </div>
+</div>
+
 <div class="page" id="page-qa-users">
   <div class="topbar">
     <div class="page-title">🛡️ Users</div>
@@ -895,6 +1006,7 @@ td.agent{color:var(--text);font-weight:500;}
   </div>
 </div>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script>
 // ─── STATE ───────────────────────────────────────────────────────────────────
 let rules=[], calls=[], agents=[], stats={}, ruleStats=[], agentStats=[], billingData={}, notesData=[];
@@ -1791,7 +1903,7 @@ function renderAgentProfile(data){
 
 function showPage(id){
   // Access control: qa_users see only their own work; costs is admin-only
-  const managerPages = ['analytics','billing','notes','rules','alerts','qa-users','manager-queue'];
+  const managerPages = ['analytics','billing','notes','rules','alerts','qa-users','manager-queue','time-report'];
   const adminPages = ['costs'];
   const isManager = currentRole==='manager' || isAdmin;
   if(adminPages.includes(id) && !isAdmin){ showToast('Admin access only', true); return; }
@@ -1811,6 +1923,7 @@ function showPage(id){
   if(id==='alerts'){ mountAlertsDatePicker(); renderAlerts(); }
   if(id==='calls') mountCallsDatePicker();
   if(id==='manager-queue') renderManagerQueue();
+  if(id==='time-report'){ loadClockerEmployees(); loadTimeReport(); }
 }
 
 function mountCallsDatePicker(){
@@ -2330,6 +2443,206 @@ async function loadManagerQueueCount(){
     const badge = document.getElementById('nb-manager');
     if(badge) badge.textContent = res.count || 0;
   }catch(e){}
+}
+
+// ─── TIME REPORT / ATTENDANCE ─────────────────────────────────────────────────
+async function handleClockerUpload(evt){
+  const file = evt.target.files[0];
+  if(!file) return;
+  showToast('Reading clocker report...');
+  try{
+    const data = await file.arrayBuffer();
+    const wb = XLSX.read(data, {cellDates:true});
+    const sheet = wb.Sheets[wb.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(sheet, {raw:false, dateNF:'yyyy-mm-dd hh:mm:ss'});
+    if(!rows.length){ showToast('That file appears to be empty', true); return; }
+
+    // Map the CMS export columns → our schema
+    const events = rows.map(r=>{
+      const rawTime = r.Created || r.created || r.Time || r.Timestamp;
+      let iso = null;
+      if(rawTime){
+        const d = (rawTime instanceof Date) ? rawTime : new Date(rawTime);
+        if(!isNaN(d)) iso = new Date(d.getTime() - d.getTimezoneOffset()*60000).toISOString().slice(0,19);
+      }
+      const bm = r.BreakMinutes ?? r.breakMinutes;
+      return {
+        employee_name: (r.EmployeeId || r.employeeId || r.Employee || '').toString().trim(),
+        event_time: iso,
+        status: (r.Status || r.status || '').toString().trim(),
+        break_minutes: (bm === undefined || bm === null || bm === '') ? null : parseFloat(bm),
+        break_reason: r.BreakReason || r.breakReason || null,
+      };
+    }).filter(e => e.employee_name && e.event_time && e.status);
+
+    if(!events.length){
+      showToast('Could not find EmployeeId / Created / Status columns in that file', true);
+      return;
+    }
+
+    showToast(`Uploading ${events.length} events...`);
+    const res = await API.post('/api/clocker-upload', {events});
+    showToast(`✅ Uploaded — ${res.inserted} new events (${res.received - res.inserted} already on file)`);
+    await loadClockerEmployees();
+    loadTimeReport();
+  }catch(e){
+    showToast('Upload failed: ' + (e.message||'could not read file'), true);
+  }finally{
+    evt.target.value = '';
+  }
+}
+
+async function loadClockerEmployees(){
+  try{
+    const res = await API.get('/api/clocker-employees');
+    const names = res.employees || [];
+    const sel = document.getElementById('tr-employee');
+    if(sel){
+      const cur = sel.value;
+      sel.innerHTML = '<option value="">All agents</option>' + names.map(n=>`<option value="${n}">${n}</option>`).join('');
+      sel.value = cur;
+    }
+    const dl = document.getElementById('sched-name-list');
+    if(dl) dl.innerHTML = names.map(n=>`<option value="${n}">`).join('');
+  }catch(e){}
+}
+
+async function loadTimeReport(){
+  const from = document.getElementById('tr-date-from')?.value || '';
+  const to = document.getElementById('tr-date-to')?.value || '';
+  const emp = document.getElementById('tr-employee')?.value || '';
+  const grace = document.getElementById('tr-grace')?.value || 5;
+  const tbody = document.getElementById('tr-tbody');
+  if(!tbody) return;
+  tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;padding:24px;color:var(--text3)">Loading...</td></tr>';
+
+  let params = `?grace_minutes=${grace}`;
+  if(from) params += `&date_from=${from}`;
+  if(to) params += `&date_to=${to}`;
+  if(emp) params += `&employee=${encodeURIComponent(emp)}`;
+
+  try{
+    const res = await API.get('/api/time-report' + params);
+    const rows = res.report || [];
+    document.getElementById('tr-count').textContent = `${rows.length} shift(s)`;
+
+    // Summary tiles
+    const okCount = rows.filter(r=>r.status==='OK').length;
+    const varCount = rows.filter(r=>r.status==='Variance').length;
+    const noShow = rows.filter(r=>r.status==='No Show').length;
+    const unsched = rows.filter(r=>r.status==='Unscheduled').length;
+    const totalNet = rows.reduce((a,r)=>a+(r.net_hours||0),0);
+    document.getElementById('tr-summary').innerHTML = `
+      ${trTile('On Schedule', okCount, 'var(--green)')}
+      ${trTile('With Variance', varCount, 'var(--yellow)')}
+      ${trTile('No Show', noShow, 'var(--red)')}
+      ${trTile('Unscheduled', unsched, 'var(--text3)')}
+      ${trTile('Total Net Hours', totalNet.toFixed(1)+'h', 'var(--accent)')}
+    `;
+
+    if(!rows.length){
+      tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;padding:32px;color:var(--text3)">No data for this range. Add schedules and upload a Clocker report.</td></tr>';
+      return;
+    }
+
+    const fmtT = iso => iso ? new Date(iso).toLocaleString([], {month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '—';
+    const fmtSched = r => r.scheduled_in ? `${new Date(r.scheduled_in).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})} → ${new Date(r.scheduled_out).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}` : '—';
+    const statusBadgeCls = s => s==='OK'?'badge-green':s==='Variance'?'badge-yellow':s==='No Show'?'badge-red':'badge-gray';
+
+    tbody.innerHTML = rows.map(r=>{
+      const varColor = r.net_variance == null ? 'var(--text3)' : (r.net_variance < -0.1 ? 'var(--red)' : r.net_variance > 0.1 ? 'var(--green)' : 'var(--text2)');
+      const lateTag = r.late_minutes != null && Math.abs(r.late_minutes) > 0
+        ? `<span style="font-size:10px;color:${r.late_minutes>5?'var(--red)':'var(--text3)'};display:block;">${r.late_minutes>0?'+':''}${r.late_minutes}m</span>` : '';
+      return `<tr>
+        <td style="font-weight:600;">${r.employee_name}</td>
+        <td style="white-space:nowrap;">${r.shift_date}</td>
+        <td style="white-space:nowrap;font-size:11px;color:var(--text3);">${fmtSched(r)}${r.break_allowed!=null?`<span style="display:block;">${r.break_allowed}m brk</span>`:''}</td>
+        <td style="white-space:nowrap;">${fmtT(r.actual_in)}${lateTag}</td>
+        <td style="white-space:nowrap;">${fmtT(r.actual_out)}</td>
+        <td>${r.break_taken}m${r.break_count?`<span style="font-size:10px;color:var(--text3);display:block;">${r.break_count} break(s)</span>`:''}</td>
+        <td>${r.gross_hours!=null?r.gross_hours.toFixed(2)+'h':'—'}</td>
+        <td style="font-weight:600;">${r.net_hours!=null?r.net_hours.toFixed(2)+'h':'—'}</td>
+        <td style="color:${varColor};font-weight:600;">${r.net_variance!=null?(r.net_variance>0?'+':'')+r.net_variance.toFixed(2)+'h':'—'}</td>
+        <td><span class="badge ${statusBadgeCls(r.status)}">${r.status}</span></td>
+        <td style="font-size:11px;color:var(--text3);max-width:220px;">${(r.issues||[]).join('; ')||'—'}</td>
+      </tr>`;
+    }).join('');
+  }catch(e){
+    tbody.innerHTML = `<tr><td colspan="11" style="text-align:center;padding:24px;color:var(--red)">Failed to load: ${e.message}</td></tr>`;
+  }
+  loadSchedulesList();
+}
+
+function trTile(label, val, color){
+  return `<div class="card" style="padding:14px 16px;">
+    <div style="font-size:22px;font-weight:700;color:${color};">${val}</div>
+    <div style="font-size:11px;color:var(--text3);margin-top:2px;">${label}</div>
+  </div>`;
+}
+
+async function saveSchedule(){
+  const name = document.getElementById('sched-name').value.trim();
+  const date = document.getElementById('sched-date').value;
+  const inT = document.getElementById('sched-in-time').value;
+  const outT = document.getElementById('sched-out-time').value;
+  const overnight = document.getElementById('sched-overnight').checked;
+  const brk = parseInt(document.getElementById('sched-break').value||'0');
+  if(!name || !date || !inT || !outT){ showToast('Fill in name, date, and both times', true); return; }
+
+  const schedIn = `${date}T${inT}:00`;
+  let outDate = date;
+  if(overnight){
+    const d = new Date(date + 'T00:00:00');
+    d.setDate(d.getDate()+1);
+    outDate = d.toISOString().slice(0,10);
+  }
+  const schedOut = `${outDate}T${outT}:00`;
+
+  try{
+    await API.post('/api/schedules', {
+      employee_name: name, shift_date: date,
+      scheduled_in: schedIn, scheduled_out: schedOut, break_minutes: brk
+    });
+    hideModal('add-schedule-modal');
+    showToast('✅ Schedule saved');
+    loadTimeReport();
+  }catch(e){ showToast('Failed: '+e.message, true); }
+}
+
+async function loadSchedulesList(){
+  const tbody = document.getElementById('tr-schedules-tbody');
+  if(!tbody) return;
+  const from = document.getElementById('tr-date-from')?.value || '';
+  const to = document.getElementById('tr-date-to')?.value || '';
+  let params = '';
+  if(from) params += `?date_from=${from}`;
+  if(to) params += (params?'&':'?') + `date_to=${to}`;
+  try{
+    const res = await API.get('/api/schedules' + params);
+    const rows = res.schedules || [];
+    if(!rows.length){
+      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:24px;color:var(--text3)">No schedules entered yet.</td></tr>';
+      return;
+    }
+    const fmt = iso => new Date(iso).toLocaleString([], {month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'});
+    tbody.innerHTML = rows.map(s=>`<tr>
+      <td style="font-weight:600;">${s.employee_name}</td>
+      <td>${String(s.shift_date).slice(0,10)}</td>
+      <td>${fmt(s.scheduled_in)}</td>
+      <td>${fmt(s.scheduled_out)}</td>
+      <td>${s.break_minutes}m</td>
+      <td><button onclick="deleteSchedule(${s.id})" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:15px;">🗑</button></td>
+    </tr>`).join('');
+  }catch(e){}
+}
+
+async function deleteSchedule(id){
+  if(!confirm('Delete this schedule?')) return;
+  try{
+    await API.del(`/api/schedules/${id}`);
+    showToast('Schedule deleted');
+    loadTimeReport();
+  }catch(e){ showToast('Failed to delete: '+e.message, true); }
 }
 
 async function renderManagerQueue(){
@@ -3715,6 +4028,7 @@ function showPipelineComparisonModal(results){
             <div style="font-size:11px;color:var(--text3);">Notes score: ${data.notes_score||0}%</div>
           </div>
         </div>
+        ${data.cost_usd!==undefined?`<div style="background:var(--surface2);border-radius:8px;padding:8px 12px;margin-bottom:12px;"><span style="font-size:11px;color:var(--text3);">This call cost: </span><span style="font-size:15px;font-weight:700;color:var(--accent);">$${data.cost_usd.toFixed(4)}</span></div>`:''}
         <div style="font-size:11px;color:var(--text3);font-weight:600;text-transform:uppercase;margin-bottom:4px;">Flags (${(data.flags||[]).length})</div>
         ${flagsHtml}
         <div style="font-size:11px;color:var(--text3);font-weight:600;text-transform:uppercase;margin:12px 0 4px;">Rules Evaluation</div>
@@ -3722,6 +4036,18 @@ function showPipelineComparisonModal(results){
         ${data.coaching_notes?`<div style="font-size:11px;color:var(--text3);font-weight:600;text-transform:uppercase;margin:12px 0 4px;">Coaching Notes</div><div style="font-size:11px;color:var(--text2);">${data.coaching_notes}</div>`:''}
       </div>`;
   };
+
+  // Build a cost savings summary if both costs are present
+  let costSummary = '';
+  if(cg.cost_usd !== undefined && go.cost_usd !== undefined && cg.cost_usd > 0){
+    const savingsPerCall = cg.cost_usd - go.cost_usd;
+    const pctSaved = Math.round((savingsPerCall / cg.cost_usd) * 100);
+    const monthlySavings = savingsPerCall * 1580 * 30; // your real ~1580 calls/day
+    costSummary = `<div style="margin-top:16px;padding:14px;background:rgba(16,212,142,0.08);border:1px solid rgba(16,212,142,0.25);border-radius:10px;">
+      <div style="font-size:13px;font-weight:700;color:var(--green);margin-bottom:4px;">💰 Cost difference on this call: $${savingsPerCall.toFixed(4)} (${pctSaved}% ${savingsPerCall>=0?'cheaper':'more expensive'} with Gemini-only)</div>
+      <div style="font-size:11px;color:var(--text3);">At your ~1,580 calls/day, that projects to roughly <strong>$${Math.abs(monthlySavings).toFixed(0)}/month ${monthlySavings>=0?'saved':'extra'}</strong> — if quality holds up. This is an estimate based on this single call.</div>
+    </div>`;
+  }
 
   const modalHtml = `
     <div class="modal open" id="pipeline-compare-modal" style="display:flex;">
@@ -3735,8 +4061,9 @@ function showPipelineComparisonModal(results){
           <div style="width:1px;background:var(--border);"></div>
           ${renderSide(go, 'Test: Gemini Only')}
         </div>
+        ${costSummary}
         <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border);font-size:11px;color:var(--text3);">
-          💡 Compare scores, flags, and especially the specificity of rule evidence between both columns before deciding whether Gemini-only matches quality. Check Costs page for per-pipeline cost tracking under "gemini-only" service.
+          💡 Compare scores, flags, and especially the specificity of rule evidence between both columns before deciding whether Gemini-only matches quality. Cost figures are per-call estimates.
         </div>
       </div>
     </div>`;
