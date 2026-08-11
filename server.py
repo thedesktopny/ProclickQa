@@ -2652,7 +2652,13 @@ def _build_shifts_from_events(events):
                 cur = {'login': t, 'logout': None, 'breaks': [], 'partial': False}
                 on_break = False
             elif on_break:
-                # Returning from a break — legitimate, but not a new login
+                # Returning from a break — close it out and measure the ACTUAL duration
+                # from the timestamps, not the minutes the agent declared.
+                if cur['breaks']:
+                    b = cur['breaks'][-1]
+                    b['end'] = t
+                    b['minutes'] = (t - b['start']).total_seconds() / 60
+                    b['closed'] = True
                 on_break = False
             else:
                 # Repeat 'In' with no Out/OnBreak in between → duplicate, ignore entirely
@@ -2662,11 +2668,23 @@ def _build_shifts_from_events(events):
             if cur is None:
                 # Break with no preceding login = report window began mid-shift
                 cur = {'login': t, 'logout': None, 'breaks': [], 'partial': True}
-            cur['breaks'].append({'start': t, 'minutes': float(e.get('break_minutes') or 0)})
+            cur['breaks'].append({
+                'start': t,
+                'end': None,
+                'declared_minutes': float(e.get('break_minutes') or 0),
+                'minutes': float(e.get('break_minutes') or 0),  # fallback until closed
+                'closed': False,
+            })
             on_break = True
 
         elif st == 'Out':
             if cur is not None:
+                # If they clocked out while still on break, end the break at logout
+                if on_break and cur['breaks']:
+                    b = cur['breaks'][-1]
+                    b['end'] = t
+                    b['minutes'] = (t - b['start']).total_seconds() / 60
+                    b['closed'] = True
                 cur['logout'] = t
                 shifts.append(cur)
                 cur = None
@@ -2728,9 +2746,13 @@ def _compute_pay(segments, sched_window, rate_history, ot_periods):
         breaks = []
         for b in seg['breaks']:
             b_start = b.get('start')
-            mins = float(b.get('minutes') or 0)
-            if b_start and mins > 0:
-                breaks.append((b_start, b_start + timedelta(minutes=mins)))
+            b_end = b.get('end')
+            if b_start and b_end:
+                breaks.append((b_start, b_end))          # measured from timestamps
+            elif b_start:
+                mins = float(b.get('minutes') or 0)      # unclosed break — fall back to declared
+                if mins > 0:
+                    breaks.append((b_start, b_start + timedelta(minutes=mins)))
         worked.extend(_subtract_intervals((seg['login'], seg['logout']), breaks))
 
     # Every point where the rate or the overtime multiplier could change
@@ -3224,7 +3246,21 @@ def _time_report_impl():
         login = segments[0]['login']
         logout = segments[-1]['logout']
         break_taken = sum(b['minutes'] for seg in segments for b in seg['breaks'])
+        break_declared = sum(b.get('declared_minutes', 0) for seg in segments for b in seg['breaks'])
         break_count = sum(len(seg['breaks']) for seg in segments)
+
+        # Flag breaks that ran longer than the agent said they would
+        for seg in segments:
+            for b in seg['breaks']:
+                dec = b.get('declared_minutes', 0)
+                act = b['minutes']
+                if dec > 0 and act - dec > grace:
+                    issues.append(
+                        f"Break ran {act:.0f}m vs {dec:.0f}m declared "
+                        f"(+{act-dec:.0f}m, from {b['start'].strftime('%-I:%M %p')})"
+                    )
+                if not b.get('closed'):
+                    issues.append(f"Break at {b['start'].strftime('%-I:%M %p')} never closed — using declared {dec:.0f}m")
 
         # Time actually clocked in = sum of each segment, so mid-shift gaps don't count
         worked_seconds = 0
@@ -3274,6 +3310,7 @@ def _time_report_impl():
             'actual_in': login.isoformat(),
             'actual_out': logout.isoformat() if logout else None,
             'break_taken': round(break_taken),
+            'break_declared': round(break_declared),
             'break_count': break_count,
             'away_minutes': round(away_minutes),
             'segment_count': len(segments),
