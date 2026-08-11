@@ -702,6 +702,8 @@ td.agent{color:var(--text);font-weight:500;}
   <div class="topbar">
     <div class="page-title">⏰ Time Report</div>
     <div class="topbar-right">
+      <button class="btn btn-outline" onclick="exportTimeReport('xlsx')">⬇️ Excel</button>
+      <button class="btn btn-outline" onclick="exportTimeReport('csv')">⬇️ CSV</button>
       <button class="btn btn-outline" onclick="openOtPeriodsModal()">⚡ Overtime Rate</button>
       <button class="btn btn-outline" onclick="openWeeklyScheduleModal()">📅 Weekly Schedule</button>
       <button class="btn btn-outline" onclick="showModal('add-schedule-modal')">+ One-Off</button>
@@ -3051,6 +3053,124 @@ async function deleteOtPeriod(id){
   }catch(e){ showToast('Failed: '+e.message, true); }
 }
 
+// ─── EXPORT TIME REPORT ───────────────────────────────────────────────────────
+let lastTimeReportData = null;   // set by loadTimeReport so export matches what's on screen
+
+async function exportTimeReport(format){
+  if(!lastTimeReportData || !(lastTimeReportData.report||[]).length){
+    showToast('Nothing to export — load a report first', true);
+    return;
+  }
+  const res = lastTimeReportData;
+  const from = document.getElementById('tr-date-from')?.value || '';
+  const to = document.getElementById('tr-date-to')?.value || '';
+  const emp = document.getElementById('tr-employee')?.value || '';
+  const stamp = `${from||'all'}_to_${to||'all'}${emp?'_'+emp.replace(/[^a-z0-9]/gi,''):''}`;
+
+  const fmtDT = iso => iso ? new Date(iso).toLocaleString('en-US',
+      {month:'2-digit',day:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'}) : '';
+  const fmtT = iso => iso ? new Date(iso).toLocaleTimeString('en-US',
+      {hour:'2-digit',minute:'2-digit'}) : '';
+
+  // Detail rows — one line per shift
+  const detail = res.report.map(r=>({
+    'Agent': r.employee_name,
+    'Date': r.shift_date,
+    'Block': r.block_no || 1,
+    'Scheduled In': fmtT(r.scheduled_in),
+    'Scheduled Out': fmtT(r.scheduled_out),
+    'Break Allowed (m)': r.break_allowed ?? '',
+    'Actual In': fmtDT(r.actual_in),
+    'Actual Out': fmtDT(r.actual_out),
+    'Late (m)': r.late_minutes ?? '',
+    'Left Early (m)': r.early_out_minutes ?? '',
+    'Break Taken (m)': r.break_taken ?? 0,
+    'Break Declared (m)': r.break_declared ?? '',
+    'Break Over (m)': (r.break_declared!=null && r.break_taken!=null) ? (r.break_taken - r.break_declared) : '',
+    'Breaks': r.break_count ?? 0,
+    'Away Mid-Shift (m)': r.away_minutes ?? 0,
+    'Sessions': r.segment_count ?? '',
+    'Gross Hours': r.gross_hours ?? '',
+    'Net Hours': r.net_hours ?? '',
+    'Scheduled Net Hours': r.scheduled_net_hours ?? '',
+    'Variance (h)': r.net_variance ?? '',
+    'Regular Hours': r.regular_hours ?? 0,
+    'Overtime Hours': r.overtime_hours ?? 0,
+    'OT Breakdown': Object.entries(r.ot_breakdown||{}).map(([m,h])=>`${h}h @${m}x`).join(', '),
+    'Hourly Rate': r.hourly_rate ?? '',
+    'Regular Pay': r.regular_pay ?? 0,
+    'Overtime Pay': r.overtime_pay ?? 0,
+    'Total Pay': r.total_pay ?? 0,
+    'Status': r.status,
+    'From Weekly Schedule': r.from_recurring ? 'Yes' : 'No',
+    'Issues': (r.issues||[]).join('; '),
+  }));
+
+  if(format === 'csv'){
+    const cols = Object.keys(detail[0]);
+    const esc = v => {
+      const s = String(v ?? '');
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s;
+    };
+    const csv = [cols.join(','), ...detail.map(r=>cols.map(c=>esc(r[c])).join(','))].join('\n');
+    const blob = new Blob(['\ufeff'+csv], {type:'text/csv;charset=utf-8;'});
+    _downloadBlob(blob, `time-report_${stamp}.csv`);
+    showToast(`✅ Exported ${detail.length} rows to CSV`);
+    return;
+  }
+
+  // Excel: detail sheet + payroll summary sheet
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(detail), 'Shift Detail');
+
+  const t = res.totals || {};
+  const summary = (res.per_agent||[]).map(a=>({
+    'Agent': a.employee_name,
+    'Hourly Rate': a.hourly_rate || '',
+    'Regular Hours': a.regular_hours,
+    'Regular Pay': a.regular_pay,
+    'Overtime Hours': a.overtime_hours,
+    'OT Breakdown': Object.entries(a.ot_breakdown||{}).map(([m,h])=>`${h}h @${m}x`).join(', '),
+    'Overtime Pay': a.overtime_pay,
+    'Total Pay': a.total_pay,
+  }));
+  summary.push({
+    'Agent':'TOTAL','Hourly Rate':'',
+    'Regular Hours': t.regular_hours||0, 'Regular Pay': t.regular_pay||0,
+    'Overtime Hours': t.overtime_hours||0, 'OT Breakdown':'',
+    'Overtime Pay': t.overtime_pay||0, 'Total Pay': t.total_pay||0,
+  });
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summary), 'Payroll Summary');
+
+  // A small context sheet so the numbers are auditable later
+  const ctx = [
+    {Field:'Date range', Value:`${from||'all'} to ${to||'all'}`},
+    {Field:'Agent filter', Value: emp || 'All agents'},
+    {Field:'Grace window (min)', Value: document.getElementById('tr-grace')?.value || 5},
+    {Field:'Standard OT multiplier', Value: `${res.default_ot_multiplier}x`},
+    {Field:'Overtime definition', Value:'Any time worked outside the scheduled block'},
+    {Field:'Break measurement', Value:'Actual time between OnBreak and return, not declared minutes'},
+    {Field:'Generated', Value: new Date().toLocaleString()},
+  ];
+  (res.active_ot_periods||[]).forEach(p=>{
+    ctx.push({Field:`Special OT ${p.multiplier}x`,
+              Value:`from ${new Date(p.starts_at).toLocaleString()}${p.ends_at?` to ${new Date(p.ends_at).toLocaleString()}`:' — until further notice'}${p.note?` (${p.note})`:''}`});
+  });
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(ctx), 'Report Info');
+
+  XLSX.writeFile(wb, `time-report_${stamp}.xlsx`);
+  showToast(`✅ Exported ${detail.length} rows to Excel`);
+}
+
+function _downloadBlob(blob, filename){
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click();
+  document.body.removeChild(a);
+  setTimeout(()=>URL.revokeObjectURL(url), 1000);
+}
+
 async function loadTimeReport(){
   const from = document.getElementById('tr-date-from')?.value || '';
   const to = document.getElementById('tr-date-to')?.value || '';
@@ -3068,6 +3188,7 @@ async function loadTimeReport(){
   try{
     const res = await API.get('/api/time-report' + params);
     const rows = res.report || [];
+    lastTimeReportData = res;
     document.getElementById('tr-count').textContent = `${rows.length} shift(s)`;
 
     // Banner when a special overtime rate is currently in force
