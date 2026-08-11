@@ -278,9 +278,11 @@ def init_db():
     c.execute('''
         CREATE TABLE IF NOT EXISTS agent_rates (
             id SERIAL PRIMARY KEY,
-            employee_name TEXT NOT NULL UNIQUE,
+            employee_name TEXT NOT NULL,
             hourly_rate NUMERIC(10,2) NOT NULL DEFAULT 0,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            effective_from TIMESTAMP NOT NULL DEFAULT '2000-01-01',
+            note TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
 
@@ -431,6 +433,11 @@ def init_db():
         "ALTER TABLE calls ADD COLUMN IF NOT EXISTS error_message TEXT",
         "CREATE UNIQUE INDEX IF NOT EXISTS agents_name_unique ON agents (name)",
         "ALTER TABLE agents ADD COLUMN IF NOT EXISTS assigned_qa_user_id INTEGER",
+        # ── Rate history: rates are effective-dated so past shifts keep their old rate
+        "ALTER TABLE agent_rates ADD COLUMN IF NOT EXISTS effective_from TIMESTAMP DEFAULT '2000-01-01'",
+        "ALTER TABLE agent_rates ADD COLUMN IF NOT EXISTS note TEXT",
+        "ALTER TABLE agent_rates DROP CONSTRAINT IF EXISTS agent_rates_employee_name_key",
+        "CREATE INDEX IF NOT EXISTS agent_rates_lookup ON agent_rates (employee_name, effective_from)",
         # ── Split-shift support: an agent can have more than one scheduled block per day
         # (e.g. 7am-12pm and 7pm-12am). block_no distinguishes them.
         "ALTER TABLE agent_schedules ADD COLUMN IF NOT EXISTS block_no INTEGER DEFAULT 1",
@@ -2684,47 +2691,35 @@ def _subtract_intervals(base, subs):
         result = nxt
     return result
 
-def _overlap_seconds(a, b):
-    """Seconds of overlap between two (start,end) intervals."""
-    start = max(a[0], b[0]); end = min(a[1], b[1])
-    return max(0, (end - start).total_seconds())
+def _split_at(interval, boundaries):
+    """Split (start,end) at any boundary datetimes that fall strictly inside it."""
+    start, end = interval
+    pts = sorted({start, end} | {b for b in boundaries if b and start < b < end})
+    return [(pts[i], pts[i+1]) for i in range(len(pts)-1)]
 
-def _clip(interval, window):
-    """Portion of `interval` inside `window`, or None."""
-    start = max(interval[0], window[0]); end = min(interval[1], window[1])
-    return (start, end) if end > start else None
+def _rate_at(t, rate_history):
+    """Hourly rate in force at time t. rate_history must be sorted by effective_from."""
+    rate = 0.0
+    for entry in rate_history:
+        if entry['effective_from'] <= t:
+            rate = float(entry['hourly_rate'])
+        else:
+            break
+    return rate
 
-def _ot_multiplier_for(interval, periods):
-    """
-    Splits an overtime interval by the manager-declared multiplier periods.
-    Returns list of (seconds, multiplier). Time not inside any declared period
-    uses DEFAULT_OT_MULTIPLIER.
-    """
-    pieces = []
-    remaining = [interval]
-    for p in periods:
-        p_start = p['starts_at']
-        p_end = p['ends_at'] or interval[1]  # open-ended = "until further notice"
-        nxt = []
-        for r in remaining:
-            inside = _clip(r, (p_start, p_end))
-            if inside:
-                pieces.append(((inside[1]-inside[0]).total_seconds(), float(p['multiplier'])))
-                nxt.extend(_subtract_intervals(r, [inside]))
-            else:
-                nxt.append(r)
-        remaining = nxt
-    for r in remaining:
-        secs = (r[1]-r[0]).total_seconds()
-        if secs > 0:
-            pieces.append((secs, DEFAULT_OT_MULTIPLIER))
-    return pieces
+def _mult_at(t, ot_periods):
+    """Overtime multiplier in force at time t (latest matching period wins)."""
+    mult = DEFAULT_OT_MULTIPLIER
+    for p in ot_periods:
+        if p['starts_at'] <= t and (p['ends_at'] is None or t < p['ends_at']):
+            mult = float(p['multiplier'])
+    return mult
 
-def _compute_pay(segments, sched_window, rate, ot_periods):
+def _compute_pay(segments, sched_window, rate_history, ot_periods):
     """
-    Splits actual worked time into regular vs overtime and prices it.
+    Splits actual worked time into regular vs overtime and prices it, honouring
+    both effective-dated pay-rate changes and manager-declared overtime periods.
     sched_window: (sched_in, sched_out) or None for unscheduled work (all overtime).
-    Returns dict with hours and dollar amounts.
     """
     worked = []
     for seg in segments:
@@ -2738,45 +2733,51 @@ def _compute_pay(segments, sched_window, rate, ot_periods):
                 breaks.append((b_start, b_start + timedelta(minutes=mins)))
         worked.extend(_subtract_intervals((seg['login'], seg['logout']), breaks))
 
-    reg_secs = 0.0
-    ot_pieces = []
+    # Every point where the rate or the overtime multiplier could change
+    boundaries = [e['effective_from'] for e in rate_history]
+    for p in ot_periods:
+        boundaries.append(p['starts_at'])
+        if p['ends_at']: boundaries.append(p['ends_at'])
+    if sched_window:
+        boundaries.extend([sched_window[0], sched_window[1]])
+
+    reg_secs = reg_pay = 0.0
+    ot_secs = ot_pay = 0.0
+    by_mult, rates_used = {}, set()
+
     for w in worked:
-        if sched_window:
-            inside = _clip(w, sched_window)
-            if inside:
-                reg_secs += (inside[1]-inside[0]).total_seconds()
-            for out in _subtract_intervals(w, [inside] if inside else []):
-                if (out[1]-out[0]).total_seconds() > 0:
-                    ot_pieces.extend(_ot_multiplier_for(out, ot_periods))
-        else:
-            ot_pieces.extend(_ot_multiplier_for(w, ot_periods))
-
-    ot_secs = sum(s for s, _ in ot_pieces)
-    rate = float(rate or 0)
-    reg_hours = reg_secs/3600
-    ot_hours = ot_secs/3600
-    ot_pay = sum((s/3600) * rate * m for s, m in ot_pieces)
-
-    # Breakdown of overtime by multiplier, for transparency in the UI
-    by_mult = {}
-    for s, m in ot_pieces:
-        by_mult[m] = by_mult.get(m, 0) + s/3600
+        for piece in _split_at(w, boundaries):
+            secs = (piece[1] - piece[0]).total_seconds()
+            if secs <= 0: continue
+            hours = secs / 3600
+            rate = _rate_at(piece[0], rate_history)
+            rates_used.add(rate)
+            in_schedule = sched_window and sched_window[0] <= piece[0] < sched_window[1]
+            if in_schedule:
+                reg_secs += secs
+                reg_pay += hours * rate
+            else:
+                mult = _mult_at(piece[0], ot_periods)
+                ot_secs += secs
+                ot_pay += hours * rate * mult
+                by_mult[mult] = by_mult.get(mult, 0) + hours
 
     return {
-        'regular_hours': round(reg_hours, 2),
-        'overtime_hours': round(ot_hours, 2),
-        'regular_pay': round(reg_hours * rate, 2),
+        'regular_hours': round(reg_secs/3600, 2),
+        'overtime_hours': round(ot_secs/3600, 2),
+        'regular_pay': round(reg_pay, 2),
         'overtime_pay': round(ot_pay, 2),
-        'total_pay': round(reg_hours * rate + ot_pay, 2),
+        'total_pay': round(reg_pay + ot_pay, 2),
         'ot_breakdown': {str(k): round(v, 2) for k, v in sorted(by_mult.items())},
-        'hourly_rate': rate,
+        'hourly_rate': max(rates_used) if rates_used else 0,
     }
 
 @app.route('/api/agent-rates', methods=['GET'])
 @require_manager
 def get_agent_rates():
+    """Full rate history, newest first, so the UI can show past and scheduled changes."""
     conn = get_db(); c = conn.cursor(cursor_factory=RealDictCursor)
-    c.execute('SELECT * FROM agent_rates ORDER BY employee_name')
+    c.execute('SELECT * FROM agent_rates ORDER BY employee_name, effective_from DESC')
     rows = [dict(r) for r in c.fetchall()]
     conn.close()
     return jsonify({'rates': rows})
@@ -2784,19 +2785,32 @@ def get_agent_rates():
 @app.route('/api/agent-rates', methods=['POST'])
 @require_manager
 def save_agent_rate():
+    """
+    Add a rate for an agent, effective from a given date/time.
+    Past shifts keep whatever rate was in force when they were worked.
+    """
     d = request.json or {}
     name = (d.get('employee_name') or '').strip()
     rate = d.get('hourly_rate')
+    eff = d.get('effective_from') or '2000-01-01T00:00:00'
     if not name or rate is None:
         return jsonify({'error': 'employee_name and hourly_rate required'}), 400
     conn = get_db(); c = conn.cursor(cursor_factory=RealDictCursor)
-    c.execute('''INSERT INTO agent_rates (employee_name, hourly_rate, updated_at)
-                 VALUES (%s,%s,CURRENT_TIMESTAMP)
-                 ON CONFLICT (employee_name) DO UPDATE SET
-                   hourly_rate=EXCLUDED.hourly_rate, updated_at=CURRENT_TIMESTAMP
-                 RETURNING *''', (name, float(rate)))
+    # Replace any rate with the exact same effective time, else append a new one
+    c.execute('DELETE FROM agent_rates WHERE employee_name=%s AND effective_from=%s', (name, eff))
+    c.execute('''INSERT INTO agent_rates (employee_name, hourly_rate, effective_from, note)
+                 VALUES (%s,%s,%s,%s) RETURNING *''',
+              (name, float(rate), eff, d.get('note','')))
     row = dict(c.fetchone()); conn.commit(); conn.close()
     return jsonify(row)
+
+@app.route('/api/agent-rates/<int:rate_id>', methods=['DELETE'])
+@require_manager
+def delete_agent_rate(rate_id):
+    conn = get_db(); c = conn.cursor()
+    c.execute('DELETE FROM agent_rates WHERE id=%s', (rate_id,))
+    conn.commit(); conn.close()
+    return jsonify({'success': True})
 
 @app.route('/api/ot-periods', methods=['GET'])
 @require_manager
@@ -3118,8 +3132,10 @@ def _time_report_impl():
     # instead of failing the whole report.
     rates, ot_periods = {}, []
     try:
-        c.execute('SELECT employee_name, hourly_rate FROM agent_rates')
-        rates = {r['employee_name']: float(r['hourly_rate']) for r in c.fetchall()}
+        c.execute('SELECT employee_name, hourly_rate, effective_from FROM agent_rates ORDER BY employee_name, effective_from')
+        for r in c.fetchall():
+            rates.setdefault(r['employee_name'], []).append(
+                {'hourly_rate': float(r['hourly_rate']), 'effective_from': r['effective_from']})
     except Exception as e:
         print(f"[time_report] agent_rates unavailable: {str(e)[:120]}")
         try: conn.rollback()
@@ -3197,7 +3213,7 @@ def _time_report_impl():
                         'net_variance': None, 'away_minutes': 0, 'segment_count': 0,
                         'regular_hours': 0, 'overtime_hours': 0, 'regular_pay': 0,
                         'overtime_pay': 0, 'total_pay': 0, 'ot_breakdown': {},
-                        'hourly_rate': rates.get(name, 0),
+                        'hourly_rate': (rates.get(name) or [{}])[-1].get('hourly_rate', 0),
                         'issues': ['No clock-in found for this scheduled shift']})
             rows.append(row); continue
 
@@ -3248,7 +3264,7 @@ def _time_report_impl():
         if any(seg.get('partial') for seg in segments):
             issues.append('Login not captured in uploaded report')
 
-        pay = _compute_pay(segments, (sched_in, sched_out), rates.get(name, 0), ot_periods)
+        pay = _compute_pay(segments, (sched_in, sched_out), rates.get(name, []), ot_periods)
         if pay['overtime_hours'] > 0:
             mults = ', '.join(f"{h}h @{m}x" for m, h in pay['ot_breakdown'].items())
             issues.append(f"Overtime {pay['overtime_hours']}h ({mults})")
@@ -3286,7 +3302,7 @@ def _time_report_impl():
                 gross = (sh['logout'] - sh['login']).total_seconds()/3600
                 net = gross - break_taken/60
             # Unscheduled work is entirely overtime by policy
-            unsched_pay = _compute_pay([sh], None, rates.get(name, 0), ot_periods)
+            unsched_pay = _compute_pay([sh], None, rates.get(name, []), ot_periods)
             unsched_issues = ['No schedule entered for this shift'] + (['Never clocked out'] if not sh['logout'] else [])
             if unsched_pay['overtime_hours'] > 0:
                 mults = ', '.join(f"{h}h @{m}x" for m, h in unsched_pay['ot_breakdown'].items())

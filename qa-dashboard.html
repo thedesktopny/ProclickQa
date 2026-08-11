@@ -703,7 +703,6 @@ td.agent{color:var(--text);font-weight:500;}
     <div class="page-title">⏰ Time Report</div>
     <div class="topbar-right">
       <button class="btn btn-outline" onclick="openOtPeriodsModal()">⚡ Overtime Rate</button>
-      <button class="btn btn-outline" onclick="openRatesModal()">💵 Hourly Rates</button>
       <button class="btn btn-outline" onclick="openWeeklyScheduleModal()">📅 Weekly Schedule</button>
       <button class="btn btn-outline" onclick="showModal('add-schedule-modal')">+ One-Off</button>
       <label class="btn btn-primary" style="cursor:pointer;margin:0;">
@@ -767,9 +766,9 @@ td.agent{color:var(--text);font-weight:500;}
       <div class="card">
         <div style="overflow-x:auto;">
           <table class="data-table">
-            <thead><tr><th>Agent</th><th>Mon</th><th>Tue</th><th>Wed</th><th>Thu</th><th>Fri</th><th>Sat</th><th>Sun</th><th>Break</th><th></th></tr></thead>
+            <thead><tr><th>Agent</th><th>Mon</th><th>Tue</th><th>Wed</th><th>Thu</th><th>Fri</th><th>Sat</th><th>Sun</th><th>Break</th><th>Rate</th><th></th></tr></thead>
             <tbody id="tr-recurring-tbody">
-              <tr><td colspan="10" style="text-align:center;padding:24px;color:var(--text3)">No weekly schedules set. Click "📅 Weekly Schedule" to add one.</td></tr>
+              <tr><td colspan="11" style="text-align:center;padding:24px;color:var(--text3)">No weekly schedules set. Click "📅 Weekly Schedule" to add one.</td></tr>
             </tbody>
           </table>
         </div>
@@ -800,7 +799,7 @@ td.agent{color:var(--text);font-weight:500;}
       <div style="font-size:11px;color:var(--text3);margin-bottom:5px;">Agent name (must match Clocker EmployeeId)</div>
       <input id="wk-name" list="sched-name-list" placeholder="e.g. Miafrel" onchange="loadWeeklyForAgent()" style="width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:9px 12px;border-radius:8px;font-size:13px;box-sizing:border-box;">
     </div>
-    <div id="wk-days" style="display:flex;flex-direction:column;gap:8px;max-height:340px;overflow-y:auto;"></div>
+    <div id="wk-days" style="display:flex;flex-direction:column;gap:8px;max-height:300px;overflow-y:auto;"></div>
     <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border);display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;">
       <div style="flex:1;min-width:150px;">
         <div style="font-size:11px;color:var(--text3);margin-bottom:5px;">Apply to all checked days</div>
@@ -812,6 +811,24 @@ td.agent{color:var(--text);font-weight:500;}
       </div>
       <button onclick="applyWeeklyBulk()" class="btn btn-outline" style="font-size:12px;">Apply to all</button>
     </div>
+
+    <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border);">
+      <div style="font-size:13px;font-weight:700;margin-bottom:4px;">💵 Pay Rate</div>
+      <div style="font-size:11px;color:var(--text3);margin-bottom:10px;">Set a rate and the date it takes effect. Shifts already worked keep the rate that was in force at the time — so a raise never changes past pay.</div>
+      <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
+        <div style="width:120px;">
+          <div style="font-size:11px;color:var(--text3);margin-bottom:4px;">Hourly rate</div>
+          <input id="wk-rate" type="number" step="0.01" min="0" placeholder="0.00" style="width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:6px;font-size:12px;box-sizing:border-box;">
+        </div>
+        <div style="flex:1;min-width:170px;">
+          <div style="font-size:11px;color:var(--text3);margin-bottom:4px;">Effective from (blank = always)</div>
+          <input id="wk-rate-eff" type="datetime-local" style="width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:6px;font-size:12px;box-sizing:border-box;">
+        </div>
+        <button onclick="saveAgentRate()" class="btn btn-outline" style="font-size:12px;">Add rate</button>
+      </div>
+      <div id="wk-rate-history" style="margin-top:10px;"></div>
+    </div>
+
     <div style="display:flex;gap:10px;margin-top:18px;">
       <button onclick="hideModal('weekly-schedule-modal')" class="btn btn-outline" style="flex:1;">Cancel</button>
       <button onclick="saveWeeklySchedule()" class="btn btn-primary" style="flex:1;">Save Weekly Schedule</button>
@@ -855,20 +872,6 @@ td.agent{color:var(--text);font-weight:500;}
       <button onclick="hideModal('add-schedule-modal')" class="btn btn-outline" style="flex:1;">Cancel</button>
       <button onclick="saveSchedule()" class="btn btn-primary" style="flex:1;">Save Schedule</button>
     </div>
-  </div>
-</div>
-
-<div class="modal" id="rates-modal">
-  <div class="modal-box" style="width:480px;max-width:95vw;">
-    <div style="font-size:16px;font-weight:700;margin-bottom:4px;">💵 Hourly Rates</div>
-    <div style="font-size:11px;color:var(--text3);margin-bottom:14px;">Set each agent's base hourly rate. Overtime is paid at a multiple of this rate.</div>
-    <div style="display:flex;gap:8px;margin-bottom:14px;">
-      <input id="rate-name" list="sched-name-list" placeholder="Agent name" style="flex:1;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:9px 12px;border-radius:8px;font-size:13px;">
-      <input id="rate-value" type="number" step="0.01" min="0" placeholder="0.00" style="width:110px;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:9px 12px;border-radius:8px;font-size:13px;">
-      <button onclick="saveAgentRate()" class="btn btn-primary" style="font-size:12px;">Save</button>
-    </div>
-    <div id="rates-list" style="max-height:320px;overflow-y:auto;"></div>
-    <button onclick="hideModal('rates-modal')" class="btn btn-outline" style="width:100%;margin-top:14px;">Close</button>
   </div>
 </div>
 
@@ -2553,9 +2556,13 @@ async function loadManagerQueueCount(){
 const DOW_NAMES = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
 let recurringCache = [];
 
-function openWeeklyScheduleModal(){
+async function openWeeklyScheduleModal(){
   document.getElementById('wk-name').value = '';
+  document.getElementById('wk-rate').value = '';
+  document.getElementById('wk-rate-eff').value = '';
   renderWeeklyDays(null);
+  await loadRatesCache();
+  renderRateHistory('');
   showModal('weekly-schedule-modal');
 }
 
@@ -2634,9 +2641,10 @@ function applyWeeklyBulk(){
 
 async function loadWeeklyForAgent(){
   const name = document.getElementById('wk-name').value.trim();
-  if(!name){ renderWeeklyDays(null); return; }
+  if(!name){ renderWeeklyDays(null); renderRateHistory(''); return; }
   const existing = recurringCache.filter(r=>r.employee_name.toLowerCase()===name.toLowerCase());
   renderWeeklyDays(existing.length ? existing : null);
+  renderRateHistory(name);
 }
 
 async function saveWeeklySchedule(){
@@ -2678,9 +2686,10 @@ async function loadRecurringList(){
     const res = await API.get('/api/recurring-schedules');
     recurringCache = res.recurring || [];
   }catch(e){ return; }
+  await loadRatesCache();
 
   if(!recurringCache.length){
-    tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;padding:24px;color:var(--text3)">No weekly schedules set. Click "📅 Weekly Schedule" to add one.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;padding:24px;color:var(--text3)">No weekly schedules set. Click "📅 Weekly Schedule" to add one.</td></tr>';
     return;
   }
   // Group by agent
@@ -2699,10 +2708,20 @@ async function loadRecurringList(){
       return `<td style="font-size:11px;white-space:nowrap;">${lines}</td>`;
     }).join('');
     const brk = days.filter(d=>d.active).reduce((a,d)=>a+(d.break_minutes||0),0);
+    const now = new Date();
+    const mine = ratesCache.filter(r=>r.employee_name.toLowerCase()===name.toLowerCase())
+                           .filter(r=>new Date(r.effective_from) <= now)
+                           .sort((a,b)=> new Date(b.effective_from) - new Date(a.effective_from));
+    const future = ratesCache.filter(r=>r.employee_name.toLowerCase()===name.toLowerCase())
+                             .filter(r=>new Date(r.effective_from) > now);
+    const rateCell = mine.length
+      ? `$${parseFloat(mine[0].hourly_rate).toFixed(2)}${future.length?`<span style="font-size:9px;color:var(--accent);display:block;">→$${parseFloat(future[0].hourly_rate).toFixed(2)} soon</span>`:''}`
+      : '<span style="color:var(--red);font-size:10px;">not set</span>';
     return `<tr>
       <td style="font-weight:600;">${name}</td>
       ${cells}
       <td>${brk}m</td>
+      <td style="font-size:11px;">${rateCell}</td>
       <td><button onclick="editWeeklyFor('${name.replace(/'/g,"\\'")}')" style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:11px;">Edit</button></td>
     </tr>`;
   }).join('');
@@ -2898,33 +2917,76 @@ async function loadClockerEmployees(){
 }
 
 // ─── PAYROLL: RATES & OVERTIME PERIODS ────────────────────────────────────────
-async function openRatesModal(){ showModal('rates-modal'); loadRatesList(); }
+let ratesCache = [];
 
-async function loadRatesList(){
-  const box = document.getElementById('rates-list');
-  if(!box) return;
+async function loadRatesCache(){
   try{
     const res = await API.get('/api/agent-rates');
-    const rows = res.rates || [];
-    box.innerHTML = rows.length ? rows.map(r=>`
-      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 10px;border-bottom:1px solid var(--border);">
-        <span style="font-size:13px;">${r.employee_name}</span>
-        <span style="font-size:13px;font-weight:600;color:var(--green);">$${parseFloat(r.hourly_rate).toFixed(2)}/hr</span>
-      </div>`).join('')
-      : '<div style="padding:16px;text-align:center;color:var(--text3);font-size:12px;">No rates set yet.</div>';
-  }catch(e){ box.innerHTML='<div style="color:var(--red);font-size:12px;padding:12px;">Failed to load rates</div>'; }
+    ratesCache = res.rates || [];
+  }catch(e){ ratesCache = []; }
+}
+
+function renderRateHistory(agentName){
+  const box = document.getElementById('wk-rate-history');
+  if(!box) return;
+  if(!agentName){ box.innerHTML=''; return; }
+  const mine = ratesCache
+    .filter(r=>r.employee_name.toLowerCase()===agentName.toLowerCase())
+    .sort((a,b)=> new Date(b.effective_from) - new Date(a.effective_from));
+  if(!mine.length){
+    box.innerHTML = '<div style="font-size:11px;color:var(--red);">No rate set for this agent yet — their pay will calculate as $0.</div>';
+    return;
+  }
+  const now = new Date();
+  box.innerHTML = mine.map((r,i)=>{
+    const eff = new Date(r.effective_from);
+    const isFuture = eff > now;
+    const isCurrent = !isFuture && !mine.slice(0,i).some(x=>new Date(x.effective_from) <= now);
+    const label = eff.getFullYear() <= 2000
+      ? 'from the beginning'
+      : `from ${eff.toLocaleString([], {month:'short',day:'numeric',year:'numeric',hour:'2-digit',minute:'2-digit'})}`;
+    const tag = isCurrent ? '<span style="color:var(--green);font-size:10px;font-weight:700;"> CURRENT</span>'
+              : isFuture ? '<span style="color:var(--accent);font-size:10px;font-weight:700;"> SCHEDULED</span>'
+              : '<span style="color:var(--text3);font-size:10px;"> past</span>';
+    return `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 8px;background:var(--surface2);border-radius:6px;margin-bottom:4px;">
+      <div style="font-size:12px;">
+        <strong>$${parseFloat(r.hourly_rate).toFixed(2)}/hr</strong>${tag}
+        <span style="color:var(--text3);font-size:11px;"> ${label}</span>
+      </div>
+      <button onclick="deleteAgentRate(${r.id})" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:13px;">🗑</button>
+    </div>`;
+  }).join('');
 }
 
 async function saveAgentRate(){
-  const name = document.getElementById('rate-name').value.trim();
-  const rate = document.getElementById('rate-value').value;
-  if(!name || rate===''){ showToast('Enter an agent name and rate', true); return; }
+  const name = document.getElementById('wk-name').value.trim();
+  const rate = document.getElementById('wk-rate').value;
+  const eff = document.getElementById('wk-rate-eff').value;
+  if(!name){ showToast('Enter the agent name first', true); return; }
+  if(rate===''){ showToast('Enter an hourly rate', true); return; }
   try{
-    await API.post('/api/agent-rates', {employee_name:name, hourly_rate:parseFloat(rate)});
-    document.getElementById('rate-name').value='';
-    document.getElementById('rate-value').value='';
-    showToast(`✅ Rate saved for ${name}`);
-    loadRatesList(); loadTimeReport();
+    await API.post('/api/agent-rates', {
+      employee_name: name,
+      hourly_rate: parseFloat(rate),
+      effective_from: eff ? eff+':00' : '2000-01-01T00:00:00',
+    });
+    document.getElementById('wk-rate').value='';
+    document.getElementById('wk-rate-eff').value='';
+    showToast(eff ? `✅ $${rate}/hr effective ${new Date(eff).toLocaleString()}` : `✅ Rate set to $${rate}/hr`);
+    await loadRatesCache();
+    renderRateHistory(name);
+    loadTimeReport();
+  }catch(e){ showToast('Failed: '+e.message, true); }
+}
+
+async function deleteAgentRate(id){
+  if(!confirm('Delete this rate entry? Pay for affected shifts will recalculate.')) return;
+  try{
+    await API.del(`/api/agent-rates/${id}`);
+    await loadRatesCache();
+    renderRateHistory(document.getElementById('wk-name').value.trim());
+    showToast('Rate removed');
+    loadTimeReport();
   }catch(e){ showToast('Failed: '+e.message, true); }
 }
 
