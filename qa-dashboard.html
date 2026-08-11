@@ -702,10 +702,12 @@ td.agent{color:var(--text);font-weight:500;}
   <div class="topbar">
     <div class="page-title">⏰ Time Report</div>
     <div class="topbar-right">
+      <button class="btn btn-outline" onclick="openOtPeriodsModal()">⚡ Overtime Rate</button>
+      <button class="btn btn-outline" onclick="openRatesModal()">💵 Hourly Rates</button>
       <button class="btn btn-outline" onclick="openWeeklyScheduleModal()">📅 Weekly Schedule</button>
       <button class="btn btn-outline" onclick="showModal('add-schedule-modal')">+ One-Off</button>
       <label class="btn btn-primary" style="cursor:pointer;margin:0;">
-        📤 Upload Clocker Report
+        📤 Upload Clocker
         <input type="file" id="clocker-file-input" accept=".xlsx,.xls,.csv" style="display:none;" onchange="handleClockerUpload(event)">
       </label>
     </div>
@@ -737,18 +739,24 @@ td.agent{color:var(--text);font-weight:500;}
       </div>
     </div>
 
+    <div id="ot-active-banner"></div>
+
     <div id="tr-summary" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px;margin-bottom:20px;"></div>
+
+    <div id="tr-payroll-summary" style="margin-bottom:20px;"></div>
 
     <div class="card">
       <div class="card-header"><span class="card-title">Attendance vs Schedule</span><span id="tr-count" style="font-size:11px;color:var(--text3)"></span></div>
       <div style="overflow-x:auto;">
-        <table class="data-table" style="min-width:1100px;">
+        <table class="data-table" style="min-width:1500px;">
           <thead><tr>
             <th>Agent</th><th>Date</th><th>Scheduled</th><th>Actual In</th><th>Actual Out</th>
-            <th>Break</th><th>Gross</th><th>Net</th><th>Variance</th><th>Status</th><th>Issues</th>
+            <th>Break</th><th>Gross</th><th>Net</th><th>Variance</th>
+            <th>Regular</th><th>Overtime</th><th>Rate</th><th>Pay</th>
+            <th>Status</th><th>Issues</th>
           </tr></thead>
           <tbody id="tr-tbody">
-            <tr><td colspan="11" style="text-align:center;padding:32px;color:var(--text3)">Upload a Clocker report and add schedules to see the report.</td></tr>
+            <tr><td colspan="15" style="text-align:center;padding:32px;color:var(--text3)">Upload a Clocker report and add schedules to see the report.</td></tr>
           </tbody>
         </table>
       </div>
@@ -847,6 +855,49 @@ td.agent{color:var(--text);font-weight:500;}
       <button onclick="hideModal('add-schedule-modal')" class="btn btn-outline" style="flex:1;">Cancel</button>
       <button onclick="saveSchedule()" class="btn btn-primary" style="flex:1;">Save Schedule</button>
     </div>
+  </div>
+</div>
+
+<div class="modal" id="rates-modal">
+  <div class="modal-box" style="width:480px;max-width:95vw;">
+    <div style="font-size:16px;font-weight:700;margin-bottom:4px;">💵 Hourly Rates</div>
+    <div style="font-size:11px;color:var(--text3);margin-bottom:14px;">Set each agent's base hourly rate. Overtime is paid at a multiple of this rate.</div>
+    <div style="display:flex;gap:8px;margin-bottom:14px;">
+      <input id="rate-name" list="sched-name-list" placeholder="Agent name" style="flex:1;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:9px 12px;border-radius:8px;font-size:13px;">
+      <input id="rate-value" type="number" step="0.01" min="0" placeholder="0.00" style="width:110px;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:9px 12px;border-radius:8px;font-size:13px;">
+      <button onclick="saveAgentRate()" class="btn btn-primary" style="font-size:12px;">Save</button>
+    </div>
+    <div id="rates-list" style="max-height:320px;overflow-y:auto;"></div>
+    <button onclick="hideModal('rates-modal')" class="btn btn-outline" style="width:100%;margin-top:14px;">Close</button>
+  </div>
+</div>
+
+<div class="modal" id="ot-periods-modal">
+  <div class="modal-box" style="width:560px;max-width:95vw;">
+    <div style="font-size:16px;font-weight:700;margin-bottom:4px;">⚡ Overtime Rate Periods</div>
+    <div style="font-size:11px;color:var(--text3);margin-bottom:14px;">
+      Overtime normally pays <strong>1.5×</strong>. Declare a period below to pay a different multiple (e.g. 2× double pay) — leave the end blank for “until further notice”, then close it when the period ends.
+    </div>
+    <div style="background:var(--surface2);border-radius:10px;padding:12px;margin-bottom:14px;">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;">
+        <div style="flex:1;min-width:150px;">
+          <div style="font-size:11px;color:var(--text3);margin-bottom:4px;">Starts</div>
+          <input id="ot-start" type="datetime-local" style="width:100%;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:7px;border-radius:6px;font-size:12px;">
+        </div>
+        <div style="flex:1;min-width:150px;">
+          <div style="font-size:11px;color:var(--text3);margin-bottom:4px;">Ends (blank = until further notice)</div>
+          <input id="ot-end" type="datetime-local" style="width:100%;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:7px;border-radius:6px;font-size:12px;">
+        </div>
+        <div style="width:90px;">
+          <div style="font-size:11px;color:var(--text3);margin-bottom:4px;">Multiplier</div>
+          <input id="ot-mult" type="number" step="0.25" min="1" value="2" style="width:100%;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:7px;border-radius:6px;font-size:12px;">
+        </div>
+      </div>
+      <input id="ot-note" placeholder="Reason (optional) — e.g. holiday rush" style="width:100%;margin-top:8px;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:7px;border-radius:6px;font-size:12px;box-sizing:border-box;">
+      <button onclick="createOtPeriod()" class="btn btn-primary" style="width:100%;margin-top:10px;font-size:12px;">Declare Rate Period</button>
+    </div>
+    <div id="ot-periods-list" style="max-height:260px;overflow-y:auto;"></div>
+    <button onclick="hideModal('ot-periods-modal')" class="btn btn-outline" style="width:100%;margin-top:14px;">Close</button>
   </div>
 </div>
 
@@ -2512,31 +2563,59 @@ function renderWeeklyDays(existing){
   const wrap = document.getElementById('wk-days');
   if(!wrap) return;
   wrap.innerHTML = DOW_NAMES.map((name, dow)=>{
-    const e = existing ? existing.find(x=>x.day_of_week===dow) : null;
-    const on = e ? e.active : (dow <= 4); // default Mon-Fri on, weekend off
-    return `<div style="display:flex;align-items:center;gap:8px;padding:8px;background:var(--surface2);border-radius:8px;">
-      <label style="display:flex;align-items:center;gap:6px;width:110px;cursor:pointer;flex-shrink:0;">
-        <input type="checkbox" class="wk-day-on" data-dow="${dow}" ${on?'checked':''} onchange="toggleWeeklyDay(${dow})" style="width:15px;height:15px;accent-color:var(--accent);">
-        <span style="font-size:12px;font-weight:600;">${name}</span>
-      </label>
-      <input type="time" class="wk-in" data-dow="${dow}" value="${e?e.scheduled_in_time:'14:00'}" ${on?'':'disabled'} style="flex:1;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:6px;border-radius:6px;font-size:12px;">
-      <span style="font-size:11px;color:var(--text3);">→</span>
-      <input type="time" class="wk-out" data-dow="${dow}" value="${e?e.scheduled_out_time:'00:00'}" ${on?'':'disabled'} style="flex:1;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:6px;border-radius:6px;font-size:12px;">
-      <label style="display:flex;align-items:center;gap:4px;cursor:pointer;flex-shrink:0;" title="Shift ends the next day">
-        <input type="checkbox" class="wk-overnight" data-dow="${dow}" ${(e?e.overnight:true)?'checked':''} ${on?'':'disabled'} style="width:14px;height:14px;accent-color:var(--accent);">
-        <span style="font-size:10px;color:var(--text3);">+1d</span>
-      </label>
-      <input type="number" class="wk-break" data-dow="${dow}" value="${e?e.break_minutes:50}" min="0" title="Break minutes" ${on?'':'disabled'} style="width:60px;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:6px;border-radius:6px;font-size:12px;">
+    const b1 = existing ? existing.find(x=>x.day_of_week===dow && (x.block_no||1)===1) : null;
+    const b2 = existing ? existing.find(x=>x.day_of_week===dow && (x.block_no||1)===2) : null;
+    const on = b1 ? b1.active : (dow <= 4);
+    const split = !!b2;
+    return `<div style="padding:8px;background:var(--surface2);border-radius:8px;">
+      <div style="display:flex;align-items:center;gap:8px;">
+        <label style="display:flex;align-items:center;gap:6px;width:100px;cursor:pointer;flex-shrink:0;">
+          <input type="checkbox" class="wk-day-on" data-dow="${dow}" ${on?'checked':''} onchange="toggleWeeklyDay(${dow})" style="width:15px;height:15px;accent-color:var(--accent);">
+          <span style="font-size:12px;font-weight:600;">${name.slice(0,3)}</span>
+        </label>
+        <input type="time" class="wk-in" data-dow="${dow}" value="${b1?b1.scheduled_in_time:'14:00'}" ${on?'':'disabled'} style="flex:1;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:6px;border-radius:6px;font-size:12px;">
+        <span style="font-size:11px;color:var(--text3);">→</span>
+        <input type="time" class="wk-out" data-dow="${dow}" value="${b1?b1.scheduled_out_time:'00:00'}" ${on?'':'disabled'} style="flex:1;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:6px;border-radius:6px;font-size:12px;">
+        <label style="display:flex;align-items:center;gap:3px;cursor:pointer;flex-shrink:0;" title="Ends next day">
+          <input type="checkbox" class="wk-overnight" data-dow="${dow}" ${(b1?b1.overnight:true)?'checked':''} ${on?'':'disabled'} style="width:14px;height:14px;accent-color:var(--accent);">
+          <span style="font-size:10px;color:var(--text3);">+1d</span>
+        </label>
+        <input type="number" class="wk-break" data-dow="${dow}" value="${b1?b1.break_minutes:50}" min="0" title="Break minutes" ${on?'':'disabled'} style="width:55px;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:6px;border-radius:6px;font-size:12px;">
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;margin-top:6px;padding-left:100px;">
+        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;flex-shrink:0;">
+          <input type="checkbox" class="wk-split" data-dow="${dow}" ${split?'checked':''} ${on?'':'disabled'} onchange="toggleWeeklySplit(${dow})" style="width:14px;height:14px;accent-color:var(--accent);">
+          <span style="font-size:10px;color:var(--text3);">Split shift (2nd block)</span>
+        </label>
+        <input type="time" class="wk-in2" data-dow="${dow}" value="${b2?b2.scheduled_in_time:'19:00'}" ${(on&&split)?'':'disabled'} style="flex:1;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:5px;border-radius:6px;font-size:11px;">
+        <span style="font-size:10px;color:var(--text3);">→</span>
+        <input type="time" class="wk-out2" data-dow="${dow}" value="${b2?b2.scheduled_out_time:'00:00'}" ${(on&&split)?'':'disabled'} style="flex:1;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:5px;border-radius:6px;font-size:11px;">
+        <label style="display:flex;align-items:center;gap:3px;cursor:pointer;flex-shrink:0;" title="Ends next day">
+          <input type="checkbox" class="wk-overnight2" data-dow="${dow}" ${(b2?b2.overnight:false)?'checked':''} ${(on&&split)?'':'disabled'} style="width:13px;height:13px;accent-color:var(--accent);">
+          <span style="font-size:10px;color:var(--text3);">+1d</span>
+        </label>
+        <input type="number" class="wk-break2" data-dow="${dow}" value="${b2?b2.break_minutes:0}" min="0" title="Break minutes" ${(on&&split)?'':'disabled'} style="width:55px;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:5px;border-radius:6px;font-size:11px;">
+      </div>
     </div>`;
   }).join('');
 }
 
+function toggleWeeklySplit(dow){
+  const on = document.querySelector(`.wk-day-on[data-dow="${dow}"]`).checked;
+  const split = document.querySelector(`.wk-split[data-dow="${dow}"]`).checked;
+  ['wk-in2','wk-out2','wk-overnight2','wk-break2'].forEach(cls=>{
+    const el = document.querySelector(`.${cls}[data-dow="${dow}"]`);
+    if(el) el.disabled = !(on && split);
+  });
+}
+
 function toggleWeeklyDay(dow){
   const on = document.querySelector(`.wk-day-on[data-dow="${dow}"]`).checked;
-  ['wk-in','wk-out','wk-overnight','wk-break'].forEach(cls=>{
+  ['wk-in','wk-out','wk-overnight','wk-break','wk-split'].forEach(cls=>{
     const el = document.querySelector(`.${cls}[data-dow="${dow}"]`);
     if(el) el.disabled = !on;
   });
+  toggleWeeklySplit(dow);
 }
 
 function applyWeeklyBulk(){
@@ -2566,14 +2645,23 @@ async function saveWeeklySchedule(){
   const days = [];
   document.querySelectorAll('.wk-day-on').forEach(cb=>{
     const dow = parseInt(cb.dataset.dow);
+    const g = cls => document.querySelector(`.${cls}[data-dow="${dow}"]`);
     days.push({
-      day_of_week: dow,
-      active: cb.checked,
-      scheduled_in_time: document.querySelector(`.wk-in[data-dow="${dow}"]`).value || '09:00',
-      scheduled_out_time: document.querySelector(`.wk-out[data-dow="${dow}"]`).value || '17:00',
-      overnight: document.querySelector(`.wk-overnight[data-dow="${dow}"]`).checked,
-      break_minutes: parseInt(document.querySelector(`.wk-break[data-dow="${dow}"]`).value||'0'),
+      day_of_week: dow, block_no: 1, active: cb.checked,
+      scheduled_in_time: g('wk-in').value || '09:00',
+      scheduled_out_time: g('wk-out').value || '17:00',
+      overnight: g('wk-overnight').checked,
+      break_minutes: parseInt(g('wk-break').value||'0'),
     });
+    if(cb.checked && g('wk-split')?.checked){
+      days.push({
+        day_of_week: dow, block_no: 2, active: true,
+        scheduled_in_time: g('wk-in2').value || '19:00',
+        scheduled_out_time: g('wk-out2').value || '00:00',
+        overnight: g('wk-overnight2').checked,
+        break_minutes: parseInt(g('wk-break2').value||'0'),
+      });
+    }
   });
   try{
     await API.post('/api/recurring-schedules/bulk', {employee_name: name, days});
@@ -2601,12 +2689,16 @@ async function loadRecurringList(){
 
   tbody.innerHTML = Object.entries(byAgent).map(([name, days])=>{
     const cells = [0,1,2,3,4,5,6].map(dow=>{
-      const d = days.find(x=>x.day_of_week===dow);
-      if(!d || !d.active) return '<td style="color:var(--text3);font-size:11px;">off</td>';
-      const on = d.overnight ? '<span style="font-size:9px;color:var(--text3);">+1d</span>' : '';
-      return `<td style="font-size:11px;white-space:nowrap;">${d.scheduled_in_time}–${d.scheduled_out_time} ${on}</td>`;
+      const blocks = days.filter(x=>x.day_of_week===dow && x.active)
+                         .sort((a,b)=>(a.block_no||1)-(b.block_no||1));
+      if(!blocks.length) return '<td style="color:var(--text3);font-size:11px;">off</td>';
+      const lines = blocks.map(d=>{
+        const on = d.overnight ? '<span style="font-size:9px;color:var(--text3);">+1d</span>' : '';
+        return `<div>${d.scheduled_in_time}–${d.scheduled_out_time} ${on}</div>`;
+      }).join('');
+      return `<td style="font-size:11px;white-space:nowrap;">${lines}</td>`;
     }).join('');
-    const brk = days.find(d=>d.active)?.break_minutes ?? 0;
+    const brk = days.filter(d=>d.active).reduce((a,d)=>a+(d.break_minutes||0),0);
     return `<tr>
       <td style="font-weight:600;">${name}</td>
       ${cells}
@@ -2805,6 +2897,98 @@ async function loadClockerEmployees(){
   }catch(e){}
 }
 
+// ─── PAYROLL: RATES & OVERTIME PERIODS ────────────────────────────────────────
+async function openRatesModal(){ showModal('rates-modal'); loadRatesList(); }
+
+async function loadRatesList(){
+  const box = document.getElementById('rates-list');
+  if(!box) return;
+  try{
+    const res = await API.get('/api/agent-rates');
+    const rows = res.rates || [];
+    box.innerHTML = rows.length ? rows.map(r=>`
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 10px;border-bottom:1px solid var(--border);">
+        <span style="font-size:13px;">${r.employee_name}</span>
+        <span style="font-size:13px;font-weight:600;color:var(--green);">$${parseFloat(r.hourly_rate).toFixed(2)}/hr</span>
+      </div>`).join('')
+      : '<div style="padding:16px;text-align:center;color:var(--text3);font-size:12px;">No rates set yet.</div>';
+  }catch(e){ box.innerHTML='<div style="color:var(--red);font-size:12px;padding:12px;">Failed to load rates</div>'; }
+}
+
+async function saveAgentRate(){
+  const name = document.getElementById('rate-name').value.trim();
+  const rate = document.getElementById('rate-value').value;
+  if(!name || rate===''){ showToast('Enter an agent name and rate', true); return; }
+  try{
+    await API.post('/api/agent-rates', {employee_name:name, hourly_rate:parseFloat(rate)});
+    document.getElementById('rate-name').value='';
+    document.getElementById('rate-value').value='';
+    showToast(`✅ Rate saved for ${name}`);
+    loadRatesList(); loadTimeReport();
+  }catch(e){ showToast('Failed: '+e.message, true); }
+}
+
+async function openOtPeriodsModal(){ showModal('ot-periods-modal'); loadOtPeriodsList(); }
+
+async function loadOtPeriodsList(){
+  const box = document.getElementById('ot-periods-list');
+  if(!box) return;
+  try{
+    const res = await API.get('/api/ot-periods');
+    const rows = res.periods || [];
+    const fmt = s => s ? new Date(s).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : null;
+    box.innerHTML = rows.length ? rows.map(p=>{
+      const open = !p.ends_at;
+      return `<div style="padding:10px 12px;border:1px solid ${open?'rgba(245,166,35,0.4)':'var(--border)'};border-radius:8px;margin-bottom:8px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+          <div>
+            <div style="font-size:13px;font-weight:700;color:${open?'var(--yellow)':'var(--text2)'};">${parseFloat(p.multiplier)}× overtime ${open?'· ACTIVE':''}</div>
+            <div style="font-size:11px;color:var(--text3);margin-top:2px;">${fmt(p.starts_at)} → ${open?'until further notice':fmt(p.ends_at)}</div>
+            ${p.note?`<div style="font-size:11px;color:var(--text3);font-style:italic;margin-top:2px;">${p.note}</div>`:''}
+          </div>
+          <div style="display:flex;gap:6px;flex-shrink:0;">
+            ${open?`<button onclick="endOtPeriod(${p.id})" style="background:rgba(245,166,35,0.15);border:1px solid rgba(245,166,35,0.3);color:var(--yellow);font-size:11px;font-weight:600;padding:5px 10px;border-radius:6px;cursor:pointer;">End now</button>`:''}
+            <button onclick="deleteOtPeriod(${p.id})" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:14px;">🗑</button>
+          </div>
+        </div>
+      </div>`;
+    }).join('') : '<div style="padding:16px;text-align:center;color:var(--text3);font-size:12px;">No special periods — overtime pays the standard 1.5×.</div>';
+  }catch(e){ box.innerHTML='<div style="color:var(--red);font-size:12px;padding:12px;">Failed to load</div>'; }
+}
+
+async function createOtPeriod(){
+  const start = document.getElementById('ot-start').value;
+  const end = document.getElementById('ot-end').value;
+  const mult = document.getElementById('ot-mult').value;
+  const note = document.getElementById('ot-note').value.trim();
+  if(!start){ showToast('Pick a start date/time', true); return; }
+  try{
+    await API.post('/api/ot-periods', {starts_at:start+':00', ends_at:end?end+':00':null,
+                                       multiplier:parseFloat(mult||'2'), note});
+    document.getElementById('ot-note').value='';
+    showToast(`✅ ${mult}× overtime declared${end?'':' — until further notice'}`);
+    loadOtPeriodsList(); loadTimeReport();
+  }catch(e){ showToast('Failed: '+e.message, true); }
+}
+
+async function endOtPeriod(id){
+  if(!confirm('End this overtime rate period now? Overtime returns to the standard 1.5× from this moment.')) return;
+  try{
+    await API.post(`/api/ot-periods/${id}/end`, {});
+    showToast('Period ended — overtime back to 1.5×');
+    loadOtPeriodsList(); loadTimeReport();
+  }catch(e){ showToast('Failed: '+e.message, true); }
+}
+
+async function deleteOtPeriod(id){
+  if(!confirm('Delete this period entirely? Past pay calculations will change.')) return;
+  try{
+    await API.del(`/api/ot-periods/${id}`);
+    showToast('Period deleted');
+    loadOtPeriodsList(); loadTimeReport();
+  }catch(e){ showToast('Failed: '+e.message, true); }
+}
+
 async function loadTimeReport(){
   const from = document.getElementById('tr-date-from')?.value || '';
   const to = document.getElementById('tr-date-to')?.value || '';
@@ -2824,22 +3008,78 @@ async function loadTimeReport(){
     const rows = res.report || [];
     document.getElementById('tr-count').textContent = `${rows.length} shift(s)`;
 
+    // Banner when a special overtime rate is currently in force
+    const banner = document.getElementById('ot-active-banner');
+    const active = res.active_ot_periods || [];
+    if(banner){
+      banner.innerHTML = active.length ? active.map(p=>`
+        <div style="background:rgba(245,166,35,0.15);border:1px solid rgba(245,166,35,0.45);border-radius:10px;padding:12px 16px;margin-bottom:16px;display:flex;align-items:center;gap:12px;">
+          <span style="font-size:20px;">⚡</span>
+          <div style="flex:1;">
+            <div style="font-size:14px;font-weight:700;color:var(--yellow);">${p.multiplier}× OVERTIME IN EFFECT${p.ends_at?'':' — until further notice'}</div>
+            <div style="font-size:11px;color:var(--text2);margin-top:2px;">
+              Since ${new Date(p.starts_at).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})}
+              ${p.ends_at?` until ${new Date(p.ends_at).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})}`:''}
+              ${p.note?` · ${p.note}`:''}
+            </div>
+          </div>
+          <button onclick="endOtPeriod(${p.id})" style="background:var(--surface);border:1px solid rgba(245,166,35,0.4);color:var(--yellow);font-size:11px;font-weight:600;padding:6px 12px;border-radius:6px;cursor:pointer;flex-shrink:0;">End now</button>
+        </div>`).join('') : '';
+    }
+
     // Summary tiles
     const okCount = rows.filter(r=>r.status==='OK').length;
     const varCount = rows.filter(r=>r.status==='Variance').length;
     const noShow = rows.filter(r=>r.status==='No Show').length;
     const unsched = rows.filter(r=>r.status==='Unscheduled').length;
-    const totalNet = rows.reduce((a,r)=>a+(r.net_hours||0),0);
+    const t = res.totals || {};
     document.getElementById('tr-summary').innerHTML = `
       ${trTile('On Schedule', okCount, 'var(--green)')}
       ${trTile('With Variance', varCount, 'var(--yellow)')}
       ${trTile('No Show', noShow, 'var(--red)')}
       ${trTile('Unscheduled', unsched, 'var(--text3)')}
-      ${trTile('Total Net Hours', totalNet.toFixed(1)+'h', 'var(--accent)')}
+      ${trTile('Regular Hours', (t.regular_hours||0).toFixed(1)+'h', 'var(--accent)')}
+      ${trTile('Overtime Hours', (t.overtime_hours||0).toFixed(1)+'h', 'var(--yellow)')}
+      ${trTile('Total Payroll', '$'+(t.total_pay||0).toFixed(2), 'var(--green)')}
     `;
 
+    // Per-agent payroll breakdown
+    const pa = res.per_agent || [];
+    const ps = document.getElementById('tr-payroll-summary');
+    if(ps){
+      ps.innerHTML = pa.length ? `
+        <div class="card">
+          <div class="card-header"><span class="card-title">💵 Payroll by Agent</span>
+            <span style="font-size:11px;color:var(--text3)">Overtime standard ${res.default_ot_multiplier}× · anything outside scheduled hours</span></div>
+          <div style="overflow-x:auto;">
+            <table class="data-table">
+              <thead><tr><th>Agent</th><th>Rate</th><th>Regular Hrs</th><th>Regular Pay</th><th>OT Hrs</th><th>OT Breakdown</th><th>OT Pay</th><th>Total Pay</th></tr></thead>
+              <tbody>${pa.map(a=>`<tr>
+                <td style="font-weight:600;">${a.employee_name}</td>
+                <td>${a.hourly_rate?'$'+a.hourly_rate.toFixed(2):'<span style="color:var(--red);font-size:11px;">no rate set</span>'}</td>
+                <td>${a.regular_hours.toFixed(2)}h</td>
+                <td>$${a.regular_pay.toFixed(2)}</td>
+                <td style="color:${a.overtime_hours>0?'var(--yellow)':'var(--text3)'};font-weight:600;">${a.overtime_hours.toFixed(2)}h</td>
+                <td style="font-size:11px;color:var(--text3);">${Object.entries(a.ot_breakdown||{}).map(([m,h])=>`${h}h @${m}×`).join(', ')||'—'}</td>
+                <td style="color:${a.overtime_pay>0?'var(--yellow)':'var(--text3)'};">$${a.overtime_pay.toFixed(2)}</td>
+                <td style="font-weight:700;color:var(--green);">$${a.total_pay.toFixed(2)}</td>
+              </tr>`).join('')}
+              <tr style="border-top:2px solid var(--border);">
+                <td colspan="2" style="font-weight:700;">TOTAL</td>
+                <td style="font-weight:700;">${(t.regular_hours||0).toFixed(2)}h</td>
+                <td style="font-weight:700;">$${(t.regular_pay||0).toFixed(2)}</td>
+                <td style="font-weight:700;color:var(--yellow);">${(t.overtime_hours||0).toFixed(2)}h</td>
+                <td></td>
+                <td style="font-weight:700;color:var(--yellow);">$${(t.overtime_pay||0).toFixed(2)}</td>
+                <td style="font-weight:700;color:var(--green);font-size:14px;">$${(t.total_pay||0).toFixed(2)}</td>
+              </tr></tbody>
+            </table>
+          </div>
+        </div>` : '';
+    }
+
     if(!rows.length){
-      tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;padding:32px;color:var(--text3)">No data for this range. Add schedules and upload a Clocker report.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="15" style="text-align:center;padding:32px;color:var(--text3)">No data for this range. Add schedules and upload a Clocker report.</td></tr>';
       return;
     }
 
@@ -2851,9 +3091,10 @@ async function loadTimeReport(){
       const varColor = r.net_variance == null ? 'var(--text3)' : (r.net_variance < -0.1 ? 'var(--red)' : r.net_variance > 0.1 ? 'var(--green)' : 'var(--text2)');
       const lateTag = r.late_minutes != null && Math.abs(r.late_minutes) > 0
         ? `<span style="font-size:10px;color:${r.late_minutes>5?'var(--red)':'var(--text3)'};display:block;">${r.late_minutes>0?'+':''}${r.late_minutes}m</span>` : '';
+      const otBreak = Object.entries(r.ot_breakdown||{}).map(([m,h])=>`${h}h@${m}×`).join(' ');
       return `<tr>
         <td style="font-weight:600;">${r.employee_name}</td>
-        <td style="white-space:nowrap;">${r.shift_date}</td>
+        <td style="white-space:nowrap;">${r.shift_date}${r.block_no>1?`<span style="font-size:10px;color:var(--accent);display:block;">block ${r.block_no}</span>`:''}</td>
         <td style="white-space:nowrap;font-size:11px;color:var(--text3);">${fmtSched(r)}${r.break_allowed!=null?`<span style="display:block;">${r.break_allowed}m brk ${r.from_recurring?'<span title="From weekly schedule">🔁</span>':''}</span>`:''}</td>
         <td style="white-space:nowrap;">${fmtT(r.actual_in)}${lateTag}</td>
         <td style="white-space:nowrap;">${fmtT(r.actual_out)}</td>
@@ -2861,12 +3102,16 @@ async function loadTimeReport(){
         <td>${r.gross_hours!=null?r.gross_hours.toFixed(2)+'h':'—'}${r.segment_count>1?`<span style="font-size:10px;color:var(--text3);display:block;">${r.segment_count} sessions</span>`:''}</td>
         <td style="font-weight:600;">${r.net_hours!=null?r.net_hours.toFixed(2)+'h':'—'}</td>
         <td style="color:${varColor};font-weight:600;">${r.net_variance!=null?(r.net_variance>0?'+':'')+r.net_variance.toFixed(2)+'h':'—'}</td>
+        <td>${(r.regular_hours||0).toFixed(2)}h</td>
+        <td style="color:${r.overtime_hours>0?'var(--yellow)':'var(--text3)'};font-weight:${r.overtime_hours>0?'600':'400'};">${(r.overtime_hours||0).toFixed(2)}h${otBreak?`<span style="font-size:10px;display:block;">${otBreak}</span>`:''}</td>
+        <td style="font-size:11px;">${r.hourly_rate?'$'+r.hourly_rate.toFixed(2):'—'}</td>
+        <td style="font-weight:700;color:var(--green);">${r.total_pay?'$'+r.total_pay.toFixed(2):'—'}</td>
         <td><span class="badge ${statusBadgeCls(r.status)}">${r.status}</span></td>
         <td style="font-size:11px;color:var(--text3);max-width:220px;">${(r.issues||[]).join('; ')||'—'}</td>
       </tr>`;
     }).join('');
   }catch(e){
-    tbody.innerHTML = `<tr><td colspan="11" style="text-align:center;padding:24px;color:var(--red)">Failed to load: ${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="15" style="text-align:center;padding:24px;color:var(--red)">Failed to load: ${e.message}</td></tr>`;
   }
   loadSchedulesList();
   loadRecurringList();

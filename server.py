@@ -4,7 +4,7 @@ import hashlib
 import os
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -276,6 +276,27 @@ def init_db():
     ''')
 
     c.execute('''
+        CREATE TABLE IF NOT EXISTS agent_rates (
+            id SERIAL PRIMARY KEY,
+            employee_name TEXT NOT NULL UNIQUE,
+            hourly_rate NUMERIC(10,2) NOT NULL DEFAULT 0,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS ot_multiplier_periods (
+            id SERIAL PRIMARY KEY,
+            starts_at TIMESTAMP NOT NULL,
+            ends_at TIMESTAMP,
+            multiplier NUMERIC(4,2) NOT NULL DEFAULT 2.0,
+            note TEXT,
+            created_by INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    c.execute('''
         CREATE TABLE IF NOT EXISTS recurring_schedules (
             id SERIAL PRIMARY KEY,
             employee_name TEXT NOT NULL,
@@ -285,8 +306,9 @@ def init_db():
             overnight BOOLEAN DEFAULT FALSE,
             break_minutes INTEGER DEFAULT 0,
             active BOOLEAN DEFAULT TRUE,
+            block_no INTEGER DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(employee_name, day_of_week)
+            UNIQUE(employee_name, day_of_week, block_no)
         )
     ''')
 
@@ -299,8 +321,9 @@ def init_db():
             scheduled_out TIMESTAMP NOT NULL,
             break_minutes INTEGER DEFAULT 0,
             notes TEXT,
+            block_no INTEGER DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(employee_name, shift_date)
+            UNIQUE(employee_name, shift_date, block_no)
         )
     ''')
 
@@ -403,6 +426,14 @@ def init_db():
         "ALTER TABLE calls ADD COLUMN IF NOT EXISTS error_message TEXT",
         "CREATE UNIQUE INDEX IF NOT EXISTS agents_name_unique ON agents (name)",
         "ALTER TABLE agents ADD COLUMN IF NOT EXISTS assigned_qa_user_id INTEGER",
+        # ── Split-shift support: an agent can have more than one scheduled block per day
+        # (e.g. 7am-12pm and 7pm-12am). block_no distinguishes them.
+        "ALTER TABLE agent_schedules ADD COLUMN IF NOT EXISTS block_no INTEGER DEFAULT 1",
+        "ALTER TABLE recurring_schedules ADD COLUMN IF NOT EXISTS block_no INTEGER DEFAULT 1",
+        "ALTER TABLE agent_schedules DROP CONSTRAINT IF EXISTS agent_schedules_employee_name_shift_date_key",
+        "ALTER TABLE recurring_schedules DROP CONSTRAINT IF EXISTS recurring_schedules_employee_name_day_of_week_key",
+        "CREATE UNIQUE INDEX IF NOT EXISTS agent_sched_unique ON agent_schedules (employee_name, shift_date, block_no)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS recurring_sched_unique ON recurring_schedules (employee_name, day_of_week, block_no)",
         """CREATE TABLE IF NOT EXISTS auth_tokens (
             token TEXT PRIMARY KEY,
             user_id INTEGER,
@@ -2628,6 +2659,182 @@ def _build_shifts_from_events(events):
         shifts.append(cur)  # still clocked in
     return shifts
 
+DEFAULT_OT_MULTIPLIER = 1.5
+
+def _subtract_intervals(base, subs):
+    """base: (start,end). subs: list of (start,end). Returns list of remaining intervals."""
+    result = [base]
+    for s_start, s_end in subs:
+        nxt = []
+        for b_start, b_end in result:
+            if s_end <= b_start or s_start >= b_end:
+                nxt.append((b_start, b_end)); continue
+            if s_start > b_start: nxt.append((b_start, s_start))
+            if s_end < b_end: nxt.append((s_end, b_end))
+        result = nxt
+    return result
+
+def _overlap_seconds(a, b):
+    """Seconds of overlap between two (start,end) intervals."""
+    start = max(a[0], b[0]); end = min(a[1], b[1])
+    return max(0, (end - start).total_seconds())
+
+def _clip(interval, window):
+    """Portion of `interval` inside `window`, or None."""
+    start = max(interval[0], window[0]); end = min(interval[1], window[1])
+    return (start, end) if end > start else None
+
+def _ot_multiplier_for(interval, periods):
+    """
+    Splits an overtime interval by the manager-declared multiplier periods.
+    Returns list of (seconds, multiplier). Time not inside any declared period
+    uses DEFAULT_OT_MULTIPLIER.
+    """
+    pieces = []
+    remaining = [interval]
+    for p in periods:
+        p_start = p['starts_at']
+        p_end = p['ends_at'] or interval[1]  # open-ended = "until further notice"
+        nxt = []
+        for r in remaining:
+            inside = _clip(r, (p_start, p_end))
+            if inside:
+                pieces.append(((inside[1]-inside[0]).total_seconds(), float(p['multiplier'])))
+                nxt.extend(_subtract_intervals(r, [inside]))
+            else:
+                nxt.append(r)
+        remaining = nxt
+    for r in remaining:
+        secs = (r[1]-r[0]).total_seconds()
+        if secs > 0:
+            pieces.append((secs, DEFAULT_OT_MULTIPLIER))
+    return pieces
+
+def _compute_pay(segments, sched_window, rate, ot_periods):
+    """
+    Splits actual worked time into regular vs overtime and prices it.
+    sched_window: (sched_in, sched_out) or None for unscheduled work (all overtime).
+    Returns dict with hours and dollar amounts.
+    """
+    worked = []
+    for seg in segments:
+        if not seg['logout']:
+            continue
+        breaks = []
+        for b in seg['breaks']:
+            b_start = b.get('start')
+            mins = float(b.get('minutes') or 0)
+            if b_start and mins > 0:
+                breaks.append((b_start, b_start + timedelta(minutes=mins)))
+        worked.extend(_subtract_intervals((seg['login'], seg['logout']), breaks))
+
+    reg_secs = 0.0
+    ot_pieces = []
+    for w in worked:
+        if sched_window:
+            inside = _clip(w, sched_window)
+            if inside:
+                reg_secs += (inside[1]-inside[0]).total_seconds()
+            for out in _subtract_intervals(w, [inside] if inside else []):
+                if (out[1]-out[0]).total_seconds() > 0:
+                    ot_pieces.extend(_ot_multiplier_for(out, ot_periods))
+        else:
+            ot_pieces.extend(_ot_multiplier_for(w, ot_periods))
+
+    ot_secs = sum(s for s, _ in ot_pieces)
+    rate = float(rate or 0)
+    reg_hours = reg_secs/3600
+    ot_hours = ot_secs/3600
+    ot_pay = sum((s/3600) * rate * m for s, m in ot_pieces)
+
+    # Breakdown of overtime by multiplier, for transparency in the UI
+    by_mult = {}
+    for s, m in ot_pieces:
+        by_mult[m] = by_mult.get(m, 0) + s/3600
+
+    return {
+        'regular_hours': round(reg_hours, 2),
+        'overtime_hours': round(ot_hours, 2),
+        'regular_pay': round(reg_hours * rate, 2),
+        'overtime_pay': round(ot_pay, 2),
+        'total_pay': round(reg_hours * rate + ot_pay, 2),
+        'ot_breakdown': {str(k): round(v, 2) for k, v in sorted(by_mult.items())},
+        'hourly_rate': rate,
+    }
+
+@app.route('/api/agent-rates', methods=['GET'])
+@require_manager
+def get_agent_rates():
+    conn = get_db(); c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('SELECT * FROM agent_rates ORDER BY employee_name')
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return jsonify({'rates': rows})
+
+@app.route('/api/agent-rates', methods=['POST'])
+@require_manager
+def save_agent_rate():
+    d = request.json or {}
+    name = (d.get('employee_name') or '').strip()
+    rate = d.get('hourly_rate')
+    if not name or rate is None:
+        return jsonify({'error': 'employee_name and hourly_rate required'}), 400
+    conn = get_db(); c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('''INSERT INTO agent_rates (employee_name, hourly_rate, updated_at)
+                 VALUES (%s,%s,CURRENT_TIMESTAMP)
+                 ON CONFLICT (employee_name) DO UPDATE SET
+                   hourly_rate=EXCLUDED.hourly_rate, updated_at=CURRENT_TIMESTAMP
+                 RETURNING *''', (name, float(rate)))
+    row = dict(c.fetchone()); conn.commit(); conn.close()
+    return jsonify(row)
+
+@app.route('/api/ot-periods', methods=['GET'])
+@require_manager
+def get_ot_periods():
+    conn = get_db(); c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('SELECT * FROM ot_multiplier_periods ORDER BY starts_at DESC')
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return jsonify({'periods': rows, 'default_multiplier': DEFAULT_OT_MULTIPLIER})
+
+@app.route('/api/ot-periods', methods=['POST'])
+@require_manager
+def create_ot_period():
+    """Declare a special overtime rate. ends_at null = 'until further notice'."""
+    user = current_user()
+    d = request.json or {}
+    starts_at = d.get('starts_at')
+    if not starts_at:
+        return jsonify({'error': 'starts_at required'}), 400
+    conn = get_db(); c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('''INSERT INTO ot_multiplier_periods (starts_at, ends_at, multiplier, note, created_by)
+                 VALUES (%s,%s,%s,%s,%s) RETURNING *''',
+              (starts_at, d.get('ends_at') or None, float(d.get('multiplier') or 2.0),
+               d.get('note',''), user.get('id') if user else None))
+    row = dict(c.fetchone()); conn.commit(); conn.close()
+    return jsonify(row)
+
+@app.route('/api/ot-periods/<int:pid>/end', methods=['POST'])
+@require_manager
+def end_ot_period(pid):
+    """Close an open-ended special rate ('further notice' has arrived)."""
+    d = request.json or {}
+    ends_at = d.get('ends_at') or datetime.now().isoformat(timespec='seconds')
+    conn = get_db(); c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('UPDATE ot_multiplier_periods SET ends_at=%s WHERE id=%s RETURNING *', (ends_at, pid))
+    row = c.fetchone()
+    conn.commit(); conn.close()
+    if not row: return jsonify({'error': 'Not found'}), 404
+    return jsonify(dict(row))
+
+@app.route('/api/ot-periods/<int:pid>', methods=['DELETE'])
+@require_manager
+def delete_ot_period(pid):
+    conn = get_db(); c = conn.cursor()
+    c.execute('DELETE FROM ot_multiplier_periods WHERE id=%s', (pid,))
+    conn.commit(); conn.close()
+    return jsonify({'success': True})
+
 @app.route('/api/recurring-schedules', methods=['GET'])
 @require_manager
 def get_recurring_schedules():
@@ -2686,17 +2893,14 @@ def save_recurring_bulk():
     if not name or not days:
         return jsonify({'error': 'employee_name and days required'}), 400
     conn = get_db(); c = conn.cursor()
+    # Replace this agent's whole weekly pattern so removed blocks disappear
+    c.execute('DELETE FROM recurring_schedules WHERE employee_name=%s', (name,))
     for day in days:
         c.execute('''INSERT INTO recurring_schedules
-                     (employee_name, day_of_week, scheduled_in_time, scheduled_out_time, overnight, break_minutes, active)
-                     VALUES (%s,%s,%s,%s,%s,%s,%s)
-                     ON CONFLICT (employee_name, day_of_week) DO UPDATE SET
-                       scheduled_in_time=EXCLUDED.scheduled_in_time,
-                       scheduled_out_time=EXCLUDED.scheduled_out_time,
-                       overnight=EXCLUDED.overnight,
-                       break_minutes=EXCLUDED.break_minutes,
-                       active=EXCLUDED.active''',
-                  (name, int(day.get('day_of_week')), day.get('scheduled_in_time','09:00'),
+                     (employee_name, day_of_week, block_no, scheduled_in_time, scheduled_out_time, overnight, break_minutes, active)
+                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s)''',
+                  (name, int(day.get('day_of_week')), int(day.get('block_no') or 1),
+                   day.get('scheduled_in_time','09:00'),
                    day.get('scheduled_out_time','17:00'), bool(day.get('overnight', False)),
                    int(day.get('break_minutes') or 0), bool(day.get('active', True))))
     conn.commit(); conn.close()
@@ -2731,7 +2935,7 @@ def _resolve_schedules(date_from, date_to, employee=''):
     if swhere: sq += ' WHERE ' + ' AND '.join(swhere)
     c.execute(sq, sparams)
     specific = [dict(r) for r in c.fetchall()]
-    override_keys = {(s['employee_name'], str(s['shift_date'])) for s in specific}
+    override_keys = {(s['employee_name'], str(s['shift_date']), s.get('block_no') or 1) for s in specific}
 
     # Recurring weekly patterns
     rq = 'SELECT * FROM recurring_schedules WHERE active = TRUE'
@@ -2754,8 +2958,9 @@ def _resolve_schedules(date_from, date_to, employee=''):
         while cur <= end:
             dow = cur.weekday()  # Monday=0 .. Sunday=6
             for r in by_dow.get(dow, []):
-                if (r['employee_name'], str(cur)) in override_keys:
-                    continue  # a specific entry for that date wins
+                blk = r.get('block_no') or 1
+                if (r['employee_name'], str(cur), blk) in override_keys:
+                    continue  # a specific entry for that date+block wins
                 in_h, in_m = [int(x) for x in str(r['scheduled_in_time']).split(':')[:2]]
                 out_h, out_m = [int(x) for x in str(r['scheduled_out_time']).split(':')[:2]]
                 sched_in = _dt.combine(cur, _dt.min.time()).replace(hour=in_h, minute=in_m)
@@ -2765,6 +2970,7 @@ def _resolve_schedules(date_from, date_to, employee=''):
                     'id': None,
                     'employee_name': r['employee_name'],
                     'shift_date': cur,
+                    'block_no': blk,
                     'scheduled_in': sched_in,
                     'scheduled_out': sched_out,
                     'break_minutes': r['break_minutes'] or 0,
@@ -2809,13 +3015,14 @@ def save_schedule():
         return jsonify({'error': 'employee_name, shift_date, scheduled_in and scheduled_out are required'}), 400
     conn = get_db()
     c = conn.cursor(cursor_factory=RealDictCursor)
-    c.execute('''INSERT INTO agent_schedules (employee_name, shift_date, scheduled_in, scheduled_out, break_minutes, notes)
-                 VALUES (%s,%s,%s,%s,%s,%s)
-                 ON CONFLICT (employee_name, shift_date) DO UPDATE SET
+    block_no = int(d.get('block_no') or 1)
+    c.execute('''INSERT INTO agent_schedules (employee_name, shift_date, block_no, scheduled_in, scheduled_out, break_minutes, notes)
+                 VALUES (%s,%s,%s,%s,%s,%s,%s)
+                 ON CONFLICT (employee_name, shift_date, block_no) DO UPDATE SET
                    scheduled_in=EXCLUDED.scheduled_in, scheduled_out=EXCLUDED.scheduled_out,
                    break_minutes=EXCLUDED.break_minutes, notes=EXCLUDED.notes
                  RETURNING *''',
-              (name, shift_date, sched_in, sched_out, break_min, d.get('notes','')))
+              (name, shift_date, block_no, sched_in, sched_out, break_min, d.get('notes','')))
     row = dict(c.fetchone())
     conn.commit(); conn.close()
     return jsonify(row)
@@ -2884,6 +3091,12 @@ def time_report():
 
     # Pull schedules for the window — specific dates plus expanded recurring patterns
     schedules = _resolve_schedules(date_from, date_to, employee)
+
+    # Pay rates and any manager-declared special overtime periods
+    c.execute('SELECT employee_name, hourly_rate FROM agent_rates')
+    rates = {r['employee_name']: float(r['hourly_rate']) for r in c.fetchall()}
+    c.execute('SELECT * FROM ot_multiplier_periods ORDER BY starts_at')
+    ot_periods = [dict(r) for r in c.fetchall()]
     conn.close()
 
     # Group events per employee and reconstruct shifts
@@ -2895,22 +3108,39 @@ def time_report():
     rows = []
     matched_shift_keys = set()
 
+    # Pre-assign each worked segment to exactly ONE scheduled block — the block whose
+    # start time it's closest to. This keeps split shifts (e.g. 7am-12pm and 7pm-12am)
+    # from stealing each other's segments, while still letting several segments of the
+    # same block merge together (mid-shift logout and re-login).
+    MAX_ASSIGN_HOURS = 6
+    assignment = {}  # id(segment) -> schedule key
+    for name, segs in shifts_by_emp.items():
+        emp_scheds = [s for s in schedules if s['employee_name'] == name]
+        for seg in segs:
+            best_key, best_delta = None, None
+            for s in emp_scheds:
+                sched_in, sched_out = s['scheduled_in'], s['scheduled_out']
+                # Distance to the block: 0 if the login falls inside the block
+                if sched_in <= seg['login'] <= sched_out:
+                    delta = 0
+                else:
+                    delta = min(abs((seg['login'] - sched_in).total_seconds()),
+                                abs((seg['login'] - sched_out).total_seconds()))
+                if delta <= MAX_ASSIGN_HOURS*3600 and (best_delta is None or delta < best_delta):
+                    best_delta = delta
+                    best_key = (name, str(s['shift_date']), s.get('block_no') or 1)
+            if best_key:
+                assignment[id(seg)] = best_key
+
     # 1) Every scheduled shift — matched against actual
     for s in schedules:
         name = s['employee_name']
         sched_in, sched_out = s['scheduled_in'], s['scheduled_out']
         break_allowed = s['break_minutes'] or 0
-        # Collect ALL shift segments that belong to this scheduled window.
-        # An agent may log out mid-shift and log back in later the same shift —
-        # those segments must merge into ONE shift, with the gap counted as a
-        # mid-shift absence rather than an early exit.
-        WINDOW_PAD = _td(hours=4)
-        win_start = sched_in - WINDOW_PAD
-        win_end = sched_out + WINDOW_PAD
-        segments = []
-        for sh in shifts_by_emp.get(name, []):
-            if win_start <= sh['login'] <= win_end:
-                segments.append(sh)
+        sched_key = (name, str(s['shift_date']), s.get('block_no') or 1)
+
+        segments = [seg for seg in shifts_by_emp.get(name, [])
+                    if assignment.get(id(seg)) == sched_key]
         segments.sort(key=lambda x: x['login'])
         best = segments[0] if segments else None
 
@@ -2921,6 +3151,7 @@ def time_report():
             'scheduled_in': sched_in.isoformat(),
             'scheduled_out': sched_out.isoformat(),
             'break_allowed': break_allowed,
+            'block_no': s.get('block_no') or 1,
             'from_recurring': s.get('from_recurring', False),
             'scheduled_net_hours': round(((sched_out - sched_in).total_seconds()/3600) - break_allowed/60, 2),
         }
@@ -2930,6 +3161,9 @@ def time_report():
                         'break_taken': 0, 'break_count': 0, 'gross_hours': None,
                         'net_hours': None, 'late_minutes': None, 'early_out_minutes': None,
                         'net_variance': None, 'away_minutes': 0, 'segment_count': 0,
+                        'regular_hours': 0, 'overtime_hours': 0, 'regular_pay': 0,
+                        'overtime_pay': 0, 'total_pay': 0, 'ot_breakdown': {},
+                        'hourly_rate': rates.get(name, 0),
                         'issues': ['No clock-in found for this scheduled shift']})
             rows.append(row); continue
 
@@ -2980,6 +3214,11 @@ def time_report():
         if any(seg.get('partial') for seg in segments):
             issues.append('Login not captured in uploaded report')
 
+        pay = _compute_pay(segments, (sched_in, sched_out), rates.get(name, 0), ot_periods)
+        if pay['overtime_hours'] > 0:
+            mults = ', '.join(f"{h}h @{m}x" for m, h in pay['ot_breakdown'].items())
+            issues.append(f"Overtime {pay['overtime_hours']}h ({mults})")
+
         row.update({
             'status': 'OK' if not issues else 'Variance',
             'actual_in': login.isoformat(),
@@ -2994,6 +3233,7 @@ def time_report():
             'early_out_minutes': round(early_out_min) if early_out_min is not None else None,
             'net_variance': round(net - row['scheduled_net_hours'],2) if net is not None else None,
             'issues': issues,
+            **pay,
         })
         rows.append(row)
 
@@ -3011,21 +3251,73 @@ def time_report():
             if sh['logout']:
                 gross = (sh['logout'] - sh['login']).total_seconds()/3600
                 net = gross - break_taken/60
+            # Unscheduled work is entirely overtime by policy
+            unsched_pay = _compute_pay([sh], None, rates.get(name, 0), ot_periods)
+            unsched_issues = ['No schedule entered for this shift'] + (['Never clocked out'] if not sh['logout'] else [])
+            if unsched_pay['overtime_hours'] > 0:
+                mults = ', '.join(f"{h}h @{m}x" for m, h in unsched_pay['ot_breakdown'].items())
+                unsched_issues.append(f"All overtime — {unsched_pay['overtime_hours']}h ({mults})")
             rows.append({
                 'employee_name': name, 'shift_date': str(d),
                 'scheduled_in': None, 'scheduled_out': None, 'break_allowed': None,
+                'block_no': 1, 'from_recurring': False,
                 'scheduled_net_hours': None, 'status': 'Unscheduled',
                 'actual_in': sh['login'].isoformat(),
                 'actual_out': sh['logout'].isoformat() if sh['logout'] else None,
                 'break_taken': round(break_taken), 'break_count': len(sh['breaks']),
+                'away_minutes': 0, 'segment_count': 1,
                 'gross_hours': round(gross,2) if gross is not None else None,
                 'net_hours': round(net,2) if net is not None else None,
                 'late_minutes': None, 'early_out_minutes': None, 'net_variance': None,
-                'issues': ['No schedule entered for this shift'] + (['Never clocked out'] if not sh['logout'] else []),
+                'issues': unsched_issues,
+                **unsched_pay,
             })
 
     rows.sort(key=lambda r: (r['shift_date'], r['employee_name']), reverse=True)
-    return jsonify({'report': rows, 'count': len(rows)})
+
+    # Payroll totals for the whole range, and per agent
+    totals = {
+        'regular_hours': round(sum(r.get('regular_hours') or 0 for r in rows), 2),
+        'overtime_hours': round(sum(r.get('overtime_hours') or 0 for r in rows), 2),
+        'regular_pay': round(sum(r.get('regular_pay') or 0 for r in rows), 2),
+        'overtime_pay': round(sum(r.get('overtime_pay') or 0 for r in rows), 2),
+        'total_pay': round(sum(r.get('total_pay') or 0 for r in rows), 2),
+    }
+    per_agent = {}
+    for r in rows:
+        a = per_agent.setdefault(r['employee_name'], {
+            'employee_name': r['employee_name'], 'hourly_rate': r.get('hourly_rate', 0),
+            'regular_hours': 0, 'overtime_hours': 0, 'regular_pay': 0,
+            'overtime_pay': 0, 'total_pay': 0, 'ot_breakdown': {},
+        })
+        a['regular_hours'] += r.get('regular_hours') or 0
+        a['overtime_hours'] += r.get('overtime_hours') or 0
+        a['regular_pay'] += r.get('regular_pay') or 0
+        a['overtime_pay'] += r.get('overtime_pay') or 0
+        a['total_pay'] += r.get('total_pay') or 0
+        for m, h in (r.get('ot_breakdown') or {}).items():
+            a['ot_breakdown'][m] = round(a['ot_breakdown'].get(m, 0) + h, 2)
+    for a in per_agent.values():
+        for k in ('regular_hours','overtime_hours','regular_pay','overtime_pay','total_pay'):
+            a[k] = round(a[k], 2)
+
+    # Any special overtime rate currently in force
+    now = datetime.now()
+    active_ot = [p for p in ot_periods if p['starts_at'] <= now and (p['ends_at'] is None or p['ends_at'] >= now)]
+
+    return jsonify({
+        'report': rows, 'count': len(rows),
+        'totals': totals,
+        'per_agent': sorted(per_agent.values(), key=lambda x: x['employee_name']),
+        'default_ot_multiplier': DEFAULT_OT_MULTIPLIER,
+        'active_ot_periods': [
+            {'id': p['id'], 'multiplier': float(p['multiplier']),
+             'starts_at': p['starts_at'].isoformat(),
+             'ends_at': p['ends_at'].isoformat() if p['ends_at'] else None,
+             'note': p.get('note','')}
+            for p in active_ot
+        ],
+    })
 
 @app.route('/api/clocker-employees', methods=['GET'])
 @require_manager
