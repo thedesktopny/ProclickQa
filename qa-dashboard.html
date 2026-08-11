@@ -3111,7 +3111,11 @@ async function loadTimeReport(){
       </tr>`;
     }).join('');
   }catch(e){
-    tbody.innerHTML = `<tr><td colspan="15" style="text-align:center;padding:24px;color:var(--red)">Failed to load: ${e.message}</td></tr>`;
+    let msg = e.message || 'unknown error';
+    if(msg.includes('<') || msg.includes('doctype') || msg.includes('JSON')){
+      msg = 'Server error building the report — the page may also need a hard refresh (Ctrl+Shift+R).';
+    }
+    tbody.innerHTML = `<tr><td colspan="15" style="text-align:center;padding:24px;color:var(--red)">${msg}</td></tr>`;
   }
   loadSchedulesList();
   loadRecurringList();

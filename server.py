@@ -404,6 +404,11 @@ def init_db():
     ''')
 
     # Migration — add new columns if they don't exist
+    # Commit all CREATE TABLE work before running migrations, so a failing
+    # migration can't roll back the schema we just created.
+    try: conn.commit()
+    except Exception: pass
+
     migrations = [
         "ALTER TABLE calls ADD COLUMN IF NOT EXISTS caller_id TEXT",
         "ALTER TABLE calls ADD COLUMN IF NOT EXISTS agent_qos_tx TEXT DEFAULT 'Good'",
@@ -447,8 +452,13 @@ def init_db():
     for sql in migrations:
         try:
             c.execute(sql)
-        except Exception:
-            pass
+            conn.commit()
+        except Exception as e:
+            # A failed statement aborts the whole Postgres transaction — roll back so
+            # the following migrations (and the table creates above) still commit.
+            try: conn.rollback()
+            except Exception: pass
+            print(f"[init_db] migration skipped: {str(e)[:120]}")
 
     # Seed admin user into users table (from env vars)
     try:
@@ -3065,6 +3075,17 @@ def clocker_upload():
 @app.route('/api/time-report', methods=['GET'])
 @require_manager
 def time_report():
+    try:
+        return _time_report_impl()
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"[time_report] FAILED:\n{tb}")
+        return jsonify({'error': f'Time report failed: {str(e)[:300]}',
+                        'report': [], 'count': 0,
+                        'totals': {}, 'per_agent': []}), 500
+
+def _time_report_impl():
     """
     Builds the attendance report: reconstructs actual shifts from clocker_events and
     compares each against the matching agent_schedules row.
@@ -3092,11 +3113,24 @@ def time_report():
     # Pull schedules for the window — specific dates plus expanded recurring patterns
     schedules = _resolve_schedules(date_from, date_to, employee)
 
-    # Pay rates and any manager-declared special overtime periods
-    c.execute('SELECT employee_name, hourly_rate FROM agent_rates')
-    rates = {r['employee_name']: float(r['hourly_rate']) for r in c.fetchall()}
-    c.execute('SELECT * FROM ot_multiplier_periods ORDER BY starts_at')
-    ot_periods = [dict(r) for r in c.fetchall()]
+    # Pay rates and any manager-declared special overtime periods.
+    # Wrapped so a missing/not-yet-migrated table degrades to "no pay data"
+    # instead of failing the whole report.
+    rates, ot_periods = {}, []
+    try:
+        c.execute('SELECT employee_name, hourly_rate FROM agent_rates')
+        rates = {r['employee_name']: float(r['hourly_rate']) for r in c.fetchall()}
+    except Exception as e:
+        print(f"[time_report] agent_rates unavailable: {str(e)[:120]}")
+        try: conn.rollback()
+        except Exception: pass
+    try:
+        c.execute('SELECT * FROM ot_multiplier_periods ORDER BY starts_at')
+        ot_periods = [dict(r) for r in c.fetchall()]
+    except Exception as e:
+        print(f"[time_report] ot_multiplier_periods unavailable: {str(e)[:120]}")
+        try: conn.rollback()
+        except Exception: pass
     conn.close()
 
     # Group events per employee and reconstruct shifts
