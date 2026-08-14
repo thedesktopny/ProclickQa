@@ -276,6 +276,26 @@ def init_db():
     ''')
 
     c.execute('''
+        CREATE TABLE IF NOT EXISTS shift_adjustments (
+            id SERIAL PRIMARY KEY,
+            employee_name TEXT NOT NULL,
+            shift_date DATE NOT NULL,
+            block_no INTEGER DEFAULT 1,
+            adjusted_in TIMESTAMP,
+            adjusted_out TIMESTAMP,
+            adjusted_break_minutes NUMERIC,
+            original_in TIMESTAMP,
+            original_out TIMESTAMP,
+            original_break_minutes NUMERIC,
+            reason TEXT,
+            adjusted_by INTEGER,
+            adjusted_by_name TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(employee_name, shift_date, block_no)
+        )
+    ''')
+
+    c.execute('''
         CREATE TABLE IF NOT EXISTS agent_rates (
             id SERIAL PRIMARY KEY,
             employee_name TEXT NOT NULL,
@@ -2794,6 +2814,74 @@ def _compute_pay(segments, sched_window, rate_history, ot_periods):
         'hourly_rate': max(rates_used) if rates_used else 0,
     }
 
+@app.route('/api/shift-adjustments', methods=['GET'])
+@require_manager
+def get_shift_adjustments():
+    date_from = request.args.get('date_from', '')
+    date_to = request.args.get('date_to', '')
+    conn = get_db(); c = conn.cursor(cursor_factory=RealDictCursor)
+    q, params, where = 'SELECT * FROM shift_adjustments', [], []
+    if date_from: where.append('shift_date >= %s'); params.append(date_from)
+    if date_to: where.append('shift_date <= %s'); params.append(date_to)
+    if where: q += ' WHERE ' + ' AND '.join(where)
+    q += ' ORDER BY created_at DESC'
+    c.execute(q, params)
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return jsonify({'adjustments': rows})
+
+@app.route('/api/shift-adjustments', methods=['POST'])
+@require_manager
+def save_shift_adjustment():
+    """
+    Override the clocked times for one shift. The raw clocker data is never changed —
+    this is a separate layer, and the original values are stored alongside so the
+    report can always show what was actually logged versus what was adjusted.
+    """
+    user = current_user()
+    d = request.json or {}
+    name = (d.get('employee_name') or '').strip()
+    shift_date = d.get('shift_date')
+    block_no = int(d.get('block_no') or 1)
+    reason = (d.get('reason') or '').strip()
+    if not name or not shift_date:
+        return jsonify({'error': 'employee_name and shift_date required'}), 400
+    if not reason:
+        return jsonify({'error': 'A reason is required for any time adjustment'}), 400
+
+    conn = get_db(); c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('''INSERT INTO shift_adjustments
+        (employee_name, shift_date, block_no, adjusted_in, adjusted_out, adjusted_break_minutes,
+         original_in, original_out, original_break_minutes, reason, adjusted_by, adjusted_by_name)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        ON CONFLICT (employee_name, shift_date, block_no) DO UPDATE SET
+          adjusted_in=EXCLUDED.adjusted_in,
+          adjusted_out=EXCLUDED.adjusted_out,
+          adjusted_break_minutes=EXCLUDED.adjusted_break_minutes,
+          reason=EXCLUDED.reason,
+          adjusted_by=EXCLUDED.adjusted_by,
+          adjusted_by_name=EXCLUDED.adjusted_by_name,
+          created_at=CURRENT_TIMESTAMP
+        RETURNING *''',
+        (name, shift_date, block_no,
+         d.get('adjusted_in') or None, d.get('adjusted_out') or None,
+         d.get('adjusted_break_minutes'),
+         d.get('original_in') or None, d.get('original_out') or None,
+         d.get('original_break_minutes'),
+         reason, user.get('id') if user else None,
+         (user.get('full_name') or user.get('username')) if user else 'Unknown'))
+    row = dict(c.fetchone()); conn.commit(); conn.close()
+    return jsonify(row)
+
+@app.route('/api/shift-adjustments/<int:adj_id>', methods=['DELETE'])
+@require_manager
+def delete_shift_adjustment(adj_id):
+    """Revert to the original clocked times."""
+    conn = get_db(); c = conn.cursor()
+    c.execute('DELETE FROM shift_adjustments WHERE id=%s', (adj_id,))
+    conn.commit(); conn.close()
+    return jsonify({'success': True})
+
 @app.route('/api/agent-rates', methods=['GET'])
 @require_manager
 def get_agent_rates():
@@ -3169,6 +3257,22 @@ def _time_report_impl():
         print(f"[time_report] ot_multiplier_periods unavailable: {str(e)[:120]}")
         try: conn.rollback()
         except Exception: pass
+
+    adjustments = {}
+    try:
+        aq = 'SELECT * FROM shift_adjustments'
+        aparams, awhere = [], []
+        if date_from: awhere.append('shift_date >= %s'); aparams.append(date_from)
+        if date_to: awhere.append('shift_date <= %s'); aparams.append(date_to)
+        if employee: awhere.append('employee_name = %s'); aparams.append(employee)
+        if awhere: aq += ' WHERE ' + ' AND '.join(awhere)
+        c.execute(aq, aparams)
+        for r in c.fetchall():
+            adjustments[(r['employee_name'], str(r['shift_date']), r['block_no'] or 1)] = dict(r)
+    except Exception as e:
+        print(f"[time_report] shift_adjustments unavailable: {str(e)[:120]}")
+        try: conn.rollback()
+        except Exception: pass
     conn.close()
 
     # Group events per employee and reconstruct shifts
@@ -3243,6 +3347,36 @@ def _time_report_impl():
         for seg in segments:
             matched_shift_keys.add((name, seg['login'].isoformat()))
 
+        # Apply a manager adjustment if one exists for this shift. The raw clocker
+        # data is untouched — we clone the segments and override the boundaries,
+        # keeping the originals so the report can show both.
+        adj = adjustments.get(sched_key)
+        original_in = segments[0]['login']
+        original_out = segments[-1]['logout']
+        original_break = sum(b['minutes'] for seg in segments for b in seg['breaks'])
+
+        if adj:
+            import copy
+            segments = copy.deepcopy(segments)
+            if adj.get('adjusted_in'):
+                segments[0]['login'] = adj['adjusted_in']
+            if adj.get('adjusted_out'):
+                segments[-1]['logout'] = adj['adjusted_out']
+            if adj.get('adjusted_break_minutes') is not None:
+                target = float(adj['adjusted_break_minutes'])
+                current = sum(b['minutes'] for seg in segments for b in seg['breaks'])
+                if segments[0]['breaks']:
+                    # Apply the difference to the first break so totals match exactly
+                    delta = target - current
+                    b0 = segments[0]['breaks'][0]
+                    b0['minutes'] = max(0, b0['minutes'] + delta)
+                    if b0.get('end') and b0.get('start'):
+                        b0['end'] = b0['start'] + timedelta(minutes=b0['minutes'])
+                elif target > 0:
+                    segments[0]['breaks'].append({
+                        'start': segments[0]['login'], 'end': segments[0]['login'] + timedelta(minutes=target),
+                        'declared_minutes': target, 'minutes': target, 'closed': True})
+
         login = segments[0]['login']
         logout = segments[-1]['logout']
         break_taken = sum(b['minutes'] for seg in segments for b in seg['breaks'])
@@ -3305,10 +3439,21 @@ def _time_report_impl():
             mults = ', '.join(f"{h}h @{m}x" for m, h in pay['ot_breakdown'].items())
             issues.append(f"Overtime {pay['overtime_hours']}h ({mults})")
 
+        if adj:
+            issues.append(f"⚠️ Times adjusted by {adj.get('adjusted_by_name','manager')}: {adj.get('reason','')}")
+
         row.update({
             'status': 'OK' if not issues else 'Variance',
             'actual_in': login.isoformat(),
             'actual_out': logout.isoformat() if logout else None,
+            'is_adjusted': bool(adj),
+            'adjustment_id': adj['id'] if adj else None,
+            'adjustment_reason': adj.get('reason') if adj else None,
+            'adjusted_by_name': adj.get('adjusted_by_name') if adj else None,
+            'adjusted_at': adj['created_at'].isoformat() if adj and adj.get('created_at') else None,
+            'original_in': original_in.isoformat() if original_in else None,
+            'original_out': original_out.isoformat() if original_out else None,
+            'original_break': round(original_break),
             'break_taken': round(break_taken),
             'break_declared': round(break_declared),
             'break_count': break_count,

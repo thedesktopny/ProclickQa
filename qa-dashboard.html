@@ -343,7 +343,7 @@ td.agent{color:var(--text);font-weight:500;}
             </tr>
           </thead>
           <tbody id="calls-tbody">
-            <tr><td colspan="15" style="text-align:center;padding:32px;color:var(--text3)">Loading calls...</td></tr>
+            <tr><td colspan="16" style="text-align:center;padding:32px;color:var(--text3)">Loading calls...</td></tr>
           </tbody>
         </table>
       </div>
@@ -749,15 +749,15 @@ td.agent{color:var(--text);font-weight:500;}
     <div class="card">
       <div class="card-header"><span class="card-title">Attendance vs Schedule</span><span id="tr-count" style="font-size:11px;color:var(--text3)"></span></div>
       <div style="overflow-x:auto;">
-        <table class="data-table" style="min-width:1500px;">
+        <table class="data-table" style="min-width:1620px;">
           <thead><tr>
             <th>Agent</th><th>Date</th><th>Scheduled</th><th>Actual In</th><th>Actual Out</th>
             <th>Break</th><th>Gross</th><th>Net</th><th>Variance</th>
             <th>Regular</th><th>Overtime</th><th>Rate</th><th>Pay</th>
-            <th>Status</th><th>Issues</th>
+            <th>Status</th><th>Issues</th><th></th>
           </tr></thead>
           <tbody id="tr-tbody">
-            <tr><td colspan="15" style="text-align:center;padding:32px;color:var(--text3)">Upload a Clocker report and add schedules to see the report.</td></tr>
+            <tr><td colspan="16" style="text-align:center;padding:32px;color:var(--text3)">Upload a Clocker report and add schedules to see the report.</td></tr>
           </tbody>
         </table>
       </div>
@@ -873,6 +873,42 @@ td.agent{color:var(--text);font-weight:500;}
     <div style="display:flex;gap:10px;margin-top:18px;">
       <button onclick="hideModal('add-schedule-modal')" class="btn btn-outline" style="flex:1;">Cancel</button>
       <button onclick="saveSchedule()" class="btn btn-primary" style="flex:1;">Save Schedule</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="adjust-shift-modal">
+  <div class="modal-box" style="width:520px;max-width:95vw;">
+    <div style="font-size:16px;font-weight:700;margin-bottom:4px;">✏️ Adjust Shift Times</div>
+    <div style="font-size:11px;color:var(--text3);margin-bottom:14px;">The original clocked times are never deleted — the report will show this shift as adjusted, with the original values kept for reference.</div>
+    <div id="adj-context" style="background:var(--surface2);border-radius:8px;padding:10px 12px;margin-bottom:14px;font-size:12px;"></div>
+    <div style="display:flex;flex-direction:column;gap:12px;">
+      <div style="display:flex;gap:10px;">
+        <div style="flex:1;">
+          <div style="font-size:11px;color:var(--text3);margin-bottom:4px;">Adjusted clock-in</div>
+          <input id="adj-in" type="datetime-local" style="width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:6px;font-size:12px;box-sizing:border-box;">
+        </div>
+        <div style="flex:1;">
+          <div style="font-size:11px;color:var(--text3);margin-bottom:4px;">Adjusted clock-out</div>
+          <input id="adj-out" type="datetime-local" style="width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:6px;font-size:12px;box-sizing:border-box;">
+        </div>
+      </div>
+      <div style="display:flex;gap:10px;align-items:flex-end;">
+        <div style="width:150px;">
+          <div style="font-size:11px;color:var(--text3);margin-bottom:4px;">Total break (minutes)</div>
+          <input id="adj-break" type="number" min="0" step="1" style="width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:6px;font-size:12px;box-sizing:border-box;">
+        </div>
+        <button onclick="adjustSnapToSchedule()" class="btn btn-outline" style="font-size:11px;">Snap to scheduled times</button>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:4px;">Reason (required — shown in the report and export)</div>
+        <input id="adj-reason" placeholder="e.g. Logged in early but did not start taking calls until 2 PM" style="width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:6px;font-size:12px;box-sizing:border-box;">
+      </div>
+    </div>
+    <div style="display:flex;gap:10px;margin-top:18px;">
+      <button onclick="hideModal('adjust-shift-modal')" class="btn btn-outline" style="flex:1;">Cancel</button>
+      <button id="adj-revert-btn" onclick="revertAdjustment()" class="btn btn-outline" style="flex:1;color:var(--red);display:none;">Revert to original</button>
+      <button onclick="saveAdjustment()" class="btn btn-primary" style="flex:1;">Save Adjustment</button>
     </div>
   </div>
 </div>
@@ -2244,7 +2280,7 @@ function renderCalls(list){
   const tbody=document.getElementById('calls-tbody');
   if(!tbody)return;
   const data=list||calls;
-  if(data.length===0){tbody.innerHTML='<tr><td colspan="15" style="text-align:center;padding:32px;color:var(--text3)">No calls yet.</td></tr>';return;}
+  if(data.length===0){tbody.innerHTML='<tr><td colspan="16" style="text-align:center;padding:32px;color:var(--text3)">No calls yet.</td></tr>';return;}
   tbody.innerHTML=data.map(c=>{
     const sc=c.overall_score>0?scoreCircle(c.overall_score):`<div class="score-circle sc-gray" style="font-size:10px;color:var(--text3);">...</div>`;
     const stBadge=statusBadge(c.status, c.error_message);
@@ -2284,7 +2320,7 @@ function renderCalls(list){
       <td style="white-space:nowrap;">${stBadge}${retryBtn}</td>
     </tr>
     <tr id="expand-${c.call_id}" style="display:${isExp?'table-row':'none'};background:var(--bg);">
-      <td colspan="15" style="padding:0;">
+      <td colspan="16" style="padding:0;">
         <div id="expand-content-${c.call_id}" style="padding:20px 24px;border-bottom:2px solid var(--border);">
           ${isExp?buildExpandContent(c):''}
         </div>
@@ -3102,6 +3138,12 @@ async function exportTimeReport(format){
     'Overtime Pay': r.overtime_pay ?? 0,
     'Total Pay': r.total_pay ?? 0,
     'Status': r.status,
+    'Adjusted': r.is_adjusted ? 'YES' : '',
+    'Original In': r.is_adjusted ? fmtDT(r.original_in) : '',
+    'Original Out': r.is_adjusted ? fmtDT(r.original_out) : '',
+    'Original Break (m)': r.is_adjusted ? (r.original_break ?? '') : '',
+    'Adjusted By': r.adjusted_by_name || '',
+    'Adjustment Reason': r.adjustment_reason || '',
     'From Weekly Schedule': r.from_recurring ? 'Yes' : 'No',
     'Issues': (r.issues||[]).join('; '),
   }));
@@ -3169,6 +3211,89 @@ function _downloadBlob(blob, filename){
   document.body.appendChild(a); a.click();
   document.body.removeChild(a);
   setTimeout(()=>URL.revokeObjectURL(url), 1000);
+}
+
+// ─── SHIFT TIME ADJUSTMENTS ───────────────────────────────────────────────────
+let currentAdjustRow = null;
+
+function _toLocalInput(iso){
+  if(!iso) return '';
+  const d = new Date(iso);
+  const pad = n => String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function openAdjustModal(idx){
+  const r = (lastTimeReportData?.report || [])[idx];
+  if(!r){ showToast('Could not find that shift', true); return; }
+  currentAdjustRow = r;
+
+  const fmt = iso => iso ? new Date(iso).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '—';
+  document.getElementById('adj-context').innerHTML = `
+    <div style="font-weight:700;margin-bottom:4px;">${r.employee_name} · ${r.shift_date}${r.block_no>1?` · block ${r.block_no}`:''}</div>
+    <div style="color:var(--text3);">Originally clocked: <strong>${fmt(r.original_in||r.actual_in)}</strong> → <strong>${fmt(r.original_out||r.actual_out)}</strong> · ${r.original_break ?? r.break_taken}m break</div>
+    ${r.scheduled_in?`<div style="color:var(--text3);">Scheduled: ${fmt(r.scheduled_in)} → ${fmt(r.scheduled_out)} · ${r.break_allowed}m break</div>`:''}
+    ${r.is_adjusted?`<div style="color:var(--yellow);margin-top:4px;">Currently adjusted by ${r.adjusted_by_name} — "${r.adjustment_reason}"</div>`:''}
+  `;
+
+  document.getElementById('adj-in').value = _toLocalInput(r.actual_in);
+  document.getElementById('adj-out').value = _toLocalInput(r.actual_out);
+  document.getElementById('adj-break').value = r.break_taken ?? 0;
+  document.getElementById('adj-reason').value = r.adjustment_reason || '';
+  document.getElementById('adj-revert-btn').style.display = r.is_adjusted ? '' : 'none';
+
+  showModal('adjust-shift-modal');
+}
+
+function adjustSnapToSchedule(){
+  const r = currentAdjustRow;
+  if(!r || !r.scheduled_in){ showToast('This shift has no schedule to snap to', true); return; }
+  document.getElementById('adj-in').value = _toLocalInput(r.scheduled_in);
+  document.getElementById('adj-out').value = _toLocalInput(r.scheduled_out);
+  if(r.break_allowed != null) document.getElementById('adj-break').value = r.break_allowed;
+  if(!document.getElementById('adj-reason').value){
+    document.getElementById('adj-reason').value = 'Adjusted to scheduled hours';
+  }
+}
+
+async function saveAdjustment(){
+  const r = currentAdjustRow;
+  if(!r) return;
+  const reason = document.getElementById('adj-reason').value.trim();
+  if(!reason){ showToast('Please enter a reason for the adjustment', true); return; }
+  const adjIn = document.getElementById('adj-in').value;
+  const adjOut = document.getElementById('adj-out').value;
+  const adjBreak = document.getElementById('adj-break').value;
+
+  try{
+    await API.post('/api/shift-adjustments', {
+      employee_name: r.employee_name,
+      shift_date: r.shift_date,
+      block_no: r.block_no || 1,
+      adjusted_in: adjIn ? adjIn+':00' : null,
+      adjusted_out: adjOut ? adjOut+':00' : null,
+      adjusted_break_minutes: adjBreak === '' ? null : parseFloat(adjBreak),
+      original_in: r.original_in || r.actual_in,
+      original_out: r.original_out || r.actual_out,
+      original_break_minutes: r.original_break ?? r.break_taken,
+      reason,
+    });
+    hideModal('adjust-shift-modal');
+    showToast('✅ Times adjusted — original values kept on record');
+    loadTimeReport();
+  }catch(e){ showToast('Failed: '+e.message, true); }
+}
+
+async function revertAdjustment(){
+  const r = currentAdjustRow;
+  if(!r || !r.adjustment_id) return;
+  if(!confirm('Remove this adjustment and go back to the original clocked times?')) return;
+  try{
+    await API.del(`/api/shift-adjustments/${r.adjustment_id}`);
+    hideModal('adjust-shift-modal');
+    showToast('Reverted to original clocked times');
+    loadTimeReport();
+  }catch(e){ showToast('Failed: '+e.message, true); }
 }
 
 async function loadTimeReport(){
@@ -3262,7 +3387,7 @@ async function loadTimeReport(){
     }
 
     if(!rows.length){
-      tbody.innerHTML = '<tr><td colspan="15" style="text-align:center;padding:32px;color:var(--text3)">No data for this range. Add schedules and upload a Clocker report.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="16" style="text-align:center;padding:32px;color:var(--text3)">No data for this range. Add schedules and upload a Clocker report.</td></tr>';
       return;
     }
 
@@ -3270,17 +3395,23 @@ async function loadTimeReport(){
     const fmtSched = r => r.scheduled_in ? `${new Date(r.scheduled_in).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})} → ${new Date(r.scheduled_out).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}` : '—';
     const statusBadgeCls = s => s==='OK'?'badge-green':s==='Variance'?'badge-yellow':s==='No Show'?'badge-red':'badge-gray';
 
-    tbody.innerHTML = rows.map(r=>{
+    tbody.innerHTML = rows.map((r,idx)=>{
       const varColor = r.net_variance == null ? 'var(--text3)' : (r.net_variance < -0.1 ? 'var(--red)' : r.net_variance > 0.1 ? 'var(--green)' : 'var(--text2)');
       const lateTag = r.late_minutes != null && Math.abs(r.late_minutes) > 0
         ? `<span style="font-size:10px;color:${r.late_minutes>5?'var(--red)':'var(--text3)'};display:block;">${r.late_minutes>0?'+':''}${r.late_minutes}m</span>` : '';
       const otBreak = Object.entries(r.ot_breakdown||{}).map(([m,h])=>`${h}h@${m}×`).join(' ');
-      return `<tr>
-        <td style="font-weight:600;">${r.employee_name}</td>
+      const adjMark = r.is_adjusted ? '<span title="Times adjusted by a manager" style="color:var(--yellow);">✏️</span> ' : '';
+      const origIn = (r.is_adjusted && r.original_in && r.original_in!==r.actual_in)
+        ? `<span style="font-size:10px;color:var(--text3);display:block;text-decoration:line-through;">${fmtT(r.original_in)}</span>` : '';
+      const origOut = (r.is_adjusted && r.original_out && r.original_out!==r.actual_out)
+        ? `<span style="font-size:10px;color:var(--text3);display:block;text-decoration:line-through;">${fmtT(r.original_out)}</span>` : '';
+      const rowBg = r.is_adjusted ? 'background:rgba(245,166,35,0.06);' : '';
+      return `<tr style="${rowBg}">
+        <td style="font-weight:600;">${adjMark}${r.employee_name}</td>
         <td style="white-space:nowrap;">${r.shift_date}${r.block_no>1?`<span style="font-size:10px;color:var(--accent);display:block;">block ${r.block_no}</span>`:''}</td>
         <td style="white-space:nowrap;font-size:11px;color:var(--text3);">${fmtSched(r)}${r.break_allowed!=null?`<span style="display:block;">${r.break_allowed}m brk ${r.from_recurring?'<span title="From weekly schedule">🔁</span>':''}</span>`:''}</td>
-        <td style="white-space:nowrap;">${fmtT(r.actual_in)}${lateTag}</td>
-        <td style="white-space:nowrap;">${fmtT(r.actual_out)}</td>
+        <td style="white-space:nowrap;">${fmtT(r.actual_in)}${origIn}${lateTag}</td>
+        <td style="white-space:nowrap;">${fmtT(r.actual_out)}${origOut}</td>
         <td>${r.break_taken}m${r.break_count?`<span style="font-size:10px;color:var(--text3);display:block;">${r.break_count} break(s)</span>`:''}${(r.break_declared!=null && r.break_declared!==r.break_taken)?`<span style="font-size:10px;color:${r.break_taken>r.break_declared?'var(--red)':'var(--text3)'};display:block;">declared ${r.break_declared}m (${r.break_taken>r.break_declared?'+':''}${r.break_taken-r.break_declared}m)</span>`:''}${r.away_minutes?`<span style="font-size:10px;color:var(--yellow);display:block;">+${r.away_minutes}m away</span>`:''}</td>
         <td>${r.gross_hours!=null?r.gross_hours.toFixed(2)+'h':'—'}${r.segment_count>1?`<span style="font-size:10px;color:var(--text3);display:block;">${r.segment_count} sessions</span>`:''}</td>
         <td style="font-weight:600;">${r.net_hours!=null?r.net_hours.toFixed(2)+'h':'—'}</td>
@@ -3291,6 +3422,7 @@ async function loadTimeReport(){
         <td style="font-weight:700;color:var(--green);">${r.total_pay?'$'+r.total_pay.toFixed(2):'—'}</td>
         <td><span class="badge ${statusBadgeCls(r.status)}">${r.status}</span></td>
         <td style="font-size:11px;color:var(--text3);max-width:220px;">${(r.issues||[]).join('; ')||'—'}</td>
+        <td><button onclick="openAdjustModal(${idx})" style="background:none;border:none;color:${r.is_adjusted?'var(--yellow)':'var(--accent)'};cursor:pointer;font-size:11px;white-space:nowrap;">${r.is_adjusted?'Edit ✏️':'Adjust'}</button></td>
       </tr>`;
     }).join('');
   }catch(e){
@@ -3298,7 +3430,7 @@ async function loadTimeReport(){
     if(msg.includes('<') || msg.includes('doctype') || msg.includes('JSON')){
       msg = 'Server error building the report — the page may also need a hard refresh (Ctrl+Shift+R).';
     }
-    tbody.innerHTML = `<tr><td colspan="15" style="text-align:center;padding:24px;color:var(--red)">${msg}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="16" style="text-align:center;padding:24px;color:var(--red)">${msg}</td></tr>`;
   }
   loadSchedulesList();
   loadRecurringList();
