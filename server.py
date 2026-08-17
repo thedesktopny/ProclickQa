@@ -2928,6 +2928,16 @@ def skinblock_submit():
     row = dict(c.fetchone()); conn.commit(); conn.close()
     return jsonify({'success': True, 'id': row['id']})
 
+@app.route('/api/skinblock/model-status', methods=['GET'])
+def skinblock_model_status():
+    """Which detector is live: the trained parser, or the colour fallback."""
+    try:
+        from skinblock_engine import model_status
+        return jsonify(model_status())
+    except Exception as e:
+        return jsonify({'model': False, 'error': str(e)[:200]})
+
+
 @app.route('/api/skinblock/process', methods=['POST'])
 def skinblock_process():
     """
@@ -2961,7 +2971,8 @@ def skinblock_process():
         hexc = (s.get('cover_color') or '#000000').lstrip('#')
         cover = (int(hexc[4:6], 16), int(hexc[2:4], 16), int(hexc[0:2], 16))  # BGR
         from skinblock_engine import process as _sb_process
-        out, info = _sb_process(img, cover=cover)
+        out, info = _sb_process(img, cover=cover,
+                                include_neck=bool(s.get('cover_neck')))
         ok, buf = _cv2.imencode('.png', out)
         if not ok:
             return jsonify({'error': 'encode failed'}), 500

@@ -9,3 +9,4 @@ redis==5.0.1
 requests==2.31.0
 opencv-python-headless==4.10.0.84
 numpy>=1.26
+onnxruntime==1.19.2

@@ -177,7 +177,7 @@
 <body>
 
 <header class="topbar">
-  <h1 class="wordmark"><span class="bars"><i></i><i></i><i></i></span> Skin Block <span class="mono" style="font-size:11px;opacity:.55;">v7.2</span></h1>
+  <h1 class="wordmark"><span class="bars"><i></i><i></i><i></i></span> Skin Block <span class="mono" style="font-size:11px;opacity:.55;">v8</span></h1>
   <div class="status">
     <span id="extBadge" class="mono" style="display:none;background:var(--signal);color:var(--void);padding:3px 9px;font-weight:600;"></span>
     <span class="dot" id="dot"></span><span id="statusText">Loading detector…</span>
@@ -246,7 +246,7 @@
 const MAXDIM = 2000;
 
 const $ = id => document.getElementById(id);
-console.log("[SkinBlock] v7 — server-side detection");
+console.log("[SkinBlock] v8 — server-side neural parser");
 
 /* ---------- server settings + extension gate ---------- */
 /* selfie_multiclass_256x256 category indices */
@@ -355,6 +355,16 @@ async function boot(){
   ready = true;
   dot.classList.add("on");
   statusText.textContent = "Server detector ready";
+  // tell the agent which detector the server is actually running
+  try{
+    const r = await fetch("/api/skinblock/model-status");
+    if (r.ok){
+      const s = await r.json();
+      statusText.textContent = s.model
+        ? "Precise detector ready"
+        : "Basic detector \u2014 check results carefully";
+    }
+  }catch(e){ /* status is a nicety, not required */ }
 }
 
 boot().catch(()=>{
@@ -495,7 +505,8 @@ async function handle(item){
     } else if (inf.wash){
       stamp(item, "Couldn't separate skin from background \u2014 cover by hand", "warn");
     } else if ((inf.faces||0) > 0 || (inf.painted||0) > 0){
-      stamp(item, "Skin covered", "");
+      stamp(item, inf.detector === 'fallback' ? "Skin covered (basic detector) \u2014 check it" : "Skin covered",
+            inf.detector === 'fallback' ? "warn" : "");
     } else {
       stamp(item, "No skin found \u2014 check it", "none");
     }
