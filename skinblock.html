@@ -258,6 +258,15 @@ const $ = id => document.getElementById(id);
 const SEG_CLASS = { BACKGROUND:0, HAIR:1, BODY_SKIN:2, FACE_SKIN:3, CLOTHES:4, OTHERS:5 };
 let multiclass = false;
 
+/* Primary detector: SegFormer human-parsing (open source, MIT) via transformers.js.
+   Labels every pixel as Face / Left-arm / Right-arm / Left-leg / Right-leg or a
+   specific clothing type — the precise skin-vs-clothing line we need. Runs fully
+   in the browser; the model downloads once (~30 MB) and is cached after that. */
+const TFJS_CDN = "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.3.1";
+const PARSER_MODELS = ["Xenova/segformer_b2_clothes", "Xenova/segformer_b0_clothes"];
+const SKIN_LABELS = new Set(["Face", "Left-arm", "Right-arm", "Left-leg", "Right-leg"]);
+let parser = null;
+
 let SETTINGS = {
   cover_color:'#FFFFFF', edge_padding:5, face_grow_x:0.45, face_grow_y:0.55,
   shrink_large:true, max_dimension:2000, require_extension:true,
@@ -351,6 +360,22 @@ let queue=Promise.resolve();
 
 /* ---------------- model boot ---------------- */
 async function boot(){
+  // Precise parser first (SegFormer). If its CDN is blocked by the content
+  // filter, we fall back to the MediaPipe detector loaded below.
+  statusText.textContent = "Downloading precise detector (one-time)…";
+  try{
+    const { pipeline } = await import(TFJS_CDN);
+    for (const modelId of PARSER_MODELS){
+      for (const device of ["webgpu", "wasm"]){
+        try{
+          parser = await pipeline("image-segmentation", modelId, { device, dtype:"q8" });
+          break;
+        }catch(e){ /* try next */ }
+      }
+      if (parser) break;
+    }
+  }catch(e){ /* transformers.js CDN unreachable — MediaPipe only */ }
+
   const vision = await FilesetResolver.forVisionTasks(WASM);
 
   async function makeSeg(path, delegate){
@@ -367,7 +392,7 @@ async function boot(){
     }
     if (segmenter){ multiclass = (path === SEG_A); break; }
   }
-  if (!segmenter) throw new Error("segmenter");
+  if (!segmenter && !parser) throw new Error("no detector");
 
   for (const delegate of ["GPU","CPU"]){
     try {
@@ -382,7 +407,9 @@ async function boot(){
 
   ready = true;
   dot.classList.add("on");
-  statusText.textContent = multiclass ? "Detector ready" : "Basic detector — covers whole person";
+  statusText.textContent = parser ? "Precise detector ready"
+    : (multiclass ? "Detector ready (basic — precise model blocked)"
+                  : "Basic detector — covers whole person");
   wipeFill.style.width = "100%";
   setTimeout(()=>{ wipeFill.style.width="0"; }, 700);
 }
@@ -407,7 +434,7 @@ function addFiles(list){
   if (!files.length) return;
   actionbar.classList.add("up");
   for (const file of files){
-    const item = { file, id:"s"+Math.random().toString(36).slice(2,9), bars:[], done:false };
+    const item = { file, id:"s"+Math.random().toString(36).slice(2,9), bars:[], autoRects:[], done:false };
     items.push(item);
     buildCard(item);
     queue = queue.then(()=> handle(item)).catch(()=> markFailed(item));
@@ -774,15 +801,41 @@ async function buildMask(base, faces, relaxAnchors){
       tctx.clearRect(0, 0, tw, th);
       tctx.drawImage(base, sx, sy, sw, sh, 0, 0, tw, th);
 
+      // Precise pass: SegFormer labels this tile pixel-by-pixel; we take only
+      // the skin classes (face, arms, legs) — every clothing class stays visible.
+      const mx0 = Math.floor(sx*scale), my0 = Math.floor(sy*scale);
+      const mx1 = Math.ceil((sx+sw)*scale), my1 = Math.ceil((sy+sh)*scale);
+      if (parser){
+        let segs = null;
+        try { segs = await parser(tile.toDataURL("image/png")); } catch(e){}
+        if (segs && segs.length){
+          const skinMasks = segs.filter(s => SKIN_LABELS.has(s.label) && s.mask);
+          for (const s of skinMasks){
+            const m = s.mask, cw = m.width, ch = m.height, raw = m.data;
+            for (let my = my0; my < my1; my++){
+              if (my < 0 || my >= mh) continue;
+              for (let mx = mx0; mx < mx1; mx++){
+                if (mx < 0 || mx >= mw) continue;
+                const u = (mx/scale - sx) / sw, v = (my/scale - sy) / sh;
+                if (u < 0 || v < 0 || u >= 1 || v >= 1) continue;
+                const val = raw[Math.min(ch-1, (v*ch)|0) * cw + Math.min(cw-1, (u*cw)|0)];
+                if (val > 127 && !segBin[my*mw + mx]){ segBin[my*mw + mx] = 1; segHits++; }
+              }
+            }
+          }
+        }
+      }
+
+      // MediaPipe backstop, unioned in: the clothes-parser is trained on dressed
+      // people, so bare torso/shoulder skin can slip past it — the selfie model's
+      // skin classes catch that. Any over-reach gets trimmed by the colour layer.
       let res = null;
-      try { res = segmenter.segment(tile); } catch(e){ continue; }
+      if (segmenter){ try { res = segmenter.segment(tile); } catch(e){} }
       const cm = res && res.categoryMask;
       if (cm){
         const cw = cm.width, ch = cm.height;
         const raw = cm.getAsUint8Array();
         // Inverse-map every mask pixel in this tile's footprint so there are no gaps
-        const mx0 = Math.floor(sx*scale), my0 = Math.floor(sy*scale);
-        const mx1 = Math.ceil((sx+sw)*scale), my1 = Math.ceil((sy+sh)*scale);
         for (let my = my0; my < my1; my++){
           if (my < 0 || my >= mh) continue;
           for (let mx = mx0; mx < mx1; mx++){
@@ -935,6 +988,112 @@ function refineMaskFullRes(base, bin, mw, mh, model){
   return outC;
 }
 
+/* GRID STRATEGY — for screenshots full of small thumbnails, tracing skin
+   pixel-by-pixel always looks ragged and lets slivers through. Instead we find
+   each thumbnail's rectangle (photos are detail-rich islands sitting in flat
+   gutters, whether the page is light or dark) and white out the WHOLE tile if
+   it contains a face or any skin. Clean rectangles, nothing peeking through. */
+function detectPhotoRects(base, bin, mw, mh, scale, faces){
+  const w = base.width, h = base.height;
+  const cc = document.createElement("canvas");
+  cc.width = mw; cc.height = mh;
+  const cctx = cc.getContext("2d", { willReadFrequently:true });
+  cctx.drawImage(base, 0, 0, mw, mh);
+  let d;
+  try { d = cctx.getImageData(0, 0, mw, mh).data; } catch(e){ return []; }
+
+  // grayscale
+  const g = new Float32Array(mw*mh);
+  for (let i = 0, p = 0; i < g.length; i++, p += 4){
+    g[i] = 0.299*d[p] + 0.587*d[p+1] + 0.114*d[p+2];
+  }
+  // "photo content" = pixels with local detail; gutters and page chrome are flat
+  let detail = new Uint8Array(mw*mh);
+  for (let y = 0; y < mh-1; y++){
+    for (let x = 0; x < mw-1; x++){
+      const i = y*mw + x;
+      if (Math.abs(g[i]-g[i+1]) > 9 || Math.abs(g[i]-g[i+mw]) > 9) detail[i] = 1;
+    }
+  }
+  // solidify photo regions and bridge small flat patches inside photos
+  detail = dilate(detail, mw, mh, 3);
+  detail = erode(detail, mw, mh, 2);
+
+  // connected components -> candidate tiles
+  const label = new Int32Array(mw*mh);
+  const stackX = new Int32Array(mw*mh), stackY = new Int32Array(mw*mh);
+  const rects = [];
+  let next = 0;
+  for (let sy = 0; sy < mh; sy++){
+    for (let sx = 0; sx < mw; sx++){
+      const si = sy*mw + sx;
+      if (!detail[si] || label[si]) continue;
+      next++;
+      let top = 0, size = 0;
+      let x0 = sx, x1 = sx, y0 = sy, y1 = sy, skin = 0;
+      stackX[top] = sx; stackY[top] = sy; top++;
+      label[si] = next;
+      while (top > 0){
+        top--;
+        const x = stackX[top], y = stackY[top];
+        const i = y*mw + x;
+        size++;
+        if (bin && bin[i]) skin++;
+        if (x < x0) x0 = x; if (x > x1) x1 = x;
+        if (y < y0) y0 = y; if (y > y1) y1 = y;
+        if (x > 0    && detail[i-1]  && !label[i-1]) { label[i-1]  = next; stackX[top]=x-1; stackY[top]=y;   top++; }
+        if (x < mw-1 && detail[i+1]  && !label[i+1]) { label[i+1]  = next; stackX[top]=x+1; stackY[top]=y;   top++; }
+        if (y > 0    && detail[i-mw] && !label[i-mw]){ label[i-mw] = next; stackX[top]=x;   stackY[top]=y-1; top++; }
+        if (y < mh-1 && detail[i+mw] && !label[i+mw]){ label[i+mw] = next; stackX[top]=x;   stackY[top]=y+1; top++; }
+      }
+      const bw = x1-x0+1, bh = y1-y0+1;
+      if (bw < 16 || bh < 16 || size < 260) continue;    // captions, icons, buttons
+      rects.push({ x0, y0, x1, y1, skin, area: bw*bh });
+    }
+  }
+
+  // decide which tiles get covered: a face inside, or any real amount of skin
+  const covered = [];
+  for (const r of rects){
+    let faceIn = false;
+    for (const f of (faces || [])){
+      const fx = (f.originX + f.width/2) * scale;
+      const fy = (f.originY + f.height/2) * scale;
+      if (fx >= r.x0 && fx <= r.x1 && fy >= r.y0 && fy <= r.y1){ faceIn = true; break; }
+    }
+    if (!faceIn && r.skin / r.area < 0.015) continue;
+    covered.push(r);
+  }
+
+  // merge overlapping cover boxes so the result is a few clean rectangles
+  let merged = true;
+  while (merged){
+    merged = false;
+    outer:
+    for (let i = 0; i < covered.length; i++){
+      for (let j = i+1; j < covered.length; j++){
+        const a = covered[i], b = covered[j];
+        if (a.x0 <= b.x1 && b.x0 <= a.x1 && a.y0 <= b.y1 && b.y0 <= a.y1){
+          a.x0 = Math.min(a.x0, b.x0); a.y0 = Math.min(a.y0, b.y0);
+          a.x1 = Math.max(a.x1, b.x1); a.y1 = Math.max(a.y1, b.y1);
+          covered.splice(j, 1);
+          merged = true;
+          break outer;
+        }
+      }
+    }
+  }
+
+  // map back to full-res normalized rects (small pad so tile borders vanish too)
+  const PAD = 2;
+  return covered.map(r => ({
+    x: Math.max(0, (r.x0 - PAD) / scale) / w,
+    y: Math.max(0, (r.y0 - PAD) / scale) / h,
+    w: Math.min(w, (r.x1 - r.x0 + 1 + PAD*2) / scale) / w,
+    h: Math.min(h, (r.y1 - r.y0 + 1 + PAD*2) / scale) / h
+  }));
+}
+
 async function handle(item){
   while (!ready) await sleep(180);
   await sleep(0);
@@ -968,6 +1127,32 @@ async function handle(item){
   // 1. skin segmentation + colour agreement -> binary mask (clothes stay visible)
   const seg = await buildMask(base, faceBoxes, gridMode);
   const bin = seg.bin, mw = seg.mw, mh = seg.mh, hits = seg.hits;
+
+  // Optional grid behaviour: cover whole thumbnail tiles instead of tracing
+  // skin inside them. OFF by default — enable with the cover_whole_tiles
+  // server setting if skin-only covering ever isn't strict enough for grids.
+  item.autoRects = [];
+  if (gridMode && SETTINGS.cover_whole_tiles === true){
+    const scale = Math.min(1, 1200 / Math.max(w, h));
+    const rects = detectPhotoRects(base, bin, mw, mh, scale, faceBoxes);
+    if (rects.length){
+      item.autoRects = rects;
+      item.faces = [];          // tiles already swallow the faces
+      item.mask = null;
+      let areaFrac = 0;
+      for (const r of rects) areaFrac += r.w * r.h;
+      item.coverage = areaFrac;
+      item.runaway = false;
+      item.done = true;
+      render(item);
+      item.card.querySelector(".working")?.remove();
+      stamp(item, `Photo grid — ${rects.length} tiles covered, check it`, "warn");
+      logToServer(item, compose(item));
+      updateTally();
+      return;
+    }
+    // tile detection found nothing usable — fall through to the pixel mask
+  }
 
   item.mask = null;
   if (bin && hits > 0){
@@ -1071,6 +1256,9 @@ function compose(item){
   for (const b of item.faces){
     const gx = b.width * (SETTINGS.face_grow_x ?? 0.45), gy = b.height * (SETTINGS.face_grow_y ?? 0.55);
     ctx.fillRect(b.originX - gx, b.originY - gy, b.width + gx*2, b.height + gy*2);
+  }
+  for (const r of (item.autoRects || [])){
+    ctx.fillRect(r.x*w, r.y*h, r.w*w, r.h*h);
   }
   for (const r of item.bars){
     ctx.fillRect(r.x*w, r.y*h, r.w*w, r.h*h);
