@@ -177,7 +177,7 @@
 <body>
 
 <header class="topbar">
-  <h1 class="wordmark"><span class="bars"><i></i><i></i><i></i></span> Skin Block <span class="mono" style="font-size:11px;opacity:.55;">v7</span></h1>
+  <h1 class="wordmark"><span class="bars"><i></i><i></i><i></i></span> Skin Block <span class="mono" style="font-size:11px;opacity:.55;">v7.2</span></h1>
   <div class="status">
     <span id="extBadge" class="mono" style="display:none;background:var(--signal);color:var(--void);padding:3px 9px;font-weight:600;"></span>
     <span class="dot" id="dot"></span><span id="statusText">Loading detector…</span>
@@ -492,6 +492,8 @@ async function handle(item){
     const inf = resp.info || {};
     if (inf.grid){
       stamp(item, `Photo grid \u2014 ${inf.painted||0} of ${inf.tiles||0} tiles painted, check it`, "warn");
+    } else if (inf.wash){
+      stamp(item, "Couldn't separate skin from background \u2014 cover by hand", "warn");
     } else if ((inf.faces||0) > 0 || (inf.painted||0) > 0){
       stamp(item, "Skin covered", "");
     } else {

@@ -3,8 +3,11 @@ Skin Block detection engine — runs on the VoiceGuard server.
 
 Paints skin (and faces) with the cover colour. Grid screenshots are split into
 their thumbnail tiles; each tile is processed as its own photo with paint
-clipped to that tile. Tuned against real agent screenshots — see the Skin Block
-project notes before changing thresholds.
+clipped to that tile. Includes: adaptive per-photo skin colour, smoothness
+test (skin is smooth, bricks/wood grain are not), edge barriers (growth cannot
+cross outlines, separating hands from same-coloured desks), pale-skin second
+pass, macro-closeup rule, and a face-coverage guarantee. Tuned against real
+agent screenshots.
 """
 import numpy as np
 import cv2
@@ -110,7 +113,7 @@ def grow(seed, allowed, iters=60):
     return seed
 
 
-def skin_photo(img, faces=None):
+def skin_photo(img, faces=None, allow_macro=False):
     """Skin mask for one coherent photo/thumbnail."""
     h, w = img.shape[:2]
     if faces is None:
@@ -137,9 +140,37 @@ def skin_photo(img, faces=None):
 
     # seeds = strict hits that are smooth; then flood each seed outward through
     # smooth, skin-chroma territory — one solid blob per skin area, shadows filled
+    # macro-skin rule: when a big share of the photo is confidently skin, this
+    # is a face/body closeup — the flood caps (built to stop background washes)
+    # would wrongly strangle it. Paint the full skin field directly.
+    if (allow_macro or faces) and float(strict.mean()) > 0.12:
+        y2_, cr2, cb2 = y_, cr, cb
+        wide = ((cr2 >= max(130, m['crMin']-5)) & (cr2 <= m['crMax']+5) &
+                (cb2 >= m['cbMin']-6) & (cb2 <= 127) & (y2_ > 25) & (y2_ < 253) & (sat >= 4))
+        sk = ((wide & smooth) | (strict > 0)).astype(np.uint8)
+        sk = cv2.morphologyEx(sk, cv2.MORPH_CLOSE, np.ones((13, 13), np.uint8))
+        n3, lab3, st3, _ = cv2.connectedComponentsWithStats(sk)
+        keep3 = np.zeros(n3, bool)
+        for i in range(1, n3):
+            if st3[i, cv2.CC_STAT_AREA] >= sk.size * 0.004:
+                keep3[i] = True
+        sk = keep3[lab3].astype(np.uint8)
+        sk = cv2.dilate(sk, np.ones((7, 7), np.uint8))
+        for (x, y, bw, bh) in faces:
+            cv2.ellipse(sk, (int(x + bw/2), int(y + bh/2)),
+                        (int(bw*0.72), int(bh*0.92)), 0, 0, 360, 1, -1)
+        return sk, faces
+
+    # edge barriers: growth may not cross strong image edges. This is what
+    # separates a hand from a same-coloured desk — the hand's outline is an
+    # edge, so hand and desk become different components and only the desk
+    # gets dropped as background.
+    gray_e = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    barrier = cv2.dilate(cv2.Canny(gray_e, 40, 110), np.ones((3, 3), np.uint8)) > 0
+
     core = cv2.erode(strict, np.ones((5, 5), np.uint8))
-    seed_ok = (((strict > 0) & smooth) | (core > 0)).astype(np.uint8)
-    sk = grow(seed_ok, ((chroma & smooth) | (strict > 0)).astype(np.uint8))
+    seed_ok = ((((strict > 0) & smooth) | (core > 0)) & ~barrier).astype(np.uint8)
+    sk = grow(seed_ok, (((chroma & smooth) | (strict > 0)) & ~barrier).astype(np.uint8))
     # flood cap: keep a grown component only if a fair share of it was real seed
     n0, lab0 = cv2.connectedComponents(sk)
     if n0 > 1:
@@ -148,6 +179,20 @@ def skin_photo(img, faces=None):
         ok = seed_counts * 14 >= comp_counts
         ok[0] = False
         sk = ok[lab0].astype(np.uint8)
+    # stage 2: pale/blown-out skin (highlight cheeks, very fair tones) sits at
+    # tiny saturation where stage 1 cannot go. Grow a second, tighter ring out
+    # of confirmed skin through bright smooth territory with any warm lean.
+    pale_ok = (smooth & (y_ > 90) & (y_ < 253) & (sat >= 4) &
+               (cr >= 130) & (cr <= m['crMax']+4) & (cb >= m['cbMin']-6) & (cb <= 127))
+    before = sk.copy()
+    sk2 = grow(sk, (pale_ok | (sk > 0)).astype(np.uint8), iters=30)
+    n2, lab2 = cv2.connectedComponents(sk2)
+    if n2 > 1:
+        base_counts = np.bincount(lab2[before > 0], minlength=n2)
+        comp_counts = np.bincount(lab2.ravel(), minlength=n2)
+        ok2 = base_counts * 6 >= comp_counts
+        ok2[0] = False
+        sk = np.where(ok2[lab2], sk2, before).astype(np.uint8)
     sk = cv2.morphologyEx(sk, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
 
     # component filter: drop specks; drop background washes unless face-anchored
@@ -165,11 +210,12 @@ def skin_photo(img, faces=None):
             continue
         comp_anchor = anchor[lab == i].any() if faces else False
         if area > total * 0.6 and not comp_anchor:
+            skin_photo.last_wash = True
             continue  # background wash
         keep[i] = True
     sk = keep[lab].astype(np.uint8)
 
-    sk = cv2.dilate(sk, np.ones((5, 5), np.uint8))
+    sk = cv2.dilate(sk, np.ones((7, 7), np.uint8))
 
     # face guarantee — every face fully covered even if colour failed on it
     for (x, y, bw, bh) in faces:
@@ -246,9 +292,11 @@ def process(img, cover=(0, 0, 0), grid_face_threshold=4, debug=None):
     info = dict(grid=grid, tiles=len(tiles), painted=0, skipped=0)
 
     if not grid:
-        sk, faces = skin_photo(img)
+        skin_photo.last_wash = False
+        sk, faces = skin_photo(img)  # single photo: macro only with a face
         out[sk > 0] = cover
         info['faces'] = len(faces)
+        info['wash'] = bool(getattr(skin_photo, 'last_wash', False)) and sk.sum() == 0
         return out, info
 
     for (tx, ty, tw, th) in tiles:
@@ -265,11 +313,11 @@ def process(img, cover=(0, 0, 0), grid_face_threshold=4, debug=None):
             q = cv2.morphologyEx(q, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
             nn, _, st, _ = cv2.connectedComponentsWithStats(q)
             biggest = st[1:, cv2.CC_STAT_AREA].max() if nn > 1 else 0
-            if biggest < q.size * 0.002:
+            if biggest < q.size * 0.002 and biggest < 700:
                 info['skipped'] += 1
                 continue
 
-        sk, faces = skin_photo(work, faces)
+        sk, faces = skin_photo(work, faces, allow_macro=True)
         if not sk.any():
             info['skipped'] += 1
             continue
