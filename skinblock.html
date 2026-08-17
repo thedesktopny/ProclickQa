@@ -669,7 +669,77 @@ function filterBlobsByAnchor(colorBin, w, h, anchorBin, faces, scale, keepAll){
 
 /* Builds a binary mask of ONLY the selected classes (skin by default), tiling the
    image so grids/collages and small faces are detected at usable resolution. */
-async function buildMask(base, faces){
+/* One shared answer to "how many tiles?" — big images (screenshots, grids)
+   automatically get sliced finer so small thumbnails are seen at real detail,
+   even when the agent leaves the setting on Normal. */
+function effectiveTiles(w, h){
+  const user = Math.max(1, Math.min(6, parseInt(SETTINGS.tiles) || 1));
+  const auto = Math.ceil(Math.max(w, h) / 450);
+  return Math.max(user, Math.min(6, auto));
+}
+
+/* Face detection run tile-by-tile (upscaled), so the small faces in a grid of
+   thumbnails are found too — the plain full-frame pass only sees big faces. */
+async function detectFacesTiled(base){
+  if (!faceDetector) return [];
+  const w = base.width, h = base.height;
+  const boxes = [];
+  // Full-frame pass first (large faces)
+  try{
+    const det = faceDetector.detect(base).detections || [];
+    for (const d of det) if (d.boundingBox) boxes.push(d.boundingBox);
+  }catch(e){}
+  const tiles = effectiveTiles(w, h);
+  if (tiles > 1){
+    const OVERLAP = 0.12;
+    const tile = document.createElement("canvas");
+    const tctx = tile.getContext("2d");
+    for (let ty = 0; ty < tiles; ty++){
+      for (let tx = 0; tx < tiles; tx++){
+        const cw0 = w / tiles, ch0 = h / tiles;
+        let sx = Math.max(0, tx*cw0 - cw0*OVERLAP);
+        let sy = Math.max(0, ty*ch0 - ch0*OVERLAP);
+        let sw = Math.min(w - sx, cw0 + cw0*OVERLAP*2);
+        let sh = Math.min(h - sy, ch0 + ch0*OVERLAP*2);
+        if (sw < 24 || sh < 24) continue;
+        const long = Math.max(sw, sh);
+        const up = long < 448 ? 448/long : 1;
+        const tw = Math.round(sw*up), th = Math.round(sh*up);
+        tile.width = tw; tile.height = th;
+        tctx.clearRect(0, 0, tw, th);
+        tctx.drawImage(base, sx, sy, sw, sh, 0, 0, tw, th);
+        try{
+          const det = faceDetector.detect(tile).detections || [];
+          for (const d of det){
+            const b = d.boundingBox;
+            if (!b) continue;
+            boxes.push({ originX: sx + b.originX/up, originY: sy + b.originY/up,
+                         width: b.width/up, height: b.height/up });
+          }
+        }catch(e){}
+        await sleep(0);
+      }
+    }
+  }
+  // Dedupe overlapping detections of the same face (tiles overlap on purpose)
+  boxes.sort((a,b)=> b.width*b.height - a.width*a.height);
+  const kept = [];
+  for (const b of boxes){
+    let dup = false;
+    for (const k of kept){
+      const ix = Math.max(0, Math.min(b.originX+b.width,  k.originX+k.width)  - Math.max(b.originX, k.originX));
+      const iy = Math.max(0, Math.min(b.originY+b.height, k.originY+k.height) - Math.max(b.originY, k.originY));
+      const inter = ix*iy;
+      const uni = b.width*b.height + k.width*k.height - inter;
+      if (uni > 0 && inter/uni > 0.4){ dup = true; break; }
+    }
+    if (!dup) kept.push(b);
+    if (kept.length >= 300) break;
+  }
+  return kept;
+}
+
+async function buildMask(base, faces, relaxAnchors){
   const w = base.width, h = base.height;
   const MASKMAX = 1200;
   const scale = Math.min(1, MASKMAX / Math.max(w, h));
@@ -678,7 +748,7 @@ async function buildMask(base, faces){
   const segBin = new Uint8Array(mw * mh);
   let segHits = 0;
 
-  const tiles = Math.max(1, Math.min(6, parseInt(SETTINGS.tiles) || 1));
+  const tiles = effectiveTiles(w, h);
   const wanted = new Set((SETTINGS.cover_classes || [2,3]).map(Number));
   const OVERLAP = 0.08;
 
@@ -794,7 +864,7 @@ async function buildMask(base, faces){
       runaway = true;
     } else {
       const anchor = hits ? dilate(bin, mw, mh, 3) : null;
-      const kept = filterBlobsByAnchor(clean, mw, mh, anchor, faces, scale, hits === 0);
+      const kept = filterBlobsByAnchor(clean, mw, mh, anchor, faces, scale, hits === 0 || relaxAnchors);
       for (let i = 0; i < bin.length; i++){
         if (kept[i] && !bin[i]){ bin[i] = 1; hits++; }
       }
@@ -882,19 +952,21 @@ async function handle(item){
   if (bmp.close) bmp.close();
   item.base = base;
 
-  // faces first — they feed the colour model even when face-covering is off
-  item.faces = [];
-  let faceBoxes = [];
-  if (faceDetector){
-    try{
-      const det = faceDetector.detect(base).detections || [];
-      faceBoxes = det.map(d => d.boundingBox).filter(Boolean);
-    }catch(e){ /* optional */ }
-  }
-  if (SETTINGS.cover_faces) item.faces = faceBoxes;
+  // faces first — tile-by-tile so small thumbnail faces are found. They feed
+  // the colour model even when face-covering is off.
+  const faceBoxes = await detectFacesTiled(base);
+
+  // GRID MODE: several faces means this is a screenshot / photo grid, not a
+  // product photo. Then: cover every face, and keep colour-detected skin even
+  // when it isn't attached to AI-detected skin (thumbnails are too small for
+  // the AI, so the anchoring rule that protects product photos from wood
+  // false-hits would wrongly erase real people here).
+  const gridMode = faceBoxes.length >= (SETTINGS.grid_face_threshold || 4);
+  item.faces = (SETTINGS.cover_faces || gridMode) ? faceBoxes : [];
+  item.gridMode = gridMode;
 
   // 1. skin segmentation + colour agreement -> binary mask (clothes stay visible)
-  const seg = await buildMask(base, faceBoxes);
+  const seg = await buildMask(base, faceBoxes, gridMode);
   const bin = seg.bin, mw = seg.mw, mh = seg.mh, hits = seg.hits;
 
   item.mask = null;
@@ -920,6 +992,8 @@ async function handle(item){
   // "did we find anything" threshold has to be lower than it was.
   if (item.runaway){
     stamp(item, "Colour match too broad — check by hand", "warn");
+  } else if (item.gridMode){
+    stamp(item, `Photo grid — ${item.faces.length} people covered, check it`, "warn");
   } else if (item.coverage > 0.0004 || item.faces.length){
     const facesOnly = item.coverage <= 0.0004 && item.faces.length;
     stamp(item, facesOnly ? "Face covered — check it" : "Skin covered", facesOnly ? "warn" : "");
