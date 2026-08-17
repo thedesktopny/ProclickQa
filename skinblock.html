@@ -1,0 +1,716 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Skin Block — cover people before sending photos</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<style>
+  :root{
+    --void:#0B0E13;
+    --paper:#D6DAD8;
+    --card:#EFF1EF;
+    --rule:#9BA3A0;
+    --signal:#7A9A01;
+    --alert:#B4471F;
+    --pad:clamp(16px,3vw,32px);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    background:var(--paper);
+    color:var(--void);
+    font-family:"IBM Plex Sans",system-ui,sans-serif;
+    font-size:15px;
+    line-height:1.45;
+    -webkit-font-smoothing:antialiased;
+    padding-bottom:96px;
+  }
+  button{font:inherit;cursor:pointer}
+  .mono{font-family:"IBM Plex Mono",ui-monospace,monospace}
+
+  /* ---------- header ---------- */
+  .topbar{
+    display:flex;align-items:center;gap:16px;flex-wrap:wrap;
+    padding:14px var(--pad);
+    background:var(--void);color:var(--card);
+    position:sticky;top:0;z-index:40;
+  }
+  .wordmark{
+    font-family:Archivo,sans-serif;font-weight:700;
+    font-size:19px;letter-spacing:-0.02em;text-transform:uppercase;
+    display:flex;align-items:center;gap:10px;margin:0;
+  }
+  .bars{display:inline-flex;gap:3px}
+  .bars i{display:block;width:13px;height:13px;background:var(--card)}
+  .bars i:nth-child(2){width:24px}
+  .bars i:nth-child(3){width:8px;background:var(--signal)}
+  .status{
+    margin-left:auto;font-family:"IBM Plex Mono",monospace;font-size:12px;
+    letter-spacing:0.04em;text-transform:uppercase;opacity:.85;
+    display:flex;align-items:center;gap:8px;
+  }
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--alert);flex:none}
+  .dot.on{background:var(--signal)}
+
+  /* ---------- intake ---------- */
+  .intake{padding:var(--pad);max-width:1180px;margin:0 auto}
+  .drop{
+    position:relative;overflow:hidden;
+    border:2px solid var(--void);background:var(--card);
+    padding:clamp(28px,6vw,56px) 24px;text-align:center;
+    transition:background .15s ease;
+  }
+  .drop.hot{background:#fff}
+  .drop h2{
+    font-family:Archivo,sans-serif;font-weight:700;
+    font-size:clamp(24px,4.5vw,38px);letter-spacing:-0.03em;
+    margin:0 0 6px;text-transform:uppercase;
+  }
+  .drop p{margin:0 0 20px;color:#4A524E;max-width:46ch;margin-inline:auto}
+  .pick{
+    background:var(--void);color:var(--card);border:none;
+    padding:12px 22px;font-weight:600;letter-spacing:.01em;
+  }
+  .pick:hover{background:#22303c}
+  .pick:focus-visible,.ghost:focus-visible,.pill:focus-visible{outline:3px solid var(--signal);outline-offset:2px}
+  .wipe{position:absolute;left:0;right:0;bottom:0;height:6px;background:var(--rule)}
+  .wipe span{display:block;height:100%;width:0;background:var(--void);transition:width .3s ease}
+
+  /* ---------- controls ---------- */
+  .controls{
+    display:flex;flex-wrap:wrap;gap:10px 26px;align-items:center;
+    padding:16px 2px 0;font-size:13px;
+  }
+  .controls label{display:flex;align-items:center;gap:8px;cursor:pointer}
+  .controls input[type=range]{width:130px;accent-color:var(--signal)}
+  .controls input[type=checkbox]{width:17px;height:17px;accent-color:var(--void)}
+  .val{font-family:"IBM Plex Mono",monospace;min-width:30px}
+
+  /* ---------- grid ---------- */
+  .grid{
+    max-width:1180px;margin:0 auto;padding:8px var(--pad) 0;
+    display:grid;gap:16px;
+    grid-template-columns:repeat(auto-fill,minmax(258px,1fr));
+  }
+  .shot{
+    background:var(--card);border:1px solid var(--void);
+    display:flex;flex-direction:column;
+    animation:rise .25s ease both;
+  }
+  @keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+  .frame{
+    position:relative;background:#C3C8C5;
+    aspect-ratio:1/1;display:flex;align-items:center;justify-content:center;overflow:hidden;
+  }
+  .frame canvas,.frame img{max-width:100%;max-height:100%;display:block}
+  .badge{
+    position:absolute;top:0;left:0;
+    font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.07em;
+    text-transform:uppercase;padding:5px 9px;color:var(--card);background:var(--void);
+  }
+  .badge.warn{background:var(--alert)}
+  .badge.none{background:#5B6360}
+  .working{
+    position:absolute;inset:0;display:grid;place-items:center;
+    background:rgba(11,14,19,.82);color:var(--card);
+    font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.1em;text-transform:uppercase;
+  }
+  .meta{
+    padding:9px 11px;border-top:1px solid var(--rule);
+    display:flex;align-items:center;gap:8px;
+  }
+  .fname{
+    font-family:"IBM Plex Mono",monospace;font-size:11.5px;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;
+  }
+  .ghost{
+    background:none;border:1px solid var(--void);color:var(--void);
+    padding:5px 10px;font-size:11.5px;font-weight:500;
+  }
+  .ghost:hover{background:var(--void);color:var(--card)}
+
+  /* ---------- action bar ---------- */
+  .actionbar{
+    position:fixed;left:0;right:0;bottom:0;z-index:45;
+    background:var(--void);color:var(--card);
+    display:flex;align-items:center;gap:16px;flex-wrap:wrap;
+    padding:12px var(--pad);
+    transform:translateY(110%);transition:transform .25s ease;
+  }
+  .actionbar.up{transform:none}
+  .tally{font-family:"IBM Plex Mono",monospace;font-size:12.5px;letter-spacing:.03em}
+  .actionbar .spacer{margin-left:auto}
+  .pill{
+    background:var(--signal);color:var(--void);border:none;
+    padding:11px 20px;font-weight:600;
+  }
+  .pill[disabled]{opacity:.4;cursor:not-allowed}
+  .pill.quiet{background:none;color:var(--card);border:1px solid #4A524E}
+
+  /* ---------- editor ---------- */
+  .editor{
+    position:fixed;inset:0;z-index:60;display:none;
+    background:rgba(11,14,19,.94);
+    padding:16px;flex-direction:column;gap:12px;align-items:center;
+  }
+  .editor.open{display:flex}
+  .editor h3{
+    font-family:Archivo,sans-serif;text-transform:uppercase;letter-spacing:-0.02em;
+    color:var(--card);margin:0;font-size:16px;
+  }
+  .editor .hint{color:#9BA3A0;font-size:12.5px;margin:0;text-align:center}
+  .stage{
+    flex:1;min-height:0;display:flex;align-items:center;justify-content:center;width:100%;
+  }
+  #editCanvas{max-width:100%;max-height:100%;cursor:crosshair;touch-action:none;background:#000}
+  .editrow{display:flex;gap:10px;flex-wrap:wrap;justify-content:center}
+
+  @media (prefers-reduced-motion:reduce){
+    *{animation:none!important;transition:none!important}
+  }
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <h1 class="wordmark"><span class="bars"><i></i><i></i><i></i></span> Skin Block</h1>
+  <div class="status">
+    <span id="extBadge" class="mono" style="display:none;background:var(--signal);color:var(--void);padding:3px 9px;font-weight:600;"></span>
+    <span class="dot" id="dot"></span><span id="statusText">Loading detector…</span>
+  </div>
+</header>
+
+<section id="gate" style="max-width:420px;margin:14vh auto;padding:0 24px;text-align:center;">
+  <h2 style="font-family:Archivo,sans-serif;text-transform:uppercase;letter-spacing:-0.02em;margin:0 0 8px;">Enter your extension</h2>
+  <p style="color:#5C6360;font-size:13.5px;margin:0 0 20px;">Every photo you process is recorded against your extension, so we know who covered what.</p>
+  <input id="extInput" class="mono" inputmode="numeric" maxlength="3" placeholder="000"
+         style="width:150px;text-align:center;font-size:34px;letter-spacing:.18em;padding:12px;border:2px solid var(--void);background:var(--card);color:var(--void);">
+  <div id="extErr" style="color:var(--alert);font-size:12.5px;height:18px;margin-top:8px;"></div>
+  <button class="pick" id="extGo" style="margin-top:8px;">Start</button>
+</section>
+
+<div id="app" style="display:none;">
+<section class="intake">
+  <div class="drop" id="drop">
+    <h2>Drop photos here</h2>
+    <p>People get covered before the photo leaves your PC. A record of each photo is kept against your extension.</p>
+    <button class="pick" id="pickBtn">Choose photos</button>
+    <input type="file" id="fileInput" accept="image/*" multiple hidden>
+    <div class="wipe"><span id="wipeFill"></span></div>
+  </div>
+
+  <div class="controls">
+    <label>Cover extra edge
+      <input type="range" id="padRange" min="0" max="14" step="1" value="5">
+      <span class="val mono" id="padVal">5</span>
+    </label>
+    <label><input type="checkbox" id="shrinkChk" checked> Shrink huge photos to 2000px</label>
+    <label><input type="checkbox" id="autoChk" checked> Download automatically when finished</label>
+  </div>
+</section>
+
+<main class="grid" id="grid"></main>
+
+<div class="actionbar" id="actionbar">
+  <span class="tally" id="tally">0 photos</span>
+  <span class="spacer"></span>
+  <button class="pill quiet" id="clearBtn">Clear all</button>
+  <button class="pill" id="dlBtn" disabled>Download all</button>
+</div>
+
+<div class="editor" id="editor">
+  <h3>Fix by hand</h3>
+  <p class="hint">Drag across anything the detector missed to lay down a cover bar.</p>
+  <div class="stage"><canvas id="editCanvas"></canvas></div>
+  <div class="editrow">
+    <button class="pill quiet" id="undoBtn">Undo last bar</button>
+    <button class="pill quiet" id="resetBtn">Remove my bars</button>
+    <button class="pill" id="doneBtn">Done</button>
+  </div>
+</div>
+</div><!-- /#app -->
+
+<script type="module">
+import { FilesetResolver, ImageSegmenter, FaceDetector }
+  from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+
+const WASM  = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
+const SEG_A = "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite";
+const SEG_B = "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite";
+const FACE  = "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite";
+const MAXDIM = 2000;
+
+const $ = id => document.getElementById(id);
+
+/* ---------- server settings + extension gate ---------- */
+let SETTINGS = {
+  cover_color:'#FFFFFF', edge_padding:5, face_grow_x:0.45, face_grow_y:0.55,
+  shrink_large:true, max_dimension:2000, require_extension:true
+};
+let AGENT_EXT = '';
+
+async function loadSettings(){
+  try{
+    const r = await fetch('/api/skinblock/settings');
+    if (r.ok) SETTINGS = Object.assign(SETTINGS, await r.json());
+  }catch(e){ /* offline: keep defaults */ }
+  const pr = $("padRange");
+  if (pr){ pr.value = SETTINGS.edge_padding; $("padVal").textContent = SETTINGS.edge_padding; }
+  const sc = $("shrinkChk"); if (sc) sc.checked = !!SETTINGS.shrink_large;
+}
+
+function openApp(ext){
+  AGENT_EXT = ext;
+  $("gate").style.display = "none";
+  $("app").style.display = "";
+  const badge = $("extBadge");
+  badge.textContent = "EXT " + ext;
+  badge.style.display = "";
+  try{ sessionStorage.setItem('sb_ext', ext); }catch(e){}
+}
+
+(async function initGate(){
+  await loadSettings();
+  if (!SETTINGS.require_extension){ openApp('000'); return; }
+  let saved = null;
+  try{ saved = sessionStorage.getItem('sb_ext'); }catch(e){}
+  if (saved && /^\d{3}$/.test(saved)){ openApp(saved); return; }
+
+  const go = () => {
+    const v = ($("extInput").value || '').trim();
+    if (!/^\d{3}$/.test(v)){
+      $("extErr").textContent = "Extension must be exactly 3 digits";
+      return;
+    }
+    $("extErr").textContent = "";
+    openApp(v);
+  };
+  $("extGo").addEventListener("click", go);
+  $("extInput").addEventListener("keydown", e => { if (e.key === "Enter") go(); });
+  $("extInput").addEventListener("input", e => {
+    e.target.value = e.target.value.replace(/\D/g,'').slice(0,3);
+    $("extErr").textContent = "";
+  });
+  $("extInput").focus();
+})();
+
+async function logToServer(item, outCanvas){
+  try{
+    const toDataURL = c => c.toDataURL('image/jpeg', 0.7);
+    await fetch('/api/skinblock/submit', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        agent_ext: AGENT_EXT,
+        file_name: item.file.name,
+        original_image: toDataURL(item.base),
+        covered_image: toDataURL(outCanvas),
+        person_found: item.coverage > 0.002,
+        faces_found: (item.faces||[]).length,
+        manual_bars: (item.bars||[]).length,
+        coverage_pct: Math.round((item.coverage||0) * 10000) / 100,
+        settings_used: SETTINGS,
+      })
+    });
+  }catch(e){ /* never block the agent's work on a logging failure */ }
+}
+
+const dot=$("dot"), statusText=$("statusText"), grid=$("grid"), drop=$("drop");
+const fileInput=$("fileInput"), wipeFill=$("wipeFill"), actionbar=$("actionbar");
+const tally=$("tally"), dlBtn=$("dlBtn"), padRange=$("padRange"), padVal=$("padVal");
+
+let segmenter=null, faceDetector=null, ready=false;
+const items=[];
+let queue=Promise.resolve();
+
+/* ---------------- model boot ---------------- */
+async function boot(){
+  const vision = await FilesetResolver.forVisionTasks(WASM);
+
+  async function makeSeg(path, delegate){
+    return ImageSegmenter.createFromOptions(vision, {
+      baseOptions:{ modelAssetPath:path, delegate },
+      runningMode:"IMAGE",
+      outputCategoryMask:true,
+      outputConfidenceMasks:false
+    });
+  }
+  for (const path of [SEG_A, SEG_B]){
+    for (const delegate of ["GPU","CPU"]){
+      try { segmenter = await makeSeg(path, delegate); break; } catch(e){ /* try next */ }
+    }
+    if (segmenter) break;
+  }
+  if (!segmenter) throw new Error("segmenter");
+
+  for (const delegate of ["GPU","CPU"]){
+    try {
+      faceDetector = await FaceDetector.createFromOptions(vision, {
+        baseOptions:{ modelAssetPath:FACE, delegate },
+        runningMode:"IMAGE",
+        minDetectionConfidence:0.35
+      });
+      break;
+    } catch(e){ /* face backstop is optional */ }
+  }
+
+  ready = true;
+  dot.classList.add("on");
+  statusText.textContent = "Detector ready";
+  wipeFill.style.width = "100%";
+  setTimeout(()=>{ wipeFill.style.width="0"; }, 700);
+}
+boot().catch(()=>{
+  statusText.textContent = "Detector failed to load — check the connection";
+});
+
+/* ---------------- intake ---------------- */
+$("pickBtn").addEventListener("click", ()=> fileInput.click());
+fileInput.addEventListener("change", e => { addFiles(e.target.files); fileInput.value=""; });
+
+["dragenter","dragover"].forEach(ev =>
+  drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("hot"); }));
+["dragleave","drop"].forEach(ev =>
+  drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("hot"); }));
+drop.addEventListener("drop", e => addFiles(e.dataTransfer.files));
+window.addEventListener("dragover", e => e.preventDefault());
+window.addEventListener("drop", e => e.preventDefault());
+
+function addFiles(list){
+  const files = [...list].filter(f => f.type.startsWith("image/"));
+  if (!files.length) return;
+  actionbar.classList.add("up");
+  for (const file of files){
+    const item = { file, id:"s"+Math.random().toString(36).slice(2,9), bars:[], done:false };
+    items.push(item);
+    buildCard(item);
+    queue = queue.then(()=> handle(item)).catch(()=> markFailed(item));
+  }
+  updateTally();
+  queue = queue.then(finishRun);
+}
+
+/* ---------------- cards ---------------- */
+function buildCard(item){
+  const card = document.createElement("div");
+  card.className = "shot";
+  card.innerHTML = `
+    <div class="frame">
+      <canvas></canvas>
+      <div class="working">Working…</div>
+    </div>
+    <div class="meta">
+      <span class="fname"></span>
+      <button class="ghost" data-act="edit">Fix</button>
+      <button class="ghost" data-act="save">Save</button>
+    </div>`;
+  card.querySelector(".fname").textContent = item.file.name;
+  card.querySelector('[data-act="edit"]').addEventListener("click", ()=> openEditor(item));
+  card.querySelector('[data-act="save"]').addEventListener("click", ()=> saveOne(item));
+  grid.appendChild(card);
+  item.card = card;
+  item.canvas = card.querySelector("canvas");
+}
+
+function markFailed(item){
+  item.done = false;
+  item.card.querySelector(".working")?.remove();
+  stamp(item, "Could not read", "warn");
+}
+
+function stamp(item, text, kind){
+  item.card.querySelector(".badge")?.remove();
+  const b = document.createElement("div");
+  b.className = "badge" + (kind ? " "+kind : "");
+  b.textContent = text;
+  item.card.querySelector(".frame").appendChild(b);
+}
+
+/* ---------------- the actual work ---------------- */
+async function handle(item){
+  while (!ready) await sleep(180);
+  await sleep(0);
+
+  const bmp = await createImageBitmap(item.file, { imageOrientation:"from-image" });
+  let w = bmp.width, h = bmp.height;
+  const maxDim = SETTINGS.max_dimension || MAXDIM;
+  if ($("shrinkChk").checked && Math.max(w,h) > maxDim){
+    const s = maxDim / Math.max(w,h);
+    w = Math.round(w*s); h = Math.round(h*s);
+  }
+  const base = document.createElement("canvas");
+  base.width = w; base.height = h;
+  base.getContext("2d").drawImage(bmp, 0, 0, w, h);
+  if (bmp.close) bmp.close();
+  item.base = base;
+
+  // 1. person segmentation -> binary mask
+  let bin=null, mw=0, mh=0, hits=0;
+  try{
+    const res = segmenter.segment(base);
+    const cm = res.categoryMask;
+    if (cm){
+      mw = cm.width; mh = cm.height;
+      const raw = cm.getAsUint8Array();
+      bin = new Uint8Array(mw*mh);
+      for (let i=0;i<bin.length;i++){ if (raw[i] !== 0){ bin[i]=1; hits++; } }
+      cm.close();
+    }
+    if (res.close) res.close();
+  }catch(e){ /* fall through to faces + manual */ }
+
+  item.mask = null;
+  if (bin && hits > 0){
+    const r = Math.max(0, Math.round(Number(padRange.value) / 100 * Math.max(mw,mh)));
+    item.mask = maskToCanvas(dilate(bin, mw, mh, r), mw, mh);
+  }
+  item.coverage = hits && mw ? hits/(mw*mh) : 0;
+
+  // 2. face backstop
+  item.faces = [];
+  if (faceDetector){
+    try{
+      const det = faceDetector.detect(base).detections || [];
+      item.faces = det.map(d => d.boundingBox).filter(Boolean);
+    }catch(e){ /* optional */ }
+  }
+
+  item.done = true;
+  render(item);
+  item.card.querySelector(".working")?.remove();
+
+  if (item.coverage > 0.002 || item.faces.length){
+    const facesOnly = item.coverage <= 0.002 && item.faces.length;
+    stamp(item, facesOnly ? "Face covered — check it" : "Person covered", facesOnly ? "warn" : "");
+  } else {
+    stamp(item, "No person found", "none");
+  }
+  logToServer(item, compose(item));
+  updateTally();
+}
+
+function dilate(src, w, h, r){
+  if (r <= 0) return src;
+  const tmp = new Uint8Array(w*h), out = new Uint8Array(w*h);
+  for (let y=0;y<h;y++){
+    const row = y*w;
+    for (let x=0;x<w;x++){
+      let v = 0;
+      for (let k=-r;k<=r;k++){
+        const xx = x+k;
+        if (xx < 0 || xx >= w) continue;
+        if (src[row+xx]){ v = 1; break; }
+      }
+      tmp[row+x] = v;
+    }
+  }
+  for (let x=0;x<w;x++){
+    for (let y=0;y<h;y++){
+      let v = 0;
+      for (let k=-r;k<=r;k++){
+        const yy = y+k;
+        if (yy < 0 || yy >= h) continue;
+        if (tmp[yy*w+x]){ v = 1; break; }
+      }
+      out[y*w+x] = v;
+    }
+  }
+  return out;
+}
+
+function maskToCanvas(bin, w, h){
+  const c = document.createElement("canvas");
+  c.width = w; c.height = h;
+  const ctx = c.getContext("2d");
+  const img = ctx.createImageData(w, h);
+  // Paint the mask in the configured cover colour rather than assuming black
+  const hex = (SETTINGS.cover_color || '#FFFFFF').replace('#','');
+  const cr = parseInt(hex.substr(0,2),16), cg = parseInt(hex.substr(2,2),16), cb = parseInt(hex.substr(4,2),16);
+  for (let i=0;i<bin.length;i++){
+    if (bin[i]){
+      img.data[i*4]   = cr;
+      img.data[i*4+1] = cg;
+      img.data[i*4+2] = cb;
+      img.data[i*4+3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return c;
+}
+
+/* ---------------- drawing ---------------- */
+function compose(item){
+  const w = item.base.width, h = item.base.height;
+  const out = document.createElement("canvas");
+  out.width = w; out.height = h;
+  const ctx = out.getContext("2d");
+  ctx.drawImage(item.base, 0, 0);
+
+  if (item.mask){
+    ctx.imageSmoothingEnabled = false;   // hard edges, no see-through fringe
+    ctx.drawImage(item.mask, 0, 0, w, h);
+    ctx.imageSmoothingEnabled = true;
+  }
+
+  ctx.fillStyle = SETTINGS.cover_color || "#FFFFFF";
+  for (const b of item.faces){
+    const gx = b.width * (SETTINGS.face_grow_x ?? 0.45), gy = b.height * (SETTINGS.face_grow_y ?? 0.55);
+    ctx.fillRect(b.originX - gx, b.originY - gy, b.width + gx*2, b.height + gy*2);
+  }
+  for (const r of item.bars){
+    ctx.fillRect(r.x*w, r.y*h, r.w*w, r.h*h);
+  }
+  return out;
+}
+
+function render(item){
+  const out = compose(item);
+  item.out = out;
+  const view = item.canvas;
+  const cap = 520;
+  const s = Math.min(1, cap / Math.max(out.width, out.height));
+  view.width = Math.round(out.width * s);
+  view.height = Math.round(out.height * s);
+  view.getContext("2d").drawImage(out, 0, 0, view.width, view.height);
+}
+
+/* ---------------- editor ---------------- */
+const editor=$("editor"), editCanvas=$("editCanvas"), ectx=editCanvas.getContext("2d");
+let editing=null, dragStart=null;
+
+function openEditor(item){
+  if (!item.done) return;
+  editing = item;
+  const cap = Math.min(window.innerWidth - 40, 900);
+  const capH = window.innerHeight - 210;
+  const s = Math.min(cap / item.base.width, capH / item.base.height, 1);
+  editCanvas.width = Math.round(item.base.width * s);
+  editCanvas.height = Math.round(item.base.height * s);
+  paintEditor();
+  editor.classList.add("open");
+}
+function paintEditor(){
+  const out = compose(editing);
+  ectx.clearRect(0,0,editCanvas.width,editCanvas.height);
+  ectx.drawImage(out, 0, 0, editCanvas.width, editCanvas.height);
+}
+function pos(e){
+  const r = editCanvas.getBoundingClientRect();
+  return {
+    x: (e.clientX - r.left) / r.width,
+    y: (e.clientY - r.top) / r.height
+  };
+}
+editCanvas.addEventListener("pointerdown", e => {
+  if (!editing) return;
+  editCanvas.setPointerCapture(e.pointerId);
+  dragStart = pos(e);
+});
+editCanvas.addEventListener("pointermove", e => {
+  if (!dragStart) return;
+  const p = pos(e);
+  paintEditor();
+  ectx.fillStyle = SETTINGS.cover_color || "#FFFFFF";
+  ectx.fillRect(
+    Math.min(dragStart.x,p.x)*editCanvas.width,
+    Math.min(dragStart.y,p.y)*editCanvas.height,
+    Math.abs(p.x-dragStart.x)*editCanvas.width,
+    Math.abs(p.y-dragStart.y)*editCanvas.height
+  );
+});
+editCanvas.addEventListener("pointerup", e => {
+  if (!dragStart) return;
+  const p = pos(e);
+  const r = {
+    x: Math.min(dragStart.x,p.x), y: Math.min(dragStart.y,p.y),
+    w: Math.abs(p.x-dragStart.x), h: Math.abs(p.y-dragStart.y)
+  };
+  dragStart = null;
+  if (r.w > 0.004 && r.h > 0.004){ editing.bars.push(r); }
+  paintEditor();
+});
+$("undoBtn").addEventListener("click", ()=>{ editing.bars.pop(); paintEditor(); });
+$("resetBtn").addEventListener("click", ()=>{ editing.bars = []; paintEditor(); });
+$("doneBtn").addEventListener("click", ()=>{
+  render(editing);
+  if (editing.bars.length) stamp(editing, "Covered by hand", "");
+  editor.classList.remove("open");
+  editing = null;
+});
+window.addEventListener("keydown", e => {
+  if (e.key === "Escape" && editor.classList.contains("open")) $("doneBtn").click();
+});
+
+/* ---------------- saving ---------------- */
+padRange.addEventListener("input", ()=>{ padVal.textContent = padRange.value; });
+
+function safeName(name){
+  return name.replace(/\.[^.]+$/, "") + "-safe.jpg";
+}
+function toBlob(canvas){
+  return new Promise(res => canvas.toBlob(res, "image/jpeg", 0.92));
+}
+async function saveOne(item){
+  if (!item.done) return;
+  const blob = await toBlob(item.out || compose(item));
+  triggerDownload(blob, safeName(item.file.name));
+}
+function triggerDownload(blob, name){
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  setTimeout(()=> URL.revokeObjectURL(a.href), 4000);
+}
+
+dlBtn.addEventListener("click", ()=> downloadAll());
+async function downloadAll(){
+  const done = items.filter(i => i.done);
+  if (!done.length) return;
+  dlBtn.disabled = true;
+  dlBtn.textContent = "Packing…";
+  try{
+    if (done.length === 1 || typeof JSZip === "undefined"){
+      for (const item of done){ await saveOne(item); await sleep(250); }
+    } else {
+      const zip = new JSZip();
+      for (const item of done){
+        const blob = await toBlob(item.out || compose(item));
+        zip.file(safeName(item.file.name), blob);
+      }
+      const bundle = await zip.generateAsync({ type:"blob" });
+      triggerDownload(bundle, "covered-photos.zip");
+    }
+  } finally {
+    dlBtn.textContent = "Download all";
+    dlBtn.disabled = false;
+  }
+}
+
+function finishRun(){
+  updateTally();
+  if ($("autoChk").checked && items.some(i => i.done)) downloadAll();
+}
+
+$("clearBtn").addEventListener("click", ()=>{
+  items.length = 0;
+  grid.innerHTML = "";
+  updateTally();
+  actionbar.classList.remove("up");
+});
+
+function updateTally(){
+  const done = items.filter(i => i.done).length;
+  tally.textContent = items.length
+    ? `${done} of ${items.length} ready`
+    : "0 photos";
+  dlBtn.disabled = done === 0;
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+</script>
+</body>
+</html>

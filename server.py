@@ -276,6 +276,24 @@ def init_db():
     ''')
 
     c.execute('''
+        CREATE TABLE IF NOT EXISTS skinblock_jobs (
+            id SERIAL PRIMARY KEY,
+            agent_ext TEXT NOT NULL,
+            file_name TEXT,
+            original_image TEXT,
+            covered_image TEXT,
+            images_purged BOOLEAN DEFAULT FALSE,
+            person_found BOOLEAN,
+            faces_found INTEGER DEFAULT 0,
+            manual_bars INTEGER DEFAULT 0,
+            coverage_pct NUMERIC,
+            settings_used TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    c.execute("CREATE INDEX IF NOT EXISTS skinblock_ext_idx ON skinblock_jobs (agent_ext, created_at)")
+
+    c.execute('''
         CREATE TABLE IF NOT EXISTS shift_adjustments (
             id SERIAL PRIMARY KEY,
             employee_name TEXT NOT NULL,
@@ -2814,6 +2832,124 @@ def _compute_pay(segments, sched_window, rate_history, ot_periods):
         'hourly_rate': max(rates_used) if rates_used else 0,
     }
 
+# ─── SKIN BLOCK (photo people-cover tool) ─────────────────────────────────────
+SKINBLOCK_DEFAULTS = {
+    'cover_color': '#FFFFFF',
+    'edge_padding': 5,          # % of image dimension to expand the person mask
+    'face_grow_x': 0.45,        # extra width around detected faces
+    'face_grow_y': 0.55,        # extra height around detected faces
+    'shrink_large': True,
+    'max_dimension': 2000,
+    'require_extension': True,
+    'retention_days': 30,
+}
+
+def _skinblock_settings():
+    s = dict(SKINBLOCK_DEFAULTS)
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute("SELECT value FROM app_settings WHERE key='skinblock_settings'")
+        row = c.fetchone()
+        conn.close()
+        if row and row[0]:
+            s.update(json.loads(row[0]))
+    except Exception as e:
+        print(f"[skinblock] settings unavailable: {str(e)[:120]}")
+    return s
+
+@app.route('/api/skinblock/settings', methods=['GET'])
+def get_skinblock_settings():
+    """Public — the tool needs these to run. No auth so any agent can load the page."""
+    return jsonify(_skinblock_settings())
+
+@app.route('/api/skinblock/settings', methods=['POST'])
+@require_manager
+def save_skinblock_settings():
+    d = request.json or {}
+    s = _skinblock_settings()
+    for k in SKINBLOCK_DEFAULTS:
+        if k in d:
+            s[k] = d[k]
+    conn = get_db(); c = conn.cursor()
+    c.execute('''INSERT INTO app_settings (key, value, updated_at)
+                 VALUES ('skinblock_settings', %s, CURRENT_TIMESTAMP)
+                 ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=CURRENT_TIMESTAMP''',
+              (json.dumps(s),))
+    conn.commit(); conn.close()
+    return jsonify(s)
+
+@app.route('/api/skinblock/submit', methods=['POST'])
+def skinblock_submit():
+    """
+    Public — records one processed photo. Called by the tool after it covers an image.
+    Stores both images for the retention window, then only the log record survives.
+    """
+    d = request.json or {}
+    ext = (d.get('agent_ext') or '').strip()
+    if not re.fullmatch(r'\d{3}', ext):
+        return jsonify({'error': 'A 3-digit extension is required'}), 400
+
+    conn = get_db(); c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('''INSERT INTO skinblock_jobs
+        (agent_ext, file_name, original_image, covered_image, person_found,
+         faces_found, manual_bars, coverage_pct, settings_used)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id, created_at''',
+        (ext, d.get('file_name',''), d.get('original_image'), d.get('covered_image'),
+         bool(d.get('person_found')), int(d.get('faces_found') or 0),
+         int(d.get('manual_bars') or 0), d.get('coverage_pct'),
+         json.dumps(d.get('settings_used') or {})))
+    row = dict(c.fetchone()); conn.commit(); conn.close()
+    return jsonify({'success': True, 'id': row['id']})
+
+@app.route('/api/skinblock/history', methods=['GET'])
+@require_manager
+def skinblock_history():
+    """Manager view of everything processed, with the images while they're retained."""
+    ext = request.args.get('ext', '')
+    date_from = request.args.get('date_from', '')
+    date_to = request.args.get('date_to', '')
+    limit = min(int(request.args.get('limit', 100)), 500)
+
+    _purge_expired_skinblock_images()
+
+    conn = get_db(); c = conn.cursor(cursor_factory=RealDictCursor)
+    q = '''SELECT id, agent_ext, file_name, person_found, faces_found, manual_bars,
+                  coverage_pct, images_purged, created_at,
+                  original_image, covered_image
+           FROM skinblock_jobs'''
+    params, where = [], []
+    if ext: where.append('agent_ext = %s'); params.append(ext)
+    if date_from: where.append('created_at >= %s'); params.append(date_from)
+    if date_to: where.append("created_at <= %s::date + INTERVAL '1 day'"); params.append(date_to)
+    if where: q += ' WHERE ' + ' AND '.join(where)
+    q += ' ORDER BY created_at DESC LIMIT %s'
+    params.append(limit)
+    c.execute(q, params)
+    jobs = [dict(r) for r in c.fetchall()]
+
+    c.execute('''SELECT agent_ext, COUNT(*) AS total,
+                        SUM(CASE WHEN person_found THEN 1 ELSE 0 END) AS with_person
+                 FROM skinblock_jobs GROUP BY agent_ext ORDER BY total DESC''')
+    by_agent = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return jsonify({'jobs': jobs, 'by_agent': by_agent,
+                    'retention_days': _skinblock_settings().get('retention_days', 30)})
+
+def _purge_expired_skinblock_images():
+    """Drop stored images past the retention window; the log record itself is kept forever."""
+    days = int(_skinblock_settings().get('retention_days', 30))
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute(f'''UPDATE skinblock_jobs
+                      SET original_image=NULL, covered_image=NULL, images_purged=TRUE
+                      WHERE images_purged=FALSE
+                        AND created_at < NOW() - INTERVAL '{days} days' ''')
+        n = c.rowcount
+        conn.commit(); conn.close()
+        if n: print(f"[skinblock] purged images for {n} job(s) older than {days} days")
+    except Exception as e:
+        print(f"[skinblock] purge failed: {str(e)[:120]}")
+
 @app.route('/api/shift-adjustments', methods=['GET'])
 @require_manager
 def get_shift_adjustments():
@@ -3944,6 +4080,11 @@ def test_analyze():
         results['audio_url_via_relay'] = 'Skipped — no recording URL available to test'
 
     return jsonify(results)
+
+@app.route('/skinblock')
+def skinblock_page():
+    """Public — no login required so any agent can use it directly."""
+    return send_from_directory('.', 'skinblock.html')
 
 @app.route('/')
 def index():

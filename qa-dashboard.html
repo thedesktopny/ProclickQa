@@ -223,6 +223,7 @@ td.agent{color:var(--text);font-weight:500;}
     <div class="nav-label">Manager</div>
     <div class="nav-item" onclick="showPage('manager-queue')"><span class="icon">🧑‍⚖️</span>AI Mistake Review<span class="nav-badge" id="nb-manager">0</span></div>
     <div class="nav-item" onclick="showPage('time-report')"><span class="icon">⏰</span>Time Report</div>
+    <div class="nav-item" onclick="showPage('skinblock')"><span class="icon">🖼️</span>Skin Block</div>
   </div>
   <div class="nav-section manager-plus" style="margin-top:12px;display:none;">
     <div class="nav-label">Processing</div>
@@ -939,6 +940,92 @@ td.agent{color:var(--text);font-weight:500;}
     </div>
     <div id="ot-periods-list" style="max-height:260px;overflow-y:auto;"></div>
     <button onclick="hideModal('ot-periods-modal')" class="btn btn-outline" style="width:100%;margin-top:14px;">Close</button>
+  </div>
+</div>
+
+<div class="page" id="page-skinblock">
+  <div class="topbar">
+    <div class="page-title">🖼️ Skin Block</div>
+    <div class="topbar-right">
+      <a href="/skinblock" target="_blank" class="btn btn-outline" style="text-decoration:none;">Open tool ↗</a>
+      <button class="btn btn-primary" onclick="saveSkinblockSettings()">Save Settings</button>
+    </div>
+  </div>
+  <div style="padding:28px;">
+    <div class="alert-bar" style="margin-bottom:20px;background:rgba(79,110,247,0.08);border-color:rgba(79,110,247,0.2)">
+      <span style="font-size:18px;">🔗</span>
+      <span style="font-size:12px;color:var(--text2);flex:1;">Agents use the tool at <strong id="sb-link">/skinblock</strong> — no login needed, but they must enter their 3-digit extension. Every photo is logged here. Images are kept for the retention period below, then only the record remains.</span>
+    </div>
+
+    <div class="card" style="margin-bottom:20px;">
+      <div class="card-header"><span class="card-title">⚙️ Detection Settings</span></div>
+      <div class="card-body" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;">
+        <div>
+          <div style="font-size:11px;color:var(--text3);margin-bottom:5px;">Cover colour</div>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <input type="color" id="sb-color" value="#FFFFFF" style="width:44px;height:34px;background:none;border:1px solid var(--border);border-radius:6px;cursor:pointer;">
+            <input type="text" id="sb-color-hex" value="#FFFFFF" style="flex:1;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:6px;font-size:12px;">
+          </div>
+        </div>
+        <div>
+          <div style="font-size:11px;color:var(--text3);margin-bottom:5px;">Cover strength — extra edge (0–14)</div>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <input type="range" id="sb-pad" min="0" max="14" step="1" value="5" style="flex:1;" oninput="document.getElementById('sb-pad-val').textContent=this.value">
+            <span id="sb-pad-val" style="font-size:12px;width:22px;">5</span>
+          </div>
+          <div style="font-size:10px;color:var(--text3);margin-top:3px;">Higher = covers further past the person's outline</div>
+        </div>
+        <div>
+          <div style="font-size:11px;color:var(--text3);margin-bottom:5px;">Face bar width (×)</div>
+          <input type="number" id="sb-face-x" step="0.05" min="0" max="2" value="0.45" style="width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:6px;font-size:12px;box-sizing:border-box;">
+        </div>
+        <div>
+          <div style="font-size:11px;color:var(--text3);margin-bottom:5px;">Face bar height (×)</div>
+          <input type="number" id="sb-face-y" step="0.05" min="0" max="2" value="0.55" style="width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:6px;font-size:12px;box-sizing:border-box;">
+        </div>
+        <div>
+          <div style="font-size:11px;color:var(--text3);margin-bottom:5px;">Max image size (px)</div>
+          <input type="number" id="sb-maxdim" step="100" min="500" value="2000" style="width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:6px;font-size:12px;box-sizing:border-box;">
+        </div>
+        <div>
+          <div style="font-size:11px;color:var(--text3);margin-bottom:5px;">Keep images for (days)</div>
+          <input type="number" id="sb-retention" step="1" min="1" max="365" value="30" style="width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:6px;font-size:12px;box-sizing:border-box;">
+        </div>
+        <div style="display:flex;flex-direction:column;gap:8px;justify-content:flex-end;">
+          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text2);cursor:pointer;">
+            <input type="checkbox" id="sb-shrink" checked style="width:15px;height:15px;accent-color:var(--accent);"> Shrink large photos
+          </label>
+          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text2);cursor:pointer;">
+            <input type="checkbox" id="sb-require-ext" checked style="width:15px;height:15px;accent-color:var(--accent);"> Require 3-digit extension
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap;align-items:flex-end;">
+      <div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:4px;">Extension</div>
+        <input id="sb-filter-ext" placeholder="All" maxlength="3" style="width:90px;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:6px;font-size:12px;">
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:4px;">From</div>
+        <input type="date" id="sb-from" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:6px;font-size:12px;">
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:4px;">To</div>
+        <input type="date" id="sb-to" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:6px;font-size:12px;">
+      </div>
+      <button onclick="loadSkinblockHistory()" class="btn btn-outline" style="font-size:12px;">Apply</button>
+    </div>
+
+    <div id="sb-by-agent" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:20px;"></div>
+
+    <div class="card">
+      <div class="card-header"><span class="card-title">History — before &amp; after</span><span id="sb-count" style="font-size:11px;color:var(--text3)"></span></div>
+      <div id="sb-history" style="padding:16px;">
+        <div style="text-align:center;color:var(--text3);padding:24px;">Loading…</div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -2037,7 +2124,7 @@ function renderAgentProfile(data){
 
 function showPage(id){
   // Access control: qa_users see only their own work; costs is admin-only
-  const managerPages = ['analytics','billing','notes','rules','alerts','qa-users','manager-queue','time-report'];
+  const managerPages = ['analytics','billing','notes','rules','alerts','qa-users','manager-queue','time-report','skinblock'];
   const adminPages = ['costs'];
   const isManager = currentRole==='manager' || isAdmin;
   if(adminPages.includes(id) && !isAdmin){ showToast('Admin access only', true); return; }
@@ -2056,6 +2143,16 @@ function showPage(id){
   if(id==='human-review'){ mountHumanReviewDatePicker(); renderHumanReview(); }
   if(id==='alerts'){ mountAlertsDatePicker(); renderAlerts(); }
   if(id==='calls') mountCallsDatePicker();
+  if(id==='skinblock'){
+    loadSkinblockSettings();
+    loadSkinblockHistory();
+    const cp = document.getElementById('sb-color'), hx = document.getElementById('sb-color-hex');
+    if(cp && !cp.dataset.bound){
+      cp.addEventListener('input', ()=>{ hx.value = cp.value.toUpperCase(); });
+      hx.addEventListener('input', ()=>{ if(/^#[0-9a-f]{6}$/i.test(hx.value)) cp.value = hx.value; });
+      cp.dataset.bound = '1';
+    }
+  }
   if(id==='manager-queue') renderManagerQueue();
   if(id==='time-report'){
     // Recurring schedules expand across a date range, so ensure one is set
@@ -3294,6 +3391,103 @@ async function revertAdjustment(){
     showToast('Reverted to original clocked times');
     loadTimeReport();
   }catch(e){ showToast('Failed: '+e.message, true); }
+}
+
+// ─── SKIN BLOCK ───────────────────────────────────────────────────────────────
+async function loadSkinblockSettings(){
+  try{
+    const s = await API.get('/api/skinblock/settings');
+    document.getElementById('sb-color').value = s.cover_color || '#FFFFFF';
+    document.getElementById('sb-color-hex').value = s.cover_color || '#FFFFFF';
+    document.getElementById('sb-pad').value = s.edge_padding ?? 5;
+    document.getElementById('sb-pad-val').textContent = s.edge_padding ?? 5;
+    document.getElementById('sb-face-x').value = s.face_grow_x ?? 0.45;
+    document.getElementById('sb-face-y').value = s.face_grow_y ?? 0.55;
+    document.getElementById('sb-maxdim').value = s.max_dimension ?? 2000;
+    document.getElementById('sb-retention').value = s.retention_days ?? 30;
+    document.getElementById('sb-shrink').checked = s.shrink_large !== false;
+    document.getElementById('sb-require-ext').checked = s.require_extension !== false;
+  }catch(e){}
+  const link = document.getElementById('sb-link');
+  if(link) link.textContent = window.location.origin + '/skinblock';
+}
+
+async function saveSkinblockSettings(){
+  try{
+    await API.post('/api/skinblock/settings', {
+      cover_color: document.getElementById('sb-color-hex').value.trim() || '#FFFFFF',
+      edge_padding: parseInt(document.getElementById('sb-pad').value),
+      face_grow_x: parseFloat(document.getElementById('sb-face-x').value),
+      face_grow_y: parseFloat(document.getElementById('sb-face-y').value),
+      max_dimension: parseInt(document.getElementById('sb-maxdim').value),
+      retention_days: parseInt(document.getElementById('sb-retention').value),
+      shrink_large: document.getElementById('sb-shrink').checked,
+      require_extension: document.getElementById('sb-require-ext').checked,
+    });
+    showToast('✅ Settings saved — applies next time an agent loads the tool');
+  }catch(e){ showToast('Failed: '+e.message, true); }
+}
+
+async function loadSkinblockHistory(){
+  const box = document.getElementById('sb-history');
+  if(!box) return;
+  box.innerHTML = '<div style="text-align:center;color:var(--text3);padding:24px;">Loading…</div>';
+  const ext = document.getElementById('sb-filter-ext')?.value.trim() || '';
+  const from = document.getElementById('sb-from')?.value || '';
+  const to = document.getElementById('sb-to')?.value || '';
+  let p = '?limit=100';
+  if(ext) p += `&ext=${encodeURIComponent(ext)}`;
+  if(from) p += `&date_from=${from}`;
+  if(to) p += `&date_to=${to}`;
+
+  try{
+    const res = await API.get('/api/skinblock/history' + p);
+    const jobs = res.jobs || [];
+    document.getElementById('sb-count').textContent = `${jobs.length} photo(s) · images kept ${res.retention_days} days`;
+
+    const agents = res.by_agent || [];
+    document.getElementById('sb-by-agent').innerHTML = agents.map(a=>`
+      <div class="card" style="padding:12px 14px;">
+        <div style="font-size:18px;font-weight:700;color:var(--accent);">EXT ${a.agent_ext}</div>
+        <div style="font-size:11px;color:var(--text3);margin-top:2px;">${a.total} photo(s) · ${a.with_person} with people</div>
+      </div>`).join('') || '<div style="font-size:12px;color:var(--text3);">No activity yet.</div>';
+
+    if(!jobs.length){
+      box.innerHTML = '<div style="text-align:center;color:var(--text3);padding:24px;">No photos processed in this range.</div>';
+      return;
+    }
+
+    box.innerHTML = jobs.map(j=>{
+      const when = new Date(j.created_at).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+      const imgs = j.images_purged
+        ? `<div style="flex:1;padding:16px;background:var(--surface2);border-radius:8px;font-size:11px;color:var(--text3);text-align:center;">Images past retention — log record only</div>`
+        : `<div style="display:flex;gap:10px;flex:1;min-width:0;">
+             <div style="flex:1;min-width:0;">
+               <div style="font-size:10px;color:var(--text3);margin-bottom:4px;text-transform:uppercase;">Before</div>
+               <img src="${j.original_image}" style="width:100%;border-radius:6px;border:1px solid var(--border);cursor:pointer;" onclick="window.open('${j.original_image}')">
+             </div>
+             <div style="flex:1;min-width:0;">
+               <div style="font-size:10px;color:var(--green);margin-bottom:4px;text-transform:uppercase;">After</div>
+               <img src="${j.covered_image}" style="width:100%;border-radius:6px;border:1px solid var(--border);cursor:pointer;" onclick="window.open('${j.covered_image}')">
+             </div>
+           </div>`;
+      return `<div style="display:flex;gap:14px;padding:14px;border:1px solid var(--border);border-radius:10px;margin-bottom:12px;flex-wrap:wrap;">
+        <div style="width:170px;flex-shrink:0;">
+          <div style="font-size:13px;font-weight:700;">EXT ${j.agent_ext}</div>
+          <div style="font-size:11px;color:var(--text3);margin-top:2px;word-break:break-all;">${j.file_name||'—'}</div>
+          <div style="font-size:11px;color:var(--text3);margin-top:4px;">${when}</div>
+          <div style="font-size:11px;margin-top:6px;color:${j.person_found?'var(--green)':'var(--text3)'};">
+            ${j.person_found?'✓ Person covered':'No person found'}
+          </div>
+          ${j.faces_found?`<div style="font-size:11px;color:var(--text3);">${j.faces_found} face(s)</div>`:''}
+          ${j.manual_bars?`<div style="font-size:11px;color:var(--yellow);">${j.manual_bars} manual bar(s)</div>`:''}
+        </div>
+        ${imgs}
+      </div>`;
+    }).join('');
+  }catch(e){
+    box.innerHTML = `<div style="text-align:center;color:var(--red);padding:24px;">Failed to load: ${e.message}</div>`;
+  }
 }
 
 async function loadTimeReport(){
