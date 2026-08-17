@@ -177,7 +177,7 @@
 <body>
 
 <header class="topbar">
-  <h1 class="wordmark"><span class="bars"><i></i><i></i><i></i></span> Skin Block <span class="mono" style="font-size:11px;opacity:.55;">v6</span></h1>
+  <h1 class="wordmark"><span class="bars"><i></i><i></i><i></i></span> Skin Block <span class="mono" style="font-size:11px;opacity:.55;">v7</span></h1>
   <div class="status">
     <span id="extBadge" class="mono" style="display:none;background:var(--signal);color:var(--void);padding:3px 9px;font-weight:600;"></span>
     <span class="dot" id="dot"></span><span id="statusText">Loading detector…</span>
@@ -242,31 +242,19 @@
 </div><!-- /#app -->
 
 <script type="module">
-import { FilesetResolver, ImageSegmenter, FaceDetector }
-  from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 
-const WASM  = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
-const SEG_A = "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite";
-const SEG_B = "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite";
-const FACE  = "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite";
 const MAXDIM = 2000;
 
 const $ = id => document.getElementById(id);
-console.log("[SkinBlock] v6 — per-tile grid painting");
+console.log("[SkinBlock] v7 — server-side detection");
 
 /* ---------- server settings + extension gate ---------- */
 /* selfie_multiclass_256x256 category indices */
-const SEG_CLASS = { BACKGROUND:0, HAIR:1, BODY_SKIN:2, FACE_SKIN:3, CLOTHES:4, OTHERS:5 };
-let multiclass = false;
 
 /* Primary detector: SegFormer human-parsing (open source, MIT) via transformers.js.
    Labels every pixel as Face / Left-arm / Right-arm / Left-leg / Right-leg or a
    specific clothing type — the precise skin-vs-clothing line we need. Runs fully
    in the browser; the model downloads once (~30 MB) and is cached after that. */
-const TFJS_LOCAL = "/sbassets/lib/transformers.min.js";   // served by VoiceGuard itself
-const PARSER_MODELS = ["Xenova/segformer_b2_clothes", "Xenova/segformer_b0_clothes"];
-const SKIN_LABELS = new Set(["Face", "Left-arm", "Right-arm", "Left-leg", "Right-leg"]);
-let parser = null;
 
 let SETTINGS = {
   cover_color:'#000000', edge_padding:5, face_grow_x:0.45, face_grow_y:0.55,
@@ -355,85 +343,19 @@ const dot=$("dot"), statusText=$("statusText"), grid=$("grid"), drop=$("drop");
 const fileInput=$("fileInput"), wipeFill=$("wipeFill"), actionbar=$("actionbar");
 const tally=$("tally"), dlBtn=$("dlBtn"), padRange=$("padRange"), padVal=$("padVal");
 
-let segmenter=null, faceDetector=null, ready=false;
+let ready=false;
 const items=[];
 let queue=Promise.resolve();
 
 /* ---------------- model boot ---------------- */
 async function boot(){
-  // Precise parser first (SegFormer). If its CDN is blocked by the content
-  // filter, we fall back to the MediaPipe detector loaded below.
-  statusText.textContent = "Downloading precise detector (one-time)…";
-  try{
-    // Everything loads from OUR server (/sbassets/...), which mirrors the files —
-    // so the content filter never has to allow any outside AI site.
-    const { pipeline, env } = await import(TFJS_LOCAL);
-    env.allowLocalModels = false;
-    env.remoteHost = location.origin + "/sbassets/hf/";
-    env.backends.onnx.wasm.wasmPaths = location.origin + "/sbassets/lib/";
-    for (const modelId of PARSER_MODELS){
-      for (const device of ["webgpu", "wasm"]){
-        try{
-          parser = await pipeline("image-segmentation", modelId, { device, dtype:"q8" });
-          break;
-        }catch(e){ /* try next */ }
-      }
-      if (parser) break;
-    }
-  }catch(e){ /* transformers.js CDN unreachable — MediaPipe only */ }
-
-  const vision = await FilesetResolver.forVisionTasks(WASM);
-
-  async function makeSeg(path, delegate){
-    return ImageSegmenter.createFromOptions(vision, {
-      baseOptions:{ modelAssetPath:path, delegate },
-      runningMode:"IMAGE",
-      outputCategoryMask:true,
-      outputConfidenceMasks:false
-    });
-  }
-  for (const path of [SEG_A, SEG_B]){
-    for (const delegate of ["GPU","CPU"]){
-      try { segmenter = await makeSeg(path, delegate); break; } catch(e){ /* try next */ }
-    }
-    if (segmenter){ multiclass = (path === SEG_A); break; }
-  }
-  if (!segmenter && !parser) throw new Error("no detector");
-
-  for (const delegate of ["GPU","CPU"]){
-    try {
-      faceDetector = await FaceDetector.createFromOptions(vision, {
-        baseOptions:{ modelAssetPath:FACE, delegate },
-        runningMode:"IMAGE",
-        minDetectionConfidence:0.35
-      });
-      break;
-    } catch(e){ /* face backstop is optional */ }
-  }
-
+  // v7: all detection runs on the VoiceGuard server. The page only uploads the
+  // photo and shows the painted result — nothing to download, nothing for the
+  // content filter to block, and every agent gets identical output.
   ready = true;
   dot.classList.add("on");
-  statusText.textContent = parser ? "Precise detector ready"
-    : (multiclass ? "Detector ready (basic — precise model failed, tell David)"
-                  : "Basic detector — covers whole person");
-  wipeFill.style.width = "100%";
-  setTimeout(()=>{ wipeFill.style.width="0"; }, 700);
+  statusText.textContent = "Server detector ready";
 }
-boot().catch(()=>{
-  statusText.textContent = "Detector failed to load — check the connection";
-});
-
-/* ---------------- intake ---------------- */
-$("pickBtn").addEventListener("click", ()=> fileInput.click());
-fileInput.addEventListener("change", e => { addFiles(e.target.files); fileInput.value=""; });
-
-["dragenter","dragover"].forEach(ev =>
-  drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("hot"); }));
-["dragleave","drop"].forEach(ev =>
-  drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("hot"); }));
-drop.addEventListener("drop", e => addFiles(e.dataTransfer.files));
-window.addEventListener("dragover", e => e.preventDefault());
-window.addEventListener("drop", e => e.preventDefault());
 
 function addFiles(list){
   const files = [...list].filter(f => f.type.startsWith("image/"));
@@ -509,744 +431,6 @@ function stamp(item, text, kind){
       skin and clothing.
 */
 
-const FIXED = { crMin:133, crMax:173, cbMin:77, cbMax:127 };
-
-function px2chroma(r, g, b){
-  return {
-    y:  0.299*r + 0.587*g + 0.114*b,
-    cb: 128 - 0.168736*r - 0.331264*g + 0.5*b,
-    cr: 128 + 0.5*r - 0.418688*g - 0.081312*b
-  };
-}
-
-/* Chroma-only test (no brightness gates) — used for trimming AI-skin edges.
-   Chroma survives shadow and highlight, so shadowed skin stays covered while
-   differently-coloured clothing gets trimmed. */
-function chromaPass(r, g, b, m){
-  const cb = 128 - 0.168736*r - 0.331264*g + 0.5*b;
-  if (cb < m.cbMin || cb > m.cbMax) return false;
-  const cr = 128 + 0.5*r - 0.418688*g - 0.081312*b;
-  return cr >= m.crMin && cr <= m.crMax;
-}
-
-/* Full strict test (brightness + grey gates + chroma) — used for finding NEW
-   skin the AI missed. Strict on purpose: anything it adds must really look
-   like lit skin. */
-function strictPass(r, g, b, m){
-  if (r < 45) return false;                 // too dark to be lit skin
-  if (r - g < 15) return false;             // skin is clearly red-dominant
-  if (r <= b) return false;
-  const mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
-  const mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
-  if (mx - mn < 15) return false;           // near-grey: paper, walls, UI chrome
-  const y = 0.299*r + 0.587*g + 0.114*b;
-  if (y < 30 || y > 250) return false;      // black suit / white dress
-  return chromaPass(r, g, b, m);
-}
-
-/* Builds this photo's own skin-colour model by sampling pixels the AI called
-   skin (and the inside of any detected face), then fitting the colour window
-   around what was actually found. Falls back to the fixed window when there
-   is nothing trustworthy to sample. */
-function buildColorModel(maskCtxData, mw, mh, segBin, faces, scale, sensitivity){
-  const d = maskCtxData;
-  const s = Math.max(0, Math.min(25, Number(sensitivity) || 0));
-  const fixedLoose  = { crMin:FIXED.crMin - s - 4, crMax:FIXED.crMax + s + 4,
-                        cbMin:FIXED.cbMin - s - 4, cbMax:FIXED.cbMax + s + 4 };
-  const fixedStrict = { crMin:FIXED.crMin - s, crMax:FIXED.crMax + s,
-                        cbMin:FIXED.cbMin - s, cbMax:FIXED.cbMax + s };
-
-  // Face interiors (inner 55%) in mask coordinates — the most reliable skin sample
-  const faceRects = (faces || []).map(b => {
-    const fx = b.originX * scale, fy = b.originY * scale;
-    const fw = b.width * scale,  fh = b.height * scale;
-    return { x0: fx + fw*0.225, x1: fx + fw*0.775, y0: fy + fh*0.225, y1: fy + fh*0.775 };
-  });
-
-  let n = 0, sumCr = 0, sumCb = 0, sumCr2 = 0, sumCb2 = 0;
-  for (let y = 0; y < mh; y++){
-    for (let x = 0; x < mw; x++){
-      const i = y*mw + x;
-      let candidate = segBin && segBin[i];
-      if (!candidate && faceRects.length){
-        for (const f of faceRects){
-          if (x >= f.x0 && x <= f.x1 && y >= f.y0 && y <= f.y1){ candidate = true; break; }
-        }
-      }
-      if (!candidate) continue;
-      const p = i*4, r = d[p], g = d[p+1], b = d[p+2];
-      // Only trust samples that already look vaguely like skin — this keeps a
-      // mislabeled patch of shirt from poisoning the model.
-      if (!chromaPass(r, g, b, fixedLoose)) continue;
-      const c = px2chroma(r, g, b);
-      if (c.y < 25 || c.y > 250) continue;
-      n++; sumCr += c.cr; sumCb += c.cb; sumCr2 += c.cr*c.cr; sumCb2 += c.cb*c.cb;
-    }
-  }
-
-  if (n < 150) return { loose: fixedLoose, strict: fixedStrict, adaptive:false };
-
-  const mCr = sumCr/n, mCb = sumCb/n;
-  const sdCr = Math.max(3, Math.sqrt(Math.max(0, sumCr2/n - mCr*mCr)));
-  const sdCb = Math.max(3, Math.sqrt(Math.max(0, sumCb2/n - mCb*mCb)));
-  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
-
-  // Loose: mean ± 3σ (min half-width 8) — for trimming AI edges and edge snap.
-  // Strict: mean ± 2.2σ (min half-width 6) — for finding new skin.
-  // Both clamped inside the widened fixed window so the model can only get
-  // MORE precise than before, never wilder.
-  const loose = {
-    crMin: clamp(mCr - Math.max(8, 3*sdCr),   fixedLoose.crMin, fixedLoose.crMax),
-    crMax: clamp(mCr + Math.max(8, 3*sdCr),   fixedLoose.crMin, fixedLoose.crMax),
-    cbMin: clamp(mCb - Math.max(8, 3*sdCb),   fixedLoose.cbMin, fixedLoose.cbMax),
-    cbMax: clamp(mCb + Math.max(8, 3*sdCb),   fixedLoose.cbMin, fixedLoose.cbMax)
-  };
-  const strict = {
-    crMin: clamp(mCr - Math.max(6, 2.2*sdCr), fixedStrict.crMin, fixedStrict.crMax),
-    crMax: clamp(mCr + Math.max(6, 2.2*sdCr), fixedStrict.crMin, fixedStrict.crMax),
-    cbMin: clamp(mCb - Math.max(6, 2.2*sdCb), fixedStrict.cbMin, fixedStrict.cbMax),
-    cbMax: clamp(mCb + Math.max(6, 2.2*sdCb), fixedStrict.cbMin, fixedStrict.cbMax)
-  };
-  return { loose, strict, adaptive:true };
-}
-
-/* Per-pixel strict skin detection over the whole frame, using the model. */
-function skinColorMask(maskCtxData, mw, mh, model){
-  const d = maskCtxData;
-  const out = new Uint8Array(mw*mh);
-  let hits = 0;
-  for (let i = 0, p = 0; i < out.length; i++, p += 4){
-    if (strictPass(d[p], d[p+1], d[p+2], model.strict)){ out[i] = 1; hits++; }
-  }
-  return { mask: out, hits };
-}
-
-/* Shrinks the mask to drop stray single-pixel hits (wood, sand, warm walls). */
-function erode(src, w, h, r){
-  if (r <= 0) return src;
-  const tmp = new Uint8Array(w*h), out = new Uint8Array(w*h);
-  for (let y = 0; y < h; y++){
-    const row = y*w;
-    for (let x = 0; x < w; x++){
-      let v = 1;
-      for (let k = -r; k <= r; k++){
-        const xx = x + k;
-        if (xx < 0 || xx >= w || !src[row+xx]){ v = 0; break; }
-      }
-      tmp[row+x] = v;
-    }
-  }
-  for (let x = 0; x < w; x++){
-    for (let y = 0; y < h; y++){
-      let v = 1;
-      for (let k = -r; k <= r; k++){
-        const yy = y + k;
-        if (yy < 0 || yy >= h || !tmp[yy*w+x]){ v = 0; break; }
-      }
-      out[y*w+x] = v;
-    }
-  }
-  return out;
-}
-
-/* Keeps only colour-detected blobs that touch AI-detected skin or a detected
-   face. This is what kills the wood / cardboard / tan-jacket false hits: real
-   hands and faces are connected to (or near) something the AI also saw. */
-function filterBlobsByAnchor(colorBin, w, h, anchorBin, faces, scale, keepAll){
-  const label = new Int32Array(w*h);
-  const stackX = new Int32Array(w*h), stackY = new Int32Array(w*h);
-  const out = new Uint8Array(w*h);
-  let nextLabel = 0;
-
-  const faceRects = (faces || []).map(b => {
-    const fx = b.originX * scale, fy = b.originY * scale;
-    return { x0: fx, x1: fx + b.width*scale, y0: fy, y1: fy + b.height*scale };
-  });
-
-  for (let sy = 0; sy < h; sy++){
-    for (let sx = 0; sx < w; sx++){
-      const si = sy*w + sx;
-      if (!colorBin[si] || label[si]) continue;
-      nextLabel++;
-      let top = 0, size = 0, anchored = false;
-      stackX[top] = sx; stackY[top] = sy; top++;
-      label[si] = nextLabel;
-      const members = [];
-      while (top > 0){
-        top--;
-        const x = stackX[top], y = stackY[top];
-        const i = y*w + x;
-        members.push(i); size++;
-        if (!anchored){
-          if (anchorBin && anchorBin[i]) anchored = true;
-          else if (faceRects.length){
-            for (const f of faceRects){
-              if (x >= f.x0 && x <= f.x1 && y >= f.y0 && y <= f.y1){ anchored = true; break; }
-            }
-          }
-        }
-        if (x > 0   && colorBin[i-1] && !label[i-1]){ label[i-1] = nextLabel; stackX[top]=x-1; stackY[top]=y; top++; }
-        if (x < w-1 && colorBin[i+1] && !label[i+1]){ label[i+1] = nextLabel; stackX[top]=x+1; stackY[top]=y; top++; }
-        if (y > 0   && colorBin[i-w] && !label[i-w]){ label[i-w] = nextLabel; stackX[top]=x;   stackY[top]=y-1; top++; }
-        if (y < h-1 && colorBin[i+w] && !label[i+w]){ label[i+w] = nextLabel; stackX[top]=x;   stackY[top]=y+1; top++; }
-      }
-      // keepAll = the AI found nothing anywhere (tiny grid thumbnails) — then any
-      // decent-sized colour blob is kept, like the old behaviour. Otherwise a
-      // blob must be anchored to AI skin or a face.
-      const keep = anchored || (keepAll && size >= 25);
-      if (keep) for (const i of members) out[i] = 1;
-    }
-  }
-  return out;
-}
-
-/* Builds a binary mask of ONLY the selected classes (skin by default), tiling the
-   image so grids/collages and small faces are detected at usable resolution. */
-/* One shared answer to "how many tiles?" — big images (screenshots, grids)
-   automatically get sliced finer so small thumbnails are seen at real detail,
-   even when the agent leaves the setting on Normal. */
-function effectiveTiles(w, h){
-  const user = Math.max(1, Math.min(6, parseInt(SETTINGS.tiles) || 1));
-  const auto = Math.ceil(Math.max(w, h) / 450);
-  return Math.max(user, Math.min(6, auto));
-}
-
-/* Face detection run tile-by-tile (upscaled), so the small faces in a grid of
-   thumbnails are found too — the plain full-frame pass only sees big faces. */
-async function detectFacesTiled(base){
-  if (!faceDetector) return [];
-  const w = base.width, h = base.height;
-  const boxes = [];
-  // Full-frame pass first (large faces)
-  try{
-    const det = faceDetector.detect(base).detections || [];
-    for (const d of det) if (d.boundingBox) boxes.push(d.boundingBox);
-  }catch(e){}
-  const tiles = effectiveTiles(w, h);
-  if (tiles > 1){
-    const OVERLAP = 0.12;
-    const tile = document.createElement("canvas");
-    const tctx = tile.getContext("2d");
-    for (let ty = 0; ty < tiles; ty++){
-      for (let tx = 0; tx < tiles; tx++){
-        const cw0 = w / tiles, ch0 = h / tiles;
-        let sx = Math.max(0, tx*cw0 - cw0*OVERLAP);
-        let sy = Math.max(0, ty*ch0 - ch0*OVERLAP);
-        let sw = Math.min(w - sx, cw0 + cw0*OVERLAP*2);
-        let sh = Math.min(h - sy, ch0 + ch0*OVERLAP*2);
-        if (sw < 24 || sh < 24) continue;
-        const long = Math.max(sw, sh);
-        const up = long < 448 ? 448/long : 1;
-        const tw = Math.round(sw*up), th = Math.round(sh*up);
-        tile.width = tw; tile.height = th;
-        tctx.clearRect(0, 0, tw, th);
-        tctx.drawImage(base, sx, sy, sw, sh, 0, 0, tw, th);
-        try{
-          const det = faceDetector.detect(tile).detections || [];
-          for (const d of det){
-            const b = d.boundingBox;
-            if (!b) continue;
-            boxes.push({ originX: sx + b.originX/up, originY: sy + b.originY/up,
-                         width: b.width/up, height: b.height/up });
-          }
-        }catch(e){}
-        await sleep(0);
-      }
-    }
-  }
-  // Dedupe overlapping detections of the same face (tiles overlap on purpose)
-  boxes.sort((a,b)=> b.width*b.height - a.width*a.height);
-  const kept = [];
-  for (const b of boxes){
-    let dup = false;
-    for (const k of kept){
-      const ix = Math.max(0, Math.min(b.originX+b.width,  k.originX+k.width)  - Math.max(b.originX, k.originX));
-      const iy = Math.max(0, Math.min(b.originY+b.height, k.originY+k.height) - Math.max(b.originY, k.originY));
-      const inter = ix*iy;
-      const uni = b.width*b.height + k.width*k.height - inter;
-      if (uni > 0 && inter/uni > 0.4){ dup = true; break; }
-    }
-    if (!dup) kept.push(b);
-    if (kept.length >= 300) break;
-  }
-  return kept;
-}
-
-async function buildMask(base, faces, relaxAnchors){
-  const w = base.width, h = base.height;
-  const MASKMAX = 1200;
-  const scale = Math.min(1, MASKMAX / Math.max(w, h));
-  const mw = Math.max(1, Math.round(w * scale));
-  const mh = Math.max(1, Math.round(h * scale));
-  const segBin = new Uint8Array(mw * mh);
-  let segHits = 0;
-
-  const tiles = effectiveTiles(w, h);
-  const wanted = new Set((SETTINGS.cover_classes || [2,3]).map(Number));
-  const OVERLAP = 0.08;
-
-  const tile = document.createElement("canvas");
-  const tctx = tile.getContext("2d", { willReadFrequently:true });
-
-  for (let ty = 0; ty < tiles; ty++){
-    for (let tx = 0; tx < tiles; tx++){
-      const cw0 = w / tiles, ch0 = h / tiles;
-      let sx = Math.max(0, tx*cw0 - cw0*OVERLAP);
-      let sy = Math.max(0, ty*ch0 - ch0*OVERLAP);
-      let sw = Math.min(w - sx, cw0 + cw0*OVERLAP*2);
-      let sh = Math.min(h - sy, ch0 + ch0*OVERLAP*2);
-      if (sw < 8 || sh < 8) continue;
-
-      // Upscale small crops — the model needs real detail, and a 100px
-      // thumbnail fed in at native size gives it almost nothing to work with.
-      const long = Math.max(sw, sh);
-      const up = long < 256 ? 256/long : 1;
-      const tw = Math.max(64, Math.min(512, Math.round(sw*up)));
-      const th = Math.max(64, Math.min(512, Math.round(sh*up)));
-      tile.width = tw; tile.height = th;
-      tctx.clearRect(0, 0, tw, th);
-      tctx.drawImage(base, sx, sy, sw, sh, 0, 0, tw, th);
-
-      // Precise pass: SegFormer labels this tile pixel-by-pixel; we take only
-      // the skin classes (face, arms, legs) — every clothing class stays visible.
-      const mx0 = Math.floor(sx*scale), my0 = Math.floor(sy*scale);
-      const mx1 = Math.ceil((sx+sw)*scale), my1 = Math.ceil((sy+sh)*scale);
-      if (parser){
-        let segs = null;
-        try { segs = await parser(tile.toDataURL("image/png")); } catch(e){}
-        if (segs && segs.length){
-          const skinMasks = segs.filter(s => SKIN_LABELS.has(s.label) && s.mask);
-          for (const s of skinMasks){
-            const m = s.mask, cw = m.width, ch = m.height, raw = m.data;
-            for (let my = my0; my < my1; my++){
-              if (my < 0 || my >= mh) continue;
-              for (let mx = mx0; mx < mx1; mx++){
-                if (mx < 0 || mx >= mw) continue;
-                const u = (mx/scale - sx) / sw, v = (my/scale - sy) / sh;
-                if (u < 0 || v < 0 || u >= 1 || v >= 1) continue;
-                const val = raw[Math.min(ch-1, (v*ch)|0) * cw + Math.min(cw-1, (u*cw)|0)];
-                if (val > 127 && !segBin[my*mw + mx]){ segBin[my*mw + mx] = 1; segHits++; }
-              }
-            }
-          }
-        }
-      }
-
-      // MediaPipe backstop, unioned in: the clothes-parser is trained on dressed
-      // people, so bare torso/shoulder skin can slip past it — the selfie model's
-      // skin classes catch that. Any over-reach gets trimmed by the colour layer.
-      let res = null;
-      if (segmenter){ try { res = segmenter.segment(tile); } catch(e){} }
-      const cm = res && res.categoryMask;
-      if (cm){
-        const cw = cm.width, ch = cm.height;
-        const raw = cm.getAsUint8Array();
-        // Inverse-map every mask pixel in this tile's footprint so there are no gaps
-        for (let my = my0; my < my1; my++){
-          if (my < 0 || my >= mh) continue;
-          for (let mx = mx0; mx < mx1; mx++){
-            if (mx < 0 || mx >= mw) continue;
-            const u = (mx/scale - sx) / sw, v = (my/scale - sy) / sh;
-            if (u < 0 || v < 0 || u >= 1 || v >= 1) continue;
-            const cls = raw[Math.min(ch-1, (v*ch)|0) * cw + Math.min(cw-1, (u*cw)|0)];
-            const on = multiclass ? wanted.has(cls) : (cls !== 0);
-            if (on && !segBin[my*mw + mx]){ segBin[my*mw + mx] = 1; segHits++; }
-          }
-        }
-        cm.close();
-      }
-      if (res && res.close) res.close();
-      await sleep(0);   // let the UI breathe between tiles
-    }
-  }
-
-  // Read the frame once at mask resolution for all colour work
-  const cc = document.createElement("canvas");
-  cc.width = mw; cc.height = mh;
-  const cctx = cc.getContext("2d", { willReadFrequently:true });
-  cctx.drawImage(base, 0, 0, mw, mh);
-  let frame = null;
-  try { frame = cctx.getImageData(0, 0, mw, mh).data; } catch(e){}
-
-  // No pixel access (rare) — fall back to raw AI mask, fixed model
-  if (!frame){
-    let hits = 0; for (let i = 0; i < segBin.length; i++) if (segBin[i]) hits++;
-    return { bin: segBin, mw, mh, hits, runaway:false,
-             model: { loose: FIXED, strict: FIXED, adaptive:false } };
-  }
-
-  // --- Layer 1: this photo's own skin-colour model ---
-  const model = buildColorModel(frame, mw, mh, segHits ? segBin : null,
-                                faces, scale, SETTINGS.skin_sensitivity);
-
-  // --- Layer 2a: trim the AI mask where colour disagrees (edge slop on clothes) ---
-  const bin = new Uint8Array(mw * mh);
-  let hits = 0;
-  if (SETTINGS.color_trim !== false && segHits){
-    for (let i = 0; i < segBin.length; i++){
-      if (!segBin[i]) continue;
-      const p = i*4;
-      if (chromaPass(frame[p], frame[p+1], frame[p+2], model.loose)){ bin[i] = 1; hits++; }
-    }
-    // Heal pinholes the trim punched into real skin (glasses glare, deep shadow)
-    const healed = erode(dilate(bin, mw, mh, 2), mw, mh, 2);
-    hits = 0;
-    for (let i = 0; i < bin.length; i++){ bin[i] = healed[i]; if (bin[i]) hits++; }
-    // If trimming removed almost everything, colour disagreed with the AI wholesale
-    // (heavy colour cast, unusual lighting) — trust the AI rather than uncover skin.
-    if (segHits && hits < segHits * 0.25){
-      hits = 0;
-      for (let i = 0; i < segBin.length; i++){ bin[i] = segBin[i]; if (bin[i]) hits++; }
-    }
-  } else {
-    for (let i = 0; i < segBin.length; i++){ bin[i] = segBin[i]; if (bin[i]) hits++; }
-  }
-
-  // --- Layer 2b: colour-found skin, anchored to the AI or a face ---
-  let runaway = false;
-  if (SETTINGS.skin_color_detect !== false){
-    const sk = skinColorMask(frame, mw, mh, model);
-    let clean = sk.mask;
-    let noise = parseInt(SETTINGS.noise_removal);
-    if (!Number.isFinite(noise)) noise = 1;
-    noise = Math.max(0, Math.min(4, noise));
-    if (noise > 0){
-      clean = erode(clean, mw, mh, noise);
-      clean = dilate(clean, mw, mh, noise);   // restore the size the erode took off
-    }
-    // Safety net: no real photo is three-quarters bare skin. If the colour rule
-    // matches that much, it has locked onto a background tone — drop it rather
-    // than white out the whole picture.
-    let cnt = 0;
-    for (let i = 0; i < clean.length; i++) if (clean[i]) cnt++;
-    if (cnt / clean.length > 0.75){
-      runaway = true;
-    } else {
-      const anchor = hits ? dilate(bin, mw, mh, 3) : null;
-      const kept = filterBlobsByAnchor(clean, mw, mh, anchor, faces, scale, hits === 0 || relaxAnchors);
-      for (let i = 0; i < bin.length; i++){
-        if (kept[i] && !bin[i]){ bin[i] = 1; hits++; }
-      }
-    }
-  }
-
-  return { bin, mw, mh, hits, runaway, model };
-}
-
-/* --- Layer 3: rebuild the mask at FULL resolution so edges land on the real
-   skin/clothing boundary instead of on scaled-up blocks. The solid core of the
-   mask stays covered no matter what; only the uncertain rim is decided by
-   colour, and the rim can only move a few pixels either way. --- */
-function refineMaskFullRes(base, bin, mw, mh, model){
-  const w = base.width, h = base.height;
-
-  // Soft-scale the low-res mask up to full size
-  const lo = document.createElement("canvas");
-  lo.width = mw; lo.height = mh;
-  const loCtx = lo.getContext("2d");
-  const loImg = loCtx.createImageData(mw, mh);
-  for (let i = 0; i < bin.length; i++){
-    if (bin[i]){ const p = i*4; loImg.data[p]=255; loImg.data[p+1]=255; loImg.data[p+2]=255; loImg.data[p+3]=255; }
-  }
-  loCtx.putImageData(loImg, 0, 0);
-
-  const soft = document.createElement("canvas");
-  soft.width = w; soft.height = h;
-  const softCtx = soft.getContext("2d", { willReadFrequently:true });
-  softCtx.imageSmoothingEnabled = true;
-  softCtx.imageSmoothingQuality = "high";
-  softCtx.drawImage(lo, 0, 0, w, h);
-
-  let softD, imgD;
-  try {
-    softD = softCtx.getImageData(0, 0, w, h).data;
-    const ic = document.createElement("canvas");
-    ic.width = w; ic.height = h;
-    const ictx = ic.getContext("2d", { willReadFrequently:true });
-    ictx.drawImage(base, 0, 0);
-    imgD = ictx.getImageData(0, 0, w, h).data;
-  } catch(e){
-    // Can't read pixels — fall back to the hard-scaled mask (old behaviour)
-    return maskToCanvas(bin, mw, mh);
-  }
-
-  const hex = (SETTINGS.cover_color || '#FFFFFF').replace('#','');
-  const cr = parseInt(hex.substr(0,2),16), cg = parseInt(hex.substr(2,2),16), cbl = parseInt(hex.substr(4,2),16);
-
-  const outC = document.createElement("canvas");
-  outC.width = w; outC.height = h;
-  const outCtx = outC.getContext("2d");
-  const outImg = outCtx.createImageData(w, h);
-  const od = outImg.data;
-
-  // alpha >= CORE  -> always covered (deep inside the mask)
-  // alpha in (RIM, CORE) -> covered only if the pixel's colour says skin
-  // alpha <= RIM  -> never covered
-  const CORE = 200, RIM = 55;
-  for (let i = 0, p = 0; p < softD.length; i++, p += 4){
-    const a = softD[p+3];
-    let on = false;
-    if (a >= CORE) on = true;
-    else if (a > RIM) on = chromaPass(imgD[p], imgD[p+1], imgD[p+2], model.loose);
-    if (on){ od[p]=cr; od[p+1]=cg; od[p+2]=cbl; od[p+3]=255; }
-  }
-  outCtx.putImageData(outImg, 0, 0);
-  return outC;
-}
-
-/* GRID STRATEGY — for screenshots full of small thumbnails, tracing skin
-   pixel-by-pixel always looks ragged and lets slivers through. Instead we find
-   each thumbnail's rectangle (photos are detail-rich islands sitting in flat
-   gutters, whether the page is light or dark) and white out the WHOLE tile if
-   it contains a face or any skin. Clean rectangles, nothing peeking through. */
-function detectPhotoRects(base, bin, mw, mh, scale, faces, returnAll){
-  const w = base.width, h = base.height;
-  const cc = document.createElement("canvas");
-  cc.width = mw; cc.height = mh;
-  const cctx = cc.getContext("2d", { willReadFrequently:true });
-  cctx.drawImage(base, 0, 0, mw, mh);
-  let d;
-  try { d = cctx.getImageData(0, 0, mw, mh).data; } catch(e){ return []; }
-
-  // grayscale
-  const g = new Float32Array(mw*mh);
-  for (let i = 0, p = 0; i < g.length; i++, p += 4){
-    g[i] = 0.299*d[p] + 0.587*d[p+1] + 0.114*d[p+2];
-  }
-  // "photo content" = pixels with local detail; gutters and page chrome are flat
-  let detail = new Uint8Array(mw*mh);
-  for (let y = 0; y < mh-1; y++){
-    for (let x = 0; x < mw-1; x++){
-      const i = y*mw + x;
-      if (Math.abs(g[i]-g[i+1]) > 9 || Math.abs(g[i]-g[i+mw]) > 9) detail[i] = 1;
-    }
-  }
-  // solidify photo regions and bridge small flat patches inside photos
-  detail = dilate(detail, mw, mh, 3);
-  detail = erode(detail, mw, mh, 2);
-
-  // connected components -> candidate tiles
-  const label = new Int32Array(mw*mh);
-  const stackX = new Int32Array(mw*mh), stackY = new Int32Array(mw*mh);
-  const rects = [];
-  let next = 0;
-  for (let sy = 0; sy < mh; sy++){
-    for (let sx = 0; sx < mw; sx++){
-      const si = sy*mw + sx;
-      if (!detail[si] || label[si]) continue;
-      next++;
-      let top = 0, size = 0;
-      let x0 = sx, x1 = sx, y0 = sy, y1 = sy, skin = 0;
-      stackX[top] = sx; stackY[top] = sy; top++;
-      label[si] = next;
-      while (top > 0){
-        top--;
-        const x = stackX[top], y = stackY[top];
-        const i = y*mw + x;
-        size++;
-        if (bin && bin[i]) skin++;
-        if (x < x0) x0 = x; if (x > x1) x1 = x;
-        if (y < y0) y0 = y; if (y > y1) y1 = y;
-        if (x > 0    && detail[i-1]  && !label[i-1]) { label[i-1]  = next; stackX[top]=x-1; stackY[top]=y;   top++; }
-        if (x < mw-1 && detail[i+1]  && !label[i+1]) { label[i+1]  = next; stackX[top]=x+1; stackY[top]=y;   top++; }
-        if (y > 0    && detail[i-mw] && !label[i-mw]){ label[i-mw] = next; stackX[top]=x;   stackY[top]=y-1; top++; }
-        if (y < mh-1 && detail[i+mw] && !label[i+mw]){ label[i+mw] = next; stackX[top]=x;   stackY[top]=y+1; top++; }
-      }
-      const bw = x1-x0+1, bh = y1-y0+1;
-      if (bw < 16 || bh < 16 || size < 260) continue;    // captions, icons, buttons
-      rects.push({ x0, y0, x1, y1, skin, area: bw*bh });
-    }
-  }
-
-  // decide which tiles get covered: a face inside, or any real amount of skin
-  const covered = [];
-  for (const r of rects){
-    let faceIn = false;
-    for (const f of (faces || [])){
-      const fx = (f.originX + f.width/2) * scale;
-      const fy = (f.originY + f.height/2) * scale;
-      if (fx >= r.x0 && fx <= r.x1 && fy >= r.y0 && fy <= r.y1){ faceIn = true; break; }
-    }
-    if (!returnAll && !faceIn && r.skin / r.area < 0.015) continue;
-    r.faceIn = faceIn;
-    covered.push(r);
-  }
-
-  // merge overlapping cover boxes so the result is a few clean rectangles
-  let merged = true;
-  while (merged){
-    merged = false;
-    outer:
-    for (let i = 0; i < covered.length; i++){
-      for (let j = i+1; j < covered.length; j++){
-        const a = covered[i], b = covered[j];
-        if (a.x0 <= b.x1 && b.x0 <= a.x1 && a.y0 <= b.y1 && b.y0 <= a.y1){
-          a.x0 = Math.min(a.x0, b.x0); a.y0 = Math.min(a.y0, b.y0);
-          a.x1 = Math.max(a.x1, b.x1); a.y1 = Math.max(a.y1, b.y1);
-          covered.splice(j, 1);
-          merged = true;
-          break outer;
-        }
-      }
-    }
-  }
-
-  // map back to full-res normalized rects (small pad so tile borders vanish too)
-  const PAD = 2;
-  return covered.map(r => ({
-    x: Math.max(0, (r.x0 - PAD) / scale) / w,
-    y: Math.max(0, (r.y0 - PAD) / scale) / h,
-    w: Math.min(w, (r.x1 - r.x0 + 1 + PAD*2) / scale) / w,
-    h: Math.min(h, (r.y1 - r.y0 + 1 + PAD*2) / scale) / h
-  }));
-}
-
-/* NETFREE-STYLE GRID PAINTING — each detected thumbnail is cropped out,
-   upscaled, and run through the detector as its own complete photo. The model
-   sees whole people (much better detection than arbitrary slices), and the
-   paint is CLIPPED to that thumbnail's borders — masks can never bleed across
-   the gutters into neighbouring tiles. Three layers per tile:
-     1. the precise parser's skin classes (face/arms/legs)
-     2. if the parser finds nothing but a face was detected -> paint the face
-     3. if neither fires but the tile clearly contains skin colour -> paint
-        those regions, so nothing slips through */
-async function paintGridTiles(item, base, rectsNorm, faceBoxes, model){
-  const w = base.width, h = base.height;
-  const out = document.createElement("canvas");
-  out.width = w; out.height = h;
-  const octx = out.getContext("2d");
-  const hex = (SETTINGS.cover_color || '#000000');
-  octx.fillStyle = hex;
-
-  const crop = document.createElement("canvas");
-  const cctx = crop.getContext("2d", { willReadFrequently:true });
-  const workEl = item.card.querySelector(".working .txt") || item.card.querySelector(".working");
-
-  let painted = 0, idx = 0;
-  for (const rn of rectsNorm){
-    idx++;
-    if (workEl) workEl.textContent = `Painting tiles… ${idx}/${rectsNorm.length}`;
-    const rx = Math.round(rn.x*w), ry = Math.round(rn.y*h);
-    const rw = Math.round(rn.w*w), rh = Math.round(rn.h*h);
-    if (rw < 20 || rh < 20) continue;
-
-    // upscale the thumbnail so the detector gets real detail
-    const long = Math.max(rw, rh);
-    const up = Math.min(4, Math.max(1, 512/long));
-    const tw = Math.round(rw*up), th = Math.round(rh*up);
-    crop.width = tw; crop.height = th;
-    cctx.clearRect(0, 0, tw, th);
-    cctx.drawImage(base, rx, ry, rw, rh, 0, 0, tw, th);
-
-    let frame = null;
-    try { frame = cctx.getImageData(0, 0, tw, th).data; } catch(e){}
-
-    // cheap pre-check so scenery/product tiles don't waste detector time
-    let quickSkin = 0, quickN = 0;
-    if (frame){
-      const step = Math.max(1, Math.floor(Math.sqrt((tw*th)/4000)));
-      for (let y = 0; y < th; y += step){
-        for (let x = 0; x < tw; x += step){
-          const p = (y*tw + x)*4;
-          quickN++;
-          if (strictPass(frame[p], frame[p+1], frame[p+2], model.strict)) quickSkin++;
-        }
-      }
-    }
-    const hasFace = rectFaceHit(rn, faceBoxes, w, h);
-    if (!hasFace && quickN && quickSkin/quickN < 0.006) continue;   // nothing human here
-
-    // clip everything to this tile — paint can never cross the gutter
-    octx.save();
-    octx.beginPath();
-    octx.rect(rx, ry, rw, rh);
-    octx.clip();
-
-    let tilePainted = false;
-
-    // layer 1: precise parser on the whole thumbnail
-    if (parser){
-      let segs = null;
-      try { segs = await parser(crop.toDataURL("image/png")); } catch(e){}
-      if (segs && segs.length){
-        const skin = segs.filter(s => SKIN_LABELS.has(s.label) && s.mask);
-        if (skin.length){
-          const t2 = document.createElement("canvas");
-          t2.width = skin[0].mask.width; t2.height = skin[0].mask.height;
-          const t2x = t2.getContext("2d");
-          const img = t2x.createImageData(t2.width, t2.height);
-          const cr = parseInt(hex.substr(1,2),16), cg = parseInt(hex.substr(3,2),16), cb = parseInt(hex.substr(5,2),16);
-          let any = false;
-          for (const s of skin){
-            const d = s.mask.data;
-            for (let i = 0, p = 0; i < d.length; i++, p += 4){
-              if (d[i] > 127){ img.data[p]=cr; img.data[p+1]=cg; img.data[p+2]=cb; img.data[p+3]=255; any = true; }
-            }
-          }
-          if (any){
-            t2x.putImageData(img, 0, 0);
-            // draw with small offsets = slight grow, so edges fully cover
-            const g = Math.max(1, Math.round(rw*0.012));
-            for (const [ox, oy] of [[0,0],[g,0],[-g,0],[0,g],[0,-g]]){
-              octx.drawImage(t2, rx+ox, ry+oy, rw, rh);
-            }
-            tilePainted = true;
-          }
-        }
-      }
-    }
-
-    // layer 2: face detected but parser silent -> paint the face area
-    if (!tilePainted && hasFace){
-      for (const f of faceBoxes){
-        const fx = f.originX + f.width/2, fy = f.originY + f.height/2;
-        if (fx < rx || fx > rx+rw || fy < ry || fy > ry+rh) continue;
-        const gx = f.width  * (0.5 + (SETTINGS.face_grow_x || 0.45));
-        const gy = f.height * (0.5 + (SETTINGS.face_grow_y || 0.55));
-        octx.beginPath();
-        octx.ellipse(fx, fy, gx, gy, 0, 0, Math.PI*2);
-        octx.fill();
-        tilePainted = true;
-      }
-    }
-
-    // layer 3: strong skin colour but nothing above fired -> paint colour regions
-    if (!tilePainted && frame && quickN && quickSkin/quickN >= 0.02){
-      let cbin = new Uint8Array(tw*th);
-      for (let i = 0, p = 0; i < cbin.length; i++, p += 4){
-        if (strictPass(frame[p], frame[p+1], frame[p+2], model.strict)) cbin[i] = 1;
-      }
-      cbin = dilate(erode(cbin, tw, th, 1), tw, th, 3);
-      const t3 = document.createElement("canvas");
-      t3.width = tw; t3.height = th;
-      const t3x = t3.getContext("2d");
-      const img3 = t3x.createImageData(tw, th);
-      const cr = parseInt(hex.substr(1,2),16), cg = parseInt(hex.substr(3,2),16), cb = parseInt(hex.substr(5,2),16);
-      for (let i = 0, p = 0; i < cbin.length; i++, p += 4){
-        if (cbin[i]){ img3.data[p]=cr; img3.data[p+1]=cg; img3.data[p+2]=cb; img3.data[p+3]=255; }
-      }
-      t3x.putImageData(img3, 0, 0);
-      octx.drawImage(t3, rx, ry, rw, rh);
-      tilePainted = true;
-    }
-
-    octx.restore();
-    if (tilePainted) painted++;
-    await sleep(0);
-  }
-  if (workEl) workEl.textContent = "Finishing…";
-  return { mask: out, painted, total: rectsNorm.length };
-}
-
-function rectFaceHit(rn, faces, w, h){
-  const rx = rn.x*w, ry = rn.y*h, rx1 = rx + rn.w*w, ry1 = ry + rn.h*h;
-  for (const f of (faces || [])){
-    const fx = f.originX + f.width/2, fy = f.originY + f.height/2;
-    if (fx >= rx && fx <= rx1 && fy >= ry && fy <= ry1) return true;
-  }
-  return false;
-}
-
 async function handle(item){
   while (!ready) await sleep(180);
   await sleep(0);
@@ -1263,174 +447,59 @@ async function handle(item){
   base.getContext("2d").drawImage(bmp, 0, 0, w, h);
   if (bmp.close) bmp.close();
   item.base = base;
+  item.faces = [];
 
-  // faces first — tile-by-tile so small thumbnail faces are found. They feed
-  // the colour model even when face-covering is off.
-  const faceBoxes = await detectFacesTiled(base);
+  // send to the server for detection + painting
+  const workEl = item.card.querySelector(".working .txt") || item.card.querySelector(".working");
+  if (workEl) workEl.textContent = "Processing on server\u2026";
+  let resp = null;
+  try{
+    const r = await fetch("/api/skinblock/process", {
+      method:"POST",
+      headers:{ "Content-Type":"application/json" },
+      body: JSON.stringify({ agent_ext: AGENT_EXT, image: base.toDataURL("image/jpeg", 0.92) })
+    });
+    if (r.ok) resp = await r.json();
+  }catch(e){ /* network */ }
 
-  // GRID MODE: several faces means this is a screenshot / photo grid, not a
-  // product photo. Then: cover every face, and keep colour-detected skin even
-  // when it isn't attached to AI-detected skin (thumbnails are too small for
-  // the AI, so the anchoring rule that protects product photos from wood
-  // false-hits would wrongly erase real people here).
-  const gridMode = faceBoxes.length >= (SETTINGS.grid_face_threshold || 4);
-  item.faces = (SETTINGS.cover_faces || gridMode) ? faceBoxes : [];
-  item.gridMode = gridMode;
-
-  // 1. skin segmentation + colour agreement -> binary mask (clothes stay visible)
-  const seg = await buildMask(base, faceBoxes, gridMode);
-  const bin = seg.bin, mw = seg.mw, mh = seg.mh, hits = seg.hits;
-
-  // Grid path: find every thumbnail, then run the detector on each one as its
-  // own photo and paint skin clipped to that tile (Netfree-style). If the
-  // cover_whole_tiles setting is on, whole tiles are blacked out instead.
-  item.autoRects = [];
-  if (gridMode){
-    const scale = Math.min(1, 1200 / Math.max(w, h));
-    if (SETTINGS.cover_whole_tiles === true){
-      const rects = detectPhotoRects(base, bin, mw, mh, scale, faceBoxes);
-      if (rects.length){
-        item.autoRects = rects;
-        item.faces = [];
-        item.mask = null;
-        let areaFrac = 0;
-        for (const r of rects) areaFrac += r.w * r.h;
-        item.coverage = areaFrac;
-        item.runaway = false;
-        item.done = true;
-        render(item);
-        item.card.querySelector(".working")?.remove();
-        stamp(item, `Photo grid — ${rects.length} tiles covered, check it`, "warn");
-        logToServer(item, compose(item));
-        updateTally();
-        return;
-      }
+  if (resp && resp.image){
+    const img = new Image();
+    await new Promise(res => { img.onload = res; img.onerror = res; img.src = resp.image; });
+    const painted = document.createElement("canvas");
+    painted.width = w; painted.height = h;
+    painted.getContext("2d").drawImage(img, 0, 0, w, h);
+    item.serverResult = painted;
+    item.coverage = resp.info && resp.info.painted ? 1 : 0;
+    item.done = true;
+    render(item);
+    item.card.querySelector(".working")?.remove();
+    const inf = resp.info || {};
+    if (inf.grid){
+      stamp(item, `Photo grid \u2014 ${inf.painted||0} of ${inf.tiles||0} tiles painted, check it`, "warn");
+    } else if ((inf.faces||0) > 0 || (inf.painted||0) > 0){
+      stamp(item, "Skin covered", "");
     } else {
-      const allRects = detectPhotoRects(base, bin, mw, mh, scale, faceBoxes, true);
-      if (allRects.length){
-        const r = await paintGridTiles(item, base, allRects, faceBoxes, seg.model);
-        item.mask = r.mask;
-        item.faces = [];          // faces were handled per tile
-        item.coverage = r.painted / Math.max(1, r.total);
-        item.runaway = false;
-        item.done = true;
-        render(item);
-        item.card.querySelector(".working")?.remove();
-        stamp(item, `Photo grid — ${r.painted} of ${r.total} tiles painted, check it`, "warn");
-        logToServer(item, compose(item));
-        updateTally();
-        return;
-      }
+      stamp(item, "No skin found \u2014 check it", "none");
     }
-    // tile detection found nothing usable — fall through to the pixel mask
-  }
-
-  item.mask = null;
-  if (bin && hits > 0){
-    // Small, roughly constant expansion. This used to be a percentage of the image
-    // size (~60px), which merged every scattered hit into one solid block.
-    const r = Math.max(0, Math.round(Number(padRange.value) * Math.max(mw,mh) / 1000));
-    const padded = dilate(bin, mw, mh, r);
-    // 2. edge snap: rebuild at full resolution so the boundary follows the
-    //    real skin/clothing line instead of scaled-up blocks
-    item.mask = (SETTINGS.edge_snap !== false)
-      ? refineMaskFullRes(base, padded, mw, mh, seg.model)
-      : maskToCanvas(padded, mw, mh);
-  }
-  item.coverage = hits && mw ? hits/(mw*mh) : 0;
-  item.runaway = seg.runaway;
-
-  item.done = true;
-  render(item);
-  item.card.querySelector(".working")?.remove();
-
-  // Skin-only masks cover far less area than a whole-person mask, so the
-  // "did we find anything" threshold has to be lower than it was.
-  if (item.runaway){
-    stamp(item, "Colour match too broad — check by hand", "warn");
-  } else if (item.gridMode){
-    stamp(item, `Photo grid — ${item.faces.length} people covered, check it`, "warn");
-  } else if (item.coverage > 0.0004 || item.faces.length){
-    const facesOnly = item.coverage <= 0.0004 && item.faces.length;
-    stamp(item, facesOnly ? "Face covered — check it" : "Skin covered", facesOnly ? "warn" : "");
   } else {
-    stamp(item, "No skin found — check it", "none");
+    item.serverResult = null;
+    item.done = true;
+    render(item);
+    item.card.querySelector(".working")?.remove();
+    stamp(item, "Server processing failed \u2014 cover by hand and tell David", "warn");
   }
   logToServer(item, compose(item));
   updateTally();
 }
 
-function dilate(src, w, h, r){
-  if (r <= 0) return src;
-  const tmp = new Uint8Array(w*h), out = new Uint8Array(w*h);
-  for (let y=0;y<h;y++){
-    const row = y*w;
-    for (let x=0;x<w;x++){
-      let v = 0;
-      for (let k=-r;k<=r;k++){
-        const xx = x+k;
-        if (xx < 0 || xx >= w) continue;
-        if (src[row+xx]){ v = 1; break; }
-      }
-      tmp[row+x] = v;
-    }
-  }
-  for (let x=0;x<w;x++){
-    for (let y=0;y<h;y++){
-      let v = 0;
-      for (let k=-r;k<=r;k++){
-        const yy = y+k;
-        if (yy < 0 || yy >= h) continue;
-        if (tmp[yy*w+x]){ v = 1; break; }
-      }
-      out[y*w+x] = v;
-    }
-  }
-  return out;
-}
-
-function maskToCanvas(bin, w, h){
-  const c = document.createElement("canvas");
-  c.width = w; c.height = h;
-  const ctx = c.getContext("2d");
-  const img = ctx.createImageData(w, h);
-  // Paint the mask in the configured cover colour rather than assuming black
-  const hex = (SETTINGS.cover_color || '#FFFFFF').replace('#','');
-  const cr = parseInt(hex.substr(0,2),16), cg = parseInt(hex.substr(2,2),16), cb = parseInt(hex.substr(4,2),16);
-  for (let i=0;i<bin.length;i++){
-    if (bin[i]){
-      img.data[i*4]   = cr;
-      img.data[i*4+1] = cg;
-      img.data[i*4+2] = cb;
-      img.data[i*4+3] = 255;
-    }
-  }
-  ctx.putImageData(img, 0, 0);
-  return c;
-}
-
-/* ---------------- drawing ---------------- */
 function compose(item){
   const w = item.base.width, h = item.base.height;
   const out = document.createElement("canvas");
   out.width = w; out.height = h;
   const ctx = out.getContext("2d");
-  ctx.drawImage(item.base, 0, 0);
+  ctx.drawImage(item.serverResult || item.base, 0, 0, w, h);
 
-  if (item.mask){
-    ctx.imageSmoothingEnabled = false;   // hard edges, no see-through fringe
-    ctx.drawImage(item.mask, 0, 0, w, h);
-    ctx.imageSmoothingEnabled = true;
-  }
-
-  ctx.fillStyle = SETTINGS.cover_color || "#FFFFFF";
-  for (const b of item.faces){
-    const gx = b.width * (SETTINGS.face_grow_x ?? 0.45), gy = b.height * (SETTINGS.face_grow_y ?? 0.55);
-    ctx.fillRect(b.originX - gx, b.originY - gy, b.width + gx*2, b.height + gy*2);
-  }
-  for (const r of (item.autoRects || [])){
-    ctx.fillRect(r.x*w, r.y*h, r.w*w, r.h*h);
-  }
+  ctx.fillStyle = SETTINGS.cover_color || "#000000";
   for (const r of item.bars){
     ctx.fillRect(r.x*w, r.y*h, r.w*w, r.h*h);
   }

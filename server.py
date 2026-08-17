@@ -2911,6 +2911,49 @@ def skinblock_submit():
     row = dict(c.fetchone()); conn.commit(); conn.close()
     return jsonify({'success': True, 'id': row['id']})
 
+@app.route('/api/skinblock/process', methods=['POST'])
+def skinblock_process():
+    """
+    Public (extension-gated like submit) — the whole detection pipeline.
+    Receives one photo, paints skin/faces server-side, returns the painted PNG.
+    All the AI runs here so agents' machines need nothing installed and the
+    content filter has nothing to block.
+    """
+    d = request.json or {}
+    s = _skinblock_settings()
+    ext = (d.get('agent_ext') or '').strip()
+    if s.get('require_extension', True) and not re.fullmatch(r'\d{3}', ext):
+        return jsonify({'error': 'A 3-digit extension is required'}), 400
+    img_b64 = d.get('image') or ''
+    if ',' in img_b64:
+        img_b64 = img_b64.split(',', 1)[1]
+    try:
+        import base64 as _b64
+        import numpy as _np
+        import cv2 as _cv2
+        raw = _b64.b64decode(img_b64)
+        arr = _np.frombuffer(raw, _np.uint8)
+        img = _cv2.imdecode(arr, _cv2.IMREAD_COLOR)
+        if img is None:
+            return jsonify({'error': 'could not read image'}), 400
+        maxd = int(s.get('max_dimension') or 2000)
+        hh, ww = img.shape[:2]
+        if max(hh, ww) > maxd:
+            sc = maxd / float(max(hh, ww))
+            img = _cv2.resize(img, (int(ww*sc), int(hh*sc)))
+        hexc = (s.get('cover_color') or '#000000').lstrip('#')
+        cover = (int(hexc[4:6], 16), int(hexc[2:4], 16), int(hexc[0:2], 16))  # BGR
+        from skinblock_engine import process as _sb_process
+        out, info = _sb_process(img, cover=cover)
+        ok, buf = _cv2.imencode('.png', out)
+        if not ok:
+            return jsonify({'error': 'encode failed'}), 500
+        data_url = 'data:image/png;base64,' + _b64.b64encode(buf.tobytes()).decode()
+        return jsonify({'image': data_url, 'info': info})
+    except Exception as e:
+        print(f"[skinblock] process failed: {str(e)[:200]}")
+        return jsonify({'error': str(e)[:200]}), 500
+
 @app.route('/api/skinblock/history', methods=['GET'])
 @require_manager
 def skinblock_history():
