@@ -177,7 +177,7 @@
 <body>
 
 <header class="topbar">
-  <h1 class="wordmark"><span class="bars"><i></i><i></i><i></i></span> Skin Block</h1>
+  <h1 class="wordmark"><span class="bars"><i></i><i></i><i></i></span> Skin Block <span class="mono" style="font-size:11px;opacity:.55;">v4</span></h1>
   <div class="status">
     <span id="extBadge" class="mono" style="display:none;background:var(--signal);color:var(--void);padding:3px 9px;font-weight:600;"></span>
     <span class="dot" id="dot"></span><span id="statusText">Loading detector…</span>
@@ -252,6 +252,7 @@ const FACE  = "https://storage.googleapis.com/mediapipe-models/face_detector/bla
 const MAXDIM = 2000;
 
 const $ = id => document.getElementById(id);
+console.log("[SkinBlock] v4 — SegFormer precise detector build");
 
 /* ---------- server settings + extension gate ---------- */
 /* selfie_multiclass_256x256 category indices */
@@ -268,7 +269,7 @@ const SKIN_LABELS = new Set(["Face", "Left-arm", "Right-arm", "Left-leg", "Right
 let parser = null;
 
 let SETTINGS = {
-  cover_color:'#FFFFFF', edge_padding:5, face_grow_x:0.45, face_grow_y:0.55,
+  cover_color:'#000000', edge_padding:5, face_grow_x:0.45, face_grow_y:0.55,
   shrink_large:true, max_dimension:2000, require_extension:true,
   cover_classes:[2,3],   // body-skin + face-skin only — clothes and shoes stay visible
   tiles:1,               // split the image into an NxN grid before detecting

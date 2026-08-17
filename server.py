@@ -2834,7 +2834,7 @@ def _compute_pay(segments, sched_window, rate_history, ot_periods):
 
 # ─── SKIN BLOCK (photo people-cover tool) ─────────────────────────────────────
 SKINBLOCK_DEFAULTS = {
-    'cover_color': '#FFFFFF',
+    'cover_color': '#000000',   # Netfree-style black paint
     'edge_padding': 5,          # % of image dimension to expand the mask
     'face_grow_x': 0.45,        # extra width around detected faces
     'face_grow_y': 0.55,        # extra height around detected faces
