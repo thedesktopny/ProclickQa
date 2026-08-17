@@ -453,40 +453,137 @@ function stamp(item, text, kind){
 }
 
 /* ---------------- the actual work ---------------- */
-/* Per-pixel skin detection in YCbCr. Works at any scale, so it catches faces and
-   hands in small thumbnails where the semantic segmenter has nothing to work with.
-   Near-black and near-white pixels are skipped, which is what keeps black suits
-   and white dresses out of the mask. */
-function skinColorMask(base, mw, mh, sensitivity){
-  const c = document.createElement("canvas");
-  c.width = mw; c.height = mh;
-  const ctx = c.getContext("2d", { willReadFrequently:true });
-  ctx.drawImage(base, 0, 0, mw, mh);
-  let d;
-  try { d = ctx.getImageData(0, 0, mw, mh).data; }
-  catch(e){ return { mask:new Uint8Array(mw*mh), hits:0 }; }
+/*
+   Precision strategy (three layers working together):
 
+   1. ADAPTIVE COLOUR MODEL — instead of one fixed "skin colour" range for every
+      photo, we sample the actual skin in THIS photo (from the face the detector
+      found, or from pixels the AI already called skin) and build the colour
+      window around those samples. Handles every skin tone and every lighting
+      condition, and stops matching beige furniture.
+
+   2. AGREE, DON'T ADD — the AI mask and the colour test now have to AGREE.
+      AI-skin pixels whose colour doesn't look like this person's skin get
+      trimmed off (that's the blob slopping onto collars and sleeves). Colour
+      hits that don't touch any AI-skin or a face get dropped (that's the wood
+      and cardboard). The old behaviour — union everything — is only used as a
+      fallback when the AI finds nothing at all (tiny grid thumbnails).
+
+   3. EDGE SNAP — the AI works on a small internal mask; scaling that up is what
+      made edges blocky. The final mask is now rebuilt at FULL resolution: solid
+      core stays covered, and the uncertain rim around it is decided pixel by
+      pixel by the colour model, so the boundary lands on the real line between
+      skin and clothing.
+*/
+
+const FIXED = { crMin:133, crMax:173, cbMin:77, cbMax:127 };
+
+function px2chroma(r, g, b){
+  return {
+    y:  0.299*r + 0.587*g + 0.114*b,
+    cb: 128 - 0.168736*r - 0.331264*g + 0.5*b,
+    cr: 128 + 0.5*r - 0.418688*g - 0.081312*b
+  };
+}
+
+/* Chroma-only test (no brightness gates) — used for trimming AI-skin edges.
+   Chroma survives shadow and highlight, so shadowed skin stays covered while
+   differently-coloured clothing gets trimmed. */
+function chromaPass(r, g, b, m){
+  const cb = 128 - 0.168736*r - 0.331264*g + 0.5*b;
+  if (cb < m.cbMin || cb > m.cbMax) return false;
+  const cr = 128 + 0.5*r - 0.418688*g - 0.081312*b;
+  return cr >= m.crMin && cr <= m.crMax;
+}
+
+/* Full strict test (brightness + grey gates + chroma) — used for finding NEW
+   skin the AI missed. Strict on purpose: anything it adds must really look
+   like lit skin. */
+function strictPass(r, g, b, m){
+  if (r < 45) return false;                 // too dark to be lit skin
+  if (r - g < 15) return false;             // skin is clearly red-dominant
+  if (r <= b) return false;
+  const mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
+  const mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
+  if (mx - mn < 15) return false;           // near-grey: paper, walls, UI chrome
+  const y = 0.299*r + 0.587*g + 0.114*b;
+  if (y < 30 || y > 250) return false;      // black suit / white dress
+  return chromaPass(r, g, b, m);
+}
+
+/* Builds this photo's own skin-colour model by sampling pixels the AI called
+   skin (and the inside of any detected face), then fitting the colour window
+   around what was actually found. Falls back to the fixed window when there
+   is nothing trustworthy to sample. */
+function buildColorModel(maskCtxData, mw, mh, segBin, faces, scale, sensitivity){
+  const d = maskCtxData;
+  const s = Math.max(0, Math.min(25, Number(sensitivity) || 0));
+  const fixedLoose  = { crMin:FIXED.crMin - s - 4, crMax:FIXED.crMax + s + 4,
+                        cbMin:FIXED.cbMin - s - 4, cbMax:FIXED.cbMax + s + 4 };
+  const fixedStrict = { crMin:FIXED.crMin - s, crMax:FIXED.crMax + s,
+                        cbMin:FIXED.cbMin - s, cbMax:FIXED.cbMax + s };
+
+  // Face interiors (inner 55%) in mask coordinates — the most reliable skin sample
+  const faceRects = (faces || []).map(b => {
+    const fx = b.originX * scale, fy = b.originY * scale;
+    const fw = b.width * scale,  fh = b.height * scale;
+    return { x0: fx + fw*0.225, x1: fx + fw*0.775, y0: fy + fh*0.225, y1: fy + fh*0.775 };
+  });
+
+  let n = 0, sumCr = 0, sumCb = 0, sumCr2 = 0, sumCb2 = 0;
+  for (let y = 0; y < mh; y++){
+    for (let x = 0; x < mw; x++){
+      const i = y*mw + x;
+      let candidate = segBin && segBin[i];
+      if (!candidate && faceRects.length){
+        for (const f of faceRects){
+          if (x >= f.x0 && x <= f.x1 && y >= f.y0 && y <= f.y1){ candidate = true; break; }
+        }
+      }
+      if (!candidate) continue;
+      const p = i*4, r = d[p], g = d[p+1], b = d[p+2];
+      // Only trust samples that already look vaguely like skin — this keeps a
+      // mislabeled patch of shirt from poisoning the model.
+      if (!chromaPass(r, g, b, fixedLoose)) continue;
+      const c = px2chroma(r, g, b);
+      if (c.y < 25 || c.y > 250) continue;
+      n++; sumCr += c.cr; sumCb += c.cb; sumCr2 += c.cr*c.cr; sumCb2 += c.cb*c.cb;
+    }
+  }
+
+  if (n < 150) return { loose: fixedLoose, strict: fixedStrict, adaptive:false };
+
+  const mCr = sumCr/n, mCb = sumCb/n;
+  const sdCr = Math.max(3, Math.sqrt(Math.max(0, sumCr2/n - mCr*mCr)));
+  const sdCb = Math.max(3, Math.sqrt(Math.max(0, sumCb2/n - mCb*mCb)));
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+  // Loose: mean ± 3σ (min half-width 8) — for trimming AI edges and edge snap.
+  // Strict: mean ± 2.2σ (min half-width 6) — for finding new skin.
+  // Both clamped inside the widened fixed window so the model can only get
+  // MORE precise than before, never wilder.
+  const loose = {
+    crMin: clamp(mCr - Math.max(8, 3*sdCr),   fixedLoose.crMin, fixedLoose.crMax),
+    crMax: clamp(mCr + Math.max(8, 3*sdCr),   fixedLoose.crMin, fixedLoose.crMax),
+    cbMin: clamp(mCb - Math.max(8, 3*sdCb),   fixedLoose.cbMin, fixedLoose.cbMax),
+    cbMax: clamp(mCb + Math.max(8, 3*sdCb),   fixedLoose.cbMin, fixedLoose.cbMax)
+  };
+  const strict = {
+    crMin: clamp(mCr - Math.max(6, 2.2*sdCr), fixedStrict.crMin, fixedStrict.crMax),
+    crMax: clamp(mCr + Math.max(6, 2.2*sdCr), fixedStrict.crMin, fixedStrict.crMax),
+    cbMin: clamp(mCb - Math.max(6, 2.2*sdCb), fixedStrict.cbMin, fixedStrict.cbMax),
+    cbMax: clamp(mCb + Math.max(6, 2.2*sdCb), fixedStrict.cbMin, fixedStrict.cbMax)
+  };
+  return { loose, strict, adaptive:true };
+}
+
+/* Per-pixel strict skin detection over the whole frame, using the model. */
+function skinColorMask(maskCtxData, mw, mh, model){
+  const d = maskCtxData;
   const out = new Uint8Array(mw*mh);
   let hits = 0;
-  const s = Math.max(0, Math.min(25, Number(sensitivity) || 0));
-  const crMin = 133 - s, crMax = 173 + s;
-  const cbMin = 77  - s, cbMax = 127 + s;
-
   for (let i = 0, p = 0; i < out.length; i++, p += 4){
-    const r = d[p], g = d[p+1], b = d[p+2];
-    if (r < 45) continue;                 // too dark to be lit skin
-    if (r - g < 15) continue;             // skin is clearly red-dominant; warm greys are not
-    if (r <= b) continue;
-    const mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
-    const mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
-    if (mx - mn < 15) continue;           // near-grey: paper, walls, UI chrome
-    const y = 0.299*r + 0.587*g + 0.114*b;
-    if (y < 30 || y > 250) continue;      // black suit / white dress
-    const cb = 128 - 0.168736*r - 0.331264*g + 0.5*b;
-    if (cb < cbMin || cb > cbMax) continue;
-    const cr = 128 + 0.5*r - 0.418688*g - 0.081312*b;
-    if (cr < crMin || cr > crMax) continue;
-    out[i] = 1; hits++;
+    if (strictPass(d[p], d[p+1], d[p+2], model.strict)){ out[i] = 1; hits++; }
   }
   return { mask: out, hits };
 }
@@ -519,16 +616,67 @@ function erode(src, w, h, r){
   return out;
 }
 
+/* Keeps only colour-detected blobs that touch AI-detected skin or a detected
+   face. This is what kills the wood / cardboard / tan-jacket false hits: real
+   hands and faces are connected to (or near) something the AI also saw. */
+function filterBlobsByAnchor(colorBin, w, h, anchorBin, faces, scale, keepAll){
+  const label = new Int32Array(w*h);
+  const stackX = new Int32Array(w*h), stackY = new Int32Array(w*h);
+  const out = new Uint8Array(w*h);
+  let nextLabel = 0;
+
+  const faceRects = (faces || []).map(b => {
+    const fx = b.originX * scale, fy = b.originY * scale;
+    return { x0: fx, x1: fx + b.width*scale, y0: fy, y1: fy + b.height*scale };
+  });
+
+  for (let sy = 0; sy < h; sy++){
+    for (let sx = 0; sx < w; sx++){
+      const si = sy*w + sx;
+      if (!colorBin[si] || label[si]) continue;
+      nextLabel++;
+      let top = 0, size = 0, anchored = false;
+      stackX[top] = sx; stackY[top] = sy; top++;
+      label[si] = nextLabel;
+      const members = [];
+      while (top > 0){
+        top--;
+        const x = stackX[top], y = stackY[top];
+        const i = y*w + x;
+        members.push(i); size++;
+        if (!anchored){
+          if (anchorBin && anchorBin[i]) anchored = true;
+          else if (faceRects.length){
+            for (const f of faceRects){
+              if (x >= f.x0 && x <= f.x1 && y >= f.y0 && y <= f.y1){ anchored = true; break; }
+            }
+          }
+        }
+        if (x > 0   && colorBin[i-1] && !label[i-1]){ label[i-1] = nextLabel; stackX[top]=x-1; stackY[top]=y; top++; }
+        if (x < w-1 && colorBin[i+1] && !label[i+1]){ label[i+1] = nextLabel; stackX[top]=x+1; stackY[top]=y; top++; }
+        if (y > 0   && colorBin[i-w] && !label[i-w]){ label[i-w] = nextLabel; stackX[top]=x;   stackY[top]=y-1; top++; }
+        if (y < h-1 && colorBin[i+w] && !label[i+w]){ label[i+w] = nextLabel; stackX[top]=x;   stackY[top]=y+1; top++; }
+      }
+      // keepAll = the AI found nothing anywhere (tiny grid thumbnails) — then any
+      // decent-sized colour blob is kept, like the old behaviour. Otherwise a
+      // blob must be anchored to AI skin or a face.
+      const keep = anchored || (keepAll && size >= 25);
+      if (keep) for (const i of members) out[i] = 1;
+    }
+  }
+  return out;
+}
+
 /* Builds a binary mask of ONLY the selected classes (skin by default), tiling the
    image so grids/collages and small faces are detected at usable resolution. */
-async function buildMask(base){
+async function buildMask(base, faces){
   const w = base.width, h = base.height;
   const MASKMAX = 1200;
   const scale = Math.min(1, MASKMAX / Math.max(w, h));
   const mw = Math.max(1, Math.round(w * scale));
   const mh = Math.max(1, Math.round(h * scale));
-  const bin = new Uint8Array(mw * mh);
-  let hits = 0;
+  const segBin = new Uint8Array(mw * mh);
+  let segHits = 0;
 
   const tiles = Math.max(1, Math.min(6, parseInt(SETTINGS.tiles) || 1));
   const wanted = new Set((SETTINGS.cover_classes || [2,3]).map(Number));
@@ -573,7 +721,7 @@ async function buildMask(base){
             if (u < 0 || v < 0 || u >= 1 || v >= 1) continue;
             const cls = raw[Math.min(ch-1, (v*ch)|0) * cw + Math.min(cw-1, (u*cw)|0)];
             const on = multiclass ? wanted.has(cls) : (cls !== 0);
-            if (on && !bin[my*mw + mx]){ bin[my*mw + mx] = 1; hits++; }
+            if (on && !segBin[my*mw + mx]){ segBin[my*mw + mx] = 1; segHits++; }
           }
         }
         cm.close();
@@ -583,11 +731,52 @@ async function buildMask(base){
     }
   }
 
-  // Skin-colour pass, unioned in. This is what catches faces and hands in small
-  // grid thumbnails that the segmenter cannot resolve.
+  // Read the frame once at mask resolution for all colour work
+  const cc = document.createElement("canvas");
+  cc.width = mw; cc.height = mh;
+  const cctx = cc.getContext("2d", { willReadFrequently:true });
+  cctx.drawImage(base, 0, 0, mw, mh);
+  let frame = null;
+  try { frame = cctx.getImageData(0, 0, mw, mh).data; } catch(e){}
+
+  // No pixel access (rare) — fall back to raw AI mask, fixed model
+  if (!frame){
+    let hits = 0; for (let i = 0; i < segBin.length; i++) if (segBin[i]) hits++;
+    return { bin: segBin, mw, mh, hits, runaway:false,
+             model: { loose: FIXED, strict: FIXED, adaptive:false } };
+  }
+
+  // --- Layer 1: this photo's own skin-colour model ---
+  const model = buildColorModel(frame, mw, mh, segHits ? segBin : null,
+                                faces, scale, SETTINGS.skin_sensitivity);
+
+  // --- Layer 2a: trim the AI mask where colour disagrees (edge slop on clothes) ---
+  const bin = new Uint8Array(mw * mh);
+  let hits = 0;
+  if (SETTINGS.color_trim !== false && segHits){
+    for (let i = 0; i < segBin.length; i++){
+      if (!segBin[i]) continue;
+      const p = i*4;
+      if (chromaPass(frame[p], frame[p+1], frame[p+2], model.loose)){ bin[i] = 1; hits++; }
+    }
+    // Heal pinholes the trim punched into real skin (glasses glare, deep shadow)
+    const healed = erode(dilate(bin, mw, mh, 2), mw, mh, 2);
+    hits = 0;
+    for (let i = 0; i < bin.length; i++){ bin[i] = healed[i]; if (bin[i]) hits++; }
+    // If trimming removed almost everything, colour disagreed with the AI wholesale
+    // (heavy colour cast, unusual lighting) — trust the AI rather than uncover skin.
+    if (segHits && hits < segHits * 0.25){
+      hits = 0;
+      for (let i = 0; i < segBin.length; i++){ bin[i] = segBin[i]; if (bin[i]) hits++; }
+    }
+  } else {
+    for (let i = 0; i < segBin.length; i++){ bin[i] = segBin[i]; if (bin[i]) hits++; }
+  }
+
+  // --- Layer 2b: colour-found skin, anchored to the AI or a face ---
   let runaway = false;
   if (SETTINGS.skin_color_detect !== false){
-    const sk = skinColorMask(base, mw, mh, SETTINGS.skin_sensitivity);
+    const sk = skinColorMask(frame, mw, mh, model);
     let clean = sk.mask;
     let noise = parseInt(SETTINGS.noise_removal);
     if (!Number.isFinite(noise)) noise = 1;
@@ -604,13 +793,76 @@ async function buildMask(base){
     if (cnt / clean.length > 0.75){
       runaway = true;
     } else {
+      const anchor = hits ? dilate(bin, mw, mh, 3) : null;
+      const kept = filterBlobsByAnchor(clean, mw, mh, anchor, faces, scale, hits === 0);
       for (let i = 0; i < bin.length; i++){
-        if (clean[i] && !bin[i]){ bin[i] = 1; hits++; }
+        if (kept[i] && !bin[i]){ bin[i] = 1; hits++; }
       }
     }
   }
 
-  return { bin, mw, mh, hits, runaway };
+  return { bin, mw, mh, hits, runaway, model };
+}
+
+/* --- Layer 3: rebuild the mask at FULL resolution so edges land on the real
+   skin/clothing boundary instead of on scaled-up blocks. The solid core of the
+   mask stays covered no matter what; only the uncertain rim is decided by
+   colour, and the rim can only move a few pixels either way. --- */
+function refineMaskFullRes(base, bin, mw, mh, model){
+  const w = base.width, h = base.height;
+
+  // Soft-scale the low-res mask up to full size
+  const lo = document.createElement("canvas");
+  lo.width = mw; lo.height = mh;
+  const loCtx = lo.getContext("2d");
+  const loImg = loCtx.createImageData(mw, mh);
+  for (let i = 0; i < bin.length; i++){
+    if (bin[i]){ const p = i*4; loImg.data[p]=255; loImg.data[p+1]=255; loImg.data[p+2]=255; loImg.data[p+3]=255; }
+  }
+  loCtx.putImageData(loImg, 0, 0);
+
+  const soft = document.createElement("canvas");
+  soft.width = w; soft.height = h;
+  const softCtx = soft.getContext("2d", { willReadFrequently:true });
+  softCtx.imageSmoothingEnabled = true;
+  softCtx.imageSmoothingQuality = "high";
+  softCtx.drawImage(lo, 0, 0, w, h);
+
+  let softD, imgD;
+  try {
+    softD = softCtx.getImageData(0, 0, w, h).data;
+    const ic = document.createElement("canvas");
+    ic.width = w; ic.height = h;
+    const ictx = ic.getContext("2d", { willReadFrequently:true });
+    ictx.drawImage(base, 0, 0);
+    imgD = ictx.getImageData(0, 0, w, h).data;
+  } catch(e){
+    // Can't read pixels — fall back to the hard-scaled mask (old behaviour)
+    return maskToCanvas(bin, mw, mh);
+  }
+
+  const hex = (SETTINGS.cover_color || '#FFFFFF').replace('#','');
+  const cr = parseInt(hex.substr(0,2),16), cg = parseInt(hex.substr(2,2),16), cbl = parseInt(hex.substr(4,2),16);
+
+  const outC = document.createElement("canvas");
+  outC.width = w; outC.height = h;
+  const outCtx = outC.getContext("2d");
+  const outImg = outCtx.createImageData(w, h);
+  const od = outImg.data;
+
+  // alpha >= CORE  -> always covered (deep inside the mask)
+  // alpha in (RIM, CORE) -> covered only if the pixel's colour says skin
+  // alpha <= RIM  -> never covered
+  const CORE = 200, RIM = 55;
+  for (let i = 0, p = 0; p < softD.length; i++, p += 4){
+    const a = softD[p+3];
+    let on = false;
+    if (a >= CORE) on = true;
+    else if (a > RIM) on = chromaPass(imgD[p], imgD[p+1], imgD[p+2], model.loose);
+    if (on){ od[p]=cr; od[p+1]=cg; od[p+2]=cbl; od[p+3]=255; }
+  }
+  outCtx.putImageData(outImg, 0, 0);
+  return outC;
 }
 
 async function handle(item){
@@ -630,8 +882,19 @@ async function handle(item){
   if (bmp.close) bmp.close();
   item.base = base;
 
-  // 1. skin segmentation -> binary mask (clothes and shoes deliberately excluded)
-  const seg = await buildMask(base);
+  // faces first — they feed the colour model even when face-covering is off
+  item.faces = [];
+  let faceBoxes = [];
+  if (faceDetector){
+    try{
+      const det = faceDetector.detect(base).detections || [];
+      faceBoxes = det.map(d => d.boundingBox).filter(Boolean);
+    }catch(e){ /* optional */ }
+  }
+  if (SETTINGS.cover_faces) item.faces = faceBoxes;
+
+  // 1. skin segmentation + colour agreement -> binary mask (clothes stay visible)
+  const seg = await buildMask(base, faceBoxes);
   const bin = seg.bin, mw = seg.mw, mh = seg.mh, hits = seg.hits;
 
   item.mask = null;
@@ -639,19 +902,15 @@ async function handle(item){
     // Small, roughly constant expansion. This used to be a percentage of the image
     // size (~60px), which merged every scattered hit into one solid block.
     const r = Math.max(0, Math.round(Number(padRange.value) * Math.max(mw,mh) / 1000));
-    item.mask = maskToCanvas(dilate(bin, mw, mh, r), mw, mh);
+    const padded = dilate(bin, mw, mh, r);
+    // 2. edge snap: rebuild at full resolution so the boundary follows the
+    //    real skin/clothing line instead of scaled-up blocks
+    item.mask = (SETTINGS.edge_snap !== false)
+      ? refineMaskFullRes(base, padded, mw, mh, seg.model)
+      : maskToCanvas(padded, mw, mh);
   }
   item.coverage = hits && mw ? hits/(mw*mh) : 0;
   item.runaway = seg.runaway;
-
-  // 2. face backstop — off by default because a face box also covers hair and collar
-  item.faces = [];
-  if (faceDetector && SETTINGS.cover_faces){
-    try{
-      const det = faceDetector.detect(base).detections || [];
-      item.faces = det.map(d => d.boundingBox).filter(Boolean);
-    }catch(e){ /* optional */ }
-  }
 
   item.done = true;
   render(item);
