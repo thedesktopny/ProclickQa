@@ -357,6 +357,22 @@ async function boot(){
   statusText.textContent = "Server detector ready";
 }
 
+boot().catch(()=>{
+  statusText.textContent = "Detector failed to load — check the connection";
+});
+
+/* ---------------- intake ---------------- */
+$("pickBtn").addEventListener("click", ()=> fileInput.click());
+fileInput.addEventListener("change", e => { addFiles(e.target.files); fileInput.value=""; });
+
+["dragenter","dragover"].forEach(ev =>
+  drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("hot"); }));
+["dragleave","drop"].forEach(ev =>
+  drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("hot"); }));
+drop.addEventListener("drop", e => addFiles(e.dataTransfer.files));
+window.addEventListener("dragover", e => e.preventDefault());
+window.addEventListener("drop", e => e.preventDefault());
+
 function addFiles(list){
   const files = [...list].filter(f => f.type.startsWith("image/"));
   if (!files.length) return;
