@@ -948,18 +948,78 @@ td.agent{color:var(--text);font-weight:500;}
     <div class="page-title">🖼️ Skin Block</div>
     <div class="topbar-right">
       <a href="/skinblock" target="_blank" class="btn btn-outline" style="text-decoration:none;">Open tool ↗</a>
-      <button class="btn btn-primary" onclick="saveSkinblockSettings()">Save Settings</button>
+      <button class="btn btn-outline" onclick="openSkinblockSettings()">⚙️ Settings</button>
     </div>
   </div>
   <div style="padding:28px;">
     <div class="alert-bar" style="margin-bottom:20px;background:rgba(79,110,247,0.08);border-color:rgba(79,110,247,0.2)">
       <span style="font-size:18px;">🔗</span>
-      <span style="font-size:12px;color:var(--text2);flex:1;">Agents use the tool at <strong id="sb-link">/skinblock</strong> — no login needed, but they must enter their 3-digit extension. Every photo is logged here. Images are kept for the retention period below, then only the record remains.</span>
+      <span style="font-size:12px;color:var(--text2);flex:1;">Agents use the tool at <strong id="sb-link">/skinblock</strong> — no login needed, but they must enter their 3-digit extension. Every photo they process is logged below.</span>
     </div>
 
-    <div class="card" style="margin-bottom:20px;">
-      <div class="card-header"><span class="card-title">⚙️ Detection Settings</span></div>
+
+    <div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap;align-items:flex-end;">
+      <div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:4px;">Extension</div>
+        <input id="sb-filter-ext" placeholder="All" maxlength="3" style="width:90px;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:6px;font-size:12px;">
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:4px;">From</div>
+        <input type="date" id="sb-from" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:6px;font-size:12px;">
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:4px;">To</div>
+        <input type="date" id="sb-to" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:6px;font-size:12px;">
+      </div>
+      <button onclick="loadSkinblockHistory()" class="btn btn-outline" style="font-size:12px;">Apply</button>
+    </div>
+
+    <div id="sb-by-agent" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:20px;"></div>
+
+    <div class="card">
+      <div class="card-header"><span class="card-title">History — before &amp; after</span><span id="sb-count" style="font-size:11px;color:var(--text3)"></span></div>
+      <div id="sb-history" style="padding:16px;">
+        <div style="text-align:center;color:var(--text3);padding:24px;">Loading…</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="skinblock-settings-modal">
+  <div class="modal-box" style="width:760px;max-width:95vw;max-height:88vh;overflow-y:auto;">
+    <div style="font-size:16px;font-weight:700;margin-bottom:4px;">⚙️ Skin Block Settings</div>
+    <div style="font-size:11px;color:var(--text3);margin-bottom:16px;">Changes apply the next time an agent loads the tool.</div>
       <div class="card-body" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;">
+        <div style="grid-column:1/-1;">
+          <div style="font-size:11px;color:var(--text3);margin-bottom:6px;">What to cover</div>
+          <div style="display:flex;gap:16px;flex-wrap:wrap;">
+            <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2);cursor:pointer;">
+              <input type="checkbox" id="sb-cls-2" checked style="width:15px;height:15px;accent-color:var(--accent);"> Body skin
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2);cursor:pointer;">
+              <input type="checkbox" id="sb-cls-3" checked style="width:15px;height:15px;accent-color:var(--accent);"> Face skin
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2);cursor:pointer;">
+              <input type="checkbox" id="sb-cls-1" style="width:15px;height:15px;accent-color:var(--accent);"> Hair
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2);cursor:pointer;">
+              <input type="checkbox" id="sb-cls-4" style="width:15px;height:15px;accent-color:var(--accent);"> Clothes
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2);cursor:pointer;">
+              <input type="checkbox" id="sb-cls-5" style="width:15px;height:15px;accent-color:var(--accent);"> Accessories
+            </label>
+          </div>
+          <div style="font-size:10px;color:var(--text3);margin-top:4px;">Leave Clothes unchecked so the dress, shoes and bag stay visible to the customer.</div>
+        </div>
+        <div>
+          <div style="font-size:11px;color:var(--text3);margin-bottom:5px;">Detail level</div>
+          <select id="sb-tiles" style="width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:6px;font-size:12px;">
+            <option value="1">Normal — one photo per image</option>
+            <option value="3">High — a few photos per image</option>
+            <option value="5">Max — screenshots and grids</option>
+          </select>
+          <div style="font-size:10px;color:var(--text3);margin-top:3px;">Higher splits the image into a grid so small photos are detected. Slower.</div>
+        </div>
         <div>
           <div style="font-size:11px;color:var(--text3);margin-bottom:5px;">Cover colour</div>
           <div style="display:flex;gap:8px;align-items:center;">
@@ -998,33 +1058,14 @@ td.agent{color:var(--text);font-weight:500;}
           <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text2);cursor:pointer;">
             <input type="checkbox" id="sb-require-ext" checked style="width:15px;height:15px;accent-color:var(--accent);"> Require 3-digit extension
           </label>
+          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text2);cursor:pointer;">
+            <input type="checkbox" id="sb-cover-faces" style="width:15px;height:15px;accent-color:var(--accent);"> Also draw face boxes
+          </label>
         </div>
       </div>
-    </div>
-
-    <div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap;align-items:flex-end;">
-      <div>
-        <div style="font-size:11px;color:var(--text3);margin-bottom:4px;">Extension</div>
-        <input id="sb-filter-ext" placeholder="All" maxlength="3" style="width:90px;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:6px;font-size:12px;">
-      </div>
-      <div>
-        <div style="font-size:11px;color:var(--text3);margin-bottom:4px;">From</div>
-        <input type="date" id="sb-from" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:6px;font-size:12px;">
-      </div>
-      <div>
-        <div style="font-size:11px;color:var(--text3);margin-bottom:4px;">To</div>
-        <input type="date" id="sb-to" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:6px;font-size:12px;">
-      </div>
-      <button onclick="loadSkinblockHistory()" class="btn btn-outline" style="font-size:12px;">Apply</button>
-    </div>
-
-    <div id="sb-by-agent" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:20px;"></div>
-
-    <div class="card">
-      <div class="card-header"><span class="card-title">History — before &amp; after</span><span id="sb-count" style="font-size:11px;color:var(--text3)"></span></div>
-      <div id="sb-history" style="padding:16px;">
-        <div style="text-align:center;color:var(--text3);padding:24px;">Loading…</div>
-      </div>
+    <div style="display:flex;gap:10px;margin-top:18px;">
+      <button onclick="hideModal('skinblock-settings-modal')" class="btn btn-outline" style="flex:1;">Cancel</button>
+      <button onclick="saveSkinblockSettings()" class="btn btn-primary" style="flex:1;">Save Settings</button>
     </div>
   </div>
 </div>
@@ -2144,14 +2185,9 @@ function showPage(id){
   if(id==='alerts'){ mountAlertsDatePicker(); renderAlerts(); }
   if(id==='calls') mountCallsDatePicker();
   if(id==='skinblock'){
-    loadSkinblockSettings();
+    const link = document.getElementById('sb-link');
+    if(link) link.textContent = window.location.origin + '/skinblock';
     loadSkinblockHistory();
-    const cp = document.getElementById('sb-color'), hx = document.getElementById('sb-color-hex');
-    if(cp && !cp.dataset.bound){
-      cp.addEventListener('input', ()=>{ hx.value = cp.value.toUpperCase(); });
-      hx.addEventListener('input', ()=>{ if(/^#[0-9a-f]{6}$/i.test(hx.value)) cp.value = hx.value; });
-      cp.dataset.bound = '1';
-    }
   }
   if(id==='manager-queue') renderManagerQueue();
   if(id==='time-report'){
@@ -3394,6 +3430,17 @@ async function revertAdjustment(){
 }
 
 // ─── SKIN BLOCK ───────────────────────────────────────────────────────────────
+async function openSkinblockSettings(){
+  showModal('skinblock-settings-modal');
+  await loadSkinblockSettings();
+  const cp = document.getElementById('sb-color'), hx = document.getElementById('sb-color-hex');
+  if(cp && hx && !cp.dataset.bound){
+    cp.addEventListener('input', ()=>{ hx.value = cp.value.toUpperCase(); });
+    hx.addEventListener('input', ()=>{ if(/^#[0-9a-f]{6}$/i.test(hx.value)) cp.value = hx.value; });
+    cp.dataset.bound = '1';
+  }
+}
+
 async function loadSkinblockSettings(){
   try{
     const s = await API.get('/api/skinblock/settings');
@@ -3407,9 +3454,14 @@ async function loadSkinblockSettings(){
     document.getElementById('sb-retention').value = s.retention_days ?? 30;
     document.getElementById('sb-shrink').checked = s.shrink_large !== false;
     document.getElementById('sb-require-ext').checked = s.require_extension !== false;
+    document.getElementById('sb-cover-faces').checked = !!s.cover_faces;
+    document.getElementById('sb-tiles').value = String(s.tiles || 1);
+    const cls = new Set((s.cover_classes || [2,3]).map(Number));
+    [1,2,3,4,5].forEach(n=>{
+      const el = document.getElementById('sb-cls-'+n);
+      if(el) el.checked = cls.has(n);
+    });
   }catch(e){}
-  const link = document.getElementById('sb-link');
-  if(link) link.textContent = window.location.origin + '/skinblock';
 }
 
 async function saveSkinblockSettings(){
@@ -3423,8 +3475,12 @@ async function saveSkinblockSettings(){
       retention_days: parseInt(document.getElementById('sb-retention').value),
       shrink_large: document.getElementById('sb-shrink').checked,
       require_extension: document.getElementById('sb-require-ext').checked,
+      cover_faces: document.getElementById('sb-cover-faces').checked,
+      tiles: parseInt(document.getElementById('sb-tiles').value) || 1,
+      cover_classes: [1,2,3,4,5].filter(n=>document.getElementById('sb-cls-'+n)?.checked),
     });
     showToast('✅ Settings saved — applies next time an agent loads the tool');
+    hideModal('skinblock-settings-modal');
   }catch(e){ showToast('Failed: '+e.message, true); }
 }
 

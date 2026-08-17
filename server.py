@@ -2835,13 +2835,18 @@ def _compute_pay(segments, sched_window, rate_history, ot_periods):
 # ─── SKIN BLOCK (photo people-cover tool) ─────────────────────────────────────
 SKINBLOCK_DEFAULTS = {
     'cover_color': '#FFFFFF',
-    'edge_padding': 5,          # % of image dimension to expand the person mask
+    'edge_padding': 5,          # % of image dimension to expand the mask
     'face_grow_x': 0.45,        # extra width around detected faces
     'face_grow_y': 0.55,        # extra height around detected faces
     'shrink_large': True,
     'max_dimension': 2000,
     'require_extension': True,
     'retention_days': 30,
+    # selfie_multiclass classes: 1=hair 2=body-skin 3=face-skin 4=clothes 5=accessories.
+    # Default covers skin only, so a dress or shoes stay visible.
+    'cover_classes': [2, 3],
+    'tiles': 1,                 # NxN grid; raise for screenshots/collages
+    'cover_faces': False,       # face rectangles also cover hair and collar
 }
 
 def _skinblock_settings():
