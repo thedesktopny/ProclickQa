@@ -177,7 +177,7 @@
 <body>
 
 <header class="topbar">
-  <h1 class="wordmark"><span class="bars"><i></i><i></i><i></i></span> Skin Block <span class="mono" style="font-size:11px;opacity:.55;">v5</span></h1>
+  <h1 class="wordmark"><span class="bars"><i></i><i></i><i></i></span> Skin Block <span class="mono" style="font-size:11px;opacity:.55;">v6</span></h1>
   <div class="status">
     <span id="extBadge" class="mono" style="display:none;background:var(--signal);color:var(--void);padding:3px 9px;font-weight:600;"></span>
     <span class="dot" id="dot"></span><span id="statusText">Loading detector…</span>
@@ -252,7 +252,7 @@ const FACE  = "https://storage.googleapis.com/mediapipe-models/face_detector/bla
 const MAXDIM = 2000;
 
 const $ = id => document.getElementById(id);
-console.log("[SkinBlock] v5 — self-hosted SegFormer (asset mirror)");
+console.log("[SkinBlock] v6 — per-tile grid painting");
 
 /* ---------- server settings + extension gate ---------- */
 /* selfie_multiclass_256x256 category indices */
@@ -999,7 +999,7 @@ function refineMaskFullRes(base, bin, mw, mh, model){
    each thumbnail's rectangle (photos are detail-rich islands sitting in flat
    gutters, whether the page is light or dark) and white out the WHOLE tile if
    it contains a face or any skin. Clean rectangles, nothing peeking through. */
-function detectPhotoRects(base, bin, mw, mh, scale, faces){
+function detectPhotoRects(base, bin, mw, mh, scale, faces, returnAll){
   const w = base.width, h = base.height;
   const cc = document.createElement("canvas");
   cc.width = mw; cc.height = mh;
@@ -1067,7 +1067,8 @@ function detectPhotoRects(base, bin, mw, mh, scale, faces){
       const fy = (f.originY + f.height/2) * scale;
       if (fx >= r.x0 && fx <= r.x1 && fy >= r.y0 && fy <= r.y1){ faceIn = true; break; }
     }
-    if (!faceIn && r.skin / r.area < 0.015) continue;
+    if (!returnAll && !faceIn && r.skin / r.area < 0.015) continue;
+    r.faceIn = faceIn;
     covered.push(r);
   }
 
@@ -1098,6 +1099,152 @@ function detectPhotoRects(base, bin, mw, mh, scale, faces){
     w: Math.min(w, (r.x1 - r.x0 + 1 + PAD*2) / scale) / w,
     h: Math.min(h, (r.y1 - r.y0 + 1 + PAD*2) / scale) / h
   }));
+}
+
+/* NETFREE-STYLE GRID PAINTING — each detected thumbnail is cropped out,
+   upscaled, and run through the detector as its own complete photo. The model
+   sees whole people (much better detection than arbitrary slices), and the
+   paint is CLIPPED to that thumbnail's borders — masks can never bleed across
+   the gutters into neighbouring tiles. Three layers per tile:
+     1. the precise parser's skin classes (face/arms/legs)
+     2. if the parser finds nothing but a face was detected -> paint the face
+     3. if neither fires but the tile clearly contains skin colour -> paint
+        those regions, so nothing slips through */
+async function paintGridTiles(item, base, rectsNorm, faceBoxes, model){
+  const w = base.width, h = base.height;
+  const out = document.createElement("canvas");
+  out.width = w; out.height = h;
+  const octx = out.getContext("2d");
+  const hex = (SETTINGS.cover_color || '#000000');
+  octx.fillStyle = hex;
+
+  const crop = document.createElement("canvas");
+  const cctx = crop.getContext("2d", { willReadFrequently:true });
+  const workEl = item.card.querySelector(".working .txt") || item.card.querySelector(".working");
+
+  let painted = 0, idx = 0;
+  for (const rn of rectsNorm){
+    idx++;
+    if (workEl) workEl.textContent = `Painting tiles… ${idx}/${rectsNorm.length}`;
+    const rx = Math.round(rn.x*w), ry = Math.round(rn.y*h);
+    const rw = Math.round(rn.w*w), rh = Math.round(rn.h*h);
+    if (rw < 20 || rh < 20) continue;
+
+    // upscale the thumbnail so the detector gets real detail
+    const long = Math.max(rw, rh);
+    const up = Math.min(4, Math.max(1, 512/long));
+    const tw = Math.round(rw*up), th = Math.round(rh*up);
+    crop.width = tw; crop.height = th;
+    cctx.clearRect(0, 0, tw, th);
+    cctx.drawImage(base, rx, ry, rw, rh, 0, 0, tw, th);
+
+    let frame = null;
+    try { frame = cctx.getImageData(0, 0, tw, th).data; } catch(e){}
+
+    // cheap pre-check so scenery/product tiles don't waste detector time
+    let quickSkin = 0, quickN = 0;
+    if (frame){
+      const step = Math.max(1, Math.floor(Math.sqrt((tw*th)/4000)));
+      for (let y = 0; y < th; y += step){
+        for (let x = 0; x < tw; x += step){
+          const p = (y*tw + x)*4;
+          quickN++;
+          if (strictPass(frame[p], frame[p+1], frame[p+2], model.strict)) quickSkin++;
+        }
+      }
+    }
+    const hasFace = rectFaceHit(rn, faceBoxes, w, h);
+    if (!hasFace && quickN && quickSkin/quickN < 0.006) continue;   // nothing human here
+
+    // clip everything to this tile — paint can never cross the gutter
+    octx.save();
+    octx.beginPath();
+    octx.rect(rx, ry, rw, rh);
+    octx.clip();
+
+    let tilePainted = false;
+
+    // layer 1: precise parser on the whole thumbnail
+    if (parser){
+      let segs = null;
+      try { segs = await parser(crop.toDataURL("image/png")); } catch(e){}
+      if (segs && segs.length){
+        const skin = segs.filter(s => SKIN_LABELS.has(s.label) && s.mask);
+        if (skin.length){
+          const t2 = document.createElement("canvas");
+          t2.width = skin[0].mask.width; t2.height = skin[0].mask.height;
+          const t2x = t2.getContext("2d");
+          const img = t2x.createImageData(t2.width, t2.height);
+          const cr = parseInt(hex.substr(1,2),16), cg = parseInt(hex.substr(3,2),16), cb = parseInt(hex.substr(5,2),16);
+          let any = false;
+          for (const s of skin){
+            const d = s.mask.data;
+            for (let i = 0, p = 0; i < d.length; i++, p += 4){
+              if (d[i] > 127){ img.data[p]=cr; img.data[p+1]=cg; img.data[p+2]=cb; img.data[p+3]=255; any = true; }
+            }
+          }
+          if (any){
+            t2x.putImageData(img, 0, 0);
+            // draw with small offsets = slight grow, so edges fully cover
+            const g = Math.max(1, Math.round(rw*0.012));
+            for (const [ox, oy] of [[0,0],[g,0],[-g,0],[0,g],[0,-g]]){
+              octx.drawImage(t2, rx+ox, ry+oy, rw, rh);
+            }
+            tilePainted = true;
+          }
+        }
+      }
+    }
+
+    // layer 2: face detected but parser silent -> paint the face area
+    if (!tilePainted && hasFace){
+      for (const f of faceBoxes){
+        const fx = f.originX + f.width/2, fy = f.originY + f.height/2;
+        if (fx < rx || fx > rx+rw || fy < ry || fy > ry+rh) continue;
+        const gx = f.width  * (0.5 + (SETTINGS.face_grow_x || 0.45));
+        const gy = f.height * (0.5 + (SETTINGS.face_grow_y || 0.55));
+        octx.beginPath();
+        octx.ellipse(fx, fy, gx, gy, 0, 0, Math.PI*2);
+        octx.fill();
+        tilePainted = true;
+      }
+    }
+
+    // layer 3: strong skin colour but nothing above fired -> paint colour regions
+    if (!tilePainted && frame && quickN && quickSkin/quickN >= 0.02){
+      let cbin = new Uint8Array(tw*th);
+      for (let i = 0, p = 0; i < cbin.length; i++, p += 4){
+        if (strictPass(frame[p], frame[p+1], frame[p+2], model.strict)) cbin[i] = 1;
+      }
+      cbin = dilate(erode(cbin, tw, th, 1), tw, th, 3);
+      const t3 = document.createElement("canvas");
+      t3.width = tw; t3.height = th;
+      const t3x = t3.getContext("2d");
+      const img3 = t3x.createImageData(tw, th);
+      const cr = parseInt(hex.substr(1,2),16), cg = parseInt(hex.substr(3,2),16), cb = parseInt(hex.substr(5,2),16);
+      for (let i = 0, p = 0; i < cbin.length; i++, p += 4){
+        if (cbin[i]){ img3.data[p]=cr; img3.data[p+1]=cg; img3.data[p+2]=cb; img3.data[p+3]=255; }
+      }
+      t3x.putImageData(img3, 0, 0);
+      octx.drawImage(t3, rx, ry, rw, rh);
+      tilePainted = true;
+    }
+
+    octx.restore();
+    if (tilePainted) painted++;
+    await sleep(0);
+  }
+  if (workEl) workEl.textContent = "Finishing…";
+  return { mask: out, painted, total: rectsNorm.length };
+}
+
+function rectFaceHit(rn, faces, w, h){
+  const rx = rn.x*w, ry = rn.y*h, rx1 = rx + rn.w*w, ry1 = ry + rn.h*h;
+  for (const f of (faces || [])){
+    const fx = f.originX + f.width/2, fy = f.originY + f.height/2;
+    if (fx >= rx && fx <= rx1 && fy >= ry && fy <= ry1) return true;
+  }
+  return false;
 }
 
 async function handle(item){
@@ -1134,28 +1281,46 @@ async function handle(item){
   const seg = await buildMask(base, faceBoxes, gridMode);
   const bin = seg.bin, mw = seg.mw, mh = seg.mh, hits = seg.hits;
 
-  // Optional grid behaviour: cover whole thumbnail tiles instead of tracing
-  // skin inside them. OFF by default — enable with the cover_whole_tiles
-  // server setting if skin-only covering ever isn't strict enough for grids.
+  // Grid path: find every thumbnail, then run the detector on each one as its
+  // own photo and paint skin clipped to that tile (Netfree-style). If the
+  // cover_whole_tiles setting is on, whole tiles are blacked out instead.
   item.autoRects = [];
-  if (gridMode && SETTINGS.cover_whole_tiles === true){
+  if (gridMode){
     const scale = Math.min(1, 1200 / Math.max(w, h));
-    const rects = detectPhotoRects(base, bin, mw, mh, scale, faceBoxes);
-    if (rects.length){
-      item.autoRects = rects;
-      item.faces = [];          // tiles already swallow the faces
-      item.mask = null;
-      let areaFrac = 0;
-      for (const r of rects) areaFrac += r.w * r.h;
-      item.coverage = areaFrac;
-      item.runaway = false;
-      item.done = true;
-      render(item);
-      item.card.querySelector(".working")?.remove();
-      stamp(item, `Photo grid — ${rects.length} tiles covered, check it`, "warn");
-      logToServer(item, compose(item));
-      updateTally();
-      return;
+    if (SETTINGS.cover_whole_tiles === true){
+      const rects = detectPhotoRects(base, bin, mw, mh, scale, faceBoxes);
+      if (rects.length){
+        item.autoRects = rects;
+        item.faces = [];
+        item.mask = null;
+        let areaFrac = 0;
+        for (const r of rects) areaFrac += r.w * r.h;
+        item.coverage = areaFrac;
+        item.runaway = false;
+        item.done = true;
+        render(item);
+        item.card.querySelector(".working")?.remove();
+        stamp(item, `Photo grid — ${rects.length} tiles covered, check it`, "warn");
+        logToServer(item, compose(item));
+        updateTally();
+        return;
+      }
+    } else {
+      const allRects = detectPhotoRects(base, bin, mw, mh, scale, faceBoxes, true);
+      if (allRects.length){
+        const r = await paintGridTiles(item, base, allRects, faceBoxes, seg.model);
+        item.mask = r.mask;
+        item.faces = [];          // faces were handled per tile
+        item.coverage = r.painted / Math.max(1, r.total);
+        item.runaway = false;
+        item.done = true;
+        render(item);
+        item.card.querySelector(".working")?.remove();
+        stamp(item, `Photo grid — ${r.painted} of ${r.total} tiles painted, check it`, "warn");
+        logToServer(item, compose(item));
+        updateTally();
+        return;
+      }
     }
     // tile detection found nothing usable — fall through to the pixel mask
   }
