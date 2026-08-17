@@ -263,7 +263,10 @@ let SETTINGS = {
   shrink_large:true, max_dimension:2000, require_extension:true,
   cover_classes:[2,3],   // body-skin + face-skin only — clothes and shoes stay visible
   tiles:1,               // split the image into an NxN grid before detecting
-  cover_faces:false      // face rectangles cover hair/clothes too, so off by default
+  cover_faces:false,     // face rectangles cover hair/clothes too, so off by default
+  skin_color_detect:true,// per-pixel skin colour pass, works at any thumbnail size
+  skin_sensitivity:0,    // widens the skin colour window (0–25)
+  noise_removal:1        // erode radius to drop stray warm-coloured pixels
 };
 let AGENT_EXT = '';
 
@@ -450,6 +453,68 @@ function stamp(item, text, kind){
 }
 
 /* ---------------- the actual work ---------------- */
+/* Per-pixel skin detection in YCbCr. Works at any scale, so it catches faces and
+   hands in small thumbnails where the semantic segmenter has nothing to work with.
+   Near-black and near-white pixels are skipped, which is what keeps black suits
+   and white dresses out of the mask. */
+function skinColorMask(base, mw, mh, sensitivity){
+  const c = document.createElement("canvas");
+  c.width = mw; c.height = mh;
+  const ctx = c.getContext("2d", { willReadFrequently:true });
+  ctx.drawImage(base, 0, 0, mw, mh);
+  let d;
+  try { d = ctx.getImageData(0, 0, mw, mh).data; }
+  catch(e){ return { mask:new Uint8Array(mw*mh), hits:0 }; }
+
+  const out = new Uint8Array(mw*mh);
+  let hits = 0;
+  const s = Math.max(0, Math.min(25, Number(sensitivity) || 0));
+  const crMin = 133 - s, crMax = 173 + s;
+  const cbMin = 77  - s, cbMax = 127 + s;
+
+  for (let i = 0, p = 0; i < out.length; i++, p += 4){
+    const r = d[p], g = d[p+1], b = d[p+2];
+    if (r < 45) continue;                 // too dark to be lit skin
+    if (r <= g || r <= b) continue;       // skin is red-dominant across all tones
+    const y = 0.299*r + 0.587*g + 0.114*b;
+    if (y < 30 || y > 250) continue;      // black suit / white dress
+    const cb = 128 - 0.168736*r - 0.331264*g + 0.5*b;
+    if (cb < cbMin || cb > cbMax) continue;
+    const cr = 128 + 0.5*r - 0.418688*g - 0.081312*b;
+    if (cr < crMin || cr > crMax) continue;
+    out[i] = 1; hits++;
+  }
+  return { mask: out, hits };
+}
+
+/* Shrinks the mask to drop stray single-pixel hits (wood, sand, warm walls). */
+function erode(src, w, h, r){
+  if (r <= 0) return src;
+  const tmp = new Uint8Array(w*h), out = new Uint8Array(w*h);
+  for (let y = 0; y < h; y++){
+    const row = y*w;
+    for (let x = 0; x < w; x++){
+      let v = 1;
+      for (let k = -r; k <= r; k++){
+        const xx = x + k;
+        if (xx < 0 || xx >= w || !src[row+xx]){ v = 0; break; }
+      }
+      tmp[row+x] = v;
+    }
+  }
+  for (let x = 0; x < w; x++){
+    for (let y = 0; y < h; y++){
+      let v = 1;
+      for (let k = -r; k <= r; k++){
+        const yy = y + k;
+        if (yy < 0 || yy >= h || !tmp[yy*w+x]){ v = 0; break; }
+      }
+      out[y*w+x] = v;
+    }
+  }
+  return out;
+}
+
 /* Builds a binary mask of ONLY the selected classes (skin by default), tiling the
    image so grids/collages and small faces are detected at usable resolution. */
 async function buildMask(base){
@@ -477,9 +542,12 @@ async function buildMask(base){
       let sh = Math.min(h - sy, ch0 + ch0*OVERLAP*2);
       if (sw < 8 || sh < 8) continue;
 
-      // Feed the model a decent-sized crop so small subjects survive downscaling
-      const tw = Math.max(64, Math.min(512, Math.round(sw)));
-      const th = Math.max(64, Math.min(512, Math.round(sh)));
+      // Upscale small crops — the model needs real detail, and a 100px
+      // thumbnail fed in at native size gives it almost nothing to work with.
+      const long = Math.max(sw, sh);
+      const up = long < 256 ? 256/long : 1;
+      const tw = Math.max(64, Math.min(512, Math.round(sw*up)));
+      const th = Math.max(64, Math.min(512, Math.round(sh*up)));
       tile.width = tw; tile.height = th;
       tctx.clearRect(0, 0, tw, th);
       tctx.drawImage(base, sx, sy, sw, sh, 0, 0, tw, th);
@@ -510,6 +578,22 @@ async function buildMask(base){
       await sleep(0);   // let the UI breathe between tiles
     }
   }
+
+  // Skin-colour pass, unioned in. This is what catches faces and hands in small
+  // grid thumbnails that the segmenter cannot resolve.
+  if (SETTINGS.skin_color_detect !== false){
+    const sk = skinColorMask(base, mw, mh, SETTINGS.skin_sensitivity);
+    let clean = sk.mask;
+    const noise = Math.max(0, Math.min(4, parseInt(SETTINGS.noise_removal) ?? 1));
+    if (noise > 0){
+      clean = erode(clean, mw, mh, noise);
+      clean = dilate(clean, mw, mh, noise);   // restore the size the erode took off
+    }
+    for (let i = 0; i < bin.length; i++){
+      if (clean[i] && !bin[i]){ bin[i] = 1; hits++; }
+    }
+  }
+
   return { bin, mw, mh, hits };
 }
 

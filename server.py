@@ -2847,6 +2847,11 @@ SKINBLOCK_DEFAULTS = {
     'cover_classes': [2, 3],
     'tiles': 1,                 # NxN grid; raise for screenshots/collages
     'cover_faces': False,       # face rectangles also cover hair and collar
+    # Per-pixel skin-colour pass. Unlike the segmenter this works at any size,
+    # so it catches faces and hands in small grid thumbnails.
+    'skin_color_detect': True,
+    'skin_sensitivity': 0,      # 0-25, widens the skin colour window
+    'noise_removal': 1,         # erode radius to drop stray warm pixels
 }
 
 def _skinblock_settings():
