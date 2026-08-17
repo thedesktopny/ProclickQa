@@ -177,7 +177,7 @@
 <body>
 
 <header class="topbar">
-  <h1 class="wordmark"><span class="bars"><i></i><i></i><i></i></span> Skin Block <span class="mono" style="font-size:11px;opacity:.55;">v4</span></h1>
+  <h1 class="wordmark"><span class="bars"><i></i><i></i><i></i></span> Skin Block <span class="mono" style="font-size:11px;opacity:.55;">v5</span></h1>
   <div class="status">
     <span id="extBadge" class="mono" style="display:none;background:var(--signal);color:var(--void);padding:3px 9px;font-weight:600;"></span>
     <span class="dot" id="dot"></span><span id="statusText">Loading detector…</span>
@@ -252,7 +252,7 @@ const FACE  = "https://storage.googleapis.com/mediapipe-models/face_detector/bla
 const MAXDIM = 2000;
 
 const $ = id => document.getElementById(id);
-console.log("[SkinBlock] v4 — SegFormer precise detector build");
+console.log("[SkinBlock] v5 — self-hosted SegFormer (asset mirror)");
 
 /* ---------- server settings + extension gate ---------- */
 /* selfie_multiclass_256x256 category indices */
@@ -263,7 +263,7 @@ let multiclass = false;
    Labels every pixel as Face / Left-arm / Right-arm / Left-leg / Right-leg or a
    specific clothing type — the precise skin-vs-clothing line we need. Runs fully
    in the browser; the model downloads once (~30 MB) and is cached after that. */
-const TFJS_CDN = "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.3.1";
+const TFJS_LOCAL = "/sbassets/lib/transformers.min.js";   // served by VoiceGuard itself
 const PARSER_MODELS = ["Xenova/segformer_b2_clothes", "Xenova/segformer_b0_clothes"];
 const SKIN_LABELS = new Set(["Face", "Left-arm", "Right-arm", "Left-leg", "Right-leg"]);
 let parser = null;
@@ -365,7 +365,12 @@ async function boot(){
   // filter, we fall back to the MediaPipe detector loaded below.
   statusText.textContent = "Downloading precise detector (one-time)…";
   try{
-    const { pipeline } = await import(TFJS_CDN);
+    // Everything loads from OUR server (/sbassets/...), which mirrors the files —
+    // so the content filter never has to allow any outside AI site.
+    const { pipeline, env } = await import(TFJS_LOCAL);
+    env.allowLocalModels = false;
+    env.remoteHost = location.origin + "/sbassets/hf/";
+    env.backends.onnx.wasm.wasmPaths = location.origin + "/sbassets/lib/";
     for (const modelId of PARSER_MODELS){
       for (const device of ["webgpu", "wasm"]){
         try{
@@ -409,7 +414,7 @@ async function boot(){
   ready = true;
   dot.classList.add("on");
   statusText.textContent = parser ? "Precise detector ready"
-    : (multiclass ? "Detector ready (basic — precise model blocked)"
+    : (multiclass ? "Detector ready (basic — precise model failed, tell David)"
                   : "Basic detector — covers whole person");
   wipeFill.style.width = "100%";
   setTimeout(()=>{ wipeFill.style.width="0"; }, 700);

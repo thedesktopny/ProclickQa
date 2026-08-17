@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, session, send_from_directory
+from flask import Flask, request, jsonify, session, send_from_directory, send_file
 from flask_cors import CORS
 import hashlib
 import os
@@ -4090,6 +4090,62 @@ def test_analyze():
         results['audio_url_via_relay'] = 'Skipped — no recording URL available to test'
 
     return jsonify(results)
+
+# ============================================================================
+#  Skin Block asset mirror
+#  The agents' browsers sit behind the Techloq content filter, which blocks the
+#  outside AI-model CDNs. So VoiceGuard fetches the detector files server-side
+#  (Azure is unfiltered), caches them on disk, and serves them from OUR domain,
+#  which the agents can already reach. Same idea as the recording relay.
+# ============================================================================
+SB_CACHE = os.path.join(os.getenv('HOME', '.'), 'sbassets_cache')
+SB_LIB_BASE = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.3.1/dist/'
+SB_HF_BASE = 'https://huggingface.co/'
+SB_HF_ALLOWED = ('Xenova/segformer_b2_clothes/', 'Xenova/segformer_b0_clothes/')
+
+def _sb_fetch(cache_key, url):
+    """Download once, then serve from disk forever (App Service /home persists)."""
+    os.makedirs(SB_CACHE, exist_ok=True)
+    safe = re.sub(r'[^A-Za-z0-9._-]', '_', cache_key)
+    path = os.path.join(SB_CACHE, safe)
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        tmp = path + '.part.' + str(os.getpid())
+        req = urllib.request.Request(url, headers={'User-Agent': 'VoiceGuard-SkinBlock/1.0'})
+        with urllib.request.urlopen(req, timeout=180) as resp, open(tmp, 'wb') as f:
+            while True:
+                chunk = resp.read(1024 * 256)
+                if not chunk:
+                    break
+                f.write(chunk)
+        os.replace(tmp, path)
+    return path
+
+@app.route('/sbassets/lib/<path:fname>')
+def sb_lib(fname):
+    """Serves the transformers.js library and its onnxruntime .wasm/.mjs files."""
+    if not re.fullmatch(r'[A-Za-z0-9._-]+', fname):
+        return jsonify({'error': 'bad name'}), 400
+    try:
+        p = _sb_fetch('lib_' + fname, SB_LIB_BASE + fname)
+    except Exception as e:
+        return jsonify({'error': str(e)[:200]}), 502
+    mime = ('application/wasm' if fname.endswith('.wasm')
+            else 'text/javascript' if fname.endswith(('.js', '.mjs'))
+            else 'application/octet-stream')
+    return send_file(p, mimetype=mime)
+
+@app.route('/sbassets/hf/<path:hfpath>')
+def sb_hf(hfpath):
+    """Serves the detector model files. Locked to the two approved models only —
+    this is a mirror for Skin Block, not an open proxy."""
+    if '..' in hfpath or not hfpath.startswith(SB_HF_ALLOWED):
+        return jsonify({'error': 'not allowed'}), 403
+    try:
+        p = _sb_fetch('hf_' + hfpath, SB_HF_BASE + hfpath)
+    except Exception as e:
+        return jsonify({'error': str(e)[:200]}), 502
+    mime = 'application/json' if hfpath.endswith('.json') else 'application/octet-stream'
+    return send_file(p, mimetype=mime)
 
 @app.route('/skinblock')
 def skinblock_page():
