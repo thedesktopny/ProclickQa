@@ -475,7 +475,11 @@ function skinColorMask(base, mw, mh, sensitivity){
   for (let i = 0, p = 0; i < out.length; i++, p += 4){
     const r = d[p], g = d[p+1], b = d[p+2];
     if (r < 45) continue;                 // too dark to be lit skin
-    if (r <= g || r <= b) continue;       // skin is red-dominant across all tones
+    if (r - g < 15) continue;             // skin is clearly red-dominant; warm greys are not
+    if (r <= b) continue;
+    const mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
+    const mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
+    if (mx - mn < 15) continue;           // near-grey: paper, walls, UI chrome
     const y = 0.299*r + 0.587*g + 0.114*b;
     if (y < 30 || y > 250) continue;      // black suit / white dress
     const cb = 128 - 0.168736*r - 0.331264*g + 0.5*b;
@@ -581,20 +585,32 @@ async function buildMask(base){
 
   // Skin-colour pass, unioned in. This is what catches faces and hands in small
   // grid thumbnails that the segmenter cannot resolve.
+  let runaway = false;
   if (SETTINGS.skin_color_detect !== false){
     const sk = skinColorMask(base, mw, mh, SETTINGS.skin_sensitivity);
     let clean = sk.mask;
-    const noise = Math.max(0, Math.min(4, parseInt(SETTINGS.noise_removal) ?? 1));
+    let noise = parseInt(SETTINGS.noise_removal);
+    if (!Number.isFinite(noise)) noise = 1;
+    noise = Math.max(0, Math.min(4, noise));
     if (noise > 0){
       clean = erode(clean, mw, mh, noise);
       clean = dilate(clean, mw, mh, noise);   // restore the size the erode took off
     }
-    for (let i = 0; i < bin.length; i++){
-      if (clean[i] && !bin[i]){ bin[i] = 1; hits++; }
+    // Safety net: no real photo is three-quarters bare skin. If the colour rule
+    // matches that much, it has locked onto a background tone — drop it rather
+    // than white out the whole picture.
+    let cnt = 0;
+    for (let i = 0; i < clean.length; i++) if (clean[i]) cnt++;
+    if (cnt / clean.length > 0.75){
+      runaway = true;
+    } else {
+      for (let i = 0; i < bin.length; i++){
+        if (clean[i] && !bin[i]){ bin[i] = 1; hits++; }
+      }
     }
   }
 
-  return { bin, mw, mh, hits };
+  return { bin, mw, mh, hits, runaway };
 }
 
 async function handle(item){
@@ -620,10 +636,13 @@ async function handle(item){
 
   item.mask = null;
   if (bin && hits > 0){
-    const r = Math.max(0, Math.round(Number(padRange.value) / 100 * Math.max(mw,mh)));
+    // Small, roughly constant expansion. This used to be a percentage of the image
+    // size (~60px), which merged every scattered hit into one solid block.
+    const r = Math.max(0, Math.round(Number(padRange.value) * Math.max(mw,mh) / 1000));
     item.mask = maskToCanvas(dilate(bin, mw, mh, r), mw, mh);
   }
   item.coverage = hits && mw ? hits/(mw*mh) : 0;
+  item.runaway = seg.runaway;
 
   // 2. face backstop — off by default because a face box also covers hair and collar
   item.faces = [];
@@ -640,7 +659,9 @@ async function handle(item){
 
   // Skin-only masks cover far less area than a whole-person mask, so the
   // "did we find anything" threshold has to be lower than it was.
-  if (item.coverage > 0.0004 || item.faces.length){
+  if (item.runaway){
+    stamp(item, "Colour match too broad — check by hand", "warn");
+  } else if (item.coverage > 0.0004 || item.faces.length){
     const facesOnly = item.coverage <= 0.0004 && item.faces.length;
     stamp(item, facesOnly ? "Face covered — check it" : "Skin covered", facesOnly ? "warn" : "");
   } else {
