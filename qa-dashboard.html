@@ -717,7 +717,7 @@ td.agent{color:var(--text);font-weight:500;}
   <div style="padding:28px;">
     <div class="alert-bar" style="margin-bottom:20px;background:rgba(79,110,247,0.08);border-color:rgba(79,110,247,0.2)">
       <span style="font-size:18px;">💡</span>
-      <span style="font-size:12px;color:var(--text2);flex:1;">Set each agent's <strong>Weekly Schedule</strong> once and it repeats every week automatically. Use <strong>+ One-Off</strong> only for exceptions — a one-off entry always overrides the weekly pattern for that date. Then upload the Clocker export from CMS to compare actual vs scheduled.</span>
+      <span style="font-size:12px;color:var(--text2);flex:1;">Set a <strong>default pattern</strong> once, then adjust <strong>any single week</strong> without touching the weeks already worked — use the week arrows below and <strong>Copy last week</strong> to start from where you left off. <strong>+ One-Off</strong> still overrides a single date. Then upload the Clocker export from CMS to compare actual vs scheduled.</span>
     </div>
 
     <div style="display:flex;gap:12px;margin-bottom:20px;flex-wrap:wrap;align-items:center;">
@@ -765,7 +765,19 @@ td.agent{color:var(--text);font-weight:500;}
     </div>
 
     <div style="margin-top:28px;">
-      <div style="font-size:14px;font-weight:700;margin-bottom:12px;">🔁 Weekly Schedules <span style="font-size:11px;color:var(--text3);font-weight:400;">— these repeat every week automatically</span></div>
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap;">
+        <div style="font-size:14px;font-weight:700;">🔁 Weekly Schedules</div>
+        <div style="display:flex;align-items:center;gap:6px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:4px 6px;">
+          <button class="btn btn-outline" style="padding:3px 9px;font-size:12px;" onclick="shiftScheduleWeek(-1)" title="Previous week">◀</button>
+          <span id="ws-week-label" style="font-size:12px;font-weight:600;min-width:190px;text-align:center;">—</span>
+          <button class="btn btn-outline" style="padding:3px 9px;font-size:12px;" onclick="shiftScheduleWeek(1)" title="Next week">▶</button>
+          <button class="btn btn-outline" style="padding:3px 9px;font-size:11px;" onclick="gotoThisWeek()">Today</button>
+        </div>
+        <span id="ws-week-badge" style="font-size:11px;padding:3px 9px;border-radius:20px;"></span>
+        <button class="btn btn-outline" style="padding:5px 11px;font-size:12px;" onclick="copyLastWeek()">📋 Copy last week</button>
+        <button class="btn btn-outline" style="padding:5px 11px;font-size:12px;" onclick="resetWeekToDefault()" title="Delete this week's custom times and use the default pattern again">↩️ Use default pattern</button>
+      </div>
+      <div style="font-size:11px;color:var(--text3);margin-bottom:10px;">Editing a week changes <strong>only that week</strong> — past weeks keep the times they were actually worked under. A week with no changes follows the default pattern.</div>
       <div class="card">
         <div style="overflow-x:auto;">
           <table class="data-table">
@@ -797,7 +809,18 @@ td.agent{color:var(--text);font-weight:500;}
 <div class="modal" id="weekly-schedule-modal">
   <div class="modal-box" style="width:620px;max-width:95vw;">
     <div style="font-size:16px;font-weight:700;margin-bottom:4px;">📅 Weekly Schedule</div>
-    <div style="font-size:11px;color:var(--text3);margin-bottom:16px;">Set once — it applies every week from now on. Uncheck a day to mark it as a day off.</div>
+    <div id="wk-scope-note" style="font-size:11px;color:var(--text3);margin-bottom:10px;">Uncheck a day to mark it as a day off.</div>
+    <div style="display:flex;gap:14px;align-items:center;margin-bottom:14px;padding:8px 10px;background:var(--surface2);border-radius:8px;flex-wrap:wrap;">
+      <span style="font-size:11px;color:var(--text3);">Save as:</span>
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+        <input type="radio" name="wk-scope" id="wk-scope-week" value="week" checked onchange="loadWeeklyForAgent()" style="accent-color:var(--accent);">
+        <span style="font-size:12px;font-weight:600;">This week only <span id="wk-scope-week-label" style="color:var(--text3);font-weight:400;"></span></span>
+      </label>
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+        <input type="radio" name="wk-scope" id="wk-scope-default" value="default" onchange="loadWeeklyForAgent()" style="accent-color:var(--accent);">
+        <span style="font-size:12px;font-weight:600;">Default pattern <span style="color:var(--text3);font-weight:400;">— every week with no changes of its own</span></span>
+      </label>
+    </div>
     <div style="margin-bottom:14px;">
       <div style="font-size:11px;color:var(--text3);margin-bottom:5px;">Agent name (must match Clocker EmployeeId)</div>
       <input id="wk-name" list="sched-name-list" placeholder="e.g. Miafrel" onchange="loadWeeklyForAgent()" style="width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:9px 12px;border-radius:8px;font-size:13px;box-sizing:border-box;">
@@ -2748,12 +2771,73 @@ async function loadManagerQueueCount(){
 // ─── TIME REPORT / ATTENDANCE ─────────────────────────────────────────────────
 // ─── WEEKLY (RECURRING) SCHEDULES ─────────────────────────────────────────────
 const DOW_NAMES = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
-let recurringCache = [];
+let recurringCache = [];      // the default pattern
+let weekCache = [];           // the selected week's own rows
+let weekCustomised = [];      // agents whose selected week has its own times
+let scheduleWeekStart = null; // Monday of the week being viewed (YYYY-MM-DD)
+
+function mondayOf(d){
+  const dt = new Date(d + 'T00:00:00');
+  const off = (dt.getDay() + 6) % 7;   // JS Sunday=0 -> Monday=0
+  dt.setDate(dt.getDate() - off);
+  return dt.toISOString().slice(0,10);
+}
+function todayISO(){
+  const d = new Date();
+  return new Date(d.getTime() - d.getTimezoneOffset()*60000).toISOString().slice(0,10);
+}
+function weekLabel(ws){
+  const a = new Date(ws + 'T00:00:00');
+  const b = new Date(a.getTime() + 6*86400000);
+  const f = d => d.toLocaleDateString(undefined, {month:'short', day:'numeric'});
+  const thisWk = ws === mondayOf(todayISO());
+  return `${f(a)} – ${f(b)}${thisWk ? ' (this week)' : ''}`;
+}
+function shiftScheduleWeek(n){
+  const d = new Date((scheduleWeekStart || mondayOf(todayISO())) + 'T00:00:00');
+  d.setDate(d.getDate() + n*7);
+  scheduleWeekStart = d.toISOString().slice(0,10);
+  loadRecurringList();
+}
+function gotoThisWeek(){
+  scheduleWeekStart = mondayOf(todayISO());
+  loadRecurringList();
+}
+
+async function copyLastWeek(){
+  const ws = scheduleWeekStart || mondayOf(todayISO());
+  if(!confirm(`Copy the previous week's schedules into ${weekLabel(ws)}?\n\nAgents that already have their own times for this week are left alone.`)) return;
+  try{
+    const res = await API.post('/api/week-schedules/copy', {week_start: ws});
+    let msg = `✅ Copied ${res.agents} agent${res.agents===1?'':'s'} into this week`;
+    if((res.skipped||[]).length) msg += ` — skipped ${res.skipped.join(', ')} (already set)`;
+    showToast(msg);
+    loadRecurringList();
+    loadTimeReport();
+  }catch(e){ showToast('Copy failed: '+e.message, true); }
+}
+
+async function resetWeekToDefault(){
+  const ws = scheduleWeekStart || mondayOf(todayISO());
+  if(!weekCustomised.length){ showToast('This week already follows the default pattern'); return; }
+  if(!confirm(`Delete this week's own times for ${weekLabel(ws)} and go back to the default pattern?\n\nOther weeks are not affected.`)) return;
+  try{
+    await API.del(`/api/week-schedules?week_start=${ws}`);
+    showToast('↩️ This week now follows the default pattern');
+    loadRecurringList();
+    loadTimeReport();
+  }catch(e){ showToast('Failed: '+e.message, true); }
+}
 
 async function openWeeklyScheduleModal(){
   document.getElementById('wk-name').value = '';
   document.getElementById('wk-rate').value = '';
   document.getElementById('wk-rate-eff').value = '';
+  const ws = scheduleWeekStart || mondayOf(todayISO());
+  const lbl = document.getElementById('wk-scope-week-label');
+  if(lbl) lbl.textContent = '— ' + weekLabel(ws);
+  const wkRadio = document.getElementById('wk-scope-week');
+  if(wkRadio) wkRadio.checked = true;
   renderWeeklyDays(null);
   await loadRatesCache();
   renderRateHistory('');
@@ -2836,7 +2920,13 @@ function applyWeeklyBulk(){
 async function loadWeeklyForAgent(){
   const name = document.getElementById('wk-name').value.trim();
   if(!name){ renderWeeklyDays(null); renderRateHistory(''); return; }
-  const existing = recurringCache.filter(r=>r.employee_name.toLowerCase()===name.toLowerCase());
+  const useWeek = document.getElementById('wk-scope-week')?.checked;
+  const low = name.toLowerCase();
+  // when editing a week, start from that week's own times if it has any,
+  // otherwise from the default pattern so nothing has to be retyped
+  const wk = weekCache.filter(r=>r.employee_name.toLowerCase()===low);
+  const def = recurringCache.filter(r=>r.employee_name.toLowerCase()===low);
+  const existing = (useWeek && wk.length) ? wk : def;
   renderWeeklyDays(existing.length ? existing : null);
   renderRateHistory(name);
 }
@@ -2865,10 +2955,19 @@ async function saveWeeklySchedule(){
       });
     }
   });
+  const asWeek = document.getElementById('wk-scope-week')?.checked;
+  const ws = scheduleWeekStart || mondayOf(todayISO());
   try{
-    await API.post('/api/recurring-schedules/bulk', {employee_name: name, days});
-    hideModal('weekly-schedule-modal');
-    showToast(`✅ Weekly schedule saved for ${name} — repeats automatically`);
+    if(asWeek){
+      await API.post('/api/week-schedules/bulk', {employee_name: name, week_start: ws, days});
+      hideModal('weekly-schedule-modal');
+      showToast(`✅ Saved for ${name} — ${weekLabel(ws)} only, other weeks unchanged`);
+    }else{
+      await API.post('/api/recurring-schedules/bulk', {employee_name: name, days});
+      hideModal('weekly-schedule-modal');
+      showToast(`✅ Default pattern saved for ${name} — applies to weeks with no changes of their own`);
+    }
+    loadRecurringList();
     loadTimeReport();
   }catch(e){ showToast('Failed: '+e.message, true); }
 }
@@ -2876,19 +2975,48 @@ async function saveWeeklySchedule(){
 async function loadRecurringList(){
   const tbody = document.getElementById('tr-recurring-tbody');
   if(!tbody) return;
+  if(!scheduleWeekStart) scheduleWeekStart = mondayOf(todayISO());
+  const ws = scheduleWeekStart;
+
+  const lbl = document.getElementById('ws-week-label');
+  if(lbl) lbl.textContent = weekLabel(ws);
+
   try{
     const res = await API.get('/api/recurring-schedules');
     recurringCache = res.recurring || [];
   }catch(e){ return; }
+  try{
+    const wres = await API.get(`/api/week-schedules?week_start=${ws}`);
+    weekCache = wres.week || [];
+    weekCustomised = wres.customised || [];
+  }catch(e){ weekCache = []; weekCustomised = []; }
   await loadRatesCache();
 
-  if(!recurringCache.length){
-    tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;padding:24px;color:var(--text3)">No weekly schedules set. Click "📅 Weekly Schedule" to add one.</td></tr>';
+  const badge = document.getElementById('ws-week-badge');
+  if(badge){
+    if(weekCustomised.length){
+      badge.textContent = `${weekCustomised.length} agent${weekCustomised.length===1?'':'s'} set for this week`;
+      badge.style.background = 'rgba(79,110,247,0.15)';
+      badge.style.color = 'var(--accent)';
+    }else{
+      badge.textContent = 'following the default pattern';
+      badge.style.background = 'var(--surface2)';
+      badge.style.color = 'var(--text3)';
+    }
+  }
+
+  // what this week actually looks like: the week's own rows where they exist,
+  // the default pattern everywhere else
+  const customSet = new Set(weekCustomised.map(n=>n.toLowerCase()));
+  const effective = recurringCache.filter(r=>!customSet.has(r.employee_name.toLowerCase())).concat(weekCache);
+
+  if(!effective.length){
+    tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;padding:24px;color:var(--text3)">No schedules yet. Click "📅 Weekly Schedule" to add one.</td></tr>';
     return;
   }
   // Group by agent
   const byAgent = {};
-  recurringCache.forEach(r=>{ (byAgent[r.employee_name] = byAgent[r.employee_name] || []).push(r); });
+  effective.forEach(r=>{ (byAgent[r.employee_name] = byAgent[r.employee_name] || []).push(r); });
 
   tbody.innerHTML = Object.entries(byAgent).map(([name, days])=>{
     const cells = [0,1,2,3,4,5,6].map(dow=>{
@@ -2911,8 +3039,9 @@ async function loadRecurringList(){
     const rateCell = mine.length
       ? `$${parseFloat(mine[0].hourly_rate).toFixed(2)}${future.length?`<span style="font-size:9px;color:var(--accent);display:block;">→$${parseFloat(future[0].hourly_rate).toFixed(2)} soon</span>`:''}`
       : '<span style="color:var(--red);font-size:10px;">not set</span>';
+    const isCustom = customSet.has(name.toLowerCase());
     return `<tr>
-      <td style="font-weight:600;">${name}</td>
+      <td style="font-weight:600;">${name}${isCustom?'<span style="display:block;font-size:9px;color:var(--accent);font-weight:400;">this week only</span>':''}</td>
       ${cells}
       <td>${brk}m</td>
       <td style="font-size:11px;">${rateCell}</td>
@@ -2923,6 +3052,11 @@ async function loadRecurringList(){
 
 function editWeeklyFor(name){
   document.getElementById('wk-name').value = name;
+  const ws = scheduleWeekStart || mondayOf(todayISO());
+  const lbl = document.getElementById('wk-scope-week-label');
+  if(lbl) lbl.textContent = '— ' + weekLabel(ws);
+  const wkRadio = document.getElementById('wk-scope-week');
+  if(wkRadio) wkRadio.checked = true;   // default to editing just this week
   loadWeeklyForAgent();
   showModal('weekly-schedule-modal');
 }

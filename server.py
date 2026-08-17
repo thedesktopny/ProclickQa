@@ -353,6 +353,23 @@ def init_db():
     ''')
 
     c.execute('''
+        CREATE TABLE IF NOT EXISTS week_schedules (
+            id SERIAL PRIMARY KEY,
+            employee_name TEXT NOT NULL,
+            week_start DATE NOT NULL,
+            day_of_week INTEGER NOT NULL,
+            scheduled_in_time TEXT NOT NULL,
+            scheduled_out_time TEXT NOT NULL,
+            overnight BOOLEAN DEFAULT FALSE,
+            break_minutes INTEGER DEFAULT 0,
+            active BOOLEAN DEFAULT TRUE,
+            block_no INTEGER DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(employee_name, week_start, day_of_week, block_no)
+        )
+    ''')
+
+    c.execute('''
         CREATE TABLE IF NOT EXISTS agent_schedules (
             id SERIAL PRIMARY KEY,
             employee_name TEXT NOT NULL,
@@ -3260,7 +3277,23 @@ def _resolve_schedules(date_from, date_to, employee=''):
     specific = [dict(r) for r in c.fetchall()]
     override_keys = {(s['employee_name'], str(s['shift_date']), s.get('block_no') or 1) for s in specific}
 
-    # Recurring weekly patterns
+    # Per-week schedules (a specific week's own times — these beat the default pattern)
+    wq = 'SELECT * FROM week_schedules'
+    wparams, wwhere = [], []
+    if employee: wwhere.append('employee_name = %s'); wparams.append(employee)
+    if wwhere: wq += ' WHERE ' + ' AND '.join(wwhere)
+    c.execute(wq, wparams)
+    weekrows = [dict(r) for r in c.fetchall()]
+    # employee+week that have ANY row are fully defined by those rows, so a day
+    # left off in a customised week correctly means "off" instead of falling back
+    week_defined = {(w['employee_name'], str(w['week_start'])) for w in weekrows}
+    by_week = {}
+    for w in weekrows:
+        if w.get('active') is False:
+            continue
+        by_week.setdefault((w['employee_name'], str(w['week_start']), w['day_of_week']), []).append(w)
+
+    # Recurring weekly patterns (the default, used for any week not customised)
     rq = 'SELECT * FROM recurring_schedules WHERE active = TRUE'
     rparams = []
     if employee:
@@ -3277,10 +3310,37 @@ def _resolve_schedules(date_from, date_to, employee=''):
         for r in recurring:
             by_dow.setdefault(r['day_of_week'], []).append(r)
 
+        by_dow_seen = set()
         cur = start
         while cur <= end:
             dow = cur.weekday()  # Monday=0 .. Sunday=6
+            wk = str(cur - _td(days=dow))          # Monday of this date's week
             for r in by_dow.get(dow, []):
+                emp = r['employee_name']
+                # if this agent's week was customised, the week's own rows are the truth
+                if (emp, wk) in week_defined:
+                    for wrow in by_week.get((emp, wk, dow), []):
+                        wblk = wrow.get('block_no') or 1
+                        if (emp, str(cur), wblk) in override_keys:
+                            continue
+                        wi_h, wi_m = [int(x) for x in str(wrow['scheduled_in_time']).split(':')[:2]]
+                        wo_h, wo_m = [int(x) for x in str(wrow['scheduled_out_time']).split(':')[:2]]
+                        w_in = _dt.combine(cur, _dt.min.time()).replace(hour=wi_h, minute=wi_m)
+                        w_out_date = cur + _td(days=1) if wrow['overnight'] else cur
+                        w_out = _dt.combine(w_out_date, _dt.min.time()).replace(hour=wo_h, minute=wo_m)
+                        generated.append({
+                            'id': None,
+                            'employee_name': emp,
+                            'shift_date': cur,
+                            'block_no': wblk,
+                            'scheduled_in': w_in,
+                            'scheduled_out': w_out,
+                            'break_minutes': wrow['break_minutes'] or 0,
+                            'from_recurring': True,
+                            'from_week': True,
+                        })
+                    by_dow_seen.add((emp, wk, dow))
+                    continue
                 blk = r.get('block_no') or 1
                 if (r['employee_name'], str(cur), blk) in override_keys:
                     continue  # a specific entry for that date+block wins
@@ -3299,11 +3359,190 @@ def _resolve_schedules(date_from, date_to, employee=''):
                     'break_minutes': r['break_minutes'] or 0,
                     'from_recurring': True,
                 })
+            # agents whose week was customised but who have no default pattern row
+            for (emp, wkey, wdow), wlist in by_week.items():
+                if wkey != wk or wdow != dow or (emp, wk, dow) in by_dow_seen:
+                    continue
+                for wrow in wlist:
+                    wblk = wrow.get('block_no') or 1
+                    if (emp, str(cur), wblk) in override_keys:
+                        continue
+                    wi_h, wi_m = [int(x) for x in str(wrow['scheduled_in_time']).split(':')[:2]]
+                    wo_h, wo_m = [int(x) for x in str(wrow['scheduled_out_time']).split(':')[:2]]
+                    w_in = _dt.combine(cur, _dt.min.time()).replace(hour=wi_h, minute=wi_m)
+                    w_out_date = cur + _td(days=1) if wrow['overnight'] else cur
+                    w_out = _dt.combine(w_out_date, _dt.min.time()).replace(hour=wo_h, minute=wo_m)
+                    generated.append({
+                        'id': None, 'employee_name': emp, 'shift_date': cur,
+                        'block_no': wblk, 'scheduled_in': w_in, 'scheduled_out': w_out,
+                        'break_minutes': wrow['break_minutes'] or 0,
+                        'from_recurring': True, 'from_week': True,
+                    })
             cur += _td(days=1)
 
     for s in specific:
         s['from_recurring'] = False
     return specific + generated
+
+def _week_start(d):
+    """Monday of the week containing date-string d (YYYY-MM-DD)."""
+    from datetime import datetime as _dt, timedelta as _td
+    dt = _dt.strptime(d, '%Y-%m-%d').date()
+    return dt - _td(days=dt.weekday())
+
+
+@app.route('/api/week-schedules', methods=['GET'])
+@require_manager
+def get_week_schedules():
+    """
+    Schedules for one specific week. Returns the week's own rows plus the default
+    weekly pattern, and which agents have had this week customised — so the UI can
+    show 'this week' accurately without the caller doing the merge.
+    """
+    ws = request.args.get('week_start', '')
+    if not ws:
+        return jsonify({'error': 'week_start required'}), 400
+    try:
+        ws = str(_week_start(ws))
+    except Exception:
+        return jsonify({'error': 'bad week_start'}), 400
+    conn = get_db()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('SELECT * FROM week_schedules WHERE week_start=%s ORDER BY employee_name, day_of_week, block_no', (ws,))
+    week = [dict(r) for r in c.fetchall()]
+    c.execute('SELECT * FROM recurring_schedules WHERE active=TRUE ORDER BY employee_name, day_of_week, block_no')
+    default = [dict(r) for r in c.fetchall()]
+    conn.close()
+    customised = sorted({w['employee_name'] for w in week})
+    return jsonify({'week_start': ws, 'week': week, 'default': default, 'customised': customised})
+
+
+@app.route('/api/week-schedules/bulk', methods=['POST'])
+@require_manager
+def save_week_schedule():
+    """Replace one agent's schedule for one week. Past weeks are untouched."""
+    d = request.json or {}
+    name = (d.get('employee_name') or '').strip()
+    ws = (d.get('week_start') or '').strip()
+    days = d.get('days') or []
+    if not name or not ws:
+        return jsonify({'error': 'employee_name and week_start required'}), 400
+    try:
+        ws = str(_week_start(ws))
+    except Exception:
+        return jsonify({'error': 'bad week_start'}), 400
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('DELETE FROM week_schedules WHERE employee_name=%s AND week_start=%s', (name, ws))
+    saved = 0
+    for day in days:
+        if not day.get('active', True):
+            continue
+        c.execute("""INSERT INTO week_schedules
+            (employee_name, week_start, day_of_week, scheduled_in_time, scheduled_out_time,
+             overnight, break_minutes, active, block_no)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,TRUE,%s)""",
+            (name, ws, int(day.get('day_of_week', 0)),
+             day.get('scheduled_in_time', '09:00'), day.get('scheduled_out_time', '17:00'),
+             bool(day.get('overnight')), int(day.get('break_minutes') or 0),
+             int(day.get('block_no') or 1)))
+        saved += 1
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True, 'saved': saved, 'week_start': ws})
+
+
+@app.route('/api/week-schedules/copy', methods=['POST'])
+@require_manager
+def copy_week_schedule():
+    """
+    Fill a week from the previous week (or any chosen source week). Agents already
+    customised in the target week are skipped unless overwrite is true. If the source
+    week has no rows of its own for an agent, that agent's default pattern is copied,
+    so the first use still produces a full, editable week.
+    """
+    d = request.json or {}
+    target = (d.get('week_start') or '').strip()
+    source = (d.get('from_week_start') or '').strip()
+    overwrite = bool(d.get('overwrite'))
+    if not target:
+        return jsonify({'error': 'week_start required'}), 400
+    from datetime import timedelta as _td
+    try:
+        tgt = _week_start(target)
+        src = _week_start(source) if source else (tgt - _td(days=7))
+    except Exception:
+        return jsonify({'error': 'bad week'}), 400
+    if str(tgt) == str(src):
+        return jsonify({'error': 'source and target are the same week'}), 400
+
+    conn = get_db()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('SELECT * FROM week_schedules WHERE week_start=%s', (str(src),))
+    src_rows = [dict(r) for r in c.fetchall()]
+    c.execute('SELECT employee_name FROM week_schedules WHERE week_start=%s', (str(tgt),))
+    already = {r['employee_name'] for r in c.fetchall()}
+    c.execute('SELECT * FROM recurring_schedules WHERE active=TRUE')
+    default_rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+
+    # per agent: prefer the source week's own rows, else that agent's default pattern
+    by_agent = {}
+    for r in src_rows:
+        by_agent.setdefault(r['employee_name'], []).append(r)
+    for r in default_rows:
+        if r['employee_name'] not in by_agent:
+            by_agent.setdefault(r['employee_name'], []).append(r)
+
+    conn = get_db()
+    c = conn.cursor()
+    agents, rows = 0, 0
+    for name, items in by_agent.items():
+        if name in already and not overwrite:
+            continue
+        c.execute('DELETE FROM week_schedules WHERE employee_name=%s AND week_start=%s', (name, str(tgt)))
+        for r in items:
+            if r.get('active') is False:
+                continue
+            c.execute("""INSERT INTO week_schedules
+                (employee_name, week_start, day_of_week, scheduled_in_time, scheduled_out_time,
+                 overnight, break_minutes, active, block_no)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,TRUE,%s)
+                ON CONFLICT (employee_name, week_start, day_of_week, block_no) DO NOTHING""",
+                (name, str(tgt), r['day_of_week'], r['scheduled_in_time'], r['scheduled_out_time'],
+                 bool(r['overnight']), int(r['break_minutes'] or 0), int(r.get('block_no') or 1)))
+            rows += 1
+        agents += 1
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True, 'agents': agents, 'rows': rows,
+                    'from_week_start': str(src), 'week_start': str(tgt),
+                    'skipped': sorted(already) if not overwrite else []})
+
+
+@app.route('/api/week-schedules', methods=['DELETE'])
+@require_manager
+def delete_week_schedule():
+    """Drop a week's custom rows so that week falls back to the default pattern."""
+    ws = request.args.get('week_start', '')
+    emp = request.args.get('employee', '')
+    if not ws:
+        return jsonify({'error': 'week_start required'}), 400
+    try:
+        ws = str(_week_start(ws))
+    except Exception:
+        return jsonify({'error': 'bad week_start'}), 400
+    conn = get_db()
+    c = conn.cursor()
+    if emp:
+        c.execute('DELETE FROM week_schedules WHERE week_start=%s AND employee_name=%s', (ws, emp))
+    else:
+        c.execute('DELETE FROM week_schedules WHERE week_start=%s', (ws,))
+    n = c.rowcount
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True, 'deleted': n})
+
 
 @app.route('/api/schedules', methods=['GET'])
 @require_manager
