@@ -1,247 +1,279 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Skin Block — cover people before sending photos</title>
-<!-- No web fonts: the page runs cross-origin-isolated so the detector can use
-     all CPU cores, and an outside font would be blocked (and is one more thing
-     the content filter could stop). System fonts below look near-identical. -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<title>Skin Block</title>
+<!-- No web fonts on purpose: the page runs cross-origin-isolated so the detector
+     can use every CPU core, and an outside font would be blocked. Personality
+     comes from scale, tracking and the sans/mono pairing instead. -->
 <style>
   :root{
-    --void:#0B0E13;
-    --paper:#D6DAD8;
-    --card:#EFF1EF;
-    --rule:#9BA3A0;
-    --signal:#7A9A01;
-    --alert:#B4471F;
-    --pad:clamp(16px,3vw,32px);
+    /* darkroom safelight — the room this work actually happens in */
+    --ink:#13151B;  --panel:#1A1D25;  --raise:#212530;  --line:#2C313D;
+    --paper:#F1EFE9; --amber:#E8A33D; --amber-dim:#8A6224;
+    --ok:#6FBF8B;   --warn:#E0A05A;   --bad:#E06A5A;
+    --text:#D9DDE5; --dim:#868EA0;    --faint:#5A6070;
+    --sans: ui-sans-serif, system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, "Cascadia Mono", "SF Mono", Consolas, "Liberation Mono", monospace;
+    --r:10px;
   }
-  *{box-sizing:border-box}
-  html,body{margin:0;padding:0}
+  *{ box-sizing:border-box; }
+  html,body{ height:100%; }
   body{
-    background:var(--paper);
-    color:var(--void);
-    font-family:"IBM Plex Sans",system-ui,sans-serif;
-    font-size:15px;
-    line-height:1.45;
+    margin:0; background:var(--ink); color:var(--text);
+    font-family:var(--sans); font-size:14px; line-height:1.5;
     -webkit-font-smoothing:antialiased;
-    padding-bottom:96px;
   }
-  button{font:inherit;cursor:pointer}
-  .mono{font-family:"IBM Plex Mono",ui-monospace,monospace}
+  button{ font:inherit; color:inherit; cursor:pointer; }
+  .mono{ font-family:var(--mono); }
 
-  /* ---------- header ---------- */
-  .topbar{
-    display:flex;align-items:center;gap:16px;flex-wrap:wrap;
-    padding:14px var(--pad);
-    background:var(--void);color:var(--card);
-    position:sticky;top:0;z-index:40;
+  /* ---------- shared controls ---------- */
+  .btn{
+    background:var(--raise); border:1px solid var(--line); color:var(--text);
+    border-radius:8px; padding:8px 14px; font-size:13px; font-weight:500;
+    transition:background .15s, border-color .15s, transform .05s;
   }
-  .wordmark{
-    font-family:Archivo,sans-serif;font-weight:700;
-    font-size:19px;letter-spacing:-0.02em;text-transform:uppercase;
-    display:flex;align-items:center;gap:10px;margin:0;
+  .btn:hover{ background:#272C38; border-color:#39404F; }
+  .btn:active{ transform:translateY(1px); }
+  .btn:disabled{ opacity:.4; cursor:not-allowed; }
+  .btn-key{
+    background:var(--amber); border-color:var(--amber); color:#1A1206; font-weight:650;
   }
-  .bars{display:inline-flex;gap:3px}
-  .bars i{display:block;width:13px;height:13px;background:var(--card)}
-  .bars i:nth-child(2){width:24px}
-  .bars i:nth-child(3){width:8px;background:var(--signal)}
-  .status{
-    margin-left:auto;font-family:"IBM Plex Mono",monospace;font-size:12px;
-    letter-spacing:0.04em;text-transform:uppercase;opacity:.85;
-    display:flex;align-items:center;gap:8px;
-  }
-  .dot{width:8px;height:8px;border-radius:50%;background:var(--alert);flex:none}
-  .dot.on{background:var(--signal)}
+  .btn-key:hover{ background:#F0B255; border-color:#F0B255; }
+  .btn-ghost{ background:transparent; }
+  :focus-visible{ outline:2px solid var(--amber); outline-offset:2px; }
 
-  /* ---------- intake ---------- */
-  .intake{padding:var(--pad);max-width:1180px;margin:0 auto}
-  .drop{
-    position:relative;overflow:hidden;
-    border:2px solid var(--void);background:var(--card);
-    padding:clamp(28px,6vw,56px) 24px;text-align:center;
-    transition:background .15s ease;
+  .eyebrow{
+    font-family:var(--mono); font-size:10.5px; letter-spacing:.18em;
+    text-transform:uppercase; color:var(--faint);
   }
-  .drop.hot{background:#fff}
-  .drop h2{
-    font-family:Archivo,sans-serif;font-weight:700;
-    font-size:clamp(24px,4.5vw,38px);letter-spacing:-0.03em;
-    margin:0 0 6px;text-transform:uppercase;
-  }
-  .drop p{margin:0 0 20px;color:#4A524E;max-width:46ch;margin-inline:auto}
-  .pick{
-    background:var(--void);color:var(--card);border:none;
-    padding:12px 22px;font-weight:600;letter-spacing:.01em;
-  }
-  .pick:hover{background:#22303c}
-  .pick:focus-visible,.ghost:focus-visible,.pill:focus-visible{outline:3px solid var(--signal);outline-offset:2px}
-  .wipe{position:absolute;left:0;right:0;bottom:0;height:6px;background:var(--rule)}
-  .wipe span{display:block;height:100%;width:0;background:var(--void);transition:width .3s ease}
 
-  /* ---------- controls ---------- */
-  .controls{
-    display:flex;flex-wrap:wrap;gap:10px 26px;align-items:center;
-    padding:16px 2px 0;font-size:13px;
+  /* ---------- gate ---------- */
+  #gate{
+    min-height:100dvh; display:grid; place-items:center; padding:24px;
   }
-  .controls label{display:flex;align-items:center;gap:8px;cursor:pointer}
-  .controls input[type=range]{width:130px;accent-color:var(--signal)}
-  .controls input[type=checkbox]{width:17px;height:17px;accent-color:var(--void)}
-  .val{font-family:"IBM Plex Mono",monospace;min-width:30px}
+  .gate-card{
+    width:min(400px,100%); background:var(--panel); border:1px solid var(--line);
+    border-radius:14px; padding:30px 28px;
+  }
+  .gate-card h1{ font-size:22px; margin:14px 0 6px; letter-spacing:-.01em; }
+  .gate-card p{ color:var(--dim); margin:0 0 22px; font-size:13.5px; }
+  .field{ display:flex; gap:10px; }
+  #extInput{
+    flex:1; background:var(--ink); border:1px solid var(--line); color:var(--text);
+    border-radius:8px; padding:11px 14px; font-family:var(--mono); font-size:17px;
+    letter-spacing:.25em; text-align:center;
+  }
+  #extInput::placeholder{ letter-spacing:.2em; color:var(--faint); }
+  #extErr{ color:var(--bad); font-size:12.5px; min-height:18px; margin-top:10px; }
 
-  /* ---------- grid ---------- */
-  .grid{
-    max-width:1180px;margin:0 auto;padding:8px var(--pad) 0;
-    display:grid;gap:16px;
-    grid-template-columns:repeat(auto-fill,minmax(258px,1fr));
+  /* ---------- top bar ---------- */
+  header{
+    position:sticky; top:0; z-index:20; background:rgba(19,21,27,.92);
+    backdrop-filter:blur(8px); border-bottom:1px solid var(--line);
   }
-  .shot{
-    background:var(--card);border:1px solid var(--void);
-    display:flex;flex-direction:column;
-    animation:rise .25s ease both;
+  .bar{
+    max-width:1400px; margin:0 auto; padding:12px 22px;
+    display:flex; align-items:center; gap:16px; flex-wrap:wrap;
   }
-  @keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+  .wordmark{ display:flex; align-items:center; gap:10px; font-weight:650; letter-spacing:-.01em; font-size:15px; }
+  .lamp{
+    width:9px; height:9px; border-radius:50%; background:var(--faint);
+    box-shadow:0 0 0 0 rgba(232,163,61,0);
+  }
+  .lamp.on{ background:var(--amber); box-shadow:0 0 14px 2px rgba(232,163,61,.45); }
+  .ver{ color:var(--faint); font-size:10.5px; }
+  .bar-right{ margin-left:auto; display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  #statusText{ color:var(--dim); font-size:12.5px; }
+  .chip{
+    font-family:var(--mono); font-size:11px; letter-spacing:.08em;
+    border:1px solid var(--line); border-radius:999px; padding:4px 10px; color:var(--dim);
+  }
+
+  /* ---------- layout ---------- */
+  main{ max-width:1400px; margin:0 auto; padding:22px; }
+
+  /* loading bay: big when empty, a slim rail once work is underway */
+  #bay{
+    border:1px dashed #333A48; border-radius:14px; background:var(--panel);
+    display:grid; place-items:center; text-align:center;
+    padding:64px 24px; transition:border-color .15s, background .15s;
+  }
+  #bay.slim{ padding:18px 24px; }
+  #bay.hot{ border-color:var(--amber); background:#20222B; }
+  #bay h2{ margin:14px 0 6px; font-size:19px; font-weight:600; letter-spacing:-.01em; }
+  #bay p{ margin:0 0 18px; color:var(--dim); font-size:13.5px; }
+  #bay.slim h2, #bay.slim .bay-icon, #bay.slim p{ display:none; }
+  .bay-icon{
+    width:44px; height:32px; border:2px solid var(--faint); border-radius:5px; position:relative;
+  }
+  .bay-icon::before{
+    content:""; position:absolute; inset:auto 5px 5px 5px; height:11px;
+    border-radius:3px; background:var(--faint);
+  }
+  .bay-row{ display:flex; gap:10px; align-items:center; justify-content:center; flex-wrap:wrap; }
+
+  .toolrow{
+    display:flex; gap:18px; align-items:center; flex-wrap:wrap;
+    margin:20px 2px 6px; color:var(--dim); font-size:12.5px;
+  }
+  .toolrow label{ display:flex; align-items:center; gap:7px; cursor:pointer; }
+  input[type=checkbox]{ accent-color:var(--amber); width:15px; height:15px; }
+  .spacer{ flex:1; }
+
+  /* ---------- contact sheet ---------- */
+  #sheet{
+    display:grid; gap:16px; margin-top:16px;
+    grid-template-columns:repeat(auto-fill, minmax(268px, 1fr));
+  }
   .frame{
-    position:relative;background:#C3C8C5;
-    aspect-ratio:1/1;display:flex;align-items:center;justify-content:center;overflow:hidden;
+    background:var(--panel); border:1px solid var(--line); border-radius:var(--r);
+    overflow:hidden; display:flex; flex-direction:column;
   }
-  .frame canvas,.frame img{max-width:100%;max-height:100%;display:block}
-  .badge{
-    position:absolute;top:0;left:0;
-    font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.07em;
-    text-transform:uppercase;padding:5px 9px;color:var(--card);background:var(--void);
+  /* signature: the film rebate — frame number and status live in the margin,
+     exactly where they sit on a real strip of film */
+  .rebate{
+    display:flex; align-items:center; gap:10px; padding:7px 10px;
+    background:#171A21; border-bottom:1px solid var(--line);
   }
-  .badge.warn{background:var(--alert)}
-  .badge.none{background:#5B6360}
-  .working{
-    position:absolute;inset:0;display:grid;place-items:center;
-    background:rgba(11,14,19,.82);color:var(--card);
-    font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.1em;text-transform:uppercase;
-  }
-  .meta{
-    padding:9px 11px;border-top:1px solid var(--rule);
-    display:flex;align-items:center;gap:8px;
-  }
+  .sprockets{ display:flex; gap:3px; }
+  .sprockets i{ width:6px; height:8px; border-radius:1.5px; background:#2E3441; display:block; }
+  .fno{ font-family:var(--mono); font-size:10.5px; letter-spacing:.14em; color:var(--faint); }
   .fname{
-    font-family:"IBM Plex Mono",monospace;font-size:11.5px;
-    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;
+    font-size:11.5px; color:var(--dim); margin-left:auto; max-width:52%;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; direction:rtl;
   }
-  .ghost{
-    background:none;border:1px solid var(--void);color:var(--void);
-    padding:5px 10px;font-size:11.5px;font-weight:500;
+  .plate{
+    position:relative; background:#0E1015; aspect-ratio:4/3;
+    display:grid; place-items:center; overflow:hidden;
   }
-  .ghost:hover{background:var(--void);color:var(--card)}
-
-  /* ---------- action bar ---------- */
-  .actionbar{
-    position:fixed;left:0;right:0;bottom:0;z-index:45;
-    background:var(--void);color:var(--card);
-    display:flex;align-items:center;gap:16px;flex-wrap:wrap;
-    padding:12px var(--pad);
-    transform:translateY(110%);transition:transform .25s ease;
+  .plate canvas, .plate img{ max-width:100%; max-height:100%; display:block; }
+  .frame[draggable=true] .plate{ cursor:grab; }
+  .frame.dragging{ opacity:.55; }
+  .working{
+    position:absolute; inset:0; display:grid; place-items:center; gap:10px;
+    background:rgba(14,16,21,.72); font-size:12.5px; color:var(--text);
   }
-  .actionbar.up{transform:none}
-  .tally{font-family:"IBM Plex Mono",monospace;font-size:12.5px;letter-spacing:.03em}
-  .actionbar .spacer{margin-left:auto}
-  .pill{
-    background:var(--signal);color:var(--void);border:none;
-    padding:11px 20px;font-weight:600;
+  .bar-track{ width:64%; height:3px; border-radius:2px; background:#252A35; overflow:hidden; }
+  .bar-fill{ height:100%; width:30%; background:var(--amber); transition:width .2s; }
+  .foot{ display:flex; align-items:center; gap:8px; padding:9px 10px; }
+  .status{
+    font-size:12px; display:flex; align-items:center; gap:6px; min-width:0;
   }
-  .pill[disabled]{opacity:.4;cursor:not-allowed}
-  .pill.quiet{background:none;color:var(--card);border:1px solid #4A524E}
+  .status b{ width:7px; height:7px; border-radius:50%; background:var(--ok); flex:none; }
+  .status.warn b{ background:var(--warn); } .status.none b{ background:var(--faint); }
+  .status.bad b{ background:var(--bad); }
+  .status span{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .foot .btn{ padding:5px 10px; font-size:12px; }
+  .foot .spacer{ flex:1; }
 
   /* ---------- editor ---------- */
-  .editor{
-    position:fixed;inset:0;z-index:60;display:none;
-    background:rgba(11,14,19,.94);
-    padding:16px;flex-direction:column;gap:12px;align-items:center;
+  #editor{
+    position:fixed; inset:0; z-index:60; background:rgba(11,12,16,.94);
+    display:none; flex-direction:column;
   }
-  .editor.open{display:flex}
-  .editor h3{
-    font-family:Archivo,sans-serif;text-transform:uppercase;letter-spacing:-0.02em;
-    color:var(--card);margin:0;font-size:16px;
+  #editor.open{ display:flex; }
+  .ed-bar{
+    display:flex; align-items:center; gap:10px; padding:12px 18px;
+    border-bottom:1px solid var(--line); flex-wrap:wrap;
   }
-  .editor .hint{color:#9BA3A0;font-size:12.5px;margin:0;text-align:center}
-  .stage{
-    flex:1;min-height:0;display:flex;align-items:center;justify-content:center;width:100%;
+  .tools{ display:flex; gap:6px; background:var(--panel); border:1px solid var(--line); border-radius:9px; padding:4px; }
+  .tool{
+    background:transparent; border:0; border-radius:6px; padding:7px 13px; font-size:13px; color:var(--dim);
   }
-  #editCanvas{max-width:100%;max-height:100%;cursor:crosshair;touch-action:none;background:#000}
-  .editrow{display:flex;gap:10px;flex-wrap:wrap;justify-content:center}
+  .tool.on{ background:var(--amber); color:#1A1206; font-weight:600; }
+  .ed-hint{ color:var(--dim); font-size:12.5px; }
+  .ed-stage{ flex:1; display:grid; place-items:center; padding:18px; overflow:auto; }
+  #edCanvas{ max-width:100%; max-height:100%; cursor:crosshair; border-radius:6px; }
 
-  @media (prefers-reduced-motion:reduce){
-    *{animation:none!important;transition:none!important}
+  .toast{
+    position:fixed; left:50%; bottom:24px; transform:translateX(-50%);
+    background:var(--raise); border:1px solid var(--line); border-radius:10px;
+    padding:10px 16px; font-size:13px; z-index:80; opacity:0; pointer-events:none;
+    transition:opacity .2s, transform .2s;
+  }
+  .toast.show{ opacity:1; transform:translateX(-50%) translateY(-4px); }
+
+  @media (prefers-reduced-motion: reduce){ *{ transition:none !important; } }
+  @media (max-width:560px){
+    .bar{ padding:10px 14px; } main{ padding:14px; }
+    #sheet{ grid-template-columns:repeat(auto-fill, minmax(200px,1fr)); }
   }
 </style>
 </head>
 <body>
 
-<header class="topbar">
-  <h1 class="wordmark"><span class="bars"><i></i><i></i><i></i></span> Skin Block <span class="mono" style="font-size:11px;opacity:.55;">v11.1</span></h1>
-  <div class="status">
-    <span id="extBadge" class="mono" style="display:none;background:var(--signal);color:var(--void);padding:3px 9px;font-weight:600;"></span>
-    <span class="dot" id="dot"></span><span id="statusText">Loading detector…</span>
-  </div>
-</header>
-
-<section id="gate" style="max-width:420px;margin:14vh auto;padding:0 24px;text-align:center;">
-  <h2 style="font-family:Archivo,sans-serif;text-transform:uppercase;letter-spacing:-0.02em;margin:0 0 8px;">Enter your extension</h2>
-  <p style="color:#5C6360;font-size:13.5px;margin:0 0 20px;">Every photo you process is recorded against your extension, so we know who covered what.</p>
-  <input id="extInput" class="mono" inputmode="numeric" maxlength="3" placeholder="000"
-         style="width:150px;text-align:center;font-size:34px;letter-spacing:.18em;padding:12px;border:2px solid var(--void);background:var(--card);color:var(--void);">
-  <div id="extErr" style="color:var(--alert);font-size:12.5px;height:18px;margin-top:8px;"></div>
-  <button class="pick" id="extGo" style="margin-top:8px;">Start</button>
-</section>
-
-<div id="app" style="display:none;">
-<section class="intake">
-  <div class="drop" id="drop">
-    <h2>Drop photos here</h2>
-    <p>People get covered before the photo leaves your PC. A record of each photo is kept against your extension.</p>
-    <button class="pick" id="pickBtn">Choose photos</button>
-    <input type="file" id="fileInput" accept="image/*" multiple hidden>
-    <div class="wipe"><span id="wipeFill"></span></div>
-  </div>
-
-  <div class="controls">
-    <label>Cover extra edge
-      <input type="range" id="padRange" min="0" max="14" step="1" value="5">
-      <span class="val mono" id="padVal">5</span>
-    </label>
-    <label>Detail
-      <select id="tilesSel" style="font:inherit;padding:4px 6px;">
-        <option value="1">Normal — one photo</option>
-        <option value="3">High — a few photos</option>
-        <option value="5">Max — screenshot / grid</option>
-      </select>
-    </label>
-    <label><input type="checkbox" id="shrinkChk" checked> Shrink huge photos to 2000px</label>
-    <label><input type="checkbox" id="autoChk" checked> Download automatically when finished</label>
-  </div>
-</section>
-
-<main class="grid" id="grid"></main>
-
-<div class="actionbar" id="actionbar">
-  <span class="tally" id="tally">0 photos</span>
-  <span class="spacer"></span>
-  <button class="pill quiet" id="clearBtn">Clear all</button>
-  <button class="pill" id="dlBtn" disabled>Download all</button>
-</div>
-
-<div class="editor" id="editor">
-  <h3>Fix by hand</h3>
-  <p class="hint">Drag across anything the detector missed to lay down a cover bar.</p>
-  <div class="stage"><canvas id="editCanvas"></canvas></div>
-  <div class="editrow">
-    <button class="pill quiet" id="undoBtn">Undo last bar</button>
-    <button class="pill quiet" id="resetBtn">Remove my bars</button>
-    <button class="pill" id="doneBtn">Done</button>
+<!-- ============================ gate ============================ -->
+<div id="gate">
+  <div class="gate-card">
+    <div class="eyebrow">ProClick · photo prep</div>
+    <h1>Skin Block</h1>
+    <p>Covers skin in photos before they go to a customer. Enter your extension to start.</p>
+    <div class="field">
+      <input id="extInput" maxlength="3" inputmode="numeric" placeholder="000" autocomplete="off">
+      <button id="extGo" class="btn btn-key">Start</button>
+    </div>
+    <div id="extErr"></div>
   </div>
 </div>
-</div><!-- /#app -->
 
-<script type="module">/* ================= real-time detector (runs on THIS PC, not the server) =======
+<!-- ============================ app ============================ -->
+<div id="app" style="display:none">
+  <header>
+    <div class="bar">
+      <div class="wordmark"><span id="dot" class="lamp"></span> Skin Block <span class="ver mono">v12</span></div>
+      <div class="bar-right">
+        <span id="statusText">Starting…</span>
+        <span id="extBadge" class="chip" style="display:none"></span>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <div id="bay">
+      <div class="bay-icon"></div>
+      <h2>Drop photos here</h2>
+      <p>Any image format your browser can open — JPG, PNG, WEBP, GIF, BMP, AVIF.<br>You can also paste with Ctrl+V.</p>
+      <div class="bay-row">
+        <button id="pickBtn" class="btn btn-key">Choose photos</button>
+        <input id="fileInput" type="file" accept="image/*" multiple hidden>
+      </div>
+    </div>
+
+    <div class="toolrow">
+      <label><input type="checkbox" id="shrinkChk" checked> Shrink very large photos</label>
+      <label><input type="checkbox" id="autoChk"> Save automatically when done</label>
+      <span class="spacer"></span>
+      <span id="tally" class="mono" style="font-size:11.5px;letter-spacing:.1em;color:var(--faint)"></span>
+      <button id="saveAllBtn" class="btn" disabled>Save all</button>
+      <button id="clearBtn" class="btn btn-ghost">Clear</button>
+    </div>
+
+    <div id="sheet"></div>
+  </main>
+</div>
+
+<!-- ============================ editor ============================ -->
+<div id="editor">
+  <div class="ed-bar">
+    <div class="tools">
+      <button class="tool on" id="toolCover">Cover more</button>
+      <button class="tool" id="toolKeep">Show again</button>
+    </div>
+    <span class="ed-hint" id="edHint">Drag over anything that still needs covering.</span>
+    <span class="spacer" style="flex:1"></span>
+    <button id="edUndo" class="btn">Undo</button>
+    <button id="edReset" class="btn">Start over</button>
+    <button id="edDone" class="btn btn-key">Done</button>
+  </div>
+  <div class="ed-stage"><canvas id="edCanvas"></canvas></div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script type="module">
+/* ================= real-time detector (runs on THIS PC, not the server) =======
    The agent's machine has a GPU; the shared Azure CPU does not. Running the
    parser here is what makes it instant instead of a 40-second round trip.
 
@@ -643,233 +675,199 @@ async function processInBrowser(base, onStep){
   return { canvas: out, found: any };
 }
 
+
+/* ===================== Skin Block app =====================
+   The detector itself lives above this block. Everything here is the page:
+   taking photos in, showing the batch, hand-editing, getting photos out.
+========================================================== */
+
 const $ = id => document.getElementById(id);
-console.log("[SkinBlock] v11.1 — real-time, runs on this PC");
+console.log("[SkinBlock] v12 — redesign, keep regions, any format");
 
-/* ---------- server settings + extension gate ---------- */
-/* selfie_multiclass_256x256 category indices */
+const dot = $("dot"), statusText = $("statusText"), sheet = $("sheet"), bay = $("bay");
+const fileInput = $("fileInput"), saveAllBtn = $("saveAllBtn"), tally = $("tally");
 
-/* Primary detector: SegFormer human-parsing (open source, MIT) via transformers.js.
-   Labels every pixel as Face / Left-arm / Right-arm / Left-leg / Right-leg or a
-   specific clothing type — the precise skin-vs-clothing line we need. Runs fully
-   in the browser; the model downloads once (~30 MB) and is cached after that. */
-
+let ready = false;
+let LOCAL_MODEL = false;
+let AGENT_EXT = "";
 let SETTINGS = {
-  cover_color:'#000000', edge_padding:5, face_grow_x:0.45, face_grow_y:0.55,
-  shrink_large:true, max_dimension:2000, require_extension:true,
-  cover_classes:[2,3],   // body-skin + face-skin only — clothes and shoes stay visible
-  tiles:1,               // split the image into an NxN grid before detecting
-  cover_faces:false,     // face rectangles cover hair/clothes too, so off by default
-  skin_color_detect:true,// per-pixel skin colour pass, works at any thumbnail size
-  skin_sensitivity:0,    // widens the skin colour window (0–25)
-  noise_removal:1        // erode radius to drop stray warm-coloured pixels
+  cover_mode:'blend', cover_color:'#000000', max_dimension:2000,
+  require_extension:true, smooth_shapes:0.6, skin_bias:0.35,
+  extend_by_colour:true, skin_colour_tolerance:14, second_pass:true, max_windows:60
 };
-let AGENT_EXT = '';
+const MAXDIM = 2000;
+const items = [];
+let queue = Promise.resolve();
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+function toast(msg, ms=2600){
+  const t = $("toast");
+  t.textContent = msg; t.classList.add("show");
+  clearTimeout(toast._t); toast._t = setTimeout(()=> t.classList.remove("show"), ms);
+}
+
+/* ---------------- gate ---------------- */
+function openApp(ext){
+  AGENT_EXT = ext;
+  $("gate").style.display = "none";
+  $("app").style.display = "";
+  const b = $("extBadge");
+  b.textContent = "EXT " + ext; b.style.display = "";
+  try{ sessionStorage.setItem('sb_ext', ext); }catch(e){}
+  boot().catch(() => { statusText.textContent = "Detector didn't start — check the connection"; });
+}
+function initGate(){
+  let saved = null;
+  try{ saved = sessionStorage.getItem('sb_ext'); }catch(e){}
+  if (SETTINGS.require_extension === false){ openApp(saved || "000"); return; }
+  if (saved && /^\d{3}$/.test(saved)){ openApp(saved); return; }
+  const go = () => {
+    const v = $("extInput").value.trim();
+    if (!/^\d{3}$/.test(v)){ $("extErr").textContent = "Enter your 3-digit extension."; return; }
+    $("extErr").textContent = ""; openApp(v);
+  };
+  $("extGo").addEventListener("click", go);
+  $("extInput").addEventListener("keydown", e => { if (e.key === "Enter") go(); });
+  $("extInput").focus();
+}
 
 async function loadSettings(){
   try{
     const r = await fetch('/api/skinblock/settings');
     if (r.ok) SETTINGS = Object.assign(SETTINGS, await r.json());
-  }catch(e){ /* offline: keep defaults */ }
-  const pr = $("padRange");
-  if (pr){ pr.value = SETTINGS.edge_padding; $("padVal").textContent = SETTINGS.edge_padding; }
-  const sc = $("shrinkChk"); if (sc) sc.checked = !!SETTINGS.shrink_large;
-  const ts = $("tilesSel");
-  if (ts){
-    ts.value = String(SETTINGS.tiles || 1);
-    if (ts.value !== String(SETTINGS.tiles || 1)) ts.value = "1";
-    ts.addEventListener("change", () => { SETTINGS.tiles = parseInt(ts.value) || 1; });
-  }
+  }catch(e){ /* offline: defaults are fine */ }
+  const sc = $("shrinkChk"); if (sc) sc.checked = SETTINGS.shrink_large !== false;
 }
 
-function openApp(ext){
-  AGENT_EXT = ext;
-  $("gate").style.display = "none";
-  $("app").style.display = "";
-  const badge = $("extBadge");
-  badge.textContent = "EXT " + ext;
-  badge.style.display = "";
-  try{ sessionStorage.setItem('sb_ext', ext); }catch(e){}
-}
-
-(async function initGate(){
-  await loadSettings();
-  if (!SETTINGS.require_extension){ openApp('000'); return; }
-  let saved = null;
-  try{ saved = sessionStorage.getItem('sb_ext'); }catch(e){}
-  if (saved && /^\d{3}$/.test(saved)){ openApp(saved); return; }
-
-  const go = () => {
-    const v = ($("extInput").value || '').trim();
-    if (!/^\d{3}$/.test(v)){
-      $("extErr").textContent = "Extension must be exactly 3 digits";
-      return;
-    }
-    $("extErr").textContent = "";
-    openApp(v);
-  };
-  $("extGo").addEventListener("click", go);
-  $("extInput").addEventListener("keydown", e => { if (e.key === "Enter") go(); });
-  $("extInput").addEventListener("input", e => {
-    e.target.value = e.target.value.replace(/\D/g,'').slice(0,3);
-    $("extErr").textContent = "";
-  });
-  $("extInput").focus();
-})();
-
-async function logToServer(item, outCanvas){
-  try{
-    const toDataURL = c => c.toDataURL('image/jpeg', 0.7);
-    await fetch('/api/skinblock/submit', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({
-        agent_ext: AGENT_EXT,
-        file_name: item.file.name,
-        original_image: toDataURL(item.base),
-        covered_image: toDataURL(outCanvas),
-        person_found: item.coverage > 0.0004,
-        faces_found: (item.faces||[]).length,
-        manual_bars: (item.bars||[]).length,
-        coverage_pct: Math.round((item.coverage||0) * 10000) / 100,
-        settings_used: SETTINGS,
-      })
-    });
-  }catch(e){ /* never block the agent's work on a logging failure */ }
-}
-
-const dot=$("dot"), statusText=$("statusText"), grid=$("grid"), drop=$("drop");
-const fileInput=$("fileInput"), wipeFill=$("wipeFill"), actionbar=$("actionbar");
-const tally=$("tally"), dlBtn=$("dlBtn"), padRange=$("padRange"), padVal=$("padVal");
-
-let ready=false;
-let LOCAL_MODEL = false;
-const items=[];
-let queue=Promise.resolve();
-
-/* ---------------- model boot ---------------- */
+/* ---------------- boot ---------------- */
 async function boot(){
-  // v7: all detection runs on the VoiceGuard server. The page only uploads the
-  // photo and shows the painted result — nothing to download, nothing for the
-  // content filter to block, and every agent gets identical output.
   ready = true;
   dot.classList.add("on");
-  statusText.textContent = "Loading detector\u2026";
-  // Run the detector on THIS machine — that is what makes it instant.
+  statusText.textContent = "Loading detector…";
   try{
     const backend = await initBrowserModel(p => {
-      statusText.textContent = "Downloading detector \u2014 one time only (" + Math.round(p*100) + "%)";
+      statusText.textContent = "Getting the detector — one time only (" + Math.round(p*100) + "%)";
     });
     LOCAL_MODEL = true;
     const threads = (window.ort && window.ort.env.wasm.numThreads) || 1;
     statusText.textContent = backend === "webgpu"
-      ? "Instant mode \u2014 using this PC's graphics"
-      : ("Fast mode \u2014 this PC, " + threads + (threads > 1 ? " cores" : " core"));
-    console.log("[SkinBlock] backend:", backend, "threads:", threads,
-                "isolated:", self.crossOriginIsolated);
+      ? "Instant mode — using this PC's graphics"
+      : ("Fast mode — this PC, " + threads + (threads > 1 ? " cores" : " core"));
+    console.log("[SkinBlock] backend:", backend, "threads:", threads, "isolated:", self.crossOriginIsolated);
   }catch(e){
     LOCAL_MODEL = false;
-    const why = (e && e.message) ? String(e.message).slice(0, 90) : "unknown";
+    const why = (e && e.message) ? String(e.message).slice(0,90) : "unknown";
     console.warn("[SkinBlock] local model unavailable:", e);
-    statusText.textContent = "Server mode \u2014 " + why;
+    statusText.textContent = "Server mode — " + why;
     statusText.title = "Send this to David: " + why;
   }
 }
 
-boot().catch(()=>{
-  statusText.textContent = "Detector failed to load — check the connection";
+/* ---------------- intake: click, drag in, paste ---------------- */
+$("pickBtn").addEventListener("click", () => fileInput.click());
+fileInput.addEventListener("change", e => { addFiles(e.target.files); fileInput.value = ""; });
+
+["dragenter","dragover"].forEach(ev => window.addEventListener(ev, e => {
+  if (!e.dataTransfer || ![...e.dataTransfer.types].includes("Files")) return;
+  e.preventDefault(); bay.classList.add("hot");
+}));
+["dragleave","drop"].forEach(ev => window.addEventListener(ev, e => {
+  e.preventDefault(); if (ev === "drop" || e.target === document.documentElement) bay.classList.remove("hot");
+}));
+window.addEventListener("drop", e => {
+  if (e.dataTransfer && e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
+});
+window.addEventListener("paste", e => {
+  const files = [...(e.clipboardData?.files || [])];
+  if (files.length) addFiles(files);
 });
 
-/* ---------------- intake ---------------- */
-$("pickBtn").addEventListener("click", ()=> fileInput.click());
-fileInput.addEventListener("change", e => { addFiles(e.target.files); fileInput.value=""; });
-
-["dragenter","dragover"].forEach(ev =>
-  drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("hot"); }));
-["dragleave","drop"].forEach(ev =>
-  drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("hot"); }));
-drop.addEventListener("drop", e => addFiles(e.dataTransfer.files));
-window.addEventListener("dragover", e => e.preventDefault());
-window.addEventListener("drop", e => e.preventDefault());
-
 function addFiles(list){
-  const files = [...list].filter(f => f.type.startsWith("image/"));
+  const files = [...list].filter(f => f.type.startsWith("image/") || /\.(jpe?g|png|webp|gif|bmp|avif|tiff?)$/i.test(f.name));
+  const skipped = list.length - files.length;
+  if (skipped > 0) toast(skipped + (skipped === 1 ? " file isn't an image" : " files aren't images"));
   if (!files.length) return;
-  actionbar.classList.add("up");
+  bay.classList.add("slim");
   for (const file of files){
-    const item = { file, id:"s"+Math.random().toString(36).slice(2,9), bars:[], autoRects:[], done:false };
+    const item = {
+      file, id:"s"+Math.random().toString(36).slice(2,9),
+      bars:[], keeps:[], done:false, no:items.length + 1
+    };
     items.push(item);
-    buildCard(item);
-    queue = queue.then(()=> handle(item)).catch(()=> markFailed(item));
+    buildFrame(item);
+    queue = queue.then(() => handle(item)).catch(err => markFailed(item, err));
   }
   updateTally();
-  queue = queue.then(finishRun);
 }
 
-/* ---------------- cards ---------------- */
-function buildCard(item){
-  const card = document.createElement("div");
-  card.className = "shot";
-  card.innerHTML = `
-    <div class="frame">
-      <canvas></canvas>
-      <div class="working">Working…</div>
+/* ---------------- one frame on the contact sheet ---------------- */
+function buildFrame(item){
+  const el = document.createElement("div");
+  el.className = "frame";
+  el.innerHTML = `
+    <div class="rebate">
+      <span class="sprockets"><i></i><i></i><i></i></span>
+      <span class="fno">FRAME ${String(item.no).padStart(2,"0")}</span>
+      <span class="fname" title="${item.file.name}">${item.file.name}</span>
     </div>
-    <div class="meta">
-      <span class="fname"></span>
-      <button class="ghost" data-act="edit">Fix</button>
-      <button class="ghost" data-act="save">Save</button>
+    <div class="plate">
+      <div class="working">
+        <span class="txt">Reading photo…</span>
+        <span class="bar-track"><span class="bar-fill"></span></span>
+      </div>
+    </div>
+    <div class="foot">
+      <span class="status"><b></b><span>Working…</span></span>
+      <span class="spacer"></span>
+      <button class="btn edit-btn" disabled>Edit</button>
+      <button class="btn save-btn" disabled>Save</button>
     </div>`;
-  card.querySelector(".fname").textContent = item.file.name;
-  card.querySelector('[data-act="edit"]').addEventListener("click", ()=> openEditor(item));
-  card.querySelector('[data-act="save"]').addEventListener("click", ()=> saveOne(item));
-  grid.appendChild(card);
-  item.card = card;
-  item.canvas = card.querySelector("canvas");
+  sheet.appendChild(el);
+  item.el = el;
+  el.querySelector(".edit-btn").addEventListener("click", () => openEditor(item));
+  el.querySelector(".save-btn").addEventListener("click", () => saveOne(item));
+
+  // drag the finished photo straight out to a folder, chat window or email
+  el.addEventListener("dragstart", e => {
+    if (!item.done || !item.url) { e.preventDefault(); return; }
+    el.classList.add("dragging");
+    e.dataTransfer.effectAllowed = "copy";
+    e.dataTransfer.setData("DownloadURL", `image/jpeg:${safeName(item.file.name)}:${item.url}`);
+    e.dataTransfer.setData("text/uri-list", item.url);
+  });
+  el.addEventListener("dragend", () => el.classList.remove("dragging"));
 }
 
-function markFailed(item){
-  item.done = false;
-  item.card.querySelector(".working")?.remove();
-  stamp(item, "Could not read", "warn");
+function setWork(item, text, pct){
+  const w = item.el.querySelector(".working");
+  if (!w) return;
+  const t = w.querySelector(".txt"); if (t) t.textContent = text;
+  const f = w.querySelector(".bar-fill");
+  if (f && pct != null) f.style.width = Math.max(4, Math.min(100, pct)) + "%";
 }
-
 function stamp(item, text, kind){
-  item.card.querySelector(".badge")?.remove();
-  const b = document.createElement("div");
-  b.className = "badge" + (kind ? " "+kind : "");
-  b.textContent = text;
-  item.card.querySelector(".frame").appendChild(b);
+  const s = item.el.querySelector(".status");
+  s.className = "status" + (kind ? " " + kind : "");
+  s.querySelector("span").textContent = text;
+}
+function markFailed(item, err){
+  item.done = false;
+  item.el.querySelector(".working")?.remove();
+  stamp(item, "Couldn't open this photo — try saving it as JPG or PNG", "bad");
+  console.warn("[SkinBlock]", item.file.name, err);
 }
 
-/* ---------------- the actual work ---------------- */
-/*
-   Precision strategy (three layers working together):
-
-   1. ADAPTIVE COLOUR MODEL — instead of one fixed "skin colour" range for every
-      photo, we sample the actual skin in THIS photo (from the face the detector
-      found, or from pixels the AI already called skin) and build the colour
-      window around those samples. Handles every skin tone and every lighting
-      condition, and stops matching beige furniture.
-
-   2. AGREE, DON'T ADD — the AI mask and the colour test now have to AGREE.
-      AI-skin pixels whose colour doesn't look like this person's skin get
-      trimmed off (that's the blob slopping onto collars and sleeves). Colour
-      hits that don't touch any AI-skin or a face get dropped (that's the wood
-      and cardboard). The old behaviour — union everything — is only used as a
-      fallback when the AI finds nothing at all (tiny grid thumbnails).
-
-   3. EDGE SNAP — the AI works on a small internal mask; scaling that up is what
-      made edges blocky. The final mask is now rebuilt at FULL resolution: solid
-      core stays covered, and the uncertain rim around it is decided pixel by
-      pixel by the colour model, so the boundary lands on the real line between
-      skin and clothing.
-*/
-
+/* ---------------- process one photo ---------------- */
 async function handle(item){
   while (!ready) await sleep(180);
-  await sleep(0);
 
-  const bmp = await createImageBitmap(item.file, { imageOrientation:"from-image" });
+  let bmp;
+  try{
+    bmp = await createImageBitmap(item.file, { imageOrientation:"from-image" });
+  }catch(e){
+    // HEIC and a few exotic formats can't be opened by the browser
+    throw new Error("format not supported by this browser");
+  }
   let w = bmp.width, h = bmp.height;
   const maxDim = SETTINGS.max_dimension || MAXDIM;
   if ($("shrinkChk").checked && Math.max(w,h) > maxDim){
@@ -881,58 +879,28 @@ async function handle(item){
   base.getContext("2d").drawImage(bmp, 0, 0, w, h);
   if (bmp.close) bmp.close();
   item.base = base;
-  item.faces = [];
 
-  const workEl = item.card.querySelector(".working .txt") || item.card.querySelector(".working");
-
-  // ---- fast path: detector runs right here, no round trip ----
   if (LOCAL_MODEL){
     try{
-      if (workEl) workEl.textContent = "Covering\u2026";
+      setWork(item, "Covering…", 5);
       const t0 = performance.now();
-      const r = await processInBrowser(base, (d, n) => {
-        if (workEl && n > 1) workEl.textContent = "Covering\u2026 " + d + "/" + n;
-      });
-      item.serverResult = r.canvas;
-      item.coverage = r.found ? 1 : 0;
-      item.done = true;
-      render(item);
-      item.card.querySelector(".working")?.remove();
-      const secs = ((performance.now() - t0)/1000).toFixed(1);
-      stamp(item, r.found ? ("Skin covered (" + secs + "s)") : "No skin found \u2014 check it",
-            r.found ? "" : "none");
-      logToServer(item, compose(item));
-      updateTally();
+      const r = await processInBrowser(base, (d,n) => setWork(item, `Covering… ${d}/${n}`, d/n*100));
+      item.painted = r.canvas;
+      item.found = r.found;
+      finish(item, ((performance.now()-t0)/1000).toFixed(1) + "s");
       return;
-    }catch(e){
-      console.warn("[SkinBlock] local pass failed, using server:", e && e.message);
-    }
+    }catch(e){ console.warn("[SkinBlock] local pass failed, using server:", e && e.message); }
   }
 
-  // ---- fallback: the server does it ----
-  if (workEl) workEl.textContent = "Processing on server\u2026";
-  let resp = null, errText = "";
+  setWork(item, "Covering on the server…", 40);
+  let resp = null;
   try{
     const r = await fetch("/api/skinblock/process", {
-      method:"POST",
-      headers:{ "Content-Type":"application/json" },
+      method:"POST", headers:{ "Content-Type":"application/json" },
       body: JSON.stringify({ agent_ext: AGENT_EXT, image: base.toDataURL("image/jpeg", 0.92) })
     });
-    const body = await r.text();
-    let parsed = null;
-    try { parsed = JSON.parse(body); } catch(e){ /* not JSON */ }
-    if (r.ok && parsed && parsed.image){
-      resp = parsed;
-    } else {
-      // keep the real reason instead of a generic failure message
-      errText = (parsed && parsed.error) ? parsed.error : (body || "").slice(0, 300);
-      if (!errText) errText = "HTTP " + r.status;
-      console.error("[SkinBlock] server error:", r.status, errText);
-    }
-  }catch(e){
-    errText = "Could not reach the server: " + (e.message || e);
-    console.error("[SkinBlock]", e);
-  }
+    if (r.ok) resp = await r.json();
+  }catch(e){}
 
   if (resp && resp.image){
     const img = new Image();
@@ -940,194 +908,216 @@ async function handle(item){
     const painted = document.createElement("canvas");
     painted.width = w; painted.height = h;
     painted.getContext("2d").drawImage(img, 0, 0, w, h);
-    item.serverResult = painted;
-    item.coverage = resp.info && resp.info.painted ? 1 : 0;
-    item.done = true;
-    render(item);
-    item.card.querySelector(".working")?.remove();
-    const inf = resp.info || {};
-    if (inf.grid){
-      stamp(item, `Photo grid \u2014 ${inf.painted||0} of ${inf.tiles||0} tiles painted, check it`, "warn");
-    } else if (inf.partial){
-      stamp(item, "Too big to finish \u2014 part of this photo wasn't checked, cover by hand", "warn");
-    } else if (inf.wash){
-      stamp(item, "Couldn't separate skin from background \u2014 cover by hand", "warn");
-    } else if ((inf.faces||0) > 0 || (inf.painted||0) > 0){
-      stamp(item, inf.detector === 'fallback' ? "Skin covered (basic detector) \u2014 check it" : "Skin covered",
-            inf.detector === 'fallback' ? "warn" : "");
-    } else {
-      stamp(item, "No skin found \u2014 check it", "none");
-    }
+    item.painted = painted;
+    item.found = !!(resp.info && resp.info.painted);
+    item.partial = !!(resp.info && resp.info.partial);
+    finish(item, resp.info && resp.info.seconds ? resp.info.seconds + "s" : "");
   } else {
-    item.serverResult = null;
-    item.done = true;
-    render(item);
-    item.card.querySelector(".working")?.remove();
-    stamp(item, "Server error: " + (errText || "unknown") + " \u2014 cover by hand and send this message to David", "warn");
+    item.painted = null;
+    item.found = false;
+    finish(item, "", true);
   }
-  logToServer(item, compose(item));
-  updateTally();
 }
 
+function finish(item, secs, failed){
+  item.done = true;
+  item.el.querySelector(".working")?.remove();
+  render(item);
+  item.el.setAttribute("draggable", "true");
+  item.el.querySelector(".edit-btn").disabled = false;
+  item.el.querySelector(".save-btn").disabled = false;
+  if (failed)            stamp(item, "Couldn't cover this one — check it by hand", "bad");
+  else if (item.partial) stamp(item, "Part of this photo wasn't checked — look it over", "warn");
+  else if (item.found)   stamp(item, "Skin covered" + (secs ? " · " + secs : ""), "");
+  else                   stamp(item, "No people found — check it", "none");
+  logToServer(item, compose(item));
+  updateTally();
+  if (items.every(i => i.done !== false) && $("autoChk").checked) saveAll();
+}
+
+/* ---------------- compose: painted + manual edits ---------------- */
 function compose(item){
   const w = item.base.width, h = item.base.height;
   const out = document.createElement("canvas");
   out.width = w; out.height = h;
   const ctx = out.getContext("2d");
-  ctx.drawImage(item.serverResult || item.base, 0, 0, w, h);
+  ctx.drawImage(item.painted || item.base, 0, 0, w, h);
 
-  ctx.fillStyle = SETTINGS.cover_color || "#000000";
-  for (const r of item.bars){
-    ctx.fillRect(r.x*w, r.y*h, r.w*w, r.h*h);
+  // "Show again" — put the untouched photo back, for a necklace or bracelet
+  // sitting on skin that the agent needs the customer to see
+  for (const r of item.keeps){
+    const x = r.x*w, y = r.y*h, rw = r.w*w, rh = r.h*h;
+    ctx.drawImage(item.base, x, y, rw, rh, x, y, rw, rh);
   }
+  // "Cover more" — anything the detector missed
+  ctx.fillStyle = SETTINGS.cover_color || "#000000";
+  for (const r of item.bars) ctx.fillRect(r.x*w, r.y*h, r.w*w, r.h*h);
   return out;
 }
 
 function render(item){
-  const out = compose(item);
-  item.out = out;
-  const view = item.canvas;
-  const cap = 520;
-  const s = Math.min(1, cap / Math.max(out.width, out.height));
-  view.width = Math.round(out.width * s);
-  view.height = Math.round(out.height * s);
-  view.getContext("2d").drawImage(out, 0, 0, view.width, view.height);
+  const canvas = compose(item);
+  item.out = canvas;
+  const plate = item.el.querySelector(".plate");
+  plate.querySelectorAll("canvas,img").forEach(n => n.remove());
+  plate.appendChild(canvas);
+  // keep a file ready so the frame can be dragged out at any moment
+  canvas.toBlob(b => {
+    if (item.url) URL.revokeObjectURL(item.url);
+    item.url = b ? URL.createObjectURL(b) : null;
+  }, "image/jpeg", 0.92);
 }
 
-/* ---------------- editor ---------------- */
-const editor=$("editor"), editCanvas=$("editCanvas"), ectx=editCanvas.getContext("2d");
-let editing=null, dragStart=null;
+/* ---------------- editor: cover more / show again ---------------- */
+let ed = { item:null, tool:"cover", drag:null };
+const edCanvas = $("edCanvas"), edCtx = edCanvas.getContext("2d");
 
 function openEditor(item){
-  if (!item.done) return;
-  editing = item;
-  const cap = Math.min(window.innerWidth - 40, 900);
-  const capH = window.innerHeight - 210;
-  const s = Math.min(cap / item.base.width, capH / item.base.height, 1);
-  editCanvas.width = Math.round(item.base.width * s);
-  editCanvas.height = Math.round(item.base.height * s);
+  ed.item = item; ed.drag = null;
+  setTool("cover");
+  const max = Math.min(window.innerWidth - 80, 1100);
+  const scale = Math.min(1, max / item.base.width, (window.innerHeight - 190) / item.base.height);
+  edCanvas.width = Math.round(item.base.width * scale);
+  edCanvas.height = Math.round(item.base.height * scale);
   paintEditor();
-  editor.classList.add("open");
+  $("editor").classList.add("open");
 }
+function setTool(t){
+  ed.tool = t;
+  $("toolCover").classList.toggle("on", t === "cover");
+  $("toolKeep").classList.toggle("on", t === "keep");
+  $("edHint").textContent = t === "cover"
+    ? "Drag over anything that still needs covering."
+    : "Drag over a necklace, bracelet or anything else that should stay visible.";
+  edCanvas.style.cursor = "crosshair";
+}
+$("toolCover").addEventListener("click", () => setTool("cover"));
+$("toolKeep").addEventListener("click", () => setTool("keep"));
+
 function paintEditor(){
-  const out = compose(editing);
-  ectx.clearRect(0,0,editCanvas.width,editCanvas.height);
-  ectx.drawImage(out, 0, 0, editCanvas.width, editCanvas.height);
+  const item = ed.item;
+  edCtx.drawImage(compose(item), 0, 0, edCanvas.width, edCanvas.height);
+  if (ed.drag){
+    const d = ed.drag;
+    edCtx.save();
+    edCtx.setLineDash([5,4]);
+    edCtx.strokeStyle = ed.tool === "cover" ? "#E8A33D" : "#6FBF8B";
+    edCtx.lineWidth = 2;
+    edCtx.strokeRect(d.x, d.y, d.w, d.h);
+    edCtx.fillStyle = ed.tool === "cover" ? "rgba(232,163,61,.20)" : "rgba(111,191,139,.20)";
+    edCtx.fillRect(d.x, d.y, d.w, d.h);
+    edCtx.restore();
+  }
 }
-function pos(e){
-  const r = editCanvas.getBoundingClientRect();
+function edPos(e){
+  const r = edCanvas.getBoundingClientRect();
+  const p = e.touches ? e.touches[0] : e;
   return {
-    x: (e.clientX - r.left) / r.width,
-    y: (e.clientY - r.top) / r.height
+    x: (p.clientX - r.left) * edCanvas.width / r.width,
+    y: (p.clientY - r.top) * edCanvas.height / r.height
   };
 }
-editCanvas.addEventListener("pointerdown", e => {
-  if (!editing) return;
-  editCanvas.setPointerCapture(e.pointerId);
-  dragStart = pos(e);
-});
-editCanvas.addEventListener("pointermove", e => {
-  if (!dragStart) return;
-  const p = pos(e);
+function edStart(e){ e.preventDefault(); const p = edPos(e); ed.drag = { sx:p.x, sy:p.y, x:p.x, y:p.y, w:0, h:0 }; }
+function edMove(e){
+  if (!ed.drag) return;
+  e.preventDefault();
+  const p = edPos(e), d = ed.drag;
+  d.x = Math.min(d.sx, p.x); d.y = Math.min(d.sy, p.y);
+  d.w = Math.abs(p.x - d.sx); d.h = Math.abs(p.y - d.sy);
   paintEditor();
-  ectx.fillStyle = SETTINGS.cover_color || "#FFFFFF";
-  ectx.fillRect(
-    Math.min(dragStart.x,p.x)*editCanvas.width,
-    Math.min(dragStart.y,p.y)*editCanvas.height,
-    Math.abs(p.x-dragStart.x)*editCanvas.width,
-    Math.abs(p.y-dragStart.y)*editCanvas.height
-  );
-});
-editCanvas.addEventListener("pointerup", e => {
-  if (!dragStart) return;
-  const p = pos(e);
-  const r = {
-    x: Math.min(dragStart.x,p.x), y: Math.min(dragStart.y,p.y),
-    w: Math.abs(p.x-dragStart.x), h: Math.abs(p.y-dragStart.y)
-  };
-  dragStart = null;
-  if (r.w > 0.004 && r.h > 0.004){ editing.bars.push(r); }
+}
+function edEnd(){
+  const d = ed.drag; ed.drag = null;
+  if (!d || d.w < 5 || d.h < 5){ paintEditor(); return; }
+  const rect = { x:d.x/edCanvas.width, y:d.y/edCanvas.height, w:d.w/edCanvas.width, h:d.h/edCanvas.height };
+  (ed.tool === "cover" ? ed.item.bars : ed.item.keeps).push(rect);
+  ed.item.lastEdit = ed.tool;
+  paintEditor();
+}
+edCanvas.addEventListener("mousedown", edStart);
+edCanvas.addEventListener("mousemove", edMove);
+window.addEventListener("mouseup", () => { if (ed.item && $("editor").classList.contains("open")) edEnd(); });
+edCanvas.addEventListener("touchstart", edStart, { passive:false });
+edCanvas.addEventListener("touchmove", edMove, { passive:false });
+edCanvas.addEventListener("touchend", edEnd);
+
+$("edUndo").addEventListener("click", () => {
+  const it = ed.item; if (!it) return;
+  const list = it.lastEdit === "keep" ? it.keeps : it.bars;
+  if (list.length) list.pop();
+  else if (it.keeps.length) it.keeps.pop();
   paintEditor();
 });
-$("undoBtn").addEventListener("click", ()=>{ editing.bars.pop(); paintEditor(); });
-$("resetBtn").addEventListener("click", ()=>{ editing.bars = []; paintEditor(); });
-$("doneBtn").addEventListener("click", ()=>{
-  render(editing);
-  if (editing.bars.length) stamp(editing, "Covered by hand", "");
-  editor.classList.remove("open");
-  editing = null;
+$("edReset").addEventListener("click", () => {
+  if (!ed.item) return;
+  ed.item.bars = []; ed.item.keeps = []; paintEditor();
+});
+$("edDone").addEventListener("click", () => {
+  if (ed.item){ render(ed.item); logToServer(ed.item, ed.item.out); }
+  $("editor").classList.remove("open"); ed.item = null;
 });
 window.addEventListener("keydown", e => {
-  if (e.key === "Escape" && editor.classList.contains("open")) $("doneBtn").click();
+  if (e.key === "Escape" && $("editor").classList.contains("open")) $("edDone").click();
 });
 
-/* ---------------- saving ---------------- */
-padRange.addEventListener("input", ()=>{ padVal.textContent = padRange.value; });
-
-function safeName(name){
-  return name.replace(/\.[^.]+$/, "") + "-safe.jpg";
-}
-function toBlob(canvas){
-  return new Promise(res => canvas.toBlob(res, "image/jpeg", 0.92));
+/* ---------------- getting photos out ---------------- */
+function safeName(name){ return name.replace(/\.[^.]+$/, "") + "-safe.jpg"; }
+function toBlob(canvas){ return new Promise(res => canvas.toBlob(res, "image/jpeg", 0.92)); }
+function triggerDownload(blob, name){
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
 }
 async function saveOne(item){
   if (!item.done) return;
-  const blob = await toBlob(item.out || compose(item));
-  triggerDownload(blob, safeName(item.file.name));
+  triggerDownload(await toBlob(item.out || compose(item)), safeName(item.file.name));
 }
-function triggerDownload(blob, name){
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = name;
-  a.click();
-  setTimeout(()=> URL.revokeObjectURL(a.href), 4000);
-}
-
-dlBtn.addEventListener("click", ()=> downloadAll());
-async function downloadAll(){
+async function saveAll(){
   const done = items.filter(i => i.done);
   if (!done.length) return;
-  dlBtn.disabled = true;
-  dlBtn.textContent = "Packing…";
-  try{
-    if (done.length === 1 || typeof JSZip === "undefined"){
-      for (const item of done){ await saveOne(item); await sleep(250); }
-    } else {
-      const zip = new JSZip();
-      for (const item of done){
-        const blob = await toBlob(item.out || compose(item));
-        zip.file(safeName(item.file.name), blob);
-      }
-      const bundle = await zip.generateAsync({ type:"blob" });
-      triggerDownload(bundle, "covered-photos.zip");
-    }
-  } finally {
-    dlBtn.textContent = "Download all";
-    dlBtn.disabled = false;
-  }
+  saveAllBtn.disabled = true; saveAllBtn.textContent = "Saving…";
+  try{ for (const item of done){ await saveOne(item); await sleep(220); } }
+  finally{ saveAllBtn.textContent = "Save all"; saveAllBtn.disabled = false; }
+  toast(done.length === 1 ? "Photo saved" : done.length + " photos saved");
 }
-
-function finishRun(){
-  updateTally();
-  if ($("autoChk").checked && items.some(i => i.done)) downloadAll();
-}
-
-$("clearBtn").addEventListener("click", ()=>{
-  items.length = 0;
-  grid.innerHTML = "";
-  updateTally();
-  actionbar.classList.remove("up");
+saveAllBtn.addEventListener("click", saveAll);
+$("clearBtn").addEventListener("click", () => {
+  items.forEach(i => { if (i.url) URL.revokeObjectURL(i.url); });
+  items.length = 0; sheet.innerHTML = ""; bay.classList.remove("slim"); updateTally();
 });
 
 function updateTally(){
   const done = items.filter(i => i.done).length;
-  tally.textContent = items.length
-    ? `${done} of ${items.length} ready`
-    : "0 photos";
-  dlBtn.disabled = done === 0;
+  tally.textContent = items.length ? `${done} OF ${items.length} READY` : "";
+  saveAllBtn.disabled = done === 0;
 }
 
-const sleep = ms => new Promise(r => setTimeout(r, ms));
+/* ---------------- logging (never blocks the agent) ---------------- */
+async function logToServer(item, outCanvas){
+  try{
+    const d = c => c.toDataURL('image/jpeg', 0.7);
+    await fetch('/api/skinblock/submit', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        agent_ext: AGENT_EXT,
+        file_name: item.file.name,
+        original_image: d(item.base),
+        covered_image: d(outCanvas),
+        person_found: !!item.found,
+        faces_found: 0,
+        manual_bars: (item.bars||[]).length + (item.keeps||[]).length,
+        coverage_pct: 0,
+        settings_used: SETTINGS
+      })
+    });
+  }catch(e){}
+}
+
+/* ---------------- start ---------------- */
+loadSettings().then(initGate);
+
 </script>
 </body>
 </html>
