@@ -3534,13 +3534,18 @@ def copy_week_schedule():
     default_rows = [dict(r) for r in c.fetchall()]
     conn.close()
 
-    # per agent: prefer the source week's own rows, else that agent's default pattern
-    by_agent = {}
+    # Per agent: prefer the source week's own rows, else that agent's whole
+    # default pattern. Group both sides FIRST — checking "is this agent already
+    # present" row by row would stop after their first day and copy a single
+    # weekday per agent.
+    src_by_agent, def_by_agent = {}, {}
     for r in src_rows:
-        by_agent.setdefault(r['employee_name'], []).append(r)
+        src_by_agent.setdefault(r['employee_name'], []).append(r)
     for r in default_rows:
-        if r['employee_name'] not in by_agent:
-            by_agent.setdefault(r['employee_name'], []).append(r)
+        def_by_agent.setdefault(r['employee_name'], []).append(r)
+    by_agent = {}
+    for name in set(src_by_agent) | set(def_by_agent):
+        by_agent[name] = src_by_agent.get(name) or def_by_agent.get(name, [])
 
     conn = get_db()
     c = conn.cursor()
