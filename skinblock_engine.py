@@ -126,7 +126,20 @@ def model_status():
     return {'model': bool(get_session()), 'error': _model_error}
 
 
+def _auto_levels(img_bgr):
+    """Brightens a dark crop before it goes to the model. Dark thumbnails read
+    as background to a model trained on normally-lit photos. Input only — the
+    picture the agent receives is untouched."""
+    mean = float(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY).mean())
+    if mean <= 4 or mean >= 105:
+        return img_bgr
+    gamma = max(0.35, min(1.0, np.log(0.42) / np.log(mean / 255.0)))
+    lut = np.array([round(255 * (i / 255.0) ** gamma) for i in range(256)], np.uint8)
+    return cv2.LUT(img_bgr, lut)
+
+
 def _preprocess(img_bgr):
+    img_bgr = _auto_levels(img_bgr)
     rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     size = max(256, min(1024, int(INPUT_SIZE) // 32 * 32))
     rgb = cv2.resize(rgb, (size, size), interpolation=cv2.INTER_LINEAR)

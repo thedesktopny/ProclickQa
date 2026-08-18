@@ -2858,7 +2858,12 @@ SKINBLOCK_DEFAULTS = {
     'cover_hair': False,        # hair stays visible; set True to cover the whole head
     'smooth_shapes': 0.6,       # 0 = trace exactly, higher = rounder; above ~1
                                 # the rounding starts swallowing thin straps
-    'skin_bias': 0.25,          # >0 covers a little more readily (catches missed skin)
+    'skin_bias': 0.35,          # >0 covers a little more readily (catches missed skin)
+    'max_windows': 60,          # ceiling on model runs per photo
+    'extend_by_colour': True,   # reclaim bare torso the model labels as clothing
+    'skin_colour_tolerance': 14, # how closely a pixel must match the person's own skin
+    'second_pass': True,        # second, shifted grid so nobody is missed by
+                                # falling across a window edge (doubles the time)
     'skin_pad': 0,              # grow past the model's skin edge (0 = exact)
     'time_budget': 110,         # seconds of model time per photo; Azure aborts at ~230
     'edge_padding': 5,          # % of image dimension to expand the mask
@@ -4438,22 +4443,110 @@ SB_LIB_BASE = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/'
 SB_HF_BASE = 'https://huggingface.co/'
 SB_HF_ALLOWED = ('Xenova/segformer_b2_clothes/', 'Xenova/segformer_b0_clothes/')
 
-def _sb_fetch(cache_key, url):
-    """Download once, then serve from disk forever (App Service /home persists)."""
-    os.makedirs(SB_CACHE, exist_ok=True)
+def _sb_looks_like_model(path):
+    """A real ONNX model is protobuf and large. Anything that starts like text
+    (JavaScript, HTML, an LFS pointer, an error page) is not the model — serving
+    it silently is what made the browser fall back to the server."""
+    try:
+        if os.path.getsize(path) < 1024 * 1024:
+            return False, 'file is only %d bytes' % os.path.getsize(path)
+        with open(path, 'rb') as f:
+            head = f.read(64)
+        for bad in (b'/*', b'<!', b'<htm', b'<?xm', b'var ', b'"use', b'{', b'version http'):
+            if head.lstrip()[:len(bad)].lower() == bad.lower():
+                return False, 'content starts with %r — not a model' % head[:24]
+        return True, ''
+    except Exception as e:
+        return False, str(e)[:120]
+
+
+def _sb_fetch(cache_key, url, expect_model=False):
+    """Download once, then serve from disk (App Service /home persists).
+
+    Library files and model files are cached in SEPARATE folders so a name can
+    never collide, and a model is validated before it is kept — a bad download
+    is deleted rather than cached and served forever.
+    """
+    sub = 'model' if expect_model else 'lib'
+    folder = os.path.join(SB_CACHE, sub)
+    os.makedirs(folder, exist_ok=True)
     safe = re.sub(r'[^A-Za-z0-9._-]', '_', cache_key)
-    path = os.path.join(SB_CACHE, safe)
+    path = os.path.join(folder, safe)
+
+    if os.path.exists(path) and expect_model:
+        ok, why = _sb_looks_like_model(path)
+        if not ok:
+            print('[skinblock] cached model was bad (%s) — refetching' % why)
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+
     if not os.path.exists(path) or os.path.getsize(path) == 0:
         tmp = path + '.part.' + str(os.getpid())
         req = urllib.request.Request(url, headers={'User-Agent': 'VoiceGuard-SkinBlock/1.0'})
-        with urllib.request.urlopen(req, timeout=180) as resp, open(tmp, 'wb') as f:
+        with urllib.request.urlopen(req, timeout=600) as resp, open(tmp, 'wb') as f:
             while True:
                 chunk = resp.read(1024 * 256)
                 if not chunk:
                     break
                 f.write(chunk)
+        if expect_model:
+            ok, why = _sb_looks_like_model(tmp)
+            if not ok:
+                try:
+                    os.remove(tmp)
+                except Exception:
+                    pass
+                raise RuntimeError('downloaded file is not a model: %s (from %s)' % (why, url))
         os.replace(tmp, path)
     return path
+
+@app.route('/sbassets/status', methods=['GET'])
+def sb_assets_status():
+    """What the mirror actually has on disk — size and first bytes of each file.
+    Open this to see at a glance whether the model cached correctly."""
+    out = []
+    for sub in ('lib', 'model'):
+        folder = os.path.join(SB_CACHE, sub)
+        if not os.path.isdir(folder):
+            continue
+        for name in sorted(os.listdir(folder)):
+            p = os.path.join(folder, name)
+            try:
+                size = os.path.getsize(p)
+                with open(p, 'rb') as f:
+                    head = f.read(16)
+                entry = {'kind': sub, 'file': name, 'bytes': size,
+                         'head': head.hex(), 'head_text': head.decode('latin-1', 'replace')}
+                if sub == 'model':
+                    ok, why = _sb_looks_like_model(p)
+                    entry['valid_model'] = ok
+                    if not ok:
+                        entry['problem'] = why
+                out.append(entry)
+            except Exception as e:
+                out.append({'kind': sub, 'file': name, 'error': str(e)[:120]})
+    return jsonify({'cache_dir': SB_CACHE, 'files': out})
+
+
+@app.route('/sbassets/clear-cache', methods=['POST', 'GET'])
+@require_manager
+def sb_assets_clear():
+    """Drop the mirrored files so the next request downloads them fresh."""
+    removed = []
+    for sub in ('lib', 'model'):
+        folder = os.path.join(SB_CACHE, sub)
+        if not os.path.isdir(folder):
+            continue
+        for name in os.listdir(folder):
+            try:
+                os.remove(os.path.join(folder, name))
+                removed.append(sub + '/' + name)
+            except Exception:
+                pass
+    return jsonify({'removed': removed})
+
 
 @app.route('/sbassets/lib/<path:fname>')
 def sb_lib(fname):
@@ -4480,7 +4573,7 @@ def sb_hf(hfpath):
     if '..' in hfpath or not hfpath.startswith(SB_HF_ALLOWED):
         return jsonify({'error': 'not allowed'}), 403
     try:
-        p = _sb_fetch('hf_' + hfpath, SB_HF_BASE + hfpath)
+        p = _sb_fetch('hf_' + hfpath, SB_HF_BASE + hfpath, expect_model=True)
     except Exception as e:
         return jsonify({'error': str(e)[:200]}), 502
     mime = 'application/json' if hfpath.endswith('.json') else 'application/octet-stream'

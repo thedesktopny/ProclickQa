@@ -177,7 +177,7 @@
 <body>
 
 <header class="topbar">
-  <h1 class="wordmark"><span class="bars"><i></i><i></i><i></i></span> Skin Block <span class="mono" style="font-size:11px;opacity:.55;">v10.3</span></h1>
+  <h1 class="wordmark"><span class="bars"><i></i><i></i><i></i></span> Skin Block <span class="mono" style="font-size:11px;opacity:.55;">v11.1</span></h1>
   <div class="status">
     <span id="extBadge" class="mono" style="display:none;background:var(--signal);color:var(--void);padding:3px 9px;font-weight:600;"></span>
     <span class="dot" id="dot"></span><span id="statusText">Loading detector…</span>
@@ -289,14 +289,7 @@ async function initBrowserModel(onProgress){
   if (!window.ort) await loadScript(ORT_URL);
   const ort = window.ort;
   ort.env.wasm.wasmPaths = ORT_WASM;
-  // Multi-threading needs the browser to be in "isolated" mode (the server sends
-  // the headers for that). Asking for threads without it makes loading fail
-  // outright, which is why this checks first.
-  try {
-    ort.env.wasm.numThreads = (self.crossOriginIsolated)
-      ? Math.min(4, navigator.hardwareConcurrency || 2) : 1;
-  } catch(e){ ort.env.wasm.numThreads = 1; }
-  ort.env.wasm.simd = true;
+  try { ort.env.wasm.numThreads = Math.min(4, navigator.hardwareConcurrency || 2); } catch(e){}
   ort.env.logLevel = "error";
 
   // fetch with progress so the one-time download doesn't look like a hang
@@ -339,6 +332,23 @@ async function scoreRegion(srcCanvas, sx, sy, sw, sh){
   cx.drawImage(srcCanvas, sx, sy, sw, sh, 0, 0, NET_SIZE, NET_SIZE);
   const px = cx.getImageData(0, 0, NET_SIZE, NET_SIZE).data;
 
+  // Auto-levels: dark thumbnails (the black panel) look like background to the
+  // model. Brightening the window before it goes in recovers those people.
+  // Purely an input adjustment — the picture the agent gets is untouched.
+  let lumaSum = 0;
+  for (let p = 0; p < px.length; p += 16){        // sample every 4th pixel
+    lumaSum += 0.299*px[p] + 0.587*px[p+1] + 0.114*px[p+2];
+  }
+  const meanLuma = lumaSum / (px.length / 16);
+  let gamma = 1;
+  if (meanLuma > 4 && meanLuma < 105) gamma = Math.log(0.42) / Math.log(meanLuma / 255);
+  gamma = Math.max(0.35, Math.min(1, gamma));
+  if (gamma < 0.99){
+    const lut = new Uint8Array(256);
+    for (let i = 0; i < 256; i++) lut[i] = Math.round(255 * Math.pow(i/255, gamma));
+    for (let p = 0; p < px.length; p += 4){ px[p]=lut[px[p]]; px[p+1]=lut[px[p+1]]; px[p+2]=lut[px[p+2]]; }
+  }
+
   const n = NET_SIZE * NET_SIZE;
   const data = new Float32Array(3 * n);
   for (let i = 0, p = 0; i < n; i++, p += 4){
@@ -355,7 +365,7 @@ async function scoreRegion(srcCanvas, sx, sy, sw, sh){
   const d = t.data;
   const cells = gh * gw;
   const score = new Float32Array(cells);
-  const cloth = new Uint8Array(cells);
+  const cloth = new Float32Array(cells);
   const isSkin = new Uint8Array(C), isCloth = new Uint8Array(C);
   for (const id of SKIN_IDS)  if (id < C) isSkin[id] = 1;
   for (const id of CLOTH_IDS) if (id < C) isCloth[id] = 1;
@@ -369,8 +379,11 @@ async function scoreRegion(srcCanvas, sx, sy, sw, sh){
         if (isCloth[k] && v > bestCloth) bestCloth = v;
       }
     }
-    score[i] = best - bestOther + SKIN_BIAS;   // bias >0 covers a little more readily
-    cloth[i] = (bestCloth > best) ? 1 : 0;
+    score[i] = best - bestOther + SKIN_BIAS;   // >0 means skin
+    // Clothing as a CONTINUOUS score, not a yes/no block. Comparing the two
+    // smoothly is what gives a clean line along a bikini strap instead of the
+    // stair-stepped edge a hard block mask produced.
+    cloth[i] = bestCloth - best;               // >0 means clothing beats skin
   }
   return { score, cloth, gw, gh };
 }
@@ -380,19 +393,12 @@ async function scoreRegion(srcCanvas, sx, sy, sw, sh){
 // how eagerly to call something skin. 0 = exactly what the model says.
 // Raised slightly by default because missing skin is worse than covering a
 // little extra, and the clothing guard below stops it reaching clothes.
-let SKIN_BIAS = 0.25;
+let SKIN_BIAS = 0.35;
 
-function markCloth(cloth, gw, gh, w, h, out, ox, oy, outW){
-  for (let y = 0; y < h; y++){
-    const sy = Math.min(gh - 1, Math.floor(y * gh / h));
-    for (let x = 0; x < w; x++){
-      const sx = Math.min(gw - 1, Math.floor(x * gw / w));
-      if (cloth[sy*gw + sx]) out[(oy + y)*outW + ox + x] = 1;
-    }
-  }
-}
-
-function scoreToMask(score, gw, gh, w, h, out, ox, oy, outW){
+/* Bilinear upsample of a score grid into a full-size float map, keeping the
+   highest value where windows overlap. Interpolating the SCORE and deciding
+   afterwards is what produces curved edges instead of blocks. */
+function blendScore(grid, gw, gh, w, h, out, ox, oy, outW){
   for (let y = 0; y < h; y++){
     const fy = (y + 0.5) * gh / h - 0.5;
     const y0 = Math.max(0, Math.min(gh - 1, Math.floor(fy)));
@@ -404,14 +410,12 @@ function scoreToMask(score, gw, gh, w, h, out, ox, oy, outW){
       const x1 = Math.min(gw - 1, x0 + 1);
       const wx = Math.max(0, Math.min(1, fx - x0));
       const v =
-        score[y0*gw + x0] * (1-wx) * (1-wy) +
-        score[y0*gw + x1] * wx     * (1-wy) +
-        score[y1*gw + x0] * (1-wx) * wy     +
-        score[y1*gw + x1] * wx     * wy;
-      if (v > 0){
-        const gx = ox + x, gy = oy + y;
-        out[gy*outW + gx] = 1;
-      }
+        grid[y0*gw + x0] * (1-wx) * (1-wy) +
+        grid[y0*gw + x1] * wx     * (1-wy) +
+        grid[y1*gw + x0] * (1-wx) * wy     +
+        grid[y1*gw + x1] * wx     * wy;
+      const i = (oy + y)*outW + ox + x;
+      if (v > out[i]) out[i] = v;
     }
   }
 }
@@ -421,7 +425,9 @@ function scoreToMask(score, gw, gh, w, h, out, ox, oy, outW){
    outward and never pulls back inside real skin. */
 function smoothMask(mask, w, h, strength){
   if (strength <= 0) return mask;
-  const r = Math.max(1, Math.round(Math.min(w, h) * 0.012 * strength));
+  // Absolute, small. Previously this scaled with the whole image, so a big
+  // screenshot got a huge blur that chewed the detail out of every thumbnail.
+  const r = Math.max(1, Math.round(2 * strength));
   const tmp = new Float32Array(w*h), acc = new Float32Array(w*h);
   for (let y = 0; y < h; y++){
     let sum = 0;
@@ -442,7 +448,7 @@ function smoothMask(mask, w, h, strength){
     }
   }
   const out = new Uint8Array(w*h);
-  for (let i = 0; i < out.length; i++) out[i] = acc[i] > 0.38 ? 1 : 0;
+  for (let i = 0; i < out.length; i++) out[i] = acc[i] > 0.45 ? 1 : 0;
   return out;
 }
 
@@ -493,39 +499,138 @@ function paintBlend(ctx, imgData, mask, w, h, mode, hex){
 }
 
 /* Full pass over one photo, in the browser. Returns a painted canvas. */
+/* The model has 18 classes and NONE of them is "torso" — a bare midriff comes
+   back labelled "Upper-clothes", which is why a stomach could sit there
+   uncovered while the face and arms were painted. So: take the skin the model
+   DID find, learn that person's own colour from it, and grow into neighbouring
+   pixels that match. Growth stops at real image edges, so a bra strap or a
+   bikini blocks it, and it only runs inside one window at a time so one
+   person's skin tone is never applied to somebody else. */
+function extendByColour(ctx, x0, y0, w, h, seed){
+  let sum = 0;
+  for (let i = 0; i < seed.length; i++) sum += seed[i];
+  if (sum < 60) return seed;
+
+  let px;
+  try { px = ctx.getImageData(x0, y0, w, h).data; } catch(e){ return seed; }
+
+  // this person's own colour, from confirmed skin (median-ish via mean of samples)
+  let n = 0, sr = 0, sg = 0, sb = 0;
+  for (let i = 0, p = 0; i < seed.length; i++, p += 4){
+    if (!seed[i]) continue;
+    sr += px[p]; sg += px[p+1]; sb += px[p+2]; n++;
+  }
+  const mr = sr/n, mg = sg/n, mb = sb/n;
+  // compare on colour, allowing lightness to vary with shading
+  const mcr = 128 + 0.5*mr - 0.418688*mg - 0.081312*mb;
+  const mcb = 128 - 0.168736*mr - 0.331264*mg + 0.5*mb;
+  const TOL = Number(SETTINGS.skin_colour_tolerance ?? 14);
+
+  // simple edge detector: growth may not cross a strong brightness change
+  const lum = new Float32Array(w*h);
+  for (let i = 0, p = 0; i < lum.length; i++, p += 4)
+    lum[i] = 0.299*px[p] + 0.587*px[p+1] + 0.114*px[p+2];
+  const edge = new Uint8Array(w*h);
+  for (let y = 1; y < h-1; y++){
+    for (let x = 1; x < w-1; x++){
+      const i = y*w + x;
+      const gx = Math.abs(lum[i+1] - lum[i-1]), gy = Math.abs(lum[i+w] - lum[i-w]);
+      if (gx + gy > 46) edge[i] = 1;
+    }
+  }
+
+  const allowed = new Uint8Array(w*h);
+  for (let i = 0, p = 0; i < allowed.length; i++, p += 4){
+    if (seed[i]){ allowed[i] = 1; continue; }
+    if (edge[i]) continue;
+    const r = px[p], g = px[p+1], bl = px[p+2];
+    const cr = 128 + 0.5*r - 0.418688*g - 0.081312*bl;
+    const cb = 128 - 0.168736*r - 0.331264*g + 0.5*bl;
+    const d = Math.hypot(cr - mcr, cb - mcb);
+    if (d < TOL) allowed[i] = 1;
+  }
+
+  // flood the seed outward through allowed territory
+  const out = Uint8Array.from(seed);
+  const stack = new Int32Array(w*h);
+  let top = 0;
+  for (let i = 0; i < out.length; i++) if (out[i]) stack[top++] = i;
+  while (top > 0){
+    const i = stack[--top];
+    const x = i % w, y = (i / w) | 0;
+    if (x > 0   && allowed[i-1] && !out[i-1]){ out[i-1] = 1; stack[top++] = i-1; }
+    if (x < w-1 && allowed[i+1] && !out[i+1]){ out[i+1] = 1; stack[top++] = i+1; }
+    if (y > 0   && allowed[i-w] && !out[i-w]){ out[i-w] = 1; stack[top++] = i-w; }
+    if (y < h-1 && allowed[i+w] && !out[i+w]){ out[i+w] = 1; stack[top++] = i+w; }
+  }
+  return out;
+}
+
 async function processInBrowser(base, onStep){
   const w = base.width, h = base.height;
-  const WINDOW = 340;
+  const WINDOW = 260;                       // finer than before: more detail per thumbnail
   let cols = Math.max(1, Math.round(w / WINDOW));
   let rows = Math.max(1, Math.round(h / WINDOW));
-  while (cols * rows > 30){ if (cols >= rows && cols > 1) cols--; else if (rows > 1) rows--; else break; }
+  const cap = Number(SETTINGS.max_windows ?? 60);
+  while (cols * rows > cap){ if (cols >= rows && cols > 1) cols--; else if (rows > 1) rows--; else break; }
 
-  const mask = new Uint8Array(w*h);
-  const clothMask = new Uint8Array(w*h);
-  SKIN_BIAS = Number(SETTINGS.skin_bias ?? 0.25);
+  const S = new Float32Array(w*h).fill(-9);   // skin score
+  const C = new Float32Array(w*h).fill(-9);   // clothing score
+  SKIN_BIAS = Number(SETTINGS.skin_bias ?? 0.35);
   const cw = w / cols, ch = h / rows;
   const OV = 0.12;
+
+  const passes = (SETTINGS.second_pass === false) ? [[0,0]] : [[0,0],[0.5,0.5]];
+  const total = passes.length * cols * rows;
+  const boxes = [];
   let done = 0;
-  for (let ry = 0; ry < rows; ry++){
-    for (let rx = 0; rx < cols; rx++){
-      const x0 = Math.max(0, Math.floor(rx*cw - cw*OV));
-      const y0 = Math.max(0, Math.floor(ry*ch - ch*OV));
-      const x1 = Math.min(w, Math.ceil((rx+1)*cw + cw*OV));
-      const y1 = Math.min(h, Math.ceil((ry+1)*ch + ch*OV));
-      const sw = x1-x0, sh = y1-y0;
-      if (sw < 16 || sh < 16) continue;
-      const { score, cloth, gw, gh } = await scoreRegion(base, x0, y0, sw, sh);
-      scoreToMask(score, gw, gh, sw, sh, mask, x0, y0, w);
-      markCloth(cloth, gw, gh, sw, sh, clothMask, x0, y0, w);
-      done++;
-      if (onStep) onStep(done, cols*rows);
+  for (const [ox, oy] of passes){
+    for (let ry = (oy ? -1 : 0); ry < rows; ry++){
+      for (let rx = (ox ? -1 : 0); rx < cols; rx++){
+        const x0 = Math.max(0, Math.floor((rx+ox)*cw - cw*OV));
+        const y0 = Math.max(0, Math.floor((ry+oy)*ch - ch*OV));
+        const x1 = Math.min(w, Math.ceil((rx+1+ox)*cw + cw*OV));
+        const y1 = Math.min(h, Math.ceil((ry+1+oy)*ch + ch*OV));
+        const sw = x1-x0, sh = y1-y0;
+        if (sw < 16 || sh < 16) continue;
+        const { score, cloth, gw, gh } = await scoreRegion(base, x0, y0, sw, sh);
+        blendScore(score, gw, gh, sw, sh, S, x0, y0, w);
+        blendScore(cloth, gw, gh, sw, sh, C, x0, y0, w);
+        boxes.push([x0, y0, sw, sh]);
+        done++;
+        if (onStep) onStep(Math.min(done, total), total);
+      }
+    }
+  }
+
+  // skin wins only where it also beats clothing
+  const mask = new Uint8Array(w*h);
+  for (let i = 0; i < mask.length; i++) mask[i] = (S[i] > 0 && C[i] <= 0) ? 1 : 0;
+
+  // reclaim bare torso the model labelled as clothing, per window
+  if (SETTINGS.extend_by_colour !== false){
+    const srcCtx = base.getContext("2d", { willReadFrequently:true });
+    for (const [bx, by, bw, bh] of boxes){
+      const seed = new Uint8Array(bw*bh);
+      let any = 0;
+      for (let y = 0; y < bh; y++){
+        const row = (by + y)*w + bx, srow = y*bw;
+        for (let x = 0; x < bw; x++){ const v = mask[row + x]; seed[srow + x] = v; any += v; }
+      }
+      if (any < 60) continue;
+      const grown = extendByColour(srcCtx, bx, by, bw, bh, seed);
+      for (let y = 0; y < bh; y++){
+        const row = (by + y)*w + bx, srow = y*bw;
+        for (let x = 0; x < bw; x++) if (grown[srow + x]) mask[row + x] = 1;
+      }
     }
   }
 
   const smoothed = smoothMask(mask, w, h, Number(SETTINGS.smooth_shapes ?? 0.6));
-  // hard rule, applied last: never paint over something the model called
-  // clothing, however the rounding expanded the shape
-  for (let i = 0; i < smoothed.length; i++) if (clothMask[i]) smoothed[i] = 0;
+  // Clothing still wins after rounding — except where the colour pass already
+  // established the pixel is bare skin (that is exactly the mislabelled torso).
+  for (let i = 0; i < smoothed.length; i++) if (C[i] > 0 && !mask[i]) smoothed[i] = 0;
+
   const out = document.createElement("canvas");
   out.width = w; out.height = h;
   const octx = out.getContext("2d", { willReadFrequently:true });
@@ -538,13 +643,8 @@ async function processInBrowser(base, onStep){
   return { canvas: out, found: any };
 }
 
-
-
-
-const MAXDIM = 2000;
-
 const $ = id => document.getElementById(id);
-console.log("[SkinBlock] v10.3 — real-time, runs on this PC");
+console.log("[SkinBlock] v11.1 — real-time, runs on this PC");
 
 /* ---------- server settings + extension gate ---------- */
 /* selfie_multiclass_256x256 category indices */
