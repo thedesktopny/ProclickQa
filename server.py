@@ -2856,7 +2856,9 @@ SKINBLOCK_DEFAULTS = {
                                 # tone so it sits in the picture; 'solid' = flat colour
     'cover_color': '#000000',   # used when cover_mode is 'solid'
     'cover_hair': False,        # hair stays visible; set True to cover the whole head
-    'smooth_shapes': 1.0,       # 0 = trace exactly, 1 = rounded blob, up to 3
+    'smooth_shapes': 0.6,       # 0 = trace exactly, higher = rounder; above ~1
+                                # the rounding starts swallowing thin straps
+    'skin_bias': 0.25,          # >0 covers a little more readily (catches missed skin)
     'skin_pad': 0,              # grow past the model's skin edge (0 = exact)
     'time_budget': 110,         # seconds of model time per photo; Azure aborts at ~230
     'edge_padding': 5,          # % of image dimension to expand the mask
@@ -2988,9 +2990,9 @@ def skinblock_process():
         except Exception:
             _sbe.SKIN_PAD = 0
         try:
-            _sbe.SMOOTH = max(0.0, min(3.0, float(s.get('smooth_shapes', 1.0))))
+            _sbe.SMOOTH = max(0.0, min(3.0, float(s.get('smooth_shapes', 0.6))))
         except Exception:
-            _sbe.SMOOTH = 1.0
+            _sbe.SMOOTH = 0.6
         _sbe.COVER_MODE = 'solid' if str(s.get('cover_mode', 'blend')).lower() == 'solid' else 'blend'
         _sbe.COVER_HAIR = s.get('cover_hair', False) is True
         try:
@@ -4427,7 +4429,7 @@ def test_analyze():
 #  which the agents can already reach. Same idea as the recording relay.
 # ============================================================================
 SB_CACHE = os.path.join(os.getenv('HOME', '.'), 'sbassets_cache')
-SB_LIB_BASE = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.3.1/dist/'
+SB_LIB_BASE = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/'
 SB_HF_BASE = 'https://huggingface.co/'
 SB_HF_ALLOWED = ('Xenova/segformer_b2_clothes/', 'Xenova/segformer_b0_clothes/')
 
@@ -4450,7 +4452,8 @@ def _sb_fetch(cache_key, url):
 
 @app.route('/sbassets/lib/<path:fname>')
 def sb_lib(fname):
-    """Serves the transformers.js library and its onnxruntime .wasm/.mjs files."""
+    """Serves the ONNX Runtime Web library and its .wasm workers, from our own
+    domain, so the agents' browsers never touch an outside CDN."""
     if not re.fullmatch(r'[A-Za-z0-9._-]+', fname):
         return jsonify({'error': 'bad name'}), 400
     try:

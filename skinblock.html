@@ -177,7 +177,7 @@
 <body>
 
 <header class="topbar">
-  <h1 class="wordmark"><span class="bars"><i></i><i></i><i></i></span> Skin Block <span class="mono" style="font-size:11px;opacity:.55;">v9.1</span></h1>
+  <h1 class="wordmark"><span class="bars"><i></i><i></i><i></i></span> Skin Block <span class="mono" style="font-size:11px;opacity:.55;">v10.1</span></h1>
   <div class="status">
     <span id="extBadge" class="mono" style="display:none;background:var(--signal);color:var(--void);padding:3px 9px;font-weight:600;"></span>
     <span class="dot" id="dot"></span><span id="statusText">Loading detector…</span>
@@ -246,7 +246,7 @@
 const MAXDIM = 2000;
 
 const $ = id => document.getElementById(id);
-console.log("[SkinBlock] v9.1 — adaptive speed");
+console.log("[SkinBlock] v10 — real-time, runs on this PC");
 
 /* ---------- server settings + extension gate ---------- */
 /* selfie_multiclass_256x256 category indices */
@@ -344,6 +344,7 @@ const fileInput=$("fileInput"), wipeFill=$("wipeFill"), actionbar=$("actionbar")
 const tally=$("tally"), dlBtn=$("dlBtn"), padRange=$("padRange"), padVal=$("padVal");
 
 let ready=false;
+let LOCAL_MODEL = false;
 const items=[];
 let queue=Promise.resolve();
 
@@ -354,17 +355,21 @@ async function boot(){
   // content filter to block, and every agent gets identical output.
   ready = true;
   dot.classList.add("on");
-  statusText.textContent = "Server detector ready";
-  // tell the agent which detector the server is actually running
+  statusText.textContent = "Loading detector\u2026";
+  // Run the detector on THIS machine — that is what makes it instant.
   try{
-    const r = await fetch("/api/skinblock/model-status");
-    if (r.ok){
-      const s = await r.json();
-      statusText.textContent = s.model
-        ? "Precise detector ready"
-        : "Basic detector \u2014 check results carefully";
-    }
-  }catch(e){ /* status is a nicety, not required */ }
+    const backend = await initBrowserModel(p => {
+      statusText.textContent = "Downloading detector \u2014 one time only (" + Math.round(p*100) + "%)";
+    });
+    LOCAL_MODEL = true;
+    statusText.textContent = backend === "webgpu"
+      ? "Instant mode \u2014 using this PC's graphics"
+      : "Fast mode \u2014 running on this PC";
+  }catch(e){
+    LOCAL_MODEL = false;
+    console.warn("[SkinBlock] local model unavailable:", e && e.message);
+    statusText.textContent = "Server mode \u2014 slower, results still precise";
+  }
 }
 
 boot().catch(()=>{
@@ -457,6 +462,296 @@ function stamp(item, text, kind){
       skin and clothing.
 */
 
+/* ================= real-time detector (runs on THIS PC, not the server) =======
+   The agent's machine has a GPU; the shared Azure CPU does not. Running the
+   parser here is what makes it instant instead of a 40-second round trip.
+
+   Everything loads from our own domain (/sbassets/...), which the server
+   mirrors, so the content filter never sees an outside AI site.
+
+   The model labels every pixel: Face, Left-arm, Right-arm, Left-leg, Right-leg,
+   Hair, Upper-clothes, Pants, Dress, Skirt, Shoes, Bag, Hat, Scarf, Sunglasses,
+   Belt, Background. Only the skin classes are painted.
+============================================================================= */
+
+const ORT_URL   = "/sbassets/lib/ort.min.js";
+const ORT_WASM  = "/sbassets/lib/";
+const MODEL_URL = "/sbassets/hf/Xenova/segformer_b2_clothes/resolve/main/onnx/model_quantized.onnx";
+
+const CLS = { HAT:1, HAIR:2, SUNGLASSES:3, UPPER:4, SKIRT:5, PANTS:6, DRESS:7,
+              BELT:8, LSHOE:9, RSHOE:10, FACE:11, LLEG:12, RLEG:13,
+              LARM:14, RARM:15, BAG:16, SCARF:17 };
+const SKIN_IDS = [CLS.FACE, CLS.LLEG, CLS.RLEG, CLS.LARM, CLS.RARM];
+// Anything worn. The rounding step may never cover these — that is what
+// painted over the bikini.
+const CLOTH_IDS = [CLS.UPPER, CLS.SKIRT, CLS.PANTS, CLS.DRESS, CLS.BELT,
+                   CLS.LSHOE, CLS.RSHOE, CLS.BAG, CLS.SUNGLASSES];
+
+const NET_SIZE = 512;
+const MEAN = [0.485, 0.456, 0.406];
+const STD  = [0.229, 0.224, 0.225];
+
+let ortSession = null;
+let ortBackend = "";
+
+async function loadScript(src){
+  return new Promise((res, rej) => {
+    const s = document.createElement("script");
+    s.src = src; s.onload = res; s.onerror = () => rej(new Error("script " + src));
+    document.head.appendChild(s);
+  });
+}
+
+/* Loads the runtime and model. WebGPU when the machine has it (fastest),
+   otherwise multi-threaded WASM on the CPU — still far quicker than the
+   shared server. Returns the backend name, or "" if it couldn't load. */
+async function initBrowserModel(onProgress){
+  if (ortSession) return ortBackend;
+  if (!window.ort) await loadScript(ORT_URL);
+  const ort = window.ort;
+  ort.env.wasm.wasmPaths = ORT_WASM;
+  try { ort.env.wasm.numThreads = Math.min(4, navigator.hardwareConcurrency || 2); } catch(e){}
+  ort.env.logLevel = "error";
+
+  // fetch with progress so the one-time download doesn't look like a hang
+  const resp = await fetch(MODEL_URL);
+  if (!resp.ok) throw new Error("model " + resp.status);
+  const total = +(resp.headers.get("content-length") || 0);
+  const reader = resp.body.getReader();
+  const parts = [];
+  let got = 0;
+  for(;;){
+    const { done, value } = await reader.read();
+    if (done) break;
+    parts.push(value); got += value.length;
+    if (onProgress && total) onProgress(got / total);
+  }
+  const buf = new Uint8Array(got);
+  let off = 0;
+  for (const p of parts){ buf.set(p, off); off += p.length; }
+
+  for (const ep of ["webgpu", "wasm"]){
+    try {
+      ortSession = await ort.InferenceSession.create(buf, { executionProviders: [ep] });
+      ortBackend = ep;
+      break;
+    } catch(e){ /* try the next backend */ }
+  }
+  if (!ortSession) throw new Error("no backend");
+  return ortBackend;
+}
+
+/* One model pass over a canvas region -> Float32Array skin score at the
+   model's own grid resolution. Positive = skin.
+   We reduce the 18 class scores to ONE number per cell (best skin class minus
+   best non-skin class) before upscaling. That keeps the smooth-boundary
+   benefit of interpolating scores while being cheap enough for real time. */
+async function scoreRegion(srcCanvas, sx, sy, sw, sh){
+  const c = document.createElement("canvas");
+  c.width = NET_SIZE; c.height = NET_SIZE;
+  const cx = c.getContext("2d", { willReadFrequently:true });
+  cx.drawImage(srcCanvas, sx, sy, sw, sh, 0, 0, NET_SIZE, NET_SIZE);
+  const px = cx.getImageData(0, 0, NET_SIZE, NET_SIZE).data;
+
+  const n = NET_SIZE * NET_SIZE;
+  const data = new Float32Array(3 * n);
+  for (let i = 0, p = 0; i < n; i++, p += 4){
+    data[i]        = (px[p]   / 255 - MEAN[0]) / STD[0];
+    data[n + i]    = (px[p+1] / 255 - MEAN[1]) / STD[1];
+    data[2*n + i]  = (px[p+2] / 255 - MEAN[2]) / STD[2];
+  }
+  const ort = window.ort;
+  const feeds = {};
+  feeds[ortSession.inputNames[0]] = new ort.Tensor("float32", data, [1, 3, NET_SIZE, NET_SIZE]);
+  const out = await ortSession.run(feeds);
+  const t = out[ortSession.outputNames[0]];
+  const [, C, gh, gw] = t.dims;
+  const d = t.data;
+  const cells = gh * gw;
+  const score = new Float32Array(cells);
+  const cloth = new Uint8Array(cells);
+  const isSkin = new Uint8Array(C), isCloth = new Uint8Array(C);
+  for (const id of SKIN_IDS)  if (id < C) isSkin[id] = 1;
+  for (const id of CLOTH_IDS) if (id < C) isCloth[id] = 1;
+  for (let i = 0; i < cells; i++){
+    let best = -1e9, bestOther = -1e9, bestCloth = -1e9;
+    for (let k = 0; k < C; k++){
+      const v = d[k*cells + i];
+      if (isSkin[k]){ if (v > best) best = v; }
+      else {
+        if (v > bestOther) bestOther = v;
+        if (isCloth[k] && v > bestCloth) bestCloth = v;
+      }
+    }
+    score[i] = best - bestOther + SKIN_BIAS;   // bias >0 covers a little more readily
+    cloth[i] = (bestCloth > best) ? 1 : 0;
+  }
+  return { score, cloth, gw, gh };
+}
+
+/* Bilinear upsample of the score grid into a full-size mask. Interpolating the
+   score and then thresholding is what gives curved edges instead of blocks. */
+// how eagerly to call something skin. 0 = exactly what the model says.
+// Raised slightly by default because missing skin is worse than covering a
+// little extra, and the clothing guard below stops it reaching clothes.
+let SKIN_BIAS = 0.25;
+
+function markCloth(cloth, gw, gh, w, h, out, ox, oy, outW){
+  for (let y = 0; y < h; y++){
+    const sy = Math.min(gh - 1, Math.floor(y * gh / h));
+    for (let x = 0; x < w; x++){
+      const sx = Math.min(gw - 1, Math.floor(x * gw / w));
+      if (cloth[sy*gw + sx]) out[(oy + y)*outW + ox + x] = 1;
+    }
+  }
+}
+
+function scoreToMask(score, gw, gh, w, h, out, ox, oy, outW){
+  for (let y = 0; y < h; y++){
+    const fy = (y + 0.5) * gh / h - 0.5;
+    const y0 = Math.max(0, Math.min(gh - 1, Math.floor(fy)));
+    const y1 = Math.min(gh - 1, y0 + 1);
+    const wy = Math.max(0, Math.min(1, fy - y0));
+    for (let x = 0; x < w; x++){
+      const fx = (x + 0.5) * gw / w - 0.5;
+      const x0 = Math.max(0, Math.min(gw - 1, Math.floor(fx)));
+      const x1 = Math.min(gw - 1, x0 + 1);
+      const wx = Math.max(0, Math.min(1, fx - x0));
+      const v =
+        score[y0*gw + x0] * (1-wx) * (1-wy) +
+        score[y0*gw + x1] * wx     * (1-wy) +
+        score[y1*gw + x0] * (1-wx) * wy     +
+        score[y1*gw + x1] * wx     * wy;
+      if (v > 0){
+        const gx = ox + x, gy = oy + y;
+        out[gy*outW + gx] = 1;
+      }
+    }
+  }
+}
+
+/* Rounds the outline into a simple blob, the way the reference covering looks.
+   Box-blur the mask and re-threshold below the midpoint so the edge rounds
+   outward and never pulls back inside real skin. */
+function smoothMask(mask, w, h, strength){
+  if (strength <= 0) return mask;
+  const r = Math.max(1, Math.round(Math.min(w, h) * 0.012 * strength));
+  const tmp = new Float32Array(w*h), acc = new Float32Array(w*h);
+  for (let y = 0; y < h; y++){
+    let sum = 0;
+    for (let x = -r; x <= r; x++) sum += mask[y*w + Math.max(0, Math.min(w-1, x))];
+    for (let x = 0; x < w; x++){
+      tmp[y*w + x] = sum / (2*r + 1);
+      sum -= mask[y*w + Math.max(0, x - r)];
+      sum += mask[y*w + Math.min(w-1, x + r + 1)];
+    }
+  }
+  for (let x = 0; x < w; x++){
+    let sum = 0;
+    for (let y = -r; y <= r; y++) sum += tmp[Math.max(0, Math.min(h-1, y))*w + x];
+    for (let y = 0; y < h; y++){
+      acc[y*w + x] = sum / (2*r + 1);
+      sum -= tmp[Math.max(0, y - r)*w + x];
+      sum += tmp[Math.min(h-1, y + r + 1)*w + x];
+    }
+  }
+  const out = new Uint8Array(w*h);
+  for (let i = 0; i < out.length; i++) out[i] = acc[i] > 0.38 ? 1 : 0;
+  return out;
+}
+
+/* Fills each separate covered area with its own averaged tone, so the patch
+   sits in the picture instead of being a black hole. */
+function paintBlend(ctx, imgData, mask, w, h, mode, hex){
+  const d = imgData.data;
+  const solid = (mode === "solid");
+  let cr = 0, cg = 0, cb = 0;
+  if (solid){
+    const s = (hex || "#000000").replace("#","");
+    cr = parseInt(s.substr(0,2),16); cg = parseInt(s.substr(2,2),16); cb = parseInt(s.substr(4,2),16);
+  }
+  if (solid){
+    for (let i = 0, p = 0; i < mask.length; i++, p += 4){
+      if (mask[i]){ d[p]=cr; d[p+1]=cg; d[p+2]=cb; }
+    }
+    ctx.putImageData(imgData, 0, 0);
+    return;
+  }
+  // connected components, then fill each with its own mean colour
+  const label = new Int32Array(w*h);
+  const stack = new Int32Array(w*h);
+  let next = 0;
+  for (let s = 0; s < mask.length; s++){
+    if (!mask[s] || label[s]) continue;
+    next++;
+    let top = 0, size = 0, sr = 0, sg = 0, sb = 0;
+    stack[top++] = s; label[s] = next;
+    const members = [];
+    while (top > 0){
+      const i = stack[--top];
+      members.push(i); size++;
+      const p = i*4;
+      sr += d[p]; sg += d[p+1]; sb += d[p+2];
+      const x = i % w, y = (i / w) | 0;
+      if (x > 0   && mask[i-1] && !label[i-1]){ label[i-1]=next; stack[top++]=i-1; }
+      if (x < w-1 && mask[i+1] && !label[i+1]){ label[i+1]=next; stack[top++]=i+1; }
+      if (y > 0   && mask[i-w] && !label[i-w]){ label[i-w]=next; stack[top++]=i-w; }
+      if (y < h-1 && mask[i+w] && !label[i+w]){ label[i+w]=next; stack[top++]=i+w; }
+    }
+    const tr = Math.min(255, Math.round(sr/size * 0.92 + 14));
+    const tg = Math.min(255, Math.round(sg/size * 0.92 + 14));
+    const tb = Math.min(255, Math.round(sb/size * 0.92 + 14));
+    for (const i of members){ const p = i*4; d[p]=tr; d[p+1]=tg; d[p+2]=tb; }
+  }
+  ctx.putImageData(imgData, 0, 0);
+}
+
+/* Full pass over one photo, in the browser. Returns a painted canvas. */
+async function processInBrowser(base, onStep){
+  const w = base.width, h = base.height;
+  const WINDOW = 340;
+  let cols = Math.max(1, Math.round(w / WINDOW));
+  let rows = Math.max(1, Math.round(h / WINDOW));
+  while (cols * rows > 30){ if (cols >= rows && cols > 1) cols--; else if (rows > 1) rows--; else break; }
+
+  const mask = new Uint8Array(w*h);
+  const clothMask = new Uint8Array(w*h);
+  SKIN_BIAS = Number(SETTINGS.skin_bias ?? 0.25);
+  const cw = w / cols, ch = h / rows;
+  const OV = 0.12;
+  let done = 0;
+  for (let ry = 0; ry < rows; ry++){
+    for (let rx = 0; rx < cols; rx++){
+      const x0 = Math.max(0, Math.floor(rx*cw - cw*OV));
+      const y0 = Math.max(0, Math.floor(ry*ch - ch*OV));
+      const x1 = Math.min(w, Math.ceil((rx+1)*cw + cw*OV));
+      const y1 = Math.min(h, Math.ceil((ry+1)*ch + ch*OV));
+      const sw = x1-x0, sh = y1-y0;
+      if (sw < 16 || sh < 16) continue;
+      const { score, cloth, gw, gh } = await scoreRegion(base, x0, y0, sw, sh);
+      scoreToMask(score, gw, gh, sw, sh, mask, x0, y0, w);
+      markCloth(cloth, gw, gh, sw, sh, clothMask, x0, y0, w);
+      done++;
+      if (onStep) onStep(done, cols*rows);
+    }
+  }
+
+  const smoothed = smoothMask(mask, w, h, Number(SETTINGS.smooth_shapes ?? 0.6));
+  // hard rule, applied last: never paint over something the model called
+  // clothing, however the rounding expanded the shape
+  for (let i = 0; i < smoothed.length; i++) if (clothMask[i]) smoothed[i] = 0;
+  const out = document.createElement("canvas");
+  out.width = w; out.height = h;
+  const octx = out.getContext("2d", { willReadFrequently:true });
+  octx.drawImage(base, 0, 0);
+  const imgData = octx.getImageData(0, 0, w, h);
+  paintBlend(octx, imgData, smoothed, w, h,
+             (SETTINGS.cover_mode || "blend"), SETTINGS.cover_color);
+  let any = false;
+  for (let i = 0; i < smoothed.length; i++) if (smoothed[i]){ any = true; break; }
+  return { canvas: out, found: any };
+}
+
 async function handle(item){
   while (!ready) await sleep(180);
   await sleep(0);
@@ -475,8 +770,33 @@ async function handle(item){
   item.base = base;
   item.faces = [];
 
-  // send to the server for detection + painting
   const workEl = item.card.querySelector(".working .txt") || item.card.querySelector(".working");
+
+  // ---- fast path: detector runs right here, no round trip ----
+  if (LOCAL_MODEL){
+    try{
+      if (workEl) workEl.textContent = "Covering\u2026";
+      const t0 = performance.now();
+      const r = await processInBrowser(base, (d, n) => {
+        if (workEl && n > 1) workEl.textContent = "Covering\u2026 " + d + "/" + n;
+      });
+      item.serverResult = r.canvas;
+      item.coverage = r.found ? 1 : 0;
+      item.done = true;
+      render(item);
+      item.card.querySelector(".working")?.remove();
+      const secs = ((performance.now() - t0)/1000).toFixed(1);
+      stamp(item, r.found ? ("Skin covered (" + secs + "s)") : "No skin found \u2014 check it",
+            r.found ? "" : "none");
+      logToServer(item, compose(item));
+      updateTally();
+      return;
+    }catch(e){
+      console.warn("[SkinBlock] local pass failed, using server:", e && e.message);
+    }
+  }
+
+  // ---- fallback: the server does it ----
   if (workEl) workEl.textContent = "Processing on server\u2026";
   let resp = null, errText = "";
   try{

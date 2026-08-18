@@ -38,11 +38,14 @@ LEFT_SHOE, RIGHT_SHOE, FACE, LEFT_LEG, RIGHT_LEG, LEFT_ARM, RIGHT_ARM, BAG, SCAR
 SKIN_CLASSES = (FACE, LEFT_LEG, RIGHT_LEG, LEFT_ARM, RIGHT_ARM)
 # The reference look covers the whole head, hair included, as one smooth shape.
 HEAD_CLASSES = (HAIR, HAT)
+# Anything the model positively identified as worn. Rounding the mask may never
+# cover these — that is what painted over the bikini.
+CLOTH_CLASSES = (UPPER, SKIRT, PANTS, DRESS, BELT, LEFT_SHOE, RIGHT_SHOE, BAG, SUNGLASSES)
 COVER_HAIR = False
 
 # Shapes are smoothed into simple rounded blobs rather than traced pixel-exactly.
 # 0 disables. Higher = rounder/simpler.
-SMOOTH = 1.0
+SMOOTH = 0.6
 
 # 'solid' = one colour everywhere (cover_color).
 # 'blend' = each covered area is filled with its own averaged tone, so the patch
@@ -178,6 +181,8 @@ def skin_from_labels(labels, include_neck=False):
     sk = np.isin(labels, wanted).astype(np.uint8)
     if not sk.any():
         return sk
+    # remember what is clothing so the smoothing below can't creep onto it
+    cloth = np.isin(labels, CLOTH_CLASSES)
     # close pinholes only (glasses, jewellery, a stray highlight). No dilation:
     # growing the mask is what pushed the paint onto collars and straps, and the
     # model's own boundary is already the true skin/clothing line.
@@ -186,6 +191,9 @@ def skin_from_labels(labels, include_neck=False):
     pad = int(SKIN_PAD)
     if pad > 0:
         sk = cv2.dilate(sk, np.ones((pad * 2 + 1, pad * 2 + 1), np.uint8))
+    # hard rule, applied last: never paint over something the model called
+    # clothing, no matter how the rounding or padding expanded the shape
+    sk[cloth] = 0
     return sk
 
 
