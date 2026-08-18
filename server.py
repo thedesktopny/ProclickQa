@@ -2985,27 +2985,24 @@ def skinblock_process():
         hexc = (s.get('cover_color') or '#000000').lstrip('#')
         cover = (int(hexc[4:6], 16), int(hexc[2:4], 16), int(hexc[0:2], 16))  # BGR
         import skinblock_engine as _sbe
-        # All tunable from Skin Block settings, no deploy needed:
-        #   skin_pad     0-4   grow past the model's edge (0 = exact)
-        #   smooth_shapes 0-3  round the outline into a simple blob (0 = off)
-        #   cover_mode  blend|solid   blend = fill with the area's own tone
-        #   cover_hair   true/false   cover the whole head, hair included
-        try:
-            _sbe.SKIN_PAD = max(0, min(4, int(s.get('skin_pad') or 0)))
-        except Exception:
-            _sbe.SKIN_PAD = 0
-        try:
-            _sbe.SMOOTH = max(0.0, min(3.0, float(s.get('smooth_shapes', 0.6))))
-        except Exception:
-            _sbe.SMOOTH = 0.6
-        _sbe.COVER_MODE = 'solid' if str(s.get('cover_mode', 'blend')).lower() == 'solid' else 'blend'
+        # Keep the server engine in step with the browser engine. All of these
+        # are Skin Block settings, changeable without a deploy:
+        def _num(key, default, lo, hi):
+            try:
+                return max(lo, min(hi, float(s.get(key, default))))
+            except Exception:
+                return default
+        _sbe.SKIN_BIAS = _num('skin_bias', 0.35, -2.0, 2.0)
+        _sbe.SMOOTH_PX = int(_num('smooth_shapes', 0.6, 0.0, 3.0) * 3.3)   # 0.6 -> 2px
+        _sbe.COLOUR_TOLERANCE = _num('skin_colour_tolerance', 14, 4, 40)
+        _sbe.WINDOW_PX = int(_num('window_px', 260, 120, 800))
+        _sbe.MAX_WINDOWS = int(_num('max_windows', 60, 1, 200))
+        _sbe.TIME_BUDGET = _num('time_budget', 110, 20, 180)
+        _sbe.EXTEND_BY_COLOUR = s.get('extend_by_colour', True) is not False
+        _sbe.SECOND_PASS = s.get('second_pass', True) is not False
         _sbe.COVER_HAIR = s.get('cover_hair', False) is True
-        try:
-            _sbe.TIME_BUDGET = max(20.0, min(180.0, float(s.get('time_budget', 110))))
-        except Exception:
-            _sbe.TIME_BUDGET = 110.0
-        out, info = _sbe.process(img, cover=cover,
-                                 include_neck=bool(s.get('cover_neck')))
+        _sbe.COVER_MODE = 'solid' if str(s.get('cover_mode', 'blend')).lower() == 'solid' else 'blend'
+        out, info = _sbe.process(img, cover=cover)
         ok, buf = _cv2.imencode('.png', out)
         if not ok:
             return jsonify({'error': 'encode failed'}), 500

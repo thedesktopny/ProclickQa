@@ -1,22 +1,30 @@
 """
-Skin Block detection engine - runs on the VoiceGuard server.
+Skin Block detection engine — the SERVER-side path.
 
-Primary detector: SegFormer human-parsing (segformer_b2_clothes, ONNX). It
-labels every pixel as one of 18 classes - Face, Left-arm, Right-arm, Left-leg,
-Right-leg, Hair, Upper-clothes, Pants, Dress, Skirt, Shoes, Bag, Hat, Scarf,
-Sunglasses, Belt, Background - so skin and clothing are separated by a trained
-model instead of colour rules. Only the skin classes are painted; every
-clothing class stays visible.
+This is the same algorithm the browser runs, so a photo comes out identical
+whether it was processed on the agent's PC or here. Deliberately kept in step
+with browser_engine.js: if you change one, change the other.
 
-The model downloads once on first use (the Azure server is not behind the
-content filter) and is cached on disk. If it cannot be obtained, the engine
-falls back to the older colour/texture detector so the tool still works, and
-reports which detector ran so the page can warn the agent.
+How it works
+------------
+1. SegFormer human-parsing (18 classes) scores every pixel. We take the best
+   SKIN score minus the best non-skin score — a continuous number, not a
+   yes/no label — and the best CLOTHING score the same way.
+2. Both score maps are upsampled smoothly and compared per pixel, so the line
+   between skin and a bikini strap lands on the real edge instead of a blocky
+   staircase.
+3. The model has NO torso class: a bare midriff comes back labelled
+   "Upper-clothes". So we learn the person's own skin colour from the skin the
+   model did find (face, arms) and grow into matching neighbours, stopping at
+   real image edges — a bra or bikini blocks it, bare skin does not.
+4. Each covered area is filled with its own averaged tone so the patch sits in
+   the picture rather than being a black hole.
 
-Grid screenshots are split into thumbnail tiles; each tile is parsed as its own
-photo with paint clipped to that tile.
+Speed: one model run is timed on first use and the number of windows is chosen
+to fit the time budget, because Azure aborts any request at ~230 seconds.
 """
 import os
+import time
 import urllib.request
 
 import numpy as np
@@ -24,46 +32,52 @@ import cv2
 
 MODEL_DIR = os.path.join(os.getenv('HOME', '.'), 'sbmodel')
 MODEL_PATH = os.path.join(MODEL_DIR, 'segformer_b2_clothes.onnx')
-# Quantized first: several times faster on a CPU App Service plan, which is what
-# keeps a whole screenshot inside Azure's 230s request limit. Full precision is
-# the fallback if the quantized export can't be fetched.
 MODEL_URLS = [
     'https://huggingface.co/Xenova/segformer_b2_clothes/resolve/main/onnx/model_quantized.onnx',
     'https://huggingface.co/Xenova/segformer_b2_clothes/resolve/main/onnx/model.onnx',
 ]
 
-# class ids in this model
+# class ids
 BACKGROUND, HAT, HAIR, SUNGLASSES, UPPER, SKIRT, PANTS, DRESS, BELT = 0, 1, 2, 3, 4, 5, 6, 7, 8
 LEFT_SHOE, RIGHT_SHOE, FACE, LEFT_LEG, RIGHT_LEG, LEFT_ARM, RIGHT_ARM, BAG, SCARF = 9, 10, 11, 12, 13, 14, 15, 16, 17
-SKIN_CLASSES = (FACE, LEFT_LEG, RIGHT_LEG, LEFT_ARM, RIGHT_ARM)
-# The reference look covers the whole head, hair included, as one smooth shape.
-HEAD_CLASSES = (HAIR, HAT)
-# Anything the model positively identified as worn. Rounding the mask may never
-# cover these — that is what painted over the bikini.
-CLOTH_CLASSES = (UPPER, SKIRT, PANTS, DRESS, BELT, LEFT_SHOE, RIGHT_SHOE, BAG, SUNGLASSES)
+SKIN_CLASSES = [FACE, LEFT_LEG, RIGHT_LEG, LEFT_ARM, RIGHT_ARM]
+HEAD_CLASSES = [HAIR, HAT]
+CLOTH_CLASSES = [UPPER, SKIRT, PANTS, DRESS, BELT, LEFT_SHOE, RIGHT_SHOE, BAG, SUNGLASSES]
+
+# tunables (all overridable from Skin Block settings)
 COVER_HAIR = False
-
-# Shapes are smoothed into simple rounded blobs rather than traced pixel-exactly.
-# 0 disables. Higher = rounder/simpler.
-SMOOTH = 0.6
-
-# 'solid' = one colour everywhere (cover_color).
-# 'blend' = each covered area is filled with its own averaged tone, so the patch
-#           sits in the picture the way the reference examples do.
 COVER_MODE = 'blend'
-
-# How many pixels to grow the mask past the model's own edge. 0 = follow the
-# model exactly (cleanest, never touches clothing). Raise to 1-2 only if a thin
-# rim of skin ever survives at the boundary.
-SKIN_PAD = 0
-
-_session = None
-_session_tried = False
-_model_error = ''
+SKIN_BIAS = 0.35
+SMOOTH_PX = 2
+EXTEND_BY_COLOUR = True
+COLOUR_TOLERANCE = 14.0
+SECOND_PASS = True
+WINDOW_PX = 260
+MAX_WINDOWS = 60
+TIME_BUDGET = 110.0
 
 INPUT_SIZE = 512
 MEAN = np.array([0.485, 0.456, 0.406], np.float32)
 STD = np.array([0.229, 0.224, 0.225], np.float32)
+
+_session = None
+_session_tried = False
+_model_error = ''
+_speed = None
+
+
+def _looks_like_model(path):
+    try:
+        if os.path.getsize(path) < 1024 * 1024:
+            return False
+        with open(path, 'rb') as f:
+            head = f.read(32).lstrip()
+        for bad in (b'/*', b'<!', b'<htm', b'{', b'var ', b'version http'):
+            if head[:len(bad)].lower() == bad.lower():
+                return False
+        return True
+    except Exception:
+        return False
 
 
 def _download_model():
@@ -79,9 +93,9 @@ def _download_model():
                     if not chunk:
                         break
                     f.write(chunk)
-            if os.path.getsize(tmp) < 1024 * 1024:
+            if not _looks_like_model(tmp):
                 os.remove(tmp)
-                last = 'downloaded file too small'
+                last = 'downloaded file is not a model'
                 continue
             os.replace(tmp, MODEL_PATH)
             return True
@@ -91,33 +105,21 @@ def _download_model():
 
 
 def get_session():
-    """Loads the parser once per process. Returns None if unavailable."""
     global _session, _session_tried, _model_error
     if _session is not None or _session_tried:
         return _session
     _session_tried = True
     try:
         import onnxruntime as ort
-        if not os.path.exists(MODEL_PATH) or os.path.getsize(MODEL_PATH) < 1024 * 1024:
+        if not os.path.exists(MODEL_PATH) or not _looks_like_model(MODEL_PATH):
             _download_model()
         so = ort.SessionOptions()
         so.intra_op_num_threads = max(1, (os.cpu_count() or 2))
-        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         _session = ort.InferenceSession(MODEL_PATH, so, providers=['CPUExecutionProvider'])
-        global INPUT_SIZE
-        try:
-            shp = _session.get_inputs()[0].shape          # e.g. [1, 3, 512, 512] or ['b',3,'h','w']
-            dynamic = not isinstance(shp[2], int) or not isinstance(shp[3], int)
-            if dynamic:
-                INPUT_SIZE = 512      # a bigger input is sharper but much slower
-            elif isinstance(shp[2], int) and shp[2] > 0:
-                INPUT_SIZE = int(shp[2])
-        except Exception:
-            pass
-        print('[skinblock] parser model loaded, input size %d' % INPUT_SIZE)
+        print('[skinblock] parser model loaded')
     except Exception as e:
         _model_error = str(e)[:200]
-        print('[skinblock] parser unavailable, using fallback: ' + _model_error)
+        print('[skinblock] parser unavailable: ' + _model_error)
         _session = None
     return _session
 
@@ -126,292 +128,74 @@ def model_status():
     return {'model': bool(get_session()), 'error': _model_error}
 
 
-def _auto_levels(img_bgr):
-    """Brightens a dark crop before it goes to the model. Dark thumbnails read
-    as background to a model trained on normally-lit photos. Input only — the
-    picture the agent receives is untouched."""
-    mean = float(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY).mean())
+def _auto_levels(img):
+    """Dark thumbnails read as background to the model. Brighten the INPUT only."""
+    mean = float(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).mean())
     if mean <= 4 or mean >= 105:
-        return img_bgr
+        return img
     gamma = max(0.35, min(1.0, np.log(0.42) / np.log(mean / 255.0)))
     lut = np.array([round(255 * (i / 255.0) ** gamma) for i in range(256)], np.uint8)
-    return cv2.LUT(img_bgr, lut)
+    return cv2.LUT(img, lut)
 
 
-def _preprocess(img_bgr):
-    img_bgr = _auto_levels(img_bgr)
-    rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-    size = max(256, min(1024, int(INPUT_SIZE) // 32 * 32))
-    rgb = cv2.resize(rgb, (size, size), interpolation=cv2.INTER_LINEAR)
-    x = rgb.astype(np.float32) / 255.0
-    x = (x - MEAN) / STD
-    return np.transpose(x, (2, 0, 1))[None, ...].astype(np.float32)
-
-
-def parse_labels(img_bgr):
-    """Per-pixel class-id map at the image's own size, or None if no model."""
+def _scores(img, x0, y0, x1, y1):
+    """Returns (skin_score, cloth_score) grids for one window."""
     sess = get_session()
-    if sess is None:
-        return None
-    try:
-        inp = sess.get_inputs()[0].name
-        out = sess.run(None, {inp: _preprocess(img_bgr)})[0]
-        logits = out[0] if out.ndim == 4 else out          # (C, h, w)
-        h, w = img_bgr.shape[:2]
-        # smooth (bilinear) upsample of every class score, then pick the winner
-        # per full-resolution pixel — this is what gives clean curved edges
-        # instead of the blocky staircase of a nearest-neighbour label map.
-        chans = [cv2.resize(c, (w, h), interpolation=cv2.INTER_LINEAR) for c in logits]
-        big = np.stack(chans, axis=0)
-        return np.argmax(big, axis=0).astype(np.uint8)
-    except Exception as e:
-        print('[skinblock] inference failed: ' + str(e)[:160])
-        return None
+    crop = cv2.resize(img[y0:y1, x0:x1], (INPUT_SIZE, INPUT_SIZE), interpolation=cv2.INTER_LINEAR)
+    crop = _auto_levels(crop)
+    rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+    x = ((rgb - MEAN) / STD).transpose(2, 0, 1)[None].astype(np.float32)
+    lg = sess.run(None, {sess.get_inputs()[0].name: x})[0][0]
+    skin_ids = list(SKIN_CLASSES) + (list(HEAD_CLASSES) if COVER_HAIR else [])
+    skin_ids = [k for k in skin_ids if k < lg.shape[0]]
+    other_ids = [k for k in range(lg.shape[0]) if k not in skin_ids]
+    cloth_ids = [k for k in CLOTH_CLASSES if k < lg.shape[0] and k not in skin_ids]
+    skin = lg[skin_ids].max(axis=0)
+    other = lg[other_ids].max(axis=0)
+    cloth = lg[cloth_ids].max(axis=0)
+    return skin - other + SKIN_BIAS, cloth - skin
 
 
-def _smooth_mask(sk):
-    """Rounds the outline into a simple blob — blur the mask and re-threshold.
-    This is what turns a jagged traced edge into the soft shapes in the
-    reference images, without letting the shape shrink away from the skin."""
-    if SMOOTH <= 0 or not sk.any():
-        return sk
-    h, w = sk.shape[:2]
-    k = int(round(min(h, w) * 0.02 * float(SMOOTH)))
-    k = max(3, k | 1)
-    blur = cv2.GaussianBlur(sk.astype(np.float32) * 255.0, (k, k), 0)
-    # threshold below the midpoint so smoothing never pulls the edge inside the
-    # real skin — it rounds corners outward instead of eroding coverage
-    out = (blur > 100).astype(np.uint8)
-    return cv2.morphologyEx(out, cv2.MORPH_CLOSE, np.ones((k, k), np.uint8))
-
-
-def skin_from_labels(labels, include_neck=False):
-    if labels is None:
-        return None
-    wanted = list(SKIN_CLASSES) + ([SCARF] if include_neck else [])
-    if COVER_HAIR:
-        wanted += list(HEAD_CLASSES)
-    sk = np.isin(labels, wanted).astype(np.uint8)
-    if not sk.any():
-        return sk
-    # remember what is clothing so the smoothing below can't creep onto it
-    cloth = np.isin(labels, CLOTH_CLASSES)
-    # close pinholes only (glasses, jewellery, a stray highlight). No dilation:
-    # growing the mask is what pushed the paint onto collars and straps, and the
-    # model's own boundary is already the true skin/clothing line.
-    sk = cv2.morphologyEx(sk, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
-    sk = _smooth_mask(sk)
-    pad = int(SKIN_PAD)
-    if pad > 0:
-        sk = cv2.dilate(sk, np.ones((pad * 2 + 1, pad * 2 + 1), np.uint8))
-    # hard rule, applied last: never paint over something the model called
-    # clothing, no matter how the rounding or padding expanded the shape
-    sk[cloth] = 0
-    return sk
-
-
-# ---------- fallback detector (only if the model can't be loaded) ----------
-
-FIXED = dict(crMin=133, crMax=178, cbMin=77, cbMax=127)
-FRONTAL = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_alt2.xml')
-
-
-def _ycrcb(img):
-    ycc = cv2.cvtColor(img, cv2.COLOR_BGR2YCrCb).astype(np.int16)
-    return ycc[:, :, 0], ycc[:, :, 1], ycc[:, :, 2]
-
-
-def strict_mask(img, m=FIXED):
-    y, cr, cb = _ycrcb(img)
-    b = img[:, :, 0].astype(np.int16)
-    g = img[:, :, 1].astype(np.int16)
-    r = img[:, :, 2].astype(np.int16)
-    mx = np.maximum(np.maximum(r, g), b)
-    mn = np.minimum(np.minimum(r, g), b)
-    return ((r > 45) & (r - g >= 12) & (r > b) & (mx - mn >= 15) & (y > 30) & (y < 252) &
-            (cr >= m['crMin']) & (cr <= m['crMax']) & (cb >= m['cbMin']) & (cb <= m['cbMax']))
-
-
-def smooth_map(img):
-    gray = cv2.GaussianBlur(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), (3, 3), 0)
-    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
-    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
-    return cv2.boxFilter(cv2.magnitude(gx, gy), -1, (7, 7)) < 85
-
-
-def fallback_skin(img):
-    h, w = img.shape[:2]
-    sk = (strict_mask(img) & smooth_map(img)).astype(np.uint8)
-    sk = cv2.morphologyEx(sk, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-    sk = cv2.morphologyEx(sk, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
-    n, lab, stats, _ = cv2.connectedComponentsWithStats(sk)
-    keep = np.zeros(n, bool)
-    for i in range(1, n):
-        a = stats[i, cv2.CC_STAT_AREA]
-        if sk.size * 0.0015 <= a <= sk.size * 0.6:
-            keep[i] = True
-    sk = keep[lab].astype(np.uint8)
-    gray = cv2.equalizeHist(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
-    mn = max(12, int(min(h, w) * 0.05))
-    for (x, y, bw, bh) in FRONTAL.detectMultiScale(gray, 1.06, 4, minSize=(mn, mn)):
-        cv2.ellipse(sk, (int(x + bw / 2), int(y + bh / 2)),
-                    (int(bw * 0.72), int(bh * 0.92)), 0, 0, 360, 1, -1)
-    return cv2.dilate(sk, np.ones((5, 5), np.uint8))
-
-
-# ---------- tile detection ----------
-
-def find_tiles(img):
-    h, w = img.shape[:2]
-    scale = min(1.0, 1400.0 / max(h, w))
-    small = cv2.resize(img, (int(w * scale), int(h * scale))) if scale < 1 else img
-    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY).astype(np.int16)
-    dx = np.abs(np.diff(gray, axis=1, prepend=gray[:, :1]))
-    dy = np.abs(np.diff(gray, axis=0, prepend=gray[:1, :]))
-    detail = ((dx > 9) | (dy > 9)).astype(np.uint8)
-    detail = cv2.morphologyEx(detail, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
-    detail = cv2.morphologyEx(detail, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-    n, lab, stats, _ = cv2.connectedComponentsWithStats(detail)
-
-    def best_cut(profile, length):
-        lo, hi = int(length * 0.15), int(length * 0.85)
-        if hi - lo < 8:
-            return None, 1.0
-        i = int(np.argmin(profile[lo:hi])) + lo
-        return i, float(profile[i])
-
-    def split_rect(x, y, bw, bh, depth=0):
-        if depth >= 4 or (bw <= 380 and bh <= 380):
-            return [(x, y, bw, bh)]
-        sub = detail[y:y + bh, x:x + bw]
-        rcut, rval = best_cut(sub.sum(axis=1) / max(1, bw), bh)
-        ccut, cval = best_cut(sub.sum(axis=0) / max(1, bh), bw)
-        if min(rval, cval) > 0.35:
-            return [(x, y, bw, bh)]
-        if rval <= cval:
-            return split_rect(x, y, bw, rcut, depth + 1) + split_rect(x, y + rcut, bw, bh - rcut, depth + 1)
-        return split_rect(x, y, ccut, bh, depth + 1) + split_rect(x + ccut, y, bw - ccut, bh, depth + 1)
-
-    tiles = []
-    for i in range(1, n):
-        x, y, bw, bh, area = stats[i]
-        if bw < 16 or bh < 16 or area < 300:
-            continue
-        for (px, py, pw, ph) in split_rect(x, y, bw, bh):
-            piece = detail[py:py + ph, px:px + pw]
-            ys, xs = np.where(piece > 0)
-            if ys.size < 90:
-                continue
-            qx, qy = px + xs.min(), py + ys.min()
-            qw, qh = xs.max() - xs.min() + 1, ys.max() - ys.min() + 1
-            if qw < 13 or qh < 13:
-                continue
-            pad = 2
-            fx = max(0, int(qx / scale) - pad)
-            fy = max(0, int(qy / scale) - pad)
-            fw = min(w - fx, int(qw / scale) + pad * 2)
-            fh = min(h - fy, int(qh / scale) + pad * 2)
-            if fw >= 18 and fh >= 18:
-                tiles.append((fx, fy, fw, fh))
-    return tiles
-
-
-# ---------- main entry ----------
-
-# Each model run costs real CPU time, so we do NOT run it once per thumbnail —
-# that was 29 runs on one screenshot and blew past Azure's 230s gateway limit.
-# Instead the image is covered by a small number of overlapping windows, each
-# fed to the model at full input size. Roughly 6 runs instead of 29, with the
-# same detail per thumbnail, because each window is ~700px of original image
-# upscaled to the model's 512px input.
-WINDOW_PX = 380          # how much original image each model run covers
-WINDOW_OVERLAP = 0.12
-MAX_WINDOWS = 15         # hard ceiling so one huge image can't run away
-TIME_BUDGET = 110.0      # seconds of model time; Azure kills the request at ~230,
-                         # and decode, smoothing and PNG encode need room too
-_speed = None            # measured seconds per model run on this server
+def _extend_by_colour(sub, seed):
+    """Reclaim bare torso the model labelled as clothing, using the person's own
+    skin colour learned from the skin it did find. Stops at real image edges."""
+    if int(seed.sum()) < 60:
+        return seed
+    lab = cv2.cvtColor(sub, cv2.COLOR_BGR2LAB).astype(np.float32)
+    med = np.median(lab[seed > 0].reshape(-1, 3), axis=0)
+    d = np.sqrt(((lab[:, :, 1:] - med[1:]) ** 2).sum(axis=2))     # colour distance
+    dl = np.abs(lab[:, :, 0] - med[0])                            # lightness may vary
+    allowed = ((d < COLOUR_TOLERANCE) & (dl < 55)).astype(np.uint8)
+    edges = cv2.dilate(cv2.Canny(cv2.GaussianBlur(sub, (3, 3), 0), 45, 120),
+                       np.ones((2, 2), np.uint8))
+    allowed[edges > 0] = 0
+    allowed[seed > 0] = 1
+    grown = seed.astype(np.uint8).copy()
+    k = np.ones((3, 3), np.uint8)
+    prev = -1
+    for _ in range(40):
+        grown = cv2.dilate(grown, k) & allowed
+        s = int(grown.sum())
+        if s == prev:
+            break
+        prev = s
+    return grown
 
 
 def _measure_speed(img):
-    """One timed inference so we know what this server can actually afford.
-    Cached per process — the answer doesn't change between requests."""
+    """One timed run so the window count fits this server's actual speed."""
     global _speed
     if _speed is not None:
         return _speed
-    import time as _time
     probe = cv2.resize(img, (INPUT_SIZE, INPUT_SIZE), interpolation=cv2.INTER_AREA)
-    t = _time.time()
-    parse_labels(probe)
-    _speed = max(0.05, _time.time() - t)
+    t = time.time()
+    _scores(probe, 0, 0, INPUT_SIZE, INPUT_SIZE)
+    _speed = max(0.05, time.time() - t)
     print('[skinblock] one model run takes %.1fs on this server' % _speed)
     return _speed
 
 
-def model_skin(img, include_neck=False, budget=TIME_BUDGET):
-    """Skin mask for a whole image via overlapping windows. None if no model."""
-    import time as _time
-    if get_session() is None:
-        return None, False
-    h, w = img.shape[:2]
-
-    # How many runs fit in the budget on THIS server? Measure, don't assume —
-    # a fixed window count is what caused the gateway timeouts.
-    per_run = _measure_speed(img)
-    affordable = max(1, int((budget - per_run) / per_run))
-
-    cols = max(1, int(round(w / float(WINDOW_PX))))
-    rows = max(1, int(round(h / float(WINDOW_PX))))
-    limit = min(MAX_WINDOWS, affordable)
-    while cols * rows > limit and (cols > 1 or rows > 1):
-        if cols >= rows and cols > 1:
-            cols -= 1
-        elif rows > 1:
-            rows -= 1
-        else:
-            break
-    print('[skinblock] %dx%d windows (%d runs, ~%.0fs of %.0fs budget)'
-          % (cols, rows, cols * rows, cols * rows * per_run, budget))
-
-    mask = np.zeros((h, w), np.uint8)
-    cw, ch = w / float(cols), h / float(rows)
-    started = _time.time()
-    partial = False
-    for ry in range(rows):
-        for rx in range(cols):
-            if _time.time() - started > budget - per_run * 0.5:
-                partial = True
-                break
-            x0 = int(max(0, rx * cw - cw * WINDOW_OVERLAP))
-            y0 = int(max(0, ry * ch - ch * WINDOW_OVERLAP))
-            x1 = int(min(w, (rx + 1) * cw + cw * WINDOW_OVERLAP))
-            y1 = int(min(h, (ry + 1) * ch + ch * WINDOW_OVERLAP))
-            if x1 - x0 < 16 or y1 - y0 < 16:
-                continue
-            sub = img[y0:y1, x0:x1]
-            sk = skin_from_labels(parse_labels(sub), include_neck)
-            if sk is None:
-                continue
-            np.maximum(mask[y0:y1, x0:x1], sk, out=mask[y0:y1, x0:x1])
-        if partial:
-            break
-    return mask, partial
-
-
-def _tile_skin(crop, use_model, include_neck=False):
-    """Fallback-detector path, still per tile (it is cheap)."""
-    th, tw = crop.shape[:2]
-    up = min(4.0, max(1.0, 384.0 / max(tw, th)))
-    work = cv2.resize(crop, (int(tw * up), int(th * up)), interpolation=cv2.INTER_LINEAR) if up > 1 else crop
-    sk = fallback_skin(work)
-    if sk.shape[:2] != (th, tw):
-        sk = cv2.resize(sk, (tw, th), interpolation=cv2.INTER_NEAREST)
-    return sk
-
-
-def paint(out, img, mask, cover):
-    """Applies the mask. In 'blend' mode each separate covered area is filled
-    with its own averaged colour, so the patch matches the picture instead of
-    being a black hole. In 'solid' mode everything gets the cover colour."""
+def _paint(out, img, mask, cover):
     if not mask.any():
         return
     if COVER_MODE != 'blend':
@@ -420,66 +204,102 @@ def paint(out, img, mask, cover):
     n, lab, stats, _ = cv2.connectedComponentsWithStats(mask)
     for i in range(1, n):
         sel = lab == i
-        if stats[i, cv2.CC_STAT_AREA] < 12:
-            out[sel] = cover
+        if stats[i, cv2.CC_STAT_AREA] < 20:
             continue
-        mean = img[sel].reshape(-1, 3).mean(axis=0)
-        # flatten and slightly mute it so the patch reads as a filled shape
-        tone = np.clip(mean * 0.92 + 14, 0, 255).astype(np.uint8)
+        tone = np.clip(img[sel].reshape(-1, 3).mean(axis=0) * 0.92 + 14, 0, 255).astype(np.uint8)
         out[sel] = tone
 
 
 def process(img, cover=(0, 0, 0), grid_face_threshold=4, include_neck=False):
     """Paint skin. Returns (painted_image, info)."""
-    import time as _time
-    t0 = _time.time()
+    t0 = time.time()
+    h, w = img.shape[:2]
     out = img.copy()
-    use_model = get_session() is not None
-    info = dict(detector='model' if use_model else 'fallback',
-                grid=False, tiles=0, painted=0, skipped=0, partial=False)
+    info = {'detector': 'model', 'painted': 0, 'partial': False, 'windows': 0}
 
-    if use_model:
-        mask, partial = model_skin(img, include_neck)
-        if mask is not None:
-            paint(out, img, mask, cover)
-            info['painted'] = int(mask.any())
-            info['partial'] = partial
-            info['windows'] = True
-            info['seconds'] = round(_time.time() - t0, 1)
-            return out, info
-        use_model = False
-        info['detector'] = 'fallback'
-
-    # fallback detector: per tile, since it is cheap
-    tiles = find_tiles(img)
-    info['grid'] = len(tiles) >= 5
-    info['tiles'] = len(tiles)
-    if not info['grid']:
-        sk = _tile_skin(img, False, include_neck)
-        paint(out, img, sk, cover)
-        info['painted'] = 1 if sk.any() else 0
-        info['wash'] = not bool(sk.any())
-        info['seconds'] = round(_time.time() - t0, 1)
+    if get_session() is None:
+        info['detector'] = 'unavailable'
+        info['wash'] = True
+        info['seconds'] = round(time.time() - t0, 1)
         return out, info
 
-    for (tx, ty, tw, th) in tiles:
-        crop = img[ty:ty + th, tx:tx + tw]
-        if crop.size == 0:
-            continue
-        sk = _tile_skin(crop, False, include_neck)
-        if not sk.any():
-            info['skipped'] += 1
-            continue
-        paint(out[ty:ty + th, tx:tx + tw], img[ty:ty + th, tx:tx + tw], sk, cover)
-        info['painted'] += 1
-    info['seconds'] = round(_time.time() - t0, 1)
+    per_run = _measure_speed(img)
+    affordable = max(1, int((TIME_BUDGET - per_run) / per_run))
+    passes = [(0, 0), (0.5, 0.5)] if SECOND_PASS else [(0, 0)]
+    cols = max(1, int(round(w / float(WINDOW_PX))))
+    rows = max(1, int(round(h / float(WINDOW_PX))))
+    limit = min(MAX_WINDOWS, max(1, affordable // len(passes)))
+    while cols * rows > limit and (cols > 1 or rows > 1):
+        if cols >= rows and cols > 1:
+            cols -= 1
+        elif rows > 1:
+            rows -= 1
+        else:
+            break
+    print('[skinblock] %dx%d windows x%d passes (~%.0fs of %.0fs budget)'
+          % (cols, rows, len(passes), cols * rows * len(passes) * per_run, TIME_BUDGET))
+
+    S = np.full((h, w), -9.0, np.float32)
+    C = np.full((h, w), -9.0, np.float32)
+    cw, ch = w / float(cols), h / float(rows)
+    OV = 0.12
+    boxes = []
+    started = time.time()
+    partial = False
+    for ox, oy in passes:
+        for ry in range(-1 if oy else 0, rows):
+            for rx in range(-1 if ox else 0, cols):
+                if time.time() - started > TIME_BUDGET - per_run * 0.5:
+                    partial = True
+                    break
+                x0 = max(0, int((rx + ox) * cw - cw * OV))
+                y0 = max(0, int((ry + oy) * ch - ch * OV))
+                x1 = min(w, int((rx + 1 + ox) * cw + cw * OV))
+                y1 = min(h, int((ry + 1 + oy) * ch + ch * OV))
+                if x1 - x0 < 16 or y1 - y0 < 16:
+                    continue
+                ss, cs = _scores(img, x0, y0, x1, y1)
+                sw, sh = x1 - x0, y1 - y0
+                np.maximum(S[y0:y1, x0:x1],
+                           cv2.resize(ss, (sw, sh), interpolation=cv2.INTER_CUBIC),
+                           out=S[y0:y1, x0:x1])
+                np.maximum(C[y0:y1, x0:x1],
+                           cv2.resize(cs, (sw, sh), interpolation=cv2.INTER_CUBIC),
+                           out=C[y0:y1, x0:x1])
+                boxes.append((x0, y0, x1, y1))
+                info['windows'] += 1
+            if partial:
+                break
+        if partial:
+            break
+
+    mask = ((S > 0) & (C <= 0)).astype(np.uint8)
+
+    if EXTEND_BY_COLOUR:
+        for (x0, y0, x1, y1) in boxes:
+            seed = mask[y0:y1, x0:x1]
+            if int(seed.sum()) < 60:
+                continue
+            mask[y0:y1, x0:x1] |= _extend_by_colour(img[y0:y1, x0:x1], seed)
+
+    if SMOOTH_PX > 0:
+        k = int(2 * SMOOTH_PX + 1)
+        smoothed = (cv2.blur(mask.astype(np.float32), (k, k)) > 0.45).astype(np.uint8)
+        # clothing still wins after rounding, except where colour proved bare skin
+        smoothed[(C > 0) & (mask == 0)] = 0
+        mask = smoothed
+
+    _paint(out, img, mask, cover)
+    info['painted'] = int(mask.any())
+    info['partial'] = partial
+    info['wash'] = not bool(mask.any())
+    info['seconds'] = round(time.time() - t0, 1)
     return out, info
 
 
 if __name__ == '__main__':
-    import sys, time
+    import sys
     im = cv2.imread(sys.argv[1])
-    t = time.time()
     o, i = process(im)
-    print(i, '%.1fs' % (time.time() - t))
+    print(i)
     cv2.imwrite(sys.argv[2], o)
