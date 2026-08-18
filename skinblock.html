@@ -187,6 +187,23 @@
   .ed-stage{ flex:1; display:grid; place-items:center; padding:18px; overflow:auto; }
   #edCanvas{ max-width:100%; max-height:100%; cursor:crosshair; border-radius:6px; }
 
+  #earlierRow{
+    display:grid; gap:12px; grid-template-columns:repeat(auto-fill, minmax(150px,1fr));
+  }
+  .past{
+    background:var(--panel); border:1px solid var(--line); border-radius:8px; overflow:hidden;
+  }
+  .past .thumb{ background:#0E1015; aspect-ratio:4/3; display:grid; place-items:center; }
+  .past img{ max-width:100%; max-height:100%; display:block; cursor:grab; }
+  .past .meta{
+    padding:6px 8px; font-size:11px; color:var(--dim);
+    display:flex; align-items:center; gap:6px;
+  }
+  .past .meta span{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .past .meta button{
+    margin-left:auto; background:transparent; border:0; color:var(--amber);
+    font-size:11.5px; padding:2px 4px;
+  }
   .toast{
     position:fixed; left:50%; bottom:24px; transform:translateX(-50%);
     background:var(--raise); border:1px solid var(--line); border-radius:10px;
@@ -222,7 +239,7 @@
 <div id="app" style="display:none">
   <header>
     <div class="bar">
-      <div class="wordmark"><span id="dot" class="lamp"></span> Skin Block <span class="ver mono">v12</span></div>
+      <div class="wordmark"><span id="dot" class="lamp"></span> Skin Block <span class="ver mono">v12.2</span></div>
       <div class="bar-right">
         <span id="statusText">Starting…</span>
         <span id="extBadge" class="chip" style="display:none"></span>
@@ -246,11 +263,22 @@
       <label><input type="checkbox" id="autoChk"> Save automatically when done</label>
       <span class="spacer"></span>
       <span id="tally" class="mono" style="font-size:11.5px;letter-spacing:.1em;color:var(--faint)"></span>
+      <button id="addBtn" class="btn">Add photos</button>
       <button id="saveAllBtn" class="btn" disabled>Save all</button>
       <button id="clearBtn" class="btn btn-ghost">Clear</button>
     </div>
 
     <div id="sheet"></div>
+
+    <section id="earlier" style="display:none;margin-top:34px">
+      <div style="display:flex;align-items:baseline;gap:12px;margin-bottom:12px">
+        <span class="eyebrow">Earlier today</span>
+        <span id="earlierNote" style="color:var(--faint);font-size:12px"></span>
+        <span class="spacer" style="flex:1"></span>
+        <button id="earlierRefresh" class="btn btn-ghost" style="padding:4px 10px;font-size:12px">Refresh</button>
+      </div>
+      <div id="earlierRow"></div>
+    </section>
   </main>
 </div>
 
@@ -532,68 +560,118 @@ function paintBlend(ctx, imgData, mask, w, h, mode, hex){
 
 /* Full pass over one photo, in the browser. Returns a painted canvas. */
 /* The model has 18 classes and NONE of them is "torso" — a bare midriff comes
-   back labelled "Upper-clothes", which is why a stomach could sit there
-   uncovered while the face and arms were painted. So: take the skin the model
-   DID find, learn that person's own colour from it, and grow into neighbouring
-   pixels that match. Growth stops at real image edges, so a bra strap or a
-   bikini blocks it, and it only runs inside one window at a time so one
-   person's skin tone is never applied to somebody else. */
-function extendByColour(ctx, x0, y0, w, h, seed){
-  let sum = 0;
-  for (let i = 0; i < seed.length; i++) sum += seed[i];
-  if (sum < 60) return seed;
+   back labelled "Upper-clothes", which is why a stomach could sit uncovered
+   while the face and arms were painted. So: take the skin the model DID find,
+   learn that person's own colour, and grow into matching neighbours.
 
-  let px;
-  try { px = ctx.getImageData(x0, y0, w, h).data; } catch(e){ return seed; }
+   Crucially this runs PER PERSON, not per window. Sampling colour across a
+   whole window mixed several thumbnails into one average that matched almost
+   anything. Each patch of confirmed skin now learns its own colour, growth is
+   confined to that patch's neighbourhood and capped in distance, and it is
+   discarded entirely if it balloons — which is what stops a bikini or a top
+   from being swallowed. */
+const MAX_GROW_PX = 90;
+const MAX_GROW_RATIO = 2.4;
 
-  // this person's own colour, from confirmed skin (median-ish via mean of samples)
-  let n = 0, sr = 0, sg = 0, sb = 0;
-  for (let i = 0, p = 0; i < seed.length; i++, p += 4){
-    if (!seed[i]) continue;
-    sr += px[p]; sg += px[p+1]; sb += px[p+2]; n++;
-  }
-  const mr = sr/n, mg = sg/n, mb = sb/n;
-  // compare on colour, allowing lightness to vary with shading
-  const mcr = 128 + 0.5*mr - 0.418688*mg - 0.081312*mb;
-  const mcb = 128 - 0.168736*mr - 0.331264*mg + 0.5*mb;
-  const TOL = Number(SETTINGS.skin_colour_tolerance ?? 14);
-
-  // simple edge detector: growth may not cross a strong brightness change
-  const lum = new Float32Array(w*h);
-  for (let i = 0, p = 0; i < lum.length; i++, p += 4)
-    lum[i] = 0.299*px[p] + 0.587*px[p+1] + 0.114*px[p+2];
-  const edge = new Uint8Array(w*h);
-  for (let y = 1; y < h-1; y++){
-    for (let x = 1; x < w-1; x++){
-      const i = y*w + x;
-      const gx = Math.abs(lum[i+1] - lum[i-1]), gy = Math.abs(lum[i+w] - lum[i-w]);
-      if (gx + gy > 46) edge[i] = 1;
-    }
-  }
-
-  const allowed = new Uint8Array(w*h);
-  for (let i = 0, p = 0; i < allowed.length; i++, p += 4){
-    if (seed[i]){ allowed[i] = 1; continue; }
-    if (edge[i]) continue;
-    const r = px[p], g = px[p+1], bl = px[p+2];
-    const cr = 128 + 0.5*r - 0.418688*g - 0.081312*bl;
-    const cb = 128 - 0.168736*r - 0.331264*g + 0.5*bl;
-    const d = Math.hypot(cr - mcr, cb - mcb);
-    if (d < TOL) allowed[i] = 1;
-  }
-
-  // flood the seed outward through allowed territory
-  const out = Uint8Array.from(seed);
+function labelComponents(mask, w, h){
+  const label = new Int32Array(w*h);
   const stack = new Int32Array(w*h);
-  let top = 0;
-  for (let i = 0; i < out.length; i++) if (out[i]) stack[top++] = i;
-  while (top > 0){
-    const i = stack[--top];
-    const x = i % w, y = (i / w) | 0;
-    if (x > 0   && allowed[i-1] && !out[i-1]){ out[i-1] = 1; stack[top++] = i-1; }
-    if (x < w-1 && allowed[i+1] && !out[i+1]){ out[i+1] = 1; stack[top++] = i+1; }
-    if (y > 0   && allowed[i-w] && !out[i-w]){ out[i-w] = 1; stack[top++] = i-w; }
-    if (y < h-1 && allowed[i+w] && !out[i+w]){ out[i+w] = 1; stack[top++] = i+w; }
+  const comps = [];
+  let next = 0;
+  for (let s = 0; s < mask.length; s++){
+    if (!mask[s] || label[s]) continue;
+    next++;
+    let top = 0, size = 0;
+    let minx = w, maxx = 0, miny = h, maxy = 0;
+    stack[top++] = s; label[s] = next;
+    while (top > 0){
+      const i = stack[--top];
+      const x = i % w, y = (i / w) | 0;
+      size++;
+      if (x < minx) minx = x; if (x > maxx) maxx = x;
+      if (y < miny) miny = y; if (y > maxy) maxy = y;
+      if (x > 0   && mask[i-1] && !label[i-1]){ label[i-1] = next; stack[top++] = i-1; }
+      if (x < w-1 && mask[i+1] && !label[i+1]){ label[i+1] = next; stack[top++] = i+1; }
+      if (y > 0   && mask[i-w] && !label[i-w]){ label[i-w] = next; stack[top++] = i-w; }
+      if (y < h-1 && mask[i+w] && !label[i+w]){ label[i+w] = next; stack[top++] = i+w; }
+    }
+    comps.push({ id: next, size, minx, maxx, miny, maxy });
+  }
+  return { label, comps };
+}
+
+function extendByColour(px, mask, w, h){
+  const { label, comps } = labelComponents(mask, w, h);
+  const out = Uint8Array.from(mask);
+  const TOL = Number(SETTINGS.skin_colour_tolerance ?? 12);
+
+  for (const c of comps){
+    if (c.size < 150) continue;                       // too small to trust
+    const bw = c.maxx - c.minx + 1, bh = c.maxy - c.miny + 1;
+    const reach = Math.min(MAX_GROW_PX, Math.max(12, Math.round(0.9 * Math.max(bw, bh))));
+    const x0 = Math.max(0, c.minx - reach), y0 = Math.max(0, c.miny - reach);
+    const x1 = Math.min(w, c.maxx + 1 + reach), y1 = Math.min(h, c.maxy + 1 + reach);
+    const rw = x1 - x0, rh = y1 - y0;
+
+    // this patch's own colour
+    let n = 0, sr = 0, sg = 0, sb = 0;
+    for (let y = y0; y < y1; y++){
+      for (let x = x0; x < x1; x++){
+        const i = y*w + x;
+        if (label[i] !== c.id) continue;
+        const p = i*4; sr += px[p]; sg += px[p+1]; sb += px[p+2]; n++;
+      }
+    }
+    if (!n) continue;
+    const mr = sr/n, mg = sg/n, mb = sb/n;
+    const mcr = 128 + 0.5*mr - 0.418688*mg - 0.081312*mb;
+    const mcb = 128 - 0.168736*mr - 0.331264*mg + 0.5*mb;
+    const mlum = 0.299*mr + 0.587*mg + 0.114*mb;
+
+    const allowed = new Uint8Array(rw*rh);
+    const seed = new Uint8Array(rw*rh);
+    for (let y = 0; y < rh; y++){
+      for (let x = 0; x < rw; x++){
+        const gi = (y0 + y)*w + (x0 + x), li = y*rw + x, p = gi*4;
+        if (label[gi] === c.id){ seed[li] = 1; allowed[li] = 1; continue; }
+        const r = px[p], g = px[p+1], bl = px[p+2];
+        const cr = 128 + 0.5*r - 0.418688*g - 0.081312*bl;
+        const cb = 128 - 0.168736*r - 0.331264*g + 0.5*bl;
+        const lum = 0.299*r + 0.587*g + 0.114*bl;
+        if (Math.hypot(cr - mcr, cb - mcb) < TOL && Math.abs(lum - mlum) < 62) allowed[li] = 1;
+      }
+    }
+    // growth may not cross a strong brightness change (a strap, a hem)
+    for (let y = 1; y < rh-1; y++){
+      for (let x = 1; x < rw-1; x++){
+        const gi = (y0 + y)*w + (x0 + x), li = y*rw + x;
+        if (seed[li]) continue;
+        const L = i2 => 0.299*px[i2*4] + 0.587*px[i2*4+1] + 0.114*px[i2*4+2];
+        if (Math.abs(L(gi+1) - L(gi-1)) + Math.abs(L(gi+w) - L(gi-w)) > 46) allowed[li] = 0;
+      }
+    }
+
+    // bounded flood
+    const grown = Uint8Array.from(seed);
+    const stack = new Int32Array(rw*rh);
+    let top = 0, grownCount = 0;
+    const dist = new Int16Array(rw*rh).fill(-1);
+    for (let i = 0; i < grown.length; i++) if (grown[i]){ stack[top++] = i; dist[i] = 0; grownCount++; }
+    while (top > 0){
+      const i = stack[--top];
+      const d = dist[i];
+      if (d >= reach) continue;
+      const x = i % rw, y = (i / rw) | 0;
+      const push = j => { if (allowed[j] && !grown[j]){ grown[j] = 1; dist[j] = d+1; stack[top++] = j; grownCount++; } };
+      if (x > 0)    push(i-1);
+      if (x < rw-1) push(i+1);
+      if (y > 0)    push(i-rw);
+      if (y < rh-1) push(i+rw);
+    }
+    if (grownCount > c.size * MAX_GROW_RATIO) continue;   // runaway: discard
+    for (let y = 0; y < rh; y++)
+      for (let x = 0; x < rw; x++)
+        if (grown[y*rw + x]) out[(y0 + y)*w + (x0 + x)] = 1;
   }
   return out;
 }
@@ -639,23 +717,13 @@ async function processInBrowser(base, onStep){
   const mask = new Uint8Array(w*h);
   for (let i = 0; i < mask.length; i++) mask[i] = (S[i] > 0 && C[i] <= 0) ? 1 : 0;
 
-  // reclaim bare torso the model labelled as clothing, per window
+  // reclaim bare torso the model labelled as clothing — per person, bounded
   if (SETTINGS.extend_by_colour !== false){
-    const srcCtx = base.getContext("2d", { willReadFrequently:true });
-    for (const [bx, by, bw, bh] of boxes){
-      const seed = new Uint8Array(bw*bh);
-      let any = 0;
-      for (let y = 0; y < bh; y++){
-        const row = (by + y)*w + bx, srow = y*bw;
-        for (let x = 0; x < bw; x++){ const v = mask[row + x]; seed[srow + x] = v; any += v; }
-      }
-      if (any < 60) continue;
-      const grown = extendByColour(srcCtx, bx, by, bw, bh, seed);
-      for (let y = 0; y < bh; y++){
-        const row = (by + y)*w + bx, srow = y*bw;
-        for (let x = 0; x < bw; x++) if (grown[srow + x]) mask[row + x] = 1;
-      }
-    }
+    try{
+      const px = base.getContext("2d", { willReadFrequently:true }).getImageData(0,0,w,h).data;
+      const grown = extendByColour(px, mask, w, h);
+      for (let i = 0; i < mask.length; i++) mask[i] = grown[i];
+    }catch(e){ /* can't read pixels: keep the model's own mask */ }
   }
 
   const smoothed = smoothMask(mask, w, h, Number(SETTINGS.smooth_shapes ?? 0.6));
@@ -682,7 +750,7 @@ async function processInBrowser(base, onStep){
 ========================================================== */
 
 const $ = id => document.getElementById(id);
-console.log("[SkinBlock] v12 — redesign, keep regions, any format");
+console.log("[SkinBlock] v12.2 — session history, add while working");
 
 const dot = $("dot"), statusText = $("statusText"), sheet = $("sheet"), bay = $("bay");
 const fileInput = $("fileInput"), saveAllBtn = $("saveAllBtn"), tally = $("tally");
@@ -715,6 +783,7 @@ function openApp(ext){
   b.textContent = "EXT " + ext; b.style.display = "";
   try{ sessionStorage.setItem('sb_ext', ext); }catch(e){}
   boot().catch(() => { statusText.textContent = "Detector didn't start — check the connection"; });
+  loadEarlier();
 }
 function initGate(){
   let saved = null;
@@ -765,6 +834,7 @@ async function boot(){
 
 /* ---------------- intake: click, drag in, paste ---------------- */
 $("pickBtn").addEventListener("click", () => fileInput.click());
+$("addBtn").addEventListener("click", () => fileInput.click());
 fileInput.addEventListener("change", e => { addFiles(e.target.files); fileInput.value = ""; });
 
 ["dragenter","dragover"].forEach(ev => window.addEventListener(ev, e => {
@@ -930,7 +1000,7 @@ function finish(item, secs, failed){
   else if (item.partial) stamp(item, "Part of this photo wasn't checked — look it over", "warn");
   else if (item.found)   stamp(item, "Skin covered" + (secs ? " · " + secs : ""), "");
   else                   stamp(item, "No people found — check it", "none");
-  logToServer(item, compose(item));
+  logToServer(item, compose(item)).then(loadEarlier);
   updateTally();
   if (items.every(i => i.done !== false) && $("autoChk").checked) saveAll();
 }
@@ -1090,7 +1160,10 @@ $("clearBtn").addEventListener("click", () => {
 
 function updateTally(){
   const done = items.filter(i => i.done).length;
-  tally.textContent = items.length ? `${done} OF ${items.length} READY` : "";
+  const working = items.length - done;
+  tally.textContent = items.length
+    ? `${done} OF ${items.length} READY` + (working ? ` · ${working} WORKING` : "")
+    : "";
   saveAllBtn.disabled = done === 0;
 }
 
@@ -1114,6 +1187,49 @@ async function logToServer(item, outCanvas){
     });
   }catch(e){}
 }
+
+/* ---------------- earlier today ----------------
+   Photos are already stored per agent when they're processed, so a hard refresh
+   or a closed tab doesn't lose them — this pulls the agent's own recent work
+   back onto the page. It's their extension's work only, and only the last few
+   hours; the full archive stays in the manager's view. */
+async function loadEarlier(){
+  const wrap = $("earlier"), row = $("earlierRow"), note = $("earlierNote");
+  if (!AGENT_EXT) return;
+  try{
+    const r = await fetch(`/api/skinblock/my-recent?agent_ext=${encodeURIComponent(AGENT_EXT)}`);
+    if (!r.ok) return;
+    const data = await r.json();
+    const list = data.items || [];
+    // don't repeat what's already on the sheet from this run
+    const onSheet = new Set(items.map(i => i.file.name));
+    const past = list.filter(p => !onSheet.has(p.file_name));
+    if (!past.length){ wrap.style.display = "none"; return; }
+    wrap.style.display = "";
+    note.textContent = past.length + (past.length === 1 ? " photo" : " photos") + " from the last " + (data.hours||12) + " hours";
+    row.innerHTML = "";
+    for (const p of past){
+      const card = document.createElement("div");
+      card.className = "past";
+      const when = p.created_at ? new Date(p.created_at).toLocaleTimeString([], {hour:"numeric", minute:"2-digit"}) : "";
+      card.innerHTML = `
+        <div class="thumb"><img alt="${p.file_name}" draggable="true"></div>
+        <div class="meta"><span title="${p.file_name}">${when} · ${p.file_name}</span><button>Save</button></div>`;
+      const img = card.querySelector("img");
+      img.src = p.covered_image;
+      img.addEventListener("dragstart", e => {
+        e.dataTransfer.effectAllowed = "copy";
+        e.dataTransfer.setData("DownloadURL", `image/jpeg:${safeName(p.file_name)}:${p.covered_image}`);
+      });
+      card.querySelector("button").addEventListener("click", async () => {
+        const blob = await (await fetch(p.covered_image)).blob();
+        triggerDownload(blob, safeName(p.file_name));
+      });
+      row.appendChild(card);
+    }
+  }catch(e){ /* the strip is a convenience; never block the page on it */ }
+}
+$("earlierRefresh").addEventListener("click", loadEarlier);
 
 /* ---------------- start ---------------- */
 loadSettings().then(initGate);

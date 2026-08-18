@@ -2861,7 +2861,9 @@ SKINBLOCK_DEFAULTS = {
     'skin_bias': 0.35,          # >0 covers a little more readily (catches missed skin)
     'max_windows': 60,          # ceiling on model runs per photo
     'extend_by_colour': True,   # reclaim bare torso the model labels as clothing
-    'skin_colour_tolerance': 14, # how closely a pixel must match the person's own skin
+    'skin_colour_tolerance': 12, # how closely a pixel must match the person's own skin
+    'skin_reach_px': 90,        # how far covering may extend from confirmed skin
+    'skin_grow_limit': 2.4,     # discard growth that balloons past this multiple
     'second_pass': True,        # second, shifted grid so nobody is missed by
                                 # falling across a window edge (doubles the time)
     'skin_pad': 0,              # grow past the model's skin edge (0 = exact)
@@ -2994,7 +2996,9 @@ def skinblock_process():
                 return default
         _sbe.SKIN_BIAS = _num('skin_bias', 0.35, -2.0, 2.0)
         _sbe.SMOOTH_PX = int(_num('smooth_shapes', 0.6, 0.0, 3.0) * 3.3)   # 0.6 -> 2px
-        _sbe.COLOUR_TOLERANCE = _num('skin_colour_tolerance', 14, 4, 40)
+        _sbe.COLOUR_TOLERANCE = _num('skin_colour_tolerance', 12, 4, 40)
+        _sbe.MAX_GROW_PX = int(_num('skin_reach_px', 90, 8, 300))
+        _sbe.MAX_GROW_RATIO = _num('skin_grow_limit', 2.4, 1.2, 6.0)
         _sbe.WINDOW_PX = int(_num('window_px', 260, 120, 800))
         _sbe.MAX_WINDOWS = int(_num('max_windows', 60, 1, 200))
         _sbe.TIME_BUDGET = _num('time_budget', 110, 20, 180)
@@ -3020,6 +3024,47 @@ def skinblock_process():
         traceback.print_exc()
         print(f"[skinblock] process failed: {type(e).__name__}: {str(e)[:300]}")
         return jsonify({'error': f'{type(e).__name__}: {str(e)[:200]}'}), 500
+
+@app.route('/api/skinblock/my-recent', methods=['GET'])
+def skinblock_my_recent():
+    """An agent's own recent photos, so a refresh (or a closed tab) doesn't lose
+    the batch they were working through. Scoped to their extension and to the
+    last few hours — this is a convenience for the person at the desk, not the
+    manager's archive, which lives behind /api/skinblock/history.
+    """
+    ext = (request.args.get('agent_ext') or '').strip()
+    if not re.fullmatch(r'\d{3}', ext):
+        return jsonify({'error': 'extension required'}), 400
+    try:
+        hours = max(1, min(48, int(request.args.get('hours', 12))))
+    except Exception:
+        hours = 12
+    limit = 40
+    try:
+        _purge_expired_skinblock_images()
+    except Exception:
+        pass
+    conn = get_db(); c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute("""SELECT id, file_name, person_found, created_at, covered_image, images_purged
+                 FROM skinblock_jobs
+                 WHERE agent_ext = %s
+                   AND created_at >= NOW() - (%s || ' hours')::INTERVAL
+                 ORDER BY created_at DESC LIMIT %s""", (ext, str(hours), limit))
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    out = []
+    for r in rows:
+        if r.get('images_purged') or not r.get('covered_image'):
+            continue
+        out.append({
+            'id': r['id'],
+            'file_name': r['file_name'],
+            'person_found': bool(r['person_found']),
+            'created_at': r['created_at'].isoformat() if r.get('created_at') else '',
+            'covered_image': r['covered_image'],
+        })
+    return jsonify({'items': out, 'hours': hours})
+
 
 @app.route('/api/skinblock/history', methods=['GET'])
 @require_manager
