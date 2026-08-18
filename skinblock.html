@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Skin Block — cover people before sending photos</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<!-- No web fonts: the page runs cross-origin-isolated so the detector can use
+     all CPU cores, and an outside font would be blocked (and is one more thing
+     the content filter could stop). System fonts below look near-identical. -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <style>
   :root{
@@ -177,7 +177,7 @@
 <body>
 
 <header class="topbar">
-  <h1 class="wordmark"><span class="bars"><i></i><i></i><i></i></span> Skin Block <span class="mono" style="font-size:11px;opacity:.55;">v10.1</span></h1>
+  <h1 class="wordmark"><span class="bars"><i></i><i></i><i></i></span> Skin Block <span class="mono" style="font-size:11px;opacity:.55;">v10.2</span></h1>
   <div class="status">
     <span id="extBadge" class="mono" style="display:none;background:var(--signal);color:var(--void);padding:3px 9px;font-weight:600;"></span>
     <span class="dot" id="dot"></span><span id="statusText">Loading detector…</span>
@@ -362,13 +362,18 @@ async function boot(){
       statusText.textContent = "Downloading detector \u2014 one time only (" + Math.round(p*100) + "%)";
     });
     LOCAL_MODEL = true;
+    const threads = (window.ort && window.ort.env.wasm.numThreads) || 1;
     statusText.textContent = backend === "webgpu"
       ? "Instant mode \u2014 using this PC's graphics"
-      : "Fast mode \u2014 running on this PC";
+      : ("Fast mode \u2014 this PC, " + threads + (threads > 1 ? " cores" : " core"));
+    console.log("[SkinBlock] backend:", backend, "threads:", threads,
+                "isolated:", self.crossOriginIsolated);
   }catch(e){
     LOCAL_MODEL = false;
-    console.warn("[SkinBlock] local model unavailable:", e && e.message);
-    statusText.textContent = "Server mode \u2014 slower, results still precise";
+    const why = (e && e.message) ? String(e.message).slice(0, 90) : "unknown";
+    console.warn("[SkinBlock] local model unavailable:", e);
+    statusText.textContent = "Server mode \u2014 " + why;
+    statusText.title = "Send this to David: " + why;
   }
 }
 
@@ -510,7 +515,14 @@ async function initBrowserModel(onProgress){
   if (!window.ort) await loadScript(ORT_URL);
   const ort = window.ort;
   ort.env.wasm.wasmPaths = ORT_WASM;
-  try { ort.env.wasm.numThreads = Math.min(4, navigator.hardwareConcurrency || 2); } catch(e){}
+  // Multi-threading needs the browser to be in "isolated" mode (the server sends
+  // the headers for that). Asking for threads without it makes loading fail
+  // outright, which is why this checks first.
+  try {
+    ort.env.wasm.numThreads = (self.crossOriginIsolated)
+      ? Math.min(4, navigator.hardwareConcurrency || 2) : 1;
+  } catch(e){ ort.env.wasm.numThreads = 1; }
+  ort.env.wasm.simd = true;
   ort.env.logLevel = "error";
 
   // fetch with progress so the one-time download doesn't look like a hang

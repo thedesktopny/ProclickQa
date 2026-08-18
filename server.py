@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, session, send_from_directory, send_file
+from flask import Flask, request, jsonify, session, send_from_directory, send_file, make_response
 from flask_cors import CORS
 import hashlib
 import os
@@ -4463,7 +4463,10 @@ def sb_lib(fname):
     mime = ('application/wasm' if fname.endswith('.wasm')
             else 'text/javascript' if fname.endswith(('.js', '.mjs'))
             else 'application/octet-stream')
-    return send_file(p, mimetype=mime)
+    r = make_response(send_file(p, mimetype=mime))
+    r.headers['Cross-Origin-Resource-Policy'] = 'same-origin'
+    r.headers['Cache-Control'] = 'public, max-age=31536000'
+    return r
 
 @app.route('/sbassets/hf/<path:hfpath>')
 def sb_hf(hfpath):
@@ -4476,12 +4479,24 @@ def sb_hf(hfpath):
     except Exception as e:
         return jsonify({'error': str(e)[:200]}), 502
     mime = 'application/json' if hfpath.endswith('.json') else 'application/octet-stream'
-    return send_file(p, mimetype=mime)
+    r = make_response(send_file(p, mimetype=mime))
+    r.headers['Cross-Origin-Resource-Policy'] = 'same-origin'
+    r.headers['Cache-Control'] = 'public, max-age=31536000'
+    return r
 
 @app.route('/skinblock')
 def skinblock_page():
-    """Public — no login required so any agent can use it directly."""
-    return send_from_directory('.', 'skinblock.html')
+    """Public — no login required so any agent can use it directly.
+
+    The two Cross-Origin headers below switch the browser into 'isolated' mode,
+    which is what unlocks multi-threaded WASM — the detector then uses all of
+    the PC's cores instead of one. Everything the page loads is same-origin, so
+    nothing breaks.
+    """
+    resp = make_response(send_from_directory('.', 'skinblock.html'))
+    resp.headers['Cross-Origin-Opener-Policy'] = 'same-origin'
+    resp.headers['Cross-Origin-Embedder-Policy'] = 'require-corp'
+    return resp
 
 @app.route('/')
 def index():
