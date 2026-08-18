@@ -24,9 +24,12 @@ import cv2
 
 MODEL_DIR = os.path.join(os.getenv('HOME', '.'), 'sbmodel')
 MODEL_PATH = os.path.join(MODEL_DIR, 'segformer_b2_clothes.onnx')
+# Quantized first: several times faster on a CPU App Service plan, which is what
+# keeps a whole screenshot inside Azure's 230s request limit. Full precision is
+# the fallback if the quantized export can't be fetched.
 MODEL_URLS = [
-    'https://huggingface.co/Xenova/segformer_b2_clothes/resolve/main/onnx/model.onnx',
     'https://huggingface.co/Xenova/segformer_b2_clothes/resolve/main/onnx/model_quantized.onnx',
+    'https://huggingface.co/Xenova/segformer_b2_clothes/resolve/main/onnx/model.onnx',
 ]
 
 # class ids in this model
@@ -103,7 +106,7 @@ def get_session():
             shp = _session.get_inputs()[0].shape          # e.g. [1, 3, 512, 512] or ['b',3,'h','w']
             dynamic = not isinstance(shp[2], int) or not isinstance(shp[3], int)
             if dynamic:
-                INPUT_SIZE = 640      # finer label map than 512, still quick on CPU
+                INPUT_SIZE = 512      # a bigger input is sharper but much slower
             elif isinstance(shp[2], int) and shp[2] > 0:
                 INPUT_SIZE = int(shp[2])
         except Exception:
@@ -303,7 +306,24 @@ def find_tiles(img):
 WINDOW_PX = 380          # how much original image each model run covers
 WINDOW_OVERLAP = 0.12
 MAX_WINDOWS = 15         # hard ceiling so one huge image can't run away
-TIME_BUDGET = 150.0      # seconds; Azure kills the request at ~230
+TIME_BUDGET = 110.0      # seconds of model time; Azure kills the request at ~230,
+                         # and decode, smoothing and PNG encode need room too
+_speed = None            # measured seconds per model run on this server
+
+
+def _measure_speed(img):
+    """One timed inference so we know what this server can actually afford.
+    Cached per process — the answer doesn't change between requests."""
+    global _speed
+    if _speed is not None:
+        return _speed
+    import time as _time
+    probe = cv2.resize(img, (INPUT_SIZE, INPUT_SIZE), interpolation=cv2.INTER_AREA)
+    t = _time.time()
+    parse_labels(probe)
+    _speed = max(0.05, _time.time() - t)
+    print('[skinblock] one model run takes %.1fs on this server' % _speed)
+    return _speed
 
 
 def model_skin(img, include_neck=False, budget=TIME_BUDGET):
@@ -312,15 +332,24 @@ def model_skin(img, include_neck=False, budget=TIME_BUDGET):
     if get_session() is None:
         return None, False
     h, w = img.shape[:2]
+
+    # How many runs fit in the budget on THIS server? Measure, don't assume —
+    # a fixed window count is what caused the gateway timeouts.
+    per_run = _measure_speed(img)
+    affordable = max(1, int((budget - per_run) / per_run))
+
     cols = max(1, int(round(w / float(WINDOW_PX))))
     rows = max(1, int(round(h / float(WINDOW_PX))))
-    while cols * rows > MAX_WINDOWS and (cols > 1 or rows > 1):
+    limit = min(MAX_WINDOWS, affordable)
+    while cols * rows > limit and (cols > 1 or rows > 1):
         if cols >= rows and cols > 1:
             cols -= 1
         elif rows > 1:
             rows -= 1
         else:
             break
+    print('[skinblock] %dx%d windows (%d runs, ~%.0fs of %.0fs budget)'
+          % (cols, rows, cols * rows, cols * rows * per_run, budget))
 
     mask = np.zeros((h, w), np.uint8)
     cw, ch = w / float(cols), h / float(rows)
@@ -328,7 +357,7 @@ def model_skin(img, include_neck=False, budget=TIME_BUDGET):
     partial = False
     for ry in range(rows):
         for rx in range(cols):
-            if _time.time() - started > budget:
+            if _time.time() - started > budget - per_run * 0.5:
                 partial = True
                 break
             x0 = int(max(0, rx * cw - cw * WINDOW_OVERLAP))

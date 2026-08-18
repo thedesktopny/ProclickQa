@@ -2858,6 +2858,7 @@ SKINBLOCK_DEFAULTS = {
     'cover_hair': False,        # hair stays visible; set True to cover the whole head
     'smooth_shapes': 1.0,       # 0 = trace exactly, 1 = rounded blob, up to 3
     'skin_pad': 0,              # grow past the model's skin edge (0 = exact)
+    'time_budget': 110,         # seconds of model time per photo; Azure aborts at ~230
     'edge_padding': 5,          # % of image dimension to expand the mask
     'face_grow_x': 0.45,        # extra width around detected faces
     'face_grow_y': 0.55,        # extra height around detected faces
@@ -2992,6 +2993,10 @@ def skinblock_process():
             _sbe.SMOOTH = 1.0
         _sbe.COVER_MODE = 'solid' if str(s.get('cover_mode', 'blend')).lower() == 'solid' else 'blend'
         _sbe.COVER_HAIR = s.get('cover_hair', False) is True
+        try:
+            _sbe.TIME_BUDGET = max(20.0, min(180.0, float(s.get('time_budget', 110))))
+        except Exception:
+            _sbe.TIME_BUDGET = 110.0
         out, info = _sbe.process(img, cover=cover,
                                  include_neck=bool(s.get('cover_neck')))
         ok, buf = _cv2.imencode('.png', out)
