@@ -33,6 +33,23 @@ MODEL_URLS = [
 BACKGROUND, HAT, HAIR, SUNGLASSES, UPPER, SKIRT, PANTS, DRESS, BELT = 0, 1, 2, 3, 4, 5, 6, 7, 8
 LEFT_SHOE, RIGHT_SHOE, FACE, LEFT_LEG, RIGHT_LEG, LEFT_ARM, RIGHT_ARM, BAG, SCARF = 9, 10, 11, 12, 13, 14, 15, 16, 17
 SKIN_CLASSES = (FACE, LEFT_LEG, RIGHT_LEG, LEFT_ARM, RIGHT_ARM)
+# The reference look covers the whole head, hair included, as one smooth shape.
+HEAD_CLASSES = (HAIR, HAT)
+COVER_HAIR = False
+
+# Shapes are smoothed into simple rounded blobs rather than traced pixel-exactly.
+# 0 disables. Higher = rounder/simpler.
+SMOOTH = 1.0
+
+# 'solid' = one colour everywhere (cover_color).
+# 'blend' = each covered area is filled with its own averaged tone, so the patch
+#           sits in the picture the way the reference examples do.
+COVER_MODE = 'blend'
+
+# How many pixels to grow the mask past the model's own edge. 0 = follow the
+# model exactly (cleanest, never touches clothing). Raise to 1-2 only if a thin
+# rim of skin ever survives at the boundary.
+SKIN_PAD = 0
 
 _session = None
 _session_tried = False
@@ -81,7 +98,17 @@ def get_session():
         so.intra_op_num_threads = max(1, (os.cpu_count() or 2))
         so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         _session = ort.InferenceSession(MODEL_PATH, so, providers=['CPUExecutionProvider'])
-        print('[skinblock] parser model loaded')
+        global INPUT_SIZE
+        try:
+            shp = _session.get_inputs()[0].shape          # e.g. [1, 3, 512, 512] or ['b',3,'h','w']
+            dynamic = not isinstance(shp[2], int) or not isinstance(shp[3], int)
+            if dynamic:
+                INPUT_SIZE = 640      # finer label map than 512, still quick on CPU
+            elif isinstance(shp[2], int) and shp[2] > 0:
+                INPUT_SIZE = int(shp[2])
+        except Exception:
+            pass
+        print('[skinblock] parser model loaded, input size %d' % INPUT_SIZE)
     except Exception as e:
         _model_error = str(e)[:200]
         print('[skinblock] parser unavailable, using fallback: ' + _model_error)
@@ -95,7 +122,8 @@ def model_status():
 
 def _preprocess(img_bgr):
     rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-    rgb = cv2.resize(rgb, (INPUT_SIZE, INPUT_SIZE), interpolation=cv2.INTER_LINEAR)
+    size = max(256, min(1024, int(INPUT_SIZE) // 32 * 32))
+    rgb = cv2.resize(rgb, (size, size), interpolation=cv2.INTER_LINEAR)
     x = rgb.astype(np.float32) / 255.0
     x = (x - MEAN) / STD
     return np.transpose(x, (2, 0, 1))[None, ...].astype(np.float32)
@@ -109,25 +137,52 @@ def parse_labels(img_bgr):
     try:
         inp = sess.get_inputs()[0].name
         out = sess.run(None, {inp: _preprocess(img_bgr)})[0]
-        logits = out[0] if out.ndim == 4 else out
-        cls = np.argmax(logits, axis=0).astype(np.uint8)
+        logits = out[0] if out.ndim == 4 else out          # (C, h, w)
         h, w = img_bgr.shape[:2]
-        return cv2.resize(cls, (w, h), interpolation=cv2.INTER_NEAREST)
+        # smooth (bilinear) upsample of every class score, then pick the winner
+        # per full-resolution pixel — this is what gives clean curved edges
+        # instead of the blocky staircase of a nearest-neighbour label map.
+        chans = [cv2.resize(c, (w, h), interpolation=cv2.INTER_LINEAR) for c in logits]
+        big = np.stack(chans, axis=0)
+        return np.argmax(big, axis=0).astype(np.uint8)
     except Exception as e:
         print('[skinblock] inference failed: ' + str(e)[:160])
         return None
+
+
+def _smooth_mask(sk):
+    """Rounds the outline into a simple blob — blur the mask and re-threshold.
+    This is what turns a jagged traced edge into the soft shapes in the
+    reference images, without letting the shape shrink away from the skin."""
+    if SMOOTH <= 0 or not sk.any():
+        return sk
+    h, w = sk.shape[:2]
+    k = int(round(min(h, w) * 0.02 * float(SMOOTH)))
+    k = max(3, k | 1)
+    blur = cv2.GaussianBlur(sk.astype(np.float32) * 255.0, (k, k), 0)
+    # threshold below the midpoint so smoothing never pulls the edge inside the
+    # real skin — it rounds corners outward instead of eroding coverage
+    out = (blur > 100).astype(np.uint8)
+    return cv2.morphologyEx(out, cv2.MORPH_CLOSE, np.ones((k, k), np.uint8))
 
 
 def skin_from_labels(labels, include_neck=False):
     if labels is None:
         return None
     wanted = list(SKIN_CLASSES) + ([SCARF] if include_neck else [])
+    if COVER_HAIR:
+        wanted += list(HEAD_CLASSES)
     sk = np.isin(labels, wanted).astype(np.uint8)
     if not sk.any():
         return sk
-    sk = cv2.morphologyEx(sk, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
-    k = max(3, (int(round(min(labels.shape) * 0.012)) | 1))
-    sk = cv2.dilate(sk, np.ones((k, k), np.uint8))
+    # close pinholes only (glasses, jewellery, a stray highlight). No dilation:
+    # growing the mask is what pushed the paint onto collars and straps, and the
+    # model's own boundary is already the true skin/clothing line.
+    sk = cv2.morphologyEx(sk, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    sk = _smooth_mask(sk)
+    pad = int(SKIN_PAD)
+    if pad > 0:
+        sk = cv2.dilate(sk, np.ones((pad * 2 + 1, pad * 2 + 1), np.uint8))
     return sk
 
 
@@ -245,9 +300,9 @@ def find_tiles(img):
 # fed to the model at full input size. Roughly 6 runs instead of 29, with the
 # same detail per thumbnail, because each window is ~700px of original image
 # upscaled to the model's 512px input.
-WINDOW_PX = 450          # how much original image each model run covers
+WINDOW_PX = 380          # how much original image each model run covers
 WINDOW_OVERLAP = 0.12
-MAX_WINDOWS = 12         # hard ceiling so one huge image can't run away
+MAX_WINDOWS = 15         # hard ceiling so one huge image can't run away
 TIME_BUDGET = 150.0      # seconds; Azure kills the request at ~230
 
 
@@ -303,6 +358,27 @@ def _tile_skin(crop, use_model, include_neck=False):
     return sk
 
 
+def paint(out, img, mask, cover):
+    """Applies the mask. In 'blend' mode each separate covered area is filled
+    with its own averaged colour, so the patch matches the picture instead of
+    being a black hole. In 'solid' mode everything gets the cover colour."""
+    if not mask.any():
+        return
+    if COVER_MODE != 'blend':
+        out[mask > 0] = cover
+        return
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(mask)
+    for i in range(1, n):
+        sel = lab == i
+        if stats[i, cv2.CC_STAT_AREA] < 12:
+            out[sel] = cover
+            continue
+        mean = img[sel].reshape(-1, 3).mean(axis=0)
+        # flatten and slightly mute it so the patch reads as a filled shape
+        tone = np.clip(mean * 0.92 + 14, 0, 255).astype(np.uint8)
+        out[sel] = tone
+
+
 def process(img, cover=(0, 0, 0), grid_face_threshold=4, include_neck=False):
     """Paint skin. Returns (painted_image, info)."""
     import time as _time
@@ -315,7 +391,7 @@ def process(img, cover=(0, 0, 0), grid_face_threshold=4, include_neck=False):
     if use_model:
         mask, partial = model_skin(img, include_neck)
         if mask is not None:
-            out[mask > 0] = cover
+            paint(out, img, mask, cover)
             info['painted'] = int(mask.any())
             info['partial'] = partial
             info['windows'] = True
@@ -330,7 +406,7 @@ def process(img, cover=(0, 0, 0), grid_face_threshold=4, include_neck=False):
     info['tiles'] = len(tiles)
     if not info['grid']:
         sk = _tile_skin(img, False, include_neck)
-        out[sk > 0] = cover
+        paint(out, img, sk, cover)
         info['painted'] = 1 if sk.any() else 0
         info['wash'] = not bool(sk.any())
         info['seconds'] = round(_time.time() - t0, 1)
@@ -344,8 +420,7 @@ def process(img, cover=(0, 0, 0), grid_face_threshold=4, include_neck=False):
         if not sk.any():
             info['skipped'] += 1
             continue
-        region = out[ty:ty + th, tx:tx + tw]
-        region[sk > 0] = cover
+        paint(out[ty:ty + th, tx:tx + tw], img[ty:ty + th, tx:tx + tw], sk, cover)
         info['painted'] += 1
     info['seconds'] = round(_time.time() - t0, 1)
     return out, info

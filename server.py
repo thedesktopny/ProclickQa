@@ -2851,7 +2851,13 @@ def _compute_pay(segments, sched_window, rate_history, ot_periods):
 
 # ─── SKIN BLOCK (photo people-cover tool) ─────────────────────────────────────
 SKINBLOCK_DEFAULTS = {
-    'cover_color': '#000000',   # Netfree-style black paint
+    # --- how the covering looks ---
+    'cover_mode': 'blend',      # 'blend' = fill each area with its own averaged
+                                # tone so it sits in the picture; 'solid' = flat colour
+    'cover_color': '#000000',   # used when cover_mode is 'solid'
+    'cover_hair': False,        # hair stays visible; set True to cover the whole head
+    'smooth_shapes': 1.0,       # 0 = trace exactly, 1 = rounded blob, up to 3
+    'skin_pad': 0,              # grow past the model's skin edge (0 = exact)
     'edge_padding': 5,          # % of image dimension to expand the mask
     'face_grow_x': 0.45,        # extra width around detected faces
     'face_grow_y': 0.55,        # extra height around detected faces
@@ -2970,17 +2976,41 @@ def skinblock_process():
             img = _cv2.resize(img, (int(ww*sc), int(hh*sc)))
         hexc = (s.get('cover_color') or '#000000').lstrip('#')
         cover = (int(hexc[4:6], 16), int(hexc[2:4], 16), int(hexc[0:2], 16))  # BGR
-        from skinblock_engine import process as _sb_process
-        out, info = _sb_process(img, cover=cover,
-                                include_neck=bool(s.get('cover_neck')))
+        import skinblock_engine as _sbe
+        # All tunable from Skin Block settings, no deploy needed:
+        #   skin_pad     0-4   grow past the model's edge (0 = exact)
+        #   smooth_shapes 0-3  round the outline into a simple blob (0 = off)
+        #   cover_mode  blend|solid   blend = fill with the area's own tone
+        #   cover_hair   true/false   cover the whole head, hair included
+        try:
+            _sbe.SKIN_PAD = max(0, min(4, int(s.get('skin_pad') or 0)))
+        except Exception:
+            _sbe.SKIN_PAD = 0
+        try:
+            _sbe.SMOOTH = max(0.0, min(3.0, float(s.get('smooth_shapes', 1.0))))
+        except Exception:
+            _sbe.SMOOTH = 1.0
+        _sbe.COVER_MODE = 'solid' if str(s.get('cover_mode', 'blend')).lower() == 'solid' else 'blend'
+        _sbe.COVER_HAIR = s.get('cover_hair', False) is True
+        out, info = _sbe.process(img, cover=cover,
+                                 include_neck=bool(s.get('cover_neck')))
         ok, buf = _cv2.imencode('.png', out)
         if not ok:
             return jsonify({'error': 'encode failed'}), 500
         data_url = 'data:image/png;base64,' + _b64.b64encode(buf.tobytes()).decode()
         return jsonify({'image': data_url, 'info': info})
+    except MemoryError:
+        print("[skinblock] process failed: out of memory")
+        return jsonify({'error': 'server ran out of memory on this image - try a smaller one'}), 500
+    except ImportError as e:
+        # a missing package is the most likely first-deploy failure, so name it plainly
+        print(f"[skinblock] missing dependency: {str(e)[:200]}")
+        return jsonify({'error': f'missing package on the server: {str(e)[:120]}'}), 500
     except Exception as e:
-        print(f"[skinblock] process failed: {str(e)[:200]}")
-        return jsonify({'error': str(e)[:200]}), 500
+        import traceback
+        traceback.print_exc()
+        print(f"[skinblock] process failed: {type(e).__name__}: {str(e)[:300]}")
+        return jsonify({'error': f'{type(e).__name__}: {str(e)[:200]}'}), 500
 
 @app.route('/api/skinblock/history', methods=['GET'])
 @require_manager
