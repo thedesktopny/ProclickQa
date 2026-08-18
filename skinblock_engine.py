@@ -78,7 +78,8 @@ def get_session():
         if not os.path.exists(MODEL_PATH) or os.path.getsize(MODEL_PATH) < 1024 * 1024:
             _download_model()
         so = ort.SessionOptions()
-        so.intra_op_num_threads = 2
+        so.intra_op_num_threads = max(1, (os.cpu_count() or 2))
+        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         _session = ort.InferenceSession(MODEL_PATH, so, providers=['CPUExecutionProvider'])
         print('[skinblock] parser model loaded')
     except Exception as e:
@@ -238,48 +239,115 @@ def find_tiles(img):
 
 # ---------- main entry ----------
 
+# Each model run costs real CPU time, so we do NOT run it once per thumbnail —
+# that was 29 runs on one screenshot and blew past Azure's 230s gateway limit.
+# Instead the image is covered by a small number of overlapping windows, each
+# fed to the model at full input size. Roughly 6 runs instead of 29, with the
+# same detail per thumbnail, because each window is ~700px of original image
+# upscaled to the model's 512px input.
+WINDOW_PX = 450          # how much original image each model run covers
+WINDOW_OVERLAP = 0.12
+MAX_WINDOWS = 12         # hard ceiling so one huge image can't run away
+TIME_BUDGET = 150.0      # seconds; Azure kills the request at ~230
+
+
+def model_skin(img, include_neck=False, budget=TIME_BUDGET):
+    """Skin mask for a whole image via overlapping windows. None if no model."""
+    import time as _time
+    if get_session() is None:
+        return None, False
+    h, w = img.shape[:2]
+    cols = max(1, int(round(w / float(WINDOW_PX))))
+    rows = max(1, int(round(h / float(WINDOW_PX))))
+    while cols * rows > MAX_WINDOWS and (cols > 1 or rows > 1):
+        if cols >= rows and cols > 1:
+            cols -= 1
+        elif rows > 1:
+            rows -= 1
+        else:
+            break
+
+    mask = np.zeros((h, w), np.uint8)
+    cw, ch = w / float(cols), h / float(rows)
+    started = _time.time()
+    partial = False
+    for ry in range(rows):
+        for rx in range(cols):
+            if _time.time() - started > budget:
+                partial = True
+                break
+            x0 = int(max(0, rx * cw - cw * WINDOW_OVERLAP))
+            y0 = int(max(0, ry * ch - ch * WINDOW_OVERLAP))
+            x1 = int(min(w, (rx + 1) * cw + cw * WINDOW_OVERLAP))
+            y1 = int(min(h, (ry + 1) * ch + ch * WINDOW_OVERLAP))
+            if x1 - x0 < 16 or y1 - y0 < 16:
+                continue
+            sub = img[y0:y1, x0:x1]
+            sk = skin_from_labels(parse_labels(sub), include_neck)
+            if sk is None:
+                continue
+            np.maximum(mask[y0:y1, x0:x1], sk, out=mask[y0:y1, x0:x1])
+        if partial:
+            break
+    return mask, partial
+
+
 def _tile_skin(crop, use_model, include_neck=False):
+    """Fallback-detector path, still per tile (it is cheap)."""
     th, tw = crop.shape[:2]
     up = min(4.0, max(1.0, 384.0 / max(tw, th)))
     work = cv2.resize(crop, (int(tw * up), int(th * up)), interpolation=cv2.INTER_LINEAR) if up > 1 else crop
-    sk = None
-    if use_model:
-        sk = skin_from_labels(parse_labels(work), include_neck)
-    if sk is None:
-        sk = fallback_skin(work)
+    sk = fallback_skin(work)
     if sk.shape[:2] != (th, tw):
         sk = cv2.resize(sk, (tw, th), interpolation=cv2.INTER_NEAREST)
     return sk
 
 
 def process(img, cover=(0, 0, 0), grid_face_threshold=4, include_neck=False):
-    h, w = img.shape[:2]
+    """Paint skin. Returns (painted_image, info)."""
+    import time as _time
+    t0 = _time.time()
     out = img.copy()
     use_model = get_session() is not None
-    tiles = find_tiles(img)
-    grid = len(tiles) >= 5
-    info = dict(grid=grid, tiles=len(tiles), painted=0, skipped=0,
-                detector='model' if use_model else 'fallback')
+    info = dict(detector='model' if use_model else 'fallback',
+                grid=False, tiles=0, painted=0, skipped=0, partial=False)
 
-    if not grid:
-        sk = _tile_skin(img, use_model, include_neck)
+    if use_model:
+        mask, partial = model_skin(img, include_neck)
+        if mask is not None:
+            out[mask > 0] = cover
+            info['painted'] = int(mask.any())
+            info['partial'] = partial
+            info['windows'] = True
+            info['seconds'] = round(_time.time() - t0, 1)
+            return out, info
+        use_model = False
+        info['detector'] = 'fallback'
+
+    # fallback detector: per tile, since it is cheap
+    tiles = find_tiles(img)
+    info['grid'] = len(tiles) >= 5
+    info['tiles'] = len(tiles)
+    if not info['grid']:
+        sk = _tile_skin(img, False, include_neck)
         out[sk > 0] = cover
         info['painted'] = 1 if sk.any() else 0
         info['wash'] = not bool(sk.any())
+        info['seconds'] = round(_time.time() - t0, 1)
         return out, info
 
     for (tx, ty, tw, th) in tiles:
         crop = img[ty:ty + th, tx:tx + tw]
         if crop.size == 0:
             continue
-        sk = _tile_skin(crop, use_model, include_neck)
+        sk = _tile_skin(crop, False, include_neck)
         if not sk.any():
             info['skipped'] += 1
             continue
         region = out[ty:ty + th, tx:tx + tw]
         region[sk > 0] = cover
         info['painted'] += 1
-
+    info['seconds'] = round(_time.time() - t0, 1)
     return out, info
 
 

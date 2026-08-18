@@ -177,7 +177,7 @@
 <body>
 
 <header class="topbar">
-  <h1 class="wordmark"><span class="bars"><i></i><i></i><i></i></span> Skin Block <span class="mono" style="font-size:11px;opacity:.55;">v8</span></h1>
+  <h1 class="wordmark"><span class="bars"><i></i><i></i><i></i></span> Skin Block <span class="mono" style="font-size:11px;opacity:.55;">v8.1</span></h1>
   <div class="status">
     <span id="extBadge" class="mono" style="display:none;background:var(--signal);color:var(--void);padding:3px 9px;font-weight:600;"></span>
     <span class="dot" id="dot"></span><span id="statusText">Loading detector…</span>
@@ -246,7 +246,7 @@
 const MAXDIM = 2000;
 
 const $ = id => document.getElementById(id);
-console.log("[SkinBlock] v8 — server-side neural parser");
+console.log("[SkinBlock] v8.1 — windowed neural parser");
 
 /* ---------- server settings + extension gate ---------- */
 /* selfie_multiclass_256x256 category indices */
@@ -478,15 +478,28 @@ async function handle(item){
   // send to the server for detection + painting
   const workEl = item.card.querySelector(".working .txt") || item.card.querySelector(".working");
   if (workEl) workEl.textContent = "Processing on server\u2026";
-  let resp = null;
+  let resp = null, errText = "";
   try{
     const r = await fetch("/api/skinblock/process", {
       method:"POST",
       headers:{ "Content-Type":"application/json" },
       body: JSON.stringify({ agent_ext: AGENT_EXT, image: base.toDataURL("image/jpeg", 0.92) })
     });
-    if (r.ok) resp = await r.json();
-  }catch(e){ /* network */ }
+    const body = await r.text();
+    let parsed = null;
+    try { parsed = JSON.parse(body); } catch(e){ /* not JSON */ }
+    if (r.ok && parsed && parsed.image){
+      resp = parsed;
+    } else {
+      // keep the real reason instead of a generic failure message
+      errText = (parsed && parsed.error) ? parsed.error : (body || "").slice(0, 300);
+      if (!errText) errText = "HTTP " + r.status;
+      console.error("[SkinBlock] server error:", r.status, errText);
+    }
+  }catch(e){
+    errText = "Could not reach the server: " + (e.message || e);
+    console.error("[SkinBlock]", e);
+  }
 
   if (resp && resp.image){
     const img = new Image();
@@ -502,6 +515,8 @@ async function handle(item){
     const inf = resp.info || {};
     if (inf.grid){
       stamp(item, `Photo grid \u2014 ${inf.painted||0} of ${inf.tiles||0} tiles painted, check it`, "warn");
+    } else if (inf.partial){
+      stamp(item, "Too big to finish \u2014 part of this photo wasn't checked, cover by hand", "warn");
     } else if (inf.wash){
       stamp(item, "Couldn't separate skin from background \u2014 cover by hand", "warn");
     } else if ((inf.faces||0) > 0 || (inf.painted||0) > 0){
@@ -515,7 +530,7 @@ async function handle(item){
     item.done = true;
     render(item);
     item.card.querySelector(".working")?.remove();
-    stamp(item, "Server processing failed \u2014 cover by hand and tell David", "warn");
+    stamp(item, "Server error: " + (errText || "unknown") + " \u2014 cover by hand and send this message to David", "warn");
   }
   logToServer(item, compose(item));
   updateTally();
