@@ -177,7 +177,7 @@
 <body>
 
 <header class="topbar">
-  <h1 class="wordmark"><span class="bars"><i></i><i></i><i></i></span> Skin Block <span class="mono" style="font-size:11px;opacity:.55;">v10.2</span></h1>
+  <h1 class="wordmark"><span class="bars"><i></i><i></i><i></i></span> Skin Block <span class="mono" style="font-size:11px;opacity:.55;">v10.3</span></h1>
   <div class="status">
     <span id="extBadge" class="mono" style="display:none;background:var(--signal);color:var(--void);padding:3px 9px;font-weight:600;"></span>
     <span class="dot" id="dot"></span><span id="statusText">Loading detector…</span>
@@ -241,233 +241,7 @@
 </div>
 </div><!-- /#app -->
 
-<script type="module">
-
-const MAXDIM = 2000;
-
-const $ = id => document.getElementById(id);
-console.log("[SkinBlock] v10 — real-time, runs on this PC");
-
-/* ---------- server settings + extension gate ---------- */
-/* selfie_multiclass_256x256 category indices */
-
-/* Primary detector: SegFormer human-parsing (open source, MIT) via transformers.js.
-   Labels every pixel as Face / Left-arm / Right-arm / Left-leg / Right-leg or a
-   specific clothing type — the precise skin-vs-clothing line we need. Runs fully
-   in the browser; the model downloads once (~30 MB) and is cached after that. */
-
-let SETTINGS = {
-  cover_color:'#000000', edge_padding:5, face_grow_x:0.45, face_grow_y:0.55,
-  shrink_large:true, max_dimension:2000, require_extension:true,
-  cover_classes:[2,3],   // body-skin + face-skin only — clothes and shoes stay visible
-  tiles:1,               // split the image into an NxN grid before detecting
-  cover_faces:false,     // face rectangles cover hair/clothes too, so off by default
-  skin_color_detect:true,// per-pixel skin colour pass, works at any thumbnail size
-  skin_sensitivity:0,    // widens the skin colour window (0–25)
-  noise_removal:1        // erode radius to drop stray warm-coloured pixels
-};
-let AGENT_EXT = '';
-
-async function loadSettings(){
-  try{
-    const r = await fetch('/api/skinblock/settings');
-    if (r.ok) SETTINGS = Object.assign(SETTINGS, await r.json());
-  }catch(e){ /* offline: keep defaults */ }
-  const pr = $("padRange");
-  if (pr){ pr.value = SETTINGS.edge_padding; $("padVal").textContent = SETTINGS.edge_padding; }
-  const sc = $("shrinkChk"); if (sc) sc.checked = !!SETTINGS.shrink_large;
-  const ts = $("tilesSel");
-  if (ts){
-    ts.value = String(SETTINGS.tiles || 1);
-    if (ts.value !== String(SETTINGS.tiles || 1)) ts.value = "1";
-    ts.addEventListener("change", () => { SETTINGS.tiles = parseInt(ts.value) || 1; });
-  }
-}
-
-function openApp(ext){
-  AGENT_EXT = ext;
-  $("gate").style.display = "none";
-  $("app").style.display = "";
-  const badge = $("extBadge");
-  badge.textContent = "EXT " + ext;
-  badge.style.display = "";
-  try{ sessionStorage.setItem('sb_ext', ext); }catch(e){}
-}
-
-(async function initGate(){
-  await loadSettings();
-  if (!SETTINGS.require_extension){ openApp('000'); return; }
-  let saved = null;
-  try{ saved = sessionStorage.getItem('sb_ext'); }catch(e){}
-  if (saved && /^\d{3}$/.test(saved)){ openApp(saved); return; }
-
-  const go = () => {
-    const v = ($("extInput").value || '').trim();
-    if (!/^\d{3}$/.test(v)){
-      $("extErr").textContent = "Extension must be exactly 3 digits";
-      return;
-    }
-    $("extErr").textContent = "";
-    openApp(v);
-  };
-  $("extGo").addEventListener("click", go);
-  $("extInput").addEventListener("keydown", e => { if (e.key === "Enter") go(); });
-  $("extInput").addEventListener("input", e => {
-    e.target.value = e.target.value.replace(/\D/g,'').slice(0,3);
-    $("extErr").textContent = "";
-  });
-  $("extInput").focus();
-})();
-
-async function logToServer(item, outCanvas){
-  try{
-    const toDataURL = c => c.toDataURL('image/jpeg', 0.7);
-    await fetch('/api/skinblock/submit', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({
-        agent_ext: AGENT_EXT,
-        file_name: item.file.name,
-        original_image: toDataURL(item.base),
-        covered_image: toDataURL(outCanvas),
-        person_found: item.coverage > 0.0004,
-        faces_found: (item.faces||[]).length,
-        manual_bars: (item.bars||[]).length,
-        coverage_pct: Math.round((item.coverage||0) * 10000) / 100,
-        settings_used: SETTINGS,
-      })
-    });
-  }catch(e){ /* never block the agent's work on a logging failure */ }
-}
-
-const dot=$("dot"), statusText=$("statusText"), grid=$("grid"), drop=$("drop");
-const fileInput=$("fileInput"), wipeFill=$("wipeFill"), actionbar=$("actionbar");
-const tally=$("tally"), dlBtn=$("dlBtn"), padRange=$("padRange"), padVal=$("padVal");
-
-let ready=false;
-let LOCAL_MODEL = false;
-const items=[];
-let queue=Promise.resolve();
-
-/* ---------------- model boot ---------------- */
-async function boot(){
-  // v7: all detection runs on the VoiceGuard server. The page only uploads the
-  // photo and shows the painted result — nothing to download, nothing for the
-  // content filter to block, and every agent gets identical output.
-  ready = true;
-  dot.classList.add("on");
-  statusText.textContent = "Loading detector\u2026";
-  // Run the detector on THIS machine — that is what makes it instant.
-  try{
-    const backend = await initBrowserModel(p => {
-      statusText.textContent = "Downloading detector \u2014 one time only (" + Math.round(p*100) + "%)";
-    });
-    LOCAL_MODEL = true;
-    const threads = (window.ort && window.ort.env.wasm.numThreads) || 1;
-    statusText.textContent = backend === "webgpu"
-      ? "Instant mode \u2014 using this PC's graphics"
-      : ("Fast mode \u2014 this PC, " + threads + (threads > 1 ? " cores" : " core"));
-    console.log("[SkinBlock] backend:", backend, "threads:", threads,
-                "isolated:", self.crossOriginIsolated);
-  }catch(e){
-    LOCAL_MODEL = false;
-    const why = (e && e.message) ? String(e.message).slice(0, 90) : "unknown";
-    console.warn("[SkinBlock] local model unavailable:", e);
-    statusText.textContent = "Server mode \u2014 " + why;
-    statusText.title = "Send this to David: " + why;
-  }
-}
-
-boot().catch(()=>{
-  statusText.textContent = "Detector failed to load — check the connection";
-});
-
-/* ---------------- intake ---------------- */
-$("pickBtn").addEventListener("click", ()=> fileInput.click());
-fileInput.addEventListener("change", e => { addFiles(e.target.files); fileInput.value=""; });
-
-["dragenter","dragover"].forEach(ev =>
-  drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("hot"); }));
-["dragleave","drop"].forEach(ev =>
-  drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("hot"); }));
-drop.addEventListener("drop", e => addFiles(e.dataTransfer.files));
-window.addEventListener("dragover", e => e.preventDefault());
-window.addEventListener("drop", e => e.preventDefault());
-
-function addFiles(list){
-  const files = [...list].filter(f => f.type.startsWith("image/"));
-  if (!files.length) return;
-  actionbar.classList.add("up");
-  for (const file of files){
-    const item = { file, id:"s"+Math.random().toString(36).slice(2,9), bars:[], autoRects:[], done:false };
-    items.push(item);
-    buildCard(item);
-    queue = queue.then(()=> handle(item)).catch(()=> markFailed(item));
-  }
-  updateTally();
-  queue = queue.then(finishRun);
-}
-
-/* ---------------- cards ---------------- */
-function buildCard(item){
-  const card = document.createElement("div");
-  card.className = "shot";
-  card.innerHTML = `
-    <div class="frame">
-      <canvas></canvas>
-      <div class="working">Working…</div>
-    </div>
-    <div class="meta">
-      <span class="fname"></span>
-      <button class="ghost" data-act="edit">Fix</button>
-      <button class="ghost" data-act="save">Save</button>
-    </div>`;
-  card.querySelector(".fname").textContent = item.file.name;
-  card.querySelector('[data-act="edit"]').addEventListener("click", ()=> openEditor(item));
-  card.querySelector('[data-act="save"]').addEventListener("click", ()=> saveOne(item));
-  grid.appendChild(card);
-  item.card = card;
-  item.canvas = card.querySelector("canvas");
-}
-
-function markFailed(item){
-  item.done = false;
-  item.card.querySelector(".working")?.remove();
-  stamp(item, "Could not read", "warn");
-}
-
-function stamp(item, text, kind){
-  item.card.querySelector(".badge")?.remove();
-  const b = document.createElement("div");
-  b.className = "badge" + (kind ? " "+kind : "");
-  b.textContent = text;
-  item.card.querySelector(".frame").appendChild(b);
-}
-
-/* ---------------- the actual work ---------------- */
-/*
-   Precision strategy (three layers working together):
-
-   1. ADAPTIVE COLOUR MODEL — instead of one fixed "skin colour" range for every
-      photo, we sample the actual skin in THIS photo (from the face the detector
-      found, or from pixels the AI already called skin) and build the colour
-      window around those samples. Handles every skin tone and every lighting
-      condition, and stops matching beige furniture.
-
-   2. AGREE, DON'T ADD — the AI mask and the colour test now have to AGREE.
-      AI-skin pixels whose colour doesn't look like this person's skin get
-      trimmed off (that's the blob slopping onto collars and sleeves). Colour
-      hits that don't touch any AI-skin or a face get dropped (that's the wood
-      and cardboard). The old behaviour — union everything — is only used as a
-      fallback when the AI finds nothing at all (tiny grid thumbnails).
-
-   3. EDGE SNAP — the AI works on a small internal mask; scaling that up is what
-      made edges blocky. The final mask is now rebuilt at FULL resolution: solid
-      core stays covered, and the uncertain rim around it is decided pixel by
-      pixel by the colour model, so the boundary lands on the real line between
-      skin and clothing.
-*/
-
-/* ================= real-time detector (runs on THIS PC, not the server) =======
+<script type="module">/* ================= real-time detector (runs on THIS PC, not the server) =======
    The agent's machine has a GPU; the shared Azure CPU does not. Running the
    parser here is what makes it instant instead of a 40-second round trip.
 
@@ -763,6 +537,233 @@ async function processInBrowser(base, onStep){
   for (let i = 0; i < smoothed.length; i++) if (smoothed[i]){ any = true; break; }
   return { canvas: out, found: any };
 }
+
+
+
+
+const MAXDIM = 2000;
+
+const $ = id => document.getElementById(id);
+console.log("[SkinBlock] v10.3 — real-time, runs on this PC");
+
+/* ---------- server settings + extension gate ---------- */
+/* selfie_multiclass_256x256 category indices */
+
+/* Primary detector: SegFormer human-parsing (open source, MIT) via transformers.js.
+   Labels every pixel as Face / Left-arm / Right-arm / Left-leg / Right-leg or a
+   specific clothing type — the precise skin-vs-clothing line we need. Runs fully
+   in the browser; the model downloads once (~30 MB) and is cached after that. */
+
+let SETTINGS = {
+  cover_color:'#000000', edge_padding:5, face_grow_x:0.45, face_grow_y:0.55,
+  shrink_large:true, max_dimension:2000, require_extension:true,
+  cover_classes:[2,3],   // body-skin + face-skin only — clothes and shoes stay visible
+  tiles:1,               // split the image into an NxN grid before detecting
+  cover_faces:false,     // face rectangles cover hair/clothes too, so off by default
+  skin_color_detect:true,// per-pixel skin colour pass, works at any thumbnail size
+  skin_sensitivity:0,    // widens the skin colour window (0–25)
+  noise_removal:1        // erode radius to drop stray warm-coloured pixels
+};
+let AGENT_EXT = '';
+
+async function loadSettings(){
+  try{
+    const r = await fetch('/api/skinblock/settings');
+    if (r.ok) SETTINGS = Object.assign(SETTINGS, await r.json());
+  }catch(e){ /* offline: keep defaults */ }
+  const pr = $("padRange");
+  if (pr){ pr.value = SETTINGS.edge_padding; $("padVal").textContent = SETTINGS.edge_padding; }
+  const sc = $("shrinkChk"); if (sc) sc.checked = !!SETTINGS.shrink_large;
+  const ts = $("tilesSel");
+  if (ts){
+    ts.value = String(SETTINGS.tiles || 1);
+    if (ts.value !== String(SETTINGS.tiles || 1)) ts.value = "1";
+    ts.addEventListener("change", () => { SETTINGS.tiles = parseInt(ts.value) || 1; });
+  }
+}
+
+function openApp(ext){
+  AGENT_EXT = ext;
+  $("gate").style.display = "none";
+  $("app").style.display = "";
+  const badge = $("extBadge");
+  badge.textContent = "EXT " + ext;
+  badge.style.display = "";
+  try{ sessionStorage.setItem('sb_ext', ext); }catch(e){}
+}
+
+(async function initGate(){
+  await loadSettings();
+  if (!SETTINGS.require_extension){ openApp('000'); return; }
+  let saved = null;
+  try{ saved = sessionStorage.getItem('sb_ext'); }catch(e){}
+  if (saved && /^\d{3}$/.test(saved)){ openApp(saved); return; }
+
+  const go = () => {
+    const v = ($("extInput").value || '').trim();
+    if (!/^\d{3}$/.test(v)){
+      $("extErr").textContent = "Extension must be exactly 3 digits";
+      return;
+    }
+    $("extErr").textContent = "";
+    openApp(v);
+  };
+  $("extGo").addEventListener("click", go);
+  $("extInput").addEventListener("keydown", e => { if (e.key === "Enter") go(); });
+  $("extInput").addEventListener("input", e => {
+    e.target.value = e.target.value.replace(/\D/g,'').slice(0,3);
+    $("extErr").textContent = "";
+  });
+  $("extInput").focus();
+})();
+
+async function logToServer(item, outCanvas){
+  try{
+    const toDataURL = c => c.toDataURL('image/jpeg', 0.7);
+    await fetch('/api/skinblock/submit', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        agent_ext: AGENT_EXT,
+        file_name: item.file.name,
+        original_image: toDataURL(item.base),
+        covered_image: toDataURL(outCanvas),
+        person_found: item.coverage > 0.0004,
+        faces_found: (item.faces||[]).length,
+        manual_bars: (item.bars||[]).length,
+        coverage_pct: Math.round((item.coverage||0) * 10000) / 100,
+        settings_used: SETTINGS,
+      })
+    });
+  }catch(e){ /* never block the agent's work on a logging failure */ }
+}
+
+const dot=$("dot"), statusText=$("statusText"), grid=$("grid"), drop=$("drop");
+const fileInput=$("fileInput"), wipeFill=$("wipeFill"), actionbar=$("actionbar");
+const tally=$("tally"), dlBtn=$("dlBtn"), padRange=$("padRange"), padVal=$("padVal");
+
+let ready=false;
+let LOCAL_MODEL = false;
+const items=[];
+let queue=Promise.resolve();
+
+/* ---------------- model boot ---------------- */
+async function boot(){
+  // v7: all detection runs on the VoiceGuard server. The page only uploads the
+  // photo and shows the painted result — nothing to download, nothing for the
+  // content filter to block, and every agent gets identical output.
+  ready = true;
+  dot.classList.add("on");
+  statusText.textContent = "Loading detector\u2026";
+  // Run the detector on THIS machine — that is what makes it instant.
+  try{
+    const backend = await initBrowserModel(p => {
+      statusText.textContent = "Downloading detector \u2014 one time only (" + Math.round(p*100) + "%)";
+    });
+    LOCAL_MODEL = true;
+    const threads = (window.ort && window.ort.env.wasm.numThreads) || 1;
+    statusText.textContent = backend === "webgpu"
+      ? "Instant mode \u2014 using this PC's graphics"
+      : ("Fast mode \u2014 this PC, " + threads + (threads > 1 ? " cores" : " core"));
+    console.log("[SkinBlock] backend:", backend, "threads:", threads,
+                "isolated:", self.crossOriginIsolated);
+  }catch(e){
+    LOCAL_MODEL = false;
+    const why = (e && e.message) ? String(e.message).slice(0, 90) : "unknown";
+    console.warn("[SkinBlock] local model unavailable:", e);
+    statusText.textContent = "Server mode \u2014 " + why;
+    statusText.title = "Send this to David: " + why;
+  }
+}
+
+boot().catch(()=>{
+  statusText.textContent = "Detector failed to load — check the connection";
+});
+
+/* ---------------- intake ---------------- */
+$("pickBtn").addEventListener("click", ()=> fileInput.click());
+fileInput.addEventListener("change", e => { addFiles(e.target.files); fileInput.value=""; });
+
+["dragenter","dragover"].forEach(ev =>
+  drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("hot"); }));
+["dragleave","drop"].forEach(ev =>
+  drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("hot"); }));
+drop.addEventListener("drop", e => addFiles(e.dataTransfer.files));
+window.addEventListener("dragover", e => e.preventDefault());
+window.addEventListener("drop", e => e.preventDefault());
+
+function addFiles(list){
+  const files = [...list].filter(f => f.type.startsWith("image/"));
+  if (!files.length) return;
+  actionbar.classList.add("up");
+  for (const file of files){
+    const item = { file, id:"s"+Math.random().toString(36).slice(2,9), bars:[], autoRects:[], done:false };
+    items.push(item);
+    buildCard(item);
+    queue = queue.then(()=> handle(item)).catch(()=> markFailed(item));
+  }
+  updateTally();
+  queue = queue.then(finishRun);
+}
+
+/* ---------------- cards ---------------- */
+function buildCard(item){
+  const card = document.createElement("div");
+  card.className = "shot";
+  card.innerHTML = `
+    <div class="frame">
+      <canvas></canvas>
+      <div class="working">Working…</div>
+    </div>
+    <div class="meta">
+      <span class="fname"></span>
+      <button class="ghost" data-act="edit">Fix</button>
+      <button class="ghost" data-act="save">Save</button>
+    </div>`;
+  card.querySelector(".fname").textContent = item.file.name;
+  card.querySelector('[data-act="edit"]').addEventListener("click", ()=> openEditor(item));
+  card.querySelector('[data-act="save"]').addEventListener("click", ()=> saveOne(item));
+  grid.appendChild(card);
+  item.card = card;
+  item.canvas = card.querySelector("canvas");
+}
+
+function markFailed(item){
+  item.done = false;
+  item.card.querySelector(".working")?.remove();
+  stamp(item, "Could not read", "warn");
+}
+
+function stamp(item, text, kind){
+  item.card.querySelector(".badge")?.remove();
+  const b = document.createElement("div");
+  b.className = "badge" + (kind ? " "+kind : "");
+  b.textContent = text;
+  item.card.querySelector(".frame").appendChild(b);
+}
+
+/* ---------------- the actual work ---------------- */
+/*
+   Precision strategy (three layers working together):
+
+   1. ADAPTIVE COLOUR MODEL — instead of one fixed "skin colour" range for every
+      photo, we sample the actual skin in THIS photo (from the face the detector
+      found, or from pixels the AI already called skin) and build the colour
+      window around those samples. Handles every skin tone and every lighting
+      condition, and stops matching beige furniture.
+
+   2. AGREE, DON'T ADD — the AI mask and the colour test now have to AGREE.
+      AI-skin pixels whose colour doesn't look like this person's skin get
+      trimmed off (that's the blob slopping onto collars and sleeves). Colour
+      hits that don't touch any AI-skin or a face get dropped (that's the wood
+      and cardboard). The old behaviour — union everything — is only used as a
+      fallback when the AI finds nothing at all (tiny grid thumbnails).
+
+   3. EDGE SNAP — the AI works on a small internal mask; scaling that up is what
+      made edges blocky. The final mask is now rebuilt at FULL resolution: solid
+      core stays covered, and the uncertain rim around it is decided pixel by
+      pixel by the colour model, so the boundary lands on the real line between
+      skin and clothing.
+*/
 
 async function handle(item){
   while (!ready) await sleep(180);
