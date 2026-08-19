@@ -981,6 +981,23 @@ td.agent{color:var(--text);font-weight:500;}
     </div>
 
 
+    <div class="card" style="margin-bottom:20px;padding:16px;">
+      <div style="font-size:13px;font-weight:700;margin-bottom:4px;">🔌 Server connections</div>
+      <div style="font-size:11.5px;color:var(--text3);margin-bottom:12px;">
+        The addresses this server connects out from — give these to Igor when a system
+        only allows known IPs. The test below says whether we can currently reach a host,
+        which separates a firewall block from a wrong password.
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px;">
+        <button onclick="showOutboundIp()" class="btn btn-outline" style="font-size:12px;">Show our IP addresses</button>
+        <input id="conn-host" placeholder="host to test — e.g. recordings.example.com"
+          style="flex:1;min-width:220px;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:7px;border-radius:6px;font-size:12px;">
+        <input id="conn-port" value="443" style="width:80px;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:7px;border-radius:6px;font-size:12px;">
+        <button onclick="testConnection()" class="btn btn-primary" style="font-size:12px;">Test connection</button>
+      </div>
+      <div id="conn-result" style="font-size:12px;color:var(--text2);white-space:pre-wrap;"></div>
+    </div>
+
     <div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap;align-items:flex-end;">
       <div>
         <div style="font-size:11px;color:var(--text3);margin-bottom:4px;">Extension</div>
@@ -2970,6 +2987,35 @@ async function saveWeeklySchedule(){
     loadRecurringList();
     loadTimeReport();
   }catch(e){ showToast('Failed: '+e.message, true); }
+}
+
+async function showOutboundIp(){
+  const box = document.getElementById('conn-result');
+  box.textContent = 'Checking…';
+  try{
+    const r = await API.get('/api/outbound-ip');
+    const all = (r.all_possible || []).join(', ') || '(not reported)';
+    box.textContent =
+      `Right now we appear as: ${r.current || 'unknown'}\n` +
+      `All possible addresses (give Igor this whole list):\n${all}\n` +
+      `Region: ${r.region || '?'}\n\n` +
+      `If the App Service tier is ever changed, check this again — the list changes with it.`;
+  }catch(e){ box.textContent = 'Could not read the addresses: ' + e.message; }
+}
+
+async function testConnection(){
+  const host = document.getElementById('conn-host').value.trim();
+  const port = document.getElementById('conn-port').value.trim() || '443';
+  const box = document.getElementById('conn-result');
+  if(!host){ box.textContent = 'Enter a host to test.'; return; }
+  box.textContent = `Trying ${host}:${port}…`;
+  try{
+    const r = await API.get(`/api/test-db-connection?host=${encodeURIComponent(host)}&port=${encodeURIComponent(port)}`);
+    box.textContent =
+      (r.reachable ? `✅ Reached ${host}:${port} in ${r.ms}ms\n` : `❌ Could not reach ${host}:${port}\n`) +
+      (r.meaning || '') + (r.greeting ? `\nServer said: ${r.greeting}` : '') +
+      (r.error ? `\nDetail: ${r.error}` : '');
+  }catch(e){ box.textContent = 'Test failed: ' + e.message; }
 }
 
 async function loadRecurringList(){
