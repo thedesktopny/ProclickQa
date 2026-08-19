@@ -239,7 +239,7 @@
 <div id="app" style="display:none">
   <header>
     <div class="bar">
-      <div class="wordmark"><span id="dot" class="lamp"></span> Skin Block <span class="ver mono">v12.2</span></div>
+      <div class="wordmark"><span id="dot" class="lamp"></span> Skin Block <span class="ver mono">v14.1</span></div>
       <div class="bar-right">
         <span id="statusText">Starting…</span>
         <span id="extBadge" class="chip" style="display:none"></span>
@@ -264,6 +264,7 @@
       <span class="spacer"></span>
       <span id="tally" class="mono" style="font-size:11.5px;letter-spacing:.1em;color:var(--faint)"></span>
       <button id="addBtn" class="btn">Add photos</button>
+      <button id="copyAllBtn" class="btn" disabled>Copy all</button>
       <button id="saveAllBtn" class="btn" disabled>Save all</button>
       <button id="clearBtn" class="btn btn-ghost">Clear</button>
     </div>
@@ -293,6 +294,7 @@
     <span class="spacer" style="flex:1"></span>
     <button id="edUndo" class="btn">Undo</button>
     <button id="edReset" class="btn">Start over</button>
+    <button id="edCopy" class="btn">Copy</button>
     <button id="edDone" class="btn btn-key">Done</button>
   </div>
   <div class="ed-stage"><canvas id="edCanvas"></canvas></div>
@@ -326,7 +328,9 @@ const SKIN_IDS = [CLS.FACE, CLS.LLEG, CLS.RLEG, CLS.LARM, CLS.RARM];
 const CLOTH_IDS = [CLS.UPPER, CLS.SKIRT, CLS.PANTS, CLS.DRESS, CLS.BELT,
                    CLS.LSHOE, CLS.RSHOE, CLS.BAG, CLS.SUNGLASSES];
 
-const NET_SIZE = 512;
+const NET_SIZE = 512;      // detail windows: small thumbnails genuinely need this
+const COARSE_SIZE = 384;   // the first look — and the whole answer when one big
+                           // subject fills the frame, where 512 buys nothing visible
 const MEAN = [0.485, 0.456, 0.406];
 const STD  = [0.229, 0.224, 0.225];
 
@@ -385,12 +389,13 @@ async function initBrowserModel(onProgress){
    We reduce the 18 class scores to ONE number per cell (best skin class minus
    best non-skin class) before upscaling. That keeps the smooth-boundary
    benefit of interpolating scores while being cheap enough for real time. */
-async function scoreRegion(srcCanvas, sx, sy, sw, sh){
+async function scoreRegion(srcCanvas, sx, sy, sw, sh, size){
+  const NET = size || NET_SIZE;
   const c = document.createElement("canvas");
-  c.width = NET_SIZE; c.height = NET_SIZE;
+  c.width = NET; c.height = NET;
   const cx = c.getContext("2d", { willReadFrequently:true });
-  cx.drawImage(srcCanvas, sx, sy, sw, sh, 0, 0, NET_SIZE, NET_SIZE);
-  const px = cx.getImageData(0, 0, NET_SIZE, NET_SIZE).data;
+  cx.drawImage(srcCanvas, sx, sy, sw, sh, 0, 0, NET, NET);
+  const px = cx.getImageData(0, 0, NET, NET).data;
 
   // Auto-levels: dark thumbnails (the black panel) look like background to the
   // model. Brightening the window before it goes in recovers those people.
@@ -409,7 +414,7 @@ async function scoreRegion(srcCanvas, sx, sy, sw, sh){
     for (let p = 0; p < px.length; p += 4){ px[p]=lut[px[p]]; px[p+1]=lut[px[p+1]]; px[p+2]=lut[px[p+2]]; }
   }
 
-  const n = NET_SIZE * NET_SIZE;
+  const n = NET * NET;
   const data = new Float32Array(3 * n);
   for (let i = 0, p = 0; i < n; i++, p += 4){
     data[i]        = (px[p]   / 255 - MEAN[0]) / STD[0];
@@ -418,7 +423,7 @@ async function scoreRegion(srcCanvas, sx, sy, sw, sh){
   }
   const ort = window.ort;
   const feeds = {};
-  feeds[ortSession.inputNames[0]] = new ort.Tensor("float32", data, [1, 3, NET_SIZE, NET_SIZE]);
+  feeds[ortSession.inputNames[0]] = new ort.Tensor("float32", data, [1, 3, NET, NET]);
   const out = await ortSession.run(feeds);
   const t = out[ortSession.outputNames[0]];
   const [, C, gh, gw] = t.dims;
@@ -681,12 +686,46 @@ async function processInBrowser(base, onStep){
   const WINDOW = 260;                       // finer than before: more detail per thumbnail
   let cols = Math.max(1, Math.round(w / WINDOW));
   let rows = Math.max(1, Math.round(h / WINDOW));
+  // Window size follows the CONTENT, never the machine's speed. Letting a time
+  // budget shrink the grid meant a slower PC produced worse covering — windows
+  // spanning several thumbnails can't resolve a bikini strap.
   const cap = Number(SETTINGS.max_windows ?? 60);
   while (cols * rows > cap){ if (cols >= rows && cols > 1) cols--; else if (rows > 1) rows--; else break; }
 
   const S = new Float32Array(w*h).fill(-9);   // skin score
   const C = new Float32Array(w*h).fill(-9);   // clothing score
   SKIN_BIAS = Number(SETTINGS.skin_bias ?? 0.35);
+
+  // ---- one coarse look first -------------------------------------------
+  // Windows exist so small thumbnails in a screenshot get enough resolution.
+  // When one big person fills the frame, the whole photo at model size is
+  // already plenty of detail — so look once and stop. That's 1 run instead of
+  // 25 on an ordinary product photo.
+  {
+    const c = await scoreRegion(base, 0, 0, w, h, COARSE_SIZE);
+    blendScore(c.score, c.gw, c.gh, w, h, S, 0, 0, w);
+    blendScore(c.cloth, c.gw, c.gh, w, h, C, 0, 0, w);
+    if (onStep) onStep(1, 1);
+  }
+  const coarse = new Uint8Array(w*h);
+  // A deliberately generous map for deciding which windows to skip: the first
+  // look runs small and can't resolve tiny thumbnails, so anything even faintly
+  // person-like keeps its window. Skipping is only for clearly empty areas.
+  const gate = new Uint8Array(w*h);
+  for (let i = 0; i < coarse.length; i++){
+    coarse[i] = (S[i] > 0 && C[i] <= 0) ? 1 : 0;
+    gate[i] = S[i] > -2.0 ? 1 : 0;
+  }
+
+  // subject height separates the cases far better than area: a portrait's
+  // largest skin patch runs ~40% of frame height, the biggest face in a grid ~14%
+  let tallest = 0;
+  {
+    const { comps } = labelComponents(coarse, w, h);
+    for (const c of comps){ const ch2 = c.maxy - c.miny + 1; if (ch2 > tallest) tallest = ch2; }
+  }
+  const oneIsEnough = tallest > h * Number(SETTINGS.coarse_enough ?? 0.28);
+  if (!oneIsEnough){
   const cw = w / cols, ch = h / rows;
   const OV = 0.12;
 
@@ -703,6 +742,14 @@ async function processInBrowser(base, onStep){
         const y1 = Math.min(h, Math.ceil((ry+1+oy)*ch + ch*OV));
         const sw = x1-x0, sh = y1-y0;
         if (sw < 16 || sh < 16) continue;
+        // nothing human here — don't spend a run on it
+        let anyHere = false;
+        const M = 24;   // margin, since the coarse look is approximate
+        const gy0 = Math.max(0, y0-M), gy1 = Math.min(h, y1+M);
+        const gx0 = Math.max(0, x0-M), gx1 = Math.min(w, x1+M);
+        for (let y = gy0; y < gy1 && !anyHere; y += 2)
+          for (let x = gx0; x < gx1; x += 2) if (gate[y*w + x]){ anyHere = true; break; }
+        if (!anyHere){ done++; if (onStep) onStep(Math.min(done,total), total); continue; }
         const { score, cloth, gw, gh } = await scoreRegion(base, x0, y0, sw, sh);
         blendScore(score, gw, gh, sw, sh, S, x0, y0, w);
         blendScore(cloth, gw, gh, sw, sh, C, x0, y0, w);
@@ -712,6 +759,7 @@ async function processInBrowser(base, onStep){
       }
     }
   }
+  }  // end: detail windows, only needed when the people are small
 
   // skin wins only where it also beats clothing
   const mask = new Uint8Array(w*h);
@@ -750,7 +798,7 @@ async function processInBrowser(base, onStep){
 ========================================================== */
 
 const $ = id => document.getElementById(id);
-console.log("[SkinBlock] v12.2 — session history, add while working");
+console.log("[SkinBlock] v14.1 — quality no longer depends on machine speed");
 
 const dot = $("dot"), statusText = $("statusText"), sheet = $("sheet"), bay = $("bay");
 const fileInput = $("fileInput"), saveAllBtn = $("saveAllBtn"), tally = $("tally");
@@ -890,12 +938,14 @@ function buildFrame(item){
       <span class="status"><b></b><span>Working…</span></span>
       <span class="spacer"></span>
       <button class="btn edit-btn" disabled>Edit</button>
+      <button class="btn copy-btn" disabled>Copy</button>
       <button class="btn save-btn" disabled>Save</button>
     </div>`;
   sheet.appendChild(el);
   item.el = el;
   el.querySelector(".edit-btn").addEventListener("click", () => openEditor(item));
   el.querySelector(".save-btn").addEventListener("click", () => saveOne(item));
+  el.querySelector(".copy-btn").addEventListener("click", () => copyOne(item));
 
   // drag the finished photo straight out to a folder, chat window or email
   el.addEventListener("dragstart", e => {
@@ -996,6 +1046,7 @@ function finish(item, secs, failed){
   item.el.setAttribute("draggable", "true");
   item.el.querySelector(".edit-btn").disabled = false;
   item.el.querySelector(".save-btn").disabled = false;
+  item.el.querySelector(".copy-btn").disabled = false;
   if (failed)            stamp(item, "Couldn't cover this one — check it by hand", "bad");
   else if (item.partial) stamp(item, "Part of this photo wasn't checked — look it over", "warn");
   else if (item.found)   stamp(item, "Skin covered" + (secs ? " · " + secs : ""), "");
@@ -1122,6 +1173,9 @@ $("edReset").addEventListener("click", () => {
   if (!ed.item) return;
   ed.item.bars = []; ed.item.keeps = []; paintEditor();
 });
+$("edCopy").addEventListener("click", () => {
+  if (ed.item) copyCanvas(compose(ed.item), "Copied " + ed.item.file.name);
+});
 $("edDone").addEventListener("click", () => {
   if (ed.item){ render(ed.item); logToServer(ed.item, ed.item.out); }
   $("editor").classList.remove("open"); ed.item = null;
@@ -1140,6 +1194,40 @@ function triggerDownload(blob, name){
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 4000);
 }
+/* Copy the finished photo to the clipboard so it can be pasted straight into
+   WhatsApp, an email or a chat — no saving to disk and hunting for the file.
+   The clipboard only takes PNG, so the copy is a PNG even though saved files
+   stay JPG. */
+async function copyCanvas(canvas, label){
+  if (!navigator.clipboard || !window.ClipboardItem){
+    toast("This browser can't copy images — use Save, or drag the photo out");
+    return false;
+  }
+  try{
+    const blob = await new Promise(res => canvas.toBlob(res, "image/png"));
+    if (!blob) throw new Error("no image");
+    await navigator.clipboard.write([ new ClipboardItem({ "image/png": blob }) ]);
+    toast(label || "Copied — paste it wherever you need it");
+    return true;
+  }catch(e){
+    console.warn("[SkinBlock] copy failed:", e);
+    toast("Couldn't copy — use Save, or drag the photo out");
+    return false;
+  }
+}
+async function copyOne(item){
+  if (!item.done) return;
+  await copyCanvas(item.out || compose(item), "Copied " + item.file.name);
+}
+async function copyFromDataUrl(dataUrl, name){
+  const img = new Image();
+  await new Promise(res => { img.onload = res; img.onerror = res; img.src = dataUrl; });
+  const c = document.createElement("canvas");
+  c.width = img.naturalWidth || img.width; c.height = img.naturalHeight || img.height;
+  c.getContext("2d").drawImage(img, 0, 0);
+  await copyCanvas(c, "Copied " + name);
+}
+
 async function saveOne(item){
   if (!item.done) return;
   triggerDownload(await toBlob(item.out || compose(item)), safeName(item.file.name));
@@ -1153,6 +1241,31 @@ async function saveAll(){
   toast(done.length === 1 ? "Photo saved" : done.length + " photos saved");
 }
 saveAllBtn.addEventListener("click", saveAll);
+
+$("copyAllBtn").addEventListener("click", async () => {
+  const done = items.filter(i => i.done);
+  if (!done.length) return;
+  if (done.length === 1){ await copyOne(done[0]); return; }
+  // The clipboard holds one image at a time, so several photos are stacked into
+  // a single sheet — one paste, every photo, in the order they were processed.
+  const cols = Math.ceil(Math.sqrt(done.length));
+  const rows = Math.ceil(done.length / cols);
+  const cw = 640, ch = 480, GAP = 10;
+  const sheetC = document.createElement("canvas");
+  sheetC.width = cols*cw + (cols+1)*GAP;
+  sheetC.height = rows*ch + (rows+1)*GAP;
+  const ctx = sheetC.getContext("2d");
+  ctx.fillStyle = "#13151B"; ctx.fillRect(0,0,sheetC.width,sheetC.height);
+  done.forEach((item, n) => {
+    const src = item.out || compose(item);
+    const s = Math.min(cw/src.width, ch/src.height);
+    const w = src.width*s, h = src.height*s;
+    const x = GAP + (n % cols)*(cw+GAP) + (cw-w)/2;
+    const y = GAP + Math.floor(n / cols)*(ch+GAP) + (ch-h)/2;
+    ctx.drawImage(src, x, y, w, h);
+  });
+  await copyCanvas(sheetC, `Copied all ${done.length} photos as one sheet`);
+});
 $("clearBtn").addEventListener("click", () => {
   items.forEach(i => { if (i.url) URL.revokeObjectURL(i.url); });
   items.length = 0; sheet.innerHTML = ""; bay.classList.remove("slim"); updateTally();
@@ -1165,6 +1278,7 @@ function updateTally(){
     ? `${done} OF ${items.length} READY` + (working ? ` · ${working} WORKING` : "")
     : "";
   saveAllBtn.disabled = done === 0;
+  $("copyAllBtn").disabled = done === 0;
 }
 
 /* ---------------- logging (never blocks the agent) ---------------- */
@@ -1214,17 +1328,20 @@ async function loadEarlier(){
       const when = p.created_at ? new Date(p.created_at).toLocaleTimeString([], {hour:"numeric", minute:"2-digit"}) : "";
       card.innerHTML = `
         <div class="thumb"><img alt="${p.file_name}" draggable="true"></div>
-        <div class="meta"><span title="${p.file_name}">${when} · ${p.file_name}</span><button>Save</button></div>`;
+        <div class="meta"><span title="${p.file_name}">${when} · ${p.file_name}</span>
+          <button class="past-copy">Copy</button><button class="past-save">Save</button></div>`;
       const img = card.querySelector("img");
       img.src = p.covered_image;
       img.addEventListener("dragstart", e => {
         e.dataTransfer.effectAllowed = "copy";
         e.dataTransfer.setData("DownloadURL", `image/jpeg:${safeName(p.file_name)}:${p.covered_image}`);
       });
-      card.querySelector("button").addEventListener("click", async () => {
+      card.querySelector(".past-save").addEventListener("click", async () => {
         const blob = await (await fetch(p.covered_image)).blob();
         triggerDownload(blob, safeName(p.file_name));
       });
+      card.querySelector(".past-copy").addEventListener("click", () =>
+        copyFromDataUrl(p.covered_image, p.file_name));
       row.appendChild(card);
     }
   }catch(e){ /* the strip is a convenience; never block the page on it */ }

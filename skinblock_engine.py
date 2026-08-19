@@ -50,13 +50,18 @@ COVER_MODE = 'blend'
 SKIN_BIAS = 0.35
 SMOOTH_PX = 2
 EXTEND_BY_COLOUR = True
-COLOUR_TOLERANCE = 14.0
+COLOUR_TOLERANCE = 12.0
+COARSE_ENOUGH = 0.28    # subject taller than this share of the frame -> one pass is enough
+MAX_GROW_PX = 90        # how far growth may travel from confirmed skin
+MAX_GROW_RATIO = 2.4    # throw the growth away if it balloons past this
 SECOND_PASS = True
 WINDOW_PX = 260
 MAX_WINDOWS = 60
 TIME_BUDGET = 110.0
 
-INPUT_SIZE = 512
+INPUT_SIZE = 512        # detail windows: small thumbnails genuinely need this
+COARSE_SIZE = 384       # the first look — and the whole answer when one big
+                        # subject fills the frame, where 512 buys nothing visible
 MEAN = np.array([0.485, 0.456, 0.406], np.float32)
 STD = np.array([0.229, 0.224, 0.225], np.float32)
 
@@ -156,30 +161,59 @@ def _scores(img, x0, y0, x1, y1):
     return skin - other + SKIN_BIAS, cloth - skin
 
 
-def _extend_by_colour(sub, seed):
-    """Reclaim bare torso the model labelled as clothing, using the person's own
-    skin colour learned from the skin it did find. Stops at real image edges."""
-    if int(seed.sum()) < 60:
-        return seed
-    lab = cv2.cvtColor(sub, cv2.COLOR_BGR2LAB).astype(np.float32)
-    med = np.median(lab[seed > 0].reshape(-1, 3), axis=0)
-    d = np.sqrt(((lab[:, :, 1:] - med[1:]) ** 2).sum(axis=2))     # colour distance
-    dl = np.abs(lab[:, :, 0] - med[0])                            # lightness may vary
-    allowed = ((d < COLOUR_TOLERANCE) & (dl < 55)).astype(np.uint8)
-    edges = cv2.dilate(cv2.Canny(cv2.GaussianBlur(sub, (3, 3), 0), 45, 120),
-                       np.ones((2, 2), np.uint8))
-    allowed[edges > 0] = 0
-    allowed[seed > 0] = 1
-    grown = seed.astype(np.uint8).copy()
-    k = np.ones((3, 3), np.uint8)
-    prev = -1
-    for _ in range(40):
-        grown = cv2.dilate(grown, k) & allowed
-        s = int(grown.sum())
-        if s == prev:
-            break
-        prev = s
-    return grown
+def _extend_by_colour(img, mask):
+    """Reclaim bare torso the model labels as clothing.
+
+    Runs per person, not per window. Sampling colour across a whole window mixed
+    several thumbnails together, producing an average that matched almost
+    anything and then spread up to 40px — which is how clothing got swallowed.
+    Now: each connected patch of confirmed skin learns its OWN colour, growth is
+    confined to that patch's neighbourhood, capped in distance, and thrown away
+    entirely if it balloons past a sane multiple of what it started from.
+    """
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(mask)
+    if n <= 1:
+        return mask
+    out = mask.copy()
+    H, W = mask.shape[:2]
+    for i in range(1, n):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if area < 150:                       # too small to trust as a colour sample
+            continue
+        x, y, bw, bh = (int(stats[i, cv2.CC_STAT_LEFT]), int(stats[i, cv2.CC_STAT_TOP]),
+                        int(stats[i, cv2.CC_STAT_WIDTH]), int(stats[i, cv2.CC_STAT_HEIGHT]))
+        reach = int(min(MAX_GROW_PX, max(12, 0.9 * max(bw, bh))))
+        x0, y0 = max(0, x - reach), max(0, y - reach)
+        x1, y1 = min(W, x + bw + reach), min(H, y + bh + reach)
+        sub = img[y0:y1, x0:x1]
+        seed = (lab[y0:y1, x0:x1] == i).astype(np.uint8)
+        if int(seed.sum()) < 150:
+            continue
+
+        lab_img = cv2.cvtColor(sub, cv2.COLOR_BGR2LAB).astype(np.float32)
+        med = np.median(lab_img[seed > 0].reshape(-1, 3), axis=0)
+        d = np.sqrt(((lab_img[:, :, 1:] - med[1:]) ** 2).sum(axis=2))
+        dl = np.abs(lab_img[:, :, 0] - med[0])
+        allowed = ((d < COLOUR_TOLERANCE) & (dl < 45)).astype(np.uint8)
+        edges = cv2.dilate(cv2.Canny(cv2.GaussianBlur(sub, (3, 3), 0), 40, 110),
+                           np.ones((2, 2), np.uint8))
+        allowed[edges > 0] = 0
+        allowed[seed > 0] = 1
+
+        grown = seed.copy()
+        k = np.ones((3, 3), np.uint8)
+        prev = -1
+        for _ in range(reach):               # travel is bounded by reach, not a fixed 40
+            grown = cv2.dilate(grown, k) & allowed
+            s = int(grown.sum())
+            if s == prev:
+                break
+            prev = s
+        # runaway guard: bare torso roughly doubles a patch; a flood does far more
+        if int(grown.sum()) > area * MAX_GROW_RATIO:
+            continue
+        out[y0:y1, x0:x1] |= grown
+    return out
 
 
 def _measure_speed(img):
@@ -223,12 +257,62 @@ def process(img, cover=(0, 0, 0), grid_face_threshold=4, include_neck=False):
         info['seconds'] = round(time.time() - t0, 1)
         return out, info
 
+    # ---- one coarse look first ----------------------------------------
+    # Windows exist so that small thumbnails in a screenshot get enough
+    # resolution. When a photo holds one big person, the whole frame at model
+    # size is already plenty — so look once, and only spend more runs where the
+    # people are actually small. This is the difference between 1 run and 25 on
+    # an ordinary product photo.
+    _full = INPUT_SIZE
+    globals()['INPUT_SIZE'] = COARSE_SIZE
+    cS, cC = _scores(img, 0, 0, w, h)
+    globals()['INPUT_SIZE'] = _full
+    bigS = cv2.resize(cS, (w, h), interpolation=cv2.INTER_CUBIC)
+    bigC = cv2.resize(cC, (w, h), interpolation=cv2.INTER_CUBIC)
+    coarse = ((bigS > 0) & (bigC <= 0)).astype(np.uint8)
+    # A separate, deliberately generous map for deciding which windows to skip.
+    # The first look runs small and cannot resolve tiny thumbnails, so anything
+    # even faintly person-like keeps its window — skipping is only for areas
+    # that are clearly empty.
+    gate = (bigS > -2.0).astype(np.uint8)
+    gate = cv2.dilate(gate, np.ones((41, 41), np.uint8))
+    info['windows'] = 1
+    # Subject HEIGHT separates the two cases far more cleanly than area:
+    # a portrait's largest skin patch runs ~40% of the frame height, while the
+    # biggest face in a grid of thumbnails is ~14%.
+    tallest = 0
+    if coarse.any():
+        nn, _, st, _ = cv2.connectedComponentsWithStats(coarse)
+        if nn > 1:
+            tallest = int(st[1:, cv2.CC_STAT_HEIGHT].max())
+    big_enough = tallest > h * COARSE_ENOUGH
+    if big_enough:
+        print('[skinblock] one large subject — a single pass is enough')
+        mask = coarse
+        if EXTEND_BY_COLOUR:
+            mask = _extend_by_colour(img, mask)
+        if SMOOTH_PX > 0:
+            k = int(2 * SMOOTH_PX + 1)
+            sm = (cv2.blur(mask.astype(np.float32), (k, k)) > 0.45).astype(np.uint8)
+            bigC = cv2.resize(cC, (w, h), interpolation=cv2.INTER_CUBIC)
+            sm[(bigC > 0) & (mask == 0)] = 0
+            mask = sm
+        _paint(out, img, mask, cover)
+        info['painted'] = int(mask.any())
+        info['wash'] = not bool(mask.any())
+        info['seconds'] = round(time.time() - t0, 1)
+        return out, info
+
     per_run = _measure_speed(img)
-    affordable = max(1, int((TIME_BUDGET - per_run) / per_run))
     passes = [(0, 0), (0.5, 0.5)] if SECOND_PASS else [(0, 0)]
+    # Window size is decided by the CONTENT, not by how fast this machine is.
+    # Letting a time budget shrink the grid meant a slow server produced worse
+    # covering than a fast one — windows spanning several thumbnails can't
+    # resolve a bikini strap. The budget still stops a runaway request, but it
+    # no longer quietly lowers quality.
     cols = max(1, int(round(w / float(WINDOW_PX))))
     rows = max(1, int(round(h / float(WINDOW_PX))))
-    limit = min(MAX_WINDOWS, max(1, affordable // len(passes)))
+    limit = MAX_WINDOWS
     while cols * rows > limit and (cols > 1 or rows > 1):
         if cols >= rows and cols > 1:
             cols -= 1
@@ -239,6 +323,11 @@ def process(img, cover=(0, 0, 0), grid_face_threshold=4, include_neck=False):
     print('[skinblock] %dx%d windows x%d passes (~%.0fs of %.0fs budget)'
           % (cols, rows, len(passes), cols * rows * len(passes) * per_run, TIME_BUDGET))
 
+    # Start the detail pass from scratch. The coarse look is deliberately
+    # low-resolution — it can't resolve a bikini strap — and because scores are
+    # combined by taking the maximum, letting it into the final map would
+    # override what the detail windows correctly saw. It is used ONLY to decide
+    # whether detail is needed at all, and where to spend it.
     S = np.full((h, w), -9.0, np.float32)
     C = np.full((h, w), -9.0, np.float32)
     cw, ch = w / float(cols), h / float(rows)
@@ -258,6 +347,8 @@ def process(img, cover=(0, 0, 0), grid_face_threshold=4, include_neck=False):
                 y1 = min(h, int((ry + 1 + oy) * ch + ch * OV))
                 if x1 - x0 < 16 or y1 - y0 < 16:
                     continue
+                if not gate[y0:y1, x0:x1].any():
+                    continue          # clearly empty — don't spend a run on it
                 ss, cs = _scores(img, x0, y0, x1, y1)
                 sw, sh = x1 - x0, y1 - y0
                 np.maximum(S[y0:y1, x0:x1],
@@ -276,11 +367,7 @@ def process(img, cover=(0, 0, 0), grid_face_threshold=4, include_neck=False):
     mask = ((S > 0) & (C <= 0)).astype(np.uint8)
 
     if EXTEND_BY_COLOUR:
-        for (x0, y0, x1, y1) in boxes:
-            seed = mask[y0:y1, x0:x1]
-            if int(seed.sum()) < 60:
-                continue
-            mask[y0:y1, x0:x1] |= _extend_by_colour(img[y0:y1, x0:x1], seed)
+        mask = _extend_by_colour(img, mask)
 
     if SMOOTH_PX > 0:
         k = int(2 * SMOOTH_PX + 1)
