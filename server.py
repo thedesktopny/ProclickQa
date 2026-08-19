@@ -2863,6 +2863,7 @@ SKINBLOCK_DEFAULTS = {
     'extend_by_colour': True,   # reclaim bare torso the model labels as clothing
     'skin_colour_tolerance': 12, # how closely a pixel must match the person's own skin
     'skin_reach_px': 90,        # how far covering may extend from confirmed skin
+    'coarse_enough': 0.28,      # subject taller than this share of the photo -> one pass
     'skin_grow_limit': 2.4,     # discard growth that balloons past this multiple
     'second_pass': True,        # second, shifted grid so nobody is missed by
                                 # falling across a window edge (doubles the time)
@@ -2944,6 +2945,87 @@ def skinblock_submit():
     row = dict(c.fetchone()); conn.commit(); conn.close()
     return jsonify({'success': True, 'id': row['id']})
 
+@app.route('/api/outbound-ip', methods=['GET'])
+@require_manager
+def outbound_ip():
+    """The addresses this server appears as when it connects OUT to somewhere
+    else — what Igor needs to allowlist on the phone system's database.
+
+    Azure gives an App Service several outbound addresses, not one, and the set
+    changes if the plan's tier changes. So this returns the live address AND the
+    full list Azure says is possible: allowlist all of them, or the connection
+    will work until the day it silently doesn't.
+    """
+    result = {
+        'current': None,
+        'all_possible': [],
+        'currently_assigned': [],
+        'note': 'Allowlist every address under all_possible, not just current.',
+    }
+    # what the outside world actually sees right now
+    for url in ('https://api.ipify.org', 'https://ifconfig.me/ip', 'https://icanhazip.com'):
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'VoiceGuard/1.0'})
+            with urllib.request.urlopen(req, timeout=8) as r:
+                ip = r.read().decode().strip()
+            if ip:
+                result['current'] = ip
+                result['checked_with'] = url
+                break
+        except Exception as e:
+            result.setdefault('errors', []).append(f'{url}: {str(e)[:80]}')
+    # what Azure itself reports
+    assigned = os.getenv('WEBSITE_OUTBOUND_IP_ADDRESSES', '')
+    possible = os.getenv('WEBSITE_POSSIBLE_OUTBOUND_IP_ADDRESSES', '')
+    result['currently_assigned'] = [x for x in assigned.split(',') if x]
+    result['all_possible'] = [x for x in possible.split(',') if x]
+    result['site'] = os.getenv('WEBSITE_SITE_NAME', '')
+    result['region'] = os.getenv('REGION_NAME', '')
+    return jsonify(result)
+
+
+@app.route('/api/test-db-connection', methods=['GET', 'POST'])
+@require_manager
+def test_db_connection():
+    """Try reaching the phone system's database and report plainly what happened.
+    Run this after Igor allowlists the addresses — it separates 'firewall still
+    blocking' from 'wrong password' from 'wrong host', which otherwise all look
+    the same from the outside.
+    """
+    # GET so it can simply be opened in the browser while logged in:
+    #   /api/test-db-connection?host=example.com&port=443
+    d = (request.json or {}) if request.method == 'POST' else {}
+    host = (d.get('host') or request.args.get('host') or '').strip()
+    try:
+        port = int(d.get('port') or request.args.get('port') or 3306)
+    except Exception:
+        port = 3306
+    if not host:
+        return jsonify({'error': 'host required'}), 400
+    import socket
+    out = {'host': host, 'port': port}
+    t0 = time.time()
+    try:
+        with socket.create_connection((host, port), timeout=10) as sock:
+            out['reachable'] = True
+            out['ms'] = int((time.time() - t0) * 1000)
+            try:
+                sock.settimeout(3)
+                banner = sock.recv(128)
+                out['greeting'] = banner[:60].decode('latin-1', 'replace')
+            except Exception:
+                out['greeting'] = '(none — normal for some databases)'
+        out['meaning'] = 'The port is open to this server. Any failure now is credentials or database name, not the firewall.'
+    except socket.timeout:
+        out['reachable'] = False
+        out['meaning'] = 'Timed out — the firewall is still blocking this server, or the host is wrong.'
+    except Exception as e:
+        out['reachable'] = False
+        out['error'] = str(e)[:160]
+        out['meaning'] = 'Could not connect. Check the host name, the port, and that our outbound IPs are allowlisted.'
+    return jsonify(out)
+
+
 @app.route('/api/skinblock/model-status', methods=['GET'])
 def skinblock_model_status():
     """Which detector is live: the trained parser, or the colour fallback."""
@@ -2998,6 +3080,7 @@ def skinblock_process():
         _sbe.SMOOTH_PX = int(_num('smooth_shapes', 0.6, 0.0, 3.0) * 3.3)   # 0.6 -> 2px
         _sbe.COLOUR_TOLERANCE = _num('skin_colour_tolerance', 12, 4, 40)
         _sbe.MAX_GROW_PX = int(_num('skin_reach_px', 90, 8, 300))
+        _sbe.COARSE_ENOUGH = _num('coarse_enough', 0.28, 0.05, 1.0)
         _sbe.MAX_GROW_RATIO = _num('skin_grow_limit', 2.4, 1.2, 6.0)
         _sbe.WINDOW_PX = int(_num('window_px', 260, 120, 800))
         _sbe.MAX_WINDOWS = int(_num('max_windows', 60, 1, 200))
