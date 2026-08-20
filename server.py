@@ -353,6 +353,35 @@ def init_db():
     ''')
 
     c.execute('''
+        CREATE TABLE IF NOT EXISTS skinblock_detector_log (
+            id SERIAL PRIMARY KEY,
+            agent_ext TEXT,
+            mode TEXT,
+            reason TEXT,
+            backend TEXT,
+            isolated BOOLEAN,
+            threads INTEGER,
+            user_agent TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS phone_status_snapshots (
+            id SERIAL PRIMARY KEY,
+            snapshot_at TIMESTAMP NOT NULL,
+            agent_ext TEXT,
+            employee_id INTEGER,
+            phone_status INTEGER,
+            cms_status INTEGER,
+            fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(snapshot_at, agent_ext)
+        )
+    ''')
+    c.execute('''CREATE INDEX IF NOT EXISTS idx_phone_snap_emp_time
+                 ON phone_status_snapshots (employee_id, snapshot_at)''')
+
+    c.execute('''
         CREATE TABLE IF NOT EXISTS week_schedules (
             id SERIAL PRIMARY KEY,
             employee_name TEXT NOT NULL,
@@ -3026,6 +3055,49 @@ def test_db_connection():
     return jsonify(out)
 
 
+@app.route('/api/skinblock/report-detector', methods=['POST'])
+def skinblock_report_detector():
+    """The page tells us which detector it ended up using and, if it fell back
+    to the server, exactly why. Saves asking an agent to read a status line —
+    the reason lands in the admin page by itself."""
+    d = request.json or {}
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute("""INSERT INTO skinblock_detector_log
+                        (agent_ext, mode, reason, backend, isolated, threads, user_agent)
+                     VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+                  (str(d.get('agent_ext') or '')[:8], str(d.get('mode') or '')[:24],
+                   str(d.get('reason') or '')[:400], str(d.get('backend') or '')[:24],
+                   bool(d.get('isolated')), int(d.get('threads') or 0),
+                   str(request.headers.get('User-Agent') or '')[:300]))
+        conn.commit(); conn.close()
+    except Exception as e:
+        print('[skinblock] detector report failed: ' + str(e)[:140])
+    return jsonify({'ok': True})
+
+
+@app.route('/api/skinblock/detector-log', methods=['GET'])
+@require_manager
+def skinblock_detector_log():
+    """Most recent detector result per agent — who is running locally (fast) and
+    who is falling back to the server (slow), with the reason."""
+    conn = get_db(); c = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        c.execute("""SELECT DISTINCT ON (agent_ext)
+                        agent_ext, mode, reason, backend, isolated, threads,
+                        user_agent, created_at
+                     FROM skinblock_detector_log
+                     ORDER BY agent_ext, created_at DESC""")
+        rows = [dict(r) for r in c.fetchall()]
+    except Exception as e:
+        conn.close()
+        return jsonify({'items': [], 'error': str(e)[:200]})
+    conn.close()
+    for r in rows:
+        r['created_at'] = r['created_at'].isoformat() if r.get('created_at') else None
+    return jsonify({'items': rows})
+
+
 @app.route('/api/skinblock/model-status', methods=['GET'])
 def skinblock_model_status():
     """Which detector is live: the trained parser, or the colour fallback."""
@@ -3807,6 +3879,60 @@ def clocker_upload():
     conn.commit(); conn.close()
     return jsonify({'success': True, 'received': len(events), 'inserted': inserted})
 
+@app.route('/api/phone-status/collect', methods=['POST', 'GET'])
+@require_manager
+def phone_status_collect():
+    """Pull availability snapshots from the phone system and store them.
+
+    Called on a schedule for 'today', and used with an explicit range to backfill
+    history — the API only serves 7 days, so anything older exists only if we
+    collected it. Re-running a range is safe; duplicates are ignored.
+    """
+    import phone_status as PS
+    if not PS.configured():
+        return jsonify({'error': 'PHONE_API_KEY is not set on the server'}), 400
+    d = (request.json or {}) if request.method == 'POST' else {}
+    today = datetime.now().strftime('%Y-%m-%d')
+    date_from = (d.get('date_from') or request.args.get('date_from') or today)[:10]
+    date_to = (d.get('date_to') or request.args.get('date_to') or today)[:10]
+    conn = get_db()
+    try:
+        result = PS.collect(conn, date_from, date_to)
+        result['interval_seconds'] = PS.detect_interval(conn)
+    finally:
+        conn.close()
+    result['date_from'], result['date_to'] = date_from, date_to
+    return jsonify(result)
+
+
+@app.route('/api/phone-status/status', methods=['GET'])
+@require_manager
+def phone_status_status():
+    """What availability data we hold, so it's obvious whether a gap in the
+    report is an agent being offline or us simply not having collected."""
+    import phone_status as PS
+    conn = get_db(); c = conn.cursor(cursor_factory=RealDictCursor)
+    out = {'configured': PS.configured(), 'api_url': PS.API_URL}
+    try:
+        c.execute("""SELECT COUNT(*) AS rows, MIN(snapshot_at) AS oldest,
+                            MAX(snapshot_at) AS newest,
+                            COUNT(DISTINCT employee_id) AS agents
+                     FROM phone_status_snapshots""")
+        r = dict(c.fetchone())
+        out.update({
+            'rows': r['rows'],
+            'agents': r['agents'],
+            'oldest': r['oldest'].isoformat() if r['oldest'] else None,
+            'newest': r['newest'].isoformat() if r['newest'] else None,
+        })
+        out['interval_seconds'] = PS.detect_interval(conn)
+    except Exception as e:
+        out['error'] = str(e)[:200]
+    finally:
+        conn.close()
+    return jsonify(out)
+
+
 @app.route('/api/time-report', methods=['GET'])
 @require_manager
 def time_report():
@@ -3819,6 +3945,151 @@ def time_report():
         return jsonify({'error': f'Time report failed: {str(e)[:300]}',
                         'report': [], 'count': 0,
                         'totals': {}, 'per_agent': []}), 500
+
+def _availability_for_shift(conn, ext, emp_id, start, end, interval):
+    """Availability inside one shift, matched on extension or employee id."""
+    if start is None or end is None or (not ext and emp_id is None):
+        return None
+    c = conn.cursor()
+    c.execute("""SELECT snapshot_at, phone_status, cms_status FROM phone_status_snapshots
+                 WHERE snapshot_at >= %s AND snapshot_at < %s
+                   AND (agent_ext = %s OR (employee_id IS NOT NULL AND employee_id = %s))
+                 ORDER BY snapshot_at""",
+              (start, end, ext or '', emp_id))
+    raw = c.fetchall()
+    rows = [(p, m) for _, p, m in raw]
+    if not raw:
+        return None
+    if not rows:
+        return None
+    step = (interval or 60) / 60.0
+    n_av = sum(1 for p, m in rows if p and m == 1)
+    n_br = sum(1 for p, m in rows if p and m == 2)
+    n_dnd = sum(1 for p, m in rows if p and m == 3)
+    n_off = sum(1 for p, m in rows if not p)
+    total = len(rows)
+    shift_min = max(0.0, (end - start).total_seconds() / 60.0)
+
+    # When did they actually become reachable, and when did they stop being so?
+    # Clocking into the CMS is not the same as being ready to take a call.
+    ready_at = next((t for t, p, m in raw if p and m == 1), None)
+    last_ready = next((t for t, p, m in reversed(raw) if p and m == 1), None)
+    late_min = round((ready_at - start).total_seconds() / 60.0, 1) if ready_at else None
+    early_off_min = round((end - last_ready).total_seconds() / 60.0, 1) if last_ready else None
+
+    # Every stretch where they couldn't take a call, anywhere in the shift.
+    #
+    # CMS break is deliberately NOT counted here: break time is already taken
+    # out of net hours, so deducting it again would charge the agent twice for
+    # the same minutes.
+    def _reason(p, m):
+        if not p:
+            return 'phone offline'
+        if m == 3:
+            return 'DND'
+        if m == 0:
+            return 'not active in CMS'
+        return None                      # 1 = available, 2 = break (already excluded)
+
+    gaps = []
+    run_start, run_reason, run_n = None, None, 0
+    for t, p, m in raw:
+        why = _reason(p, m)
+        if why:
+            if run_start is None:
+                run_start, run_reason, run_n = t, why, 1
+            else:
+                run_n += 1
+                if why != run_reason:
+                    run_reason = 'mixed'
+        elif run_start is not None:
+            gaps.append({'from': run_start.isoformat(), 'to': t.isoformat(),
+                         'minutes': round(run_n * ((interval or 60) / 60.0), 1),
+                         'reason': run_reason})
+            run_start, run_reason, run_n = None, None, 0
+    if run_start is not None:
+        gaps.append({'from': run_start.isoformat(), 'to': end.isoformat(),
+                     'minutes': round(run_n * ((interval or 60) / 60.0), 1),
+                     'reason': run_reason})
+
+    return {
+        'gaps': gaps,
+        'unavailable_minutes': round(sum(g['minutes'] for g in gaps), 1),
+        'ready_at': ready_at.isoformat() if ready_at else None,
+        'last_ready_at': last_ready.isoformat() if last_ready else None,
+        'late_to_phone_minutes': max(0.0, late_min) if late_min is not None else None,
+        'early_off_phone_minutes': max(0.0, early_off_min) if early_off_min is not None else None,
+        'available_minutes': round(n_av * step, 1),
+        'available_hours': round(n_av * step / 60.0, 2),
+        'break_minutes': round(n_br * step, 1),
+        'dnd_minutes': round(n_dnd * step, 1),
+        'offline_minutes': round(n_off * step, 1),
+        'available_pct': round(n_av / total * 100, 1),
+        'coverage_pct': round(min(100.0, total * step / shift_min * 100), 1) if shift_min else None,
+        'samples': total,
+    }
+
+
+def _phone_grace_minutes():
+    """Minutes of slack before a late phone start is deducted — a phone takes a
+    moment to register, and nobody should lose pay for that."""
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute("SELECT value FROM app_settings WHERE key = 'phone_grace_minutes'")
+        r = c.fetchone(); conn.close()
+        if r and r[0] is not None:
+            return max(0.0, min(60.0, float(r[0])))
+    except Exception:
+        pass
+    return 5.0
+
+
+def _phone_min_gap_minutes():
+    """Gaps shorter than this are ignored as snapshot noise rather than treated
+    as real time off the phone."""
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute("SELECT value FROM app_settings WHERE key = 'phone_min_gap_minutes'")
+        r = c.fetchone(); conn.close()
+        if r and r[0] is not None:
+            return max(0.0, min(30.0, float(r[0])))
+    except Exception:
+        pass
+    return 2.0
+
+
+def _phone_identity_map():
+    """VoiceGuard knows agents by NAME; the phone system reports an extension and
+    a numeric EmployeeId. This builds name -> (extension, employee_id).
+
+    The link comes from the agents table, which already carries each agent's
+    extension from the call webhook. Anyone without an extension there simply has
+    no availability figure — better a blank than a wrong number attached to the
+    wrong person.
+    """
+    ext_by_name, id_by_ext = {}, {}
+    conn = get_db()
+    try:
+        c = conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            c.execute("SELECT name, extension FROM agents WHERE extension IS NOT NULL AND extension <> ''")
+            for r in c.fetchall():
+                ext = str(r['extension']).strip()
+                if ext and ext != '—':
+                    ext_by_name[str(r['name']).strip().lower()] = ext
+        except Exception as e:
+            print('[time_report] agents table unavailable for phone mapping: ' + str(e)[:120])
+        try:
+            c.execute("""SELECT DISTINCT agent_ext, employee_id FROM phone_status_snapshots
+                         WHERE employee_id IS NOT NULL""")
+            for r in c.fetchall():
+                id_by_ext[str(r['agent_ext']).strip()] = r['employee_id']
+        except Exception:
+            pass
+    finally:
+        conn.close()
+    return ext_by_name, id_by_ext
+
 
 def _time_report_impl():
     """
@@ -4143,6 +4414,101 @@ def _time_report_impl():
     for a in per_agent.values():
         for k in ('regular_hours','overtime_hours','regular_pay','overtime_pay','total_pay'):
             a[k] = round(a[k], 2)
+
+    # ---- phone availability -------------------------------------------
+    # Per shift: how much of it the agent was actually reachable — phone online
+    # AND CMS active. A shift with no snapshots gets None rather than zero, so
+    # "we didn't collect" can never be read as "they did nothing".
+    try:
+        import phone_status as _PS
+        from datetime import datetime as _dtx
+        _ext_by_name, _id_by_ext = _phone_identity_map()
+        _conn2 = get_db()
+        try:
+            _interval = _PS.detect_interval(_conn2)
+            for _row in rows:
+                _row['availability'] = None
+                _ai, _ao = _row.get('actual_in'), _row.get('actual_out')
+                if not _ai or not _ao:
+                    continue
+                _ext = _ext_by_name.get(str(_row.get('employee_name') or '').strip().lower())
+                _eid = _id_by_ext.get(_ext) if _ext else None
+                if not _ext and _eid is None:
+                    continue
+                _av = _availability_for_shift(
+                    _conn2, _ext, _eid,
+                    _dtx.fromisoformat(_ai), _dtx.fromisoformat(_ao), _interval)
+                _row['availability'] = _av
+                if not _av:
+                    continue
+
+                # ---- payroll deduction ----------------------------------
+                # Any stretch where they couldn't take a call comes off paid
+                # time — the slow start after clocking in, the early finish,
+                # and anything in the middle of the shift. CMS break is not
+                # counted: it's already out of net hours, so deducting it here
+                # would charge the same minutes twice.
+                #
+                # Everything is reported side by side — hours worked, each gap,
+                # what was deducted, and the pay before and after — so the
+                # figure can always be explained to the agent.
+                _grace = float(_phone_grace_minutes())
+                _min_gap = float(_phone_min_gap_minutes())
+                _late = _av.get('late_to_phone_minutes') or 0.0
+                _early = _av.get('early_off_phone_minutes') or 0.0
+
+                _counted, _ignored = [], 0.0
+                for _g in (_av.get('gaps') or []):
+                    _mins = _g['minutes']
+                    _at_start = _g['from'] == _ai or abs(
+                        (_dtx.fromisoformat(_g['from']) - _dtx.fromisoformat(_ai)).total_seconds()) < 90
+                    # the start gap gets the grace allowance (a phone takes a
+                    # moment to register); brief blips anywhere are ignored as
+                    # snapshot noise rather than real absence
+                    _at_end = abs((_dtx.fromisoformat(_g['to']) -
+                                   _dtx.fromisoformat(_ao)).total_seconds()) < 90
+                    _charge = max(0.0, _mins - _grace) if _at_start else _mins
+                    if _charge <= 0 or _mins < _min_gap:
+                        _ignored += _mins
+                        continue
+                    _where = 'start' if _at_start else ('end' if _at_end else 'middle')
+                    _counted.append({**_g, 'deducted_minutes': round(_charge, 1),
+                                     'at_shift_start': _at_start, 'where': _where})
+                _ded = round(sum(_g['deducted_minutes'] for _g in _counted), 1)
+
+                _net = _row.get('net_hours')
+                _rate = float(_row.get('hourly_rate') or 0)
+                _orig_pay = _row.get('total_pay')
+                _reduction = round(_ded / 60.0 * _rate, 2) if _rate else 0.0
+                _row['phone_deduction'] = {
+                    'original_net_hours': _net,
+                    'original_pay': _orig_pay,
+                    'gaps_counted': _counted,
+                    'gaps_ignored_minutes': round(_ignored, 1),
+                    'late_start_minutes': round(max(0.0, _late - _grace), 1),
+                    'early_finish_minutes': round(sum(
+                        _g['deducted_minutes'] for _g in _counted if _g['where'] == 'end'), 1),
+                    'midshift_minutes': round(sum(
+                        _g['deducted_minutes'] for _g in _counted if _g['where'] == 'middle'), 1),
+                    'total_minutes': _ded,
+                    'grace_minutes': _grace,
+                    'min_gap_minutes': _min_gap,
+                    'payable_hours': round(max(0.0, (_net or 0) - _ded / 60.0), 2) if _net is not None else None,
+                    'pay_reduction': _reduction,
+                    'adjusted_pay': round(max(0.0, float(_orig_pay or 0) - _reduction), 2)
+                                    if _orig_pay is not None else None,
+                }
+                if _ded > 0:
+                    _row.setdefault('issues', []).append(
+                        "Couldn't take calls for %.0f min of this shift (%d gap%s) — %.2fh deducted"
+                        % (_ded, len(_counted), '' if len(_counted) == 1 else 's', _ded / 60.0))
+                if _av.get('available_pct') is not None and _av['available_pct'] < 60:
+                    _row.setdefault('issues', []).append(
+                        "Available on the phone only %.0f%% of the shift" % _av['available_pct'])
+        finally:
+            _conn2.close()
+    except Exception as _e:
+        print('[time_report] availability unavailable: ' + str(_e)[:160])
 
     # Any special overtime rate currently in force
     now = datetime.now()
