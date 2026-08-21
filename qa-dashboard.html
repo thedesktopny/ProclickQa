@@ -223,6 +223,7 @@ td.agent{color:var(--text);font-weight:500;}
     <div class="nav-label">Manager</div>
     <div class="nav-item" onclick="showPage('manager-queue')"><span class="icon">🧑‍⚖️</span>AI Mistake Review<span class="nav-badge" id="nb-manager">0</span></div>
     <div class="nav-item" onclick="showPage('time-report')"><span class="icon">⏰</span>Time Report</div>
+    <div class="nav-item" onclick="showPage('cms-pull')"><span class="icon">🔗</span>CMS Pull <span style="font-size:9px;opacity:.6;">test</span></div>
     <div class="nav-item" onclick="showPage('skinblock')"><span class="icon">🖼️</span>Skin Block</div>
   </div>
   <div class="nav-section manager-plus" style="margin-top:12px;display:none;">
@@ -304,6 +305,65 @@ td.agent{color:var(--text);font-weight:500;}
 </div>
 
 <!-- ===== CALL REVIEW ===== -->
+<div class="page" id="page-cms-pull">
+  <div class="page-head">
+    <div>
+      <h1 style="margin:0;font-size:20px;">🔗 CMS Pull <span style="font-size:11px;color:var(--text3);font-weight:400;">temporary — for checking the data</span></h1>
+      <div style="font-size:12px;color:var(--text3);margin-top:4px;">
+        Reads clock events straight from the CMS for a date range and shows them here.
+        Nothing is saved and the Time Report is not touched — this is only to see whether
+        the data matches what you would have uploaded.
+      </div>
+    </div>
+  </div>
+
+  <div style="padding:28px;">
+    <div class="card" style="padding:16px;margin-bottom:18px;">
+      <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Setup <span style="font-size:11px;color:var(--text3);font-weight:400;">— once only</span></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
+        <button onclick="cmsTest()" class="btn btn-outline" style="font-size:12px;">1 · Test connection</button>
+        <button onclick="cmsTables()" class="btn btn-outline" style="font-size:12px;">2 · Find the table</button>
+        <button onclick="cmsSaveMapping()" class="btn btn-outline" style="font-size:12px;">3 · Save mapping</button>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:6px;">
+        <input id="cms-map-table" placeholder="table (e.g. agent_clocker)" class="cms-in">
+        <input id="cms-map-employee" placeholder="employee column" class="cms-in">
+        <input id="cms-map-time" placeholder="time column" class="cms-in">
+        <input id="cms-map-status" placeholder="status column (In/OnBreak/Out)" class="cms-in">
+        <input id="cms-map-break_minutes" placeholder="break minutes (optional)" class="cms-in">
+        <input id="cms-map-break_reason" placeholder="break reason (optional)" class="cms-in">
+      </div>
+      <div id="cms-out" style="font-size:12px;color:var(--text2);white-space:pre-wrap;max-height:200px;overflow:auto;
+           background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px;margin-top:10px;">Start with Test connection.</div>
+    </div>
+
+    <div class="card" style="padding:16px;margin-bottom:18px;">
+      <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;">
+        <div>
+          <div style="font-size:11px;color:var(--text3);margin-bottom:4px;">From</div>
+          <input type="date" id="cms-from" class="cms-in" style="width:auto;">
+        </div>
+        <div>
+          <div style="font-size:11px;color:var(--text3);margin-bottom:4px;">To</div>
+          <input type="date" id="cms-to" class="cms-in" style="width:auto;">
+        </div>
+        <button onclick="cmsPreview()" class="btn btn-primary" style="font-size:13px;">Pull data</button>
+        <button onclick="cmsPreviewCsv()" class="btn btn-outline" style="font-size:12px;">⬇️ CSV</button>
+        <span id="cms-summary" style="font-size:12px;color:var(--text3);margin-left:auto;"></span>
+      </div>
+    </div>
+
+    <div id="cms-preview-wrap" class="card" style="padding:0;display:none;">
+      <div style="overflow-x:auto;max-height:60vh;">
+        <table class="data-table" id="cms-preview-table">
+          <thead><tr><th>EmployeeId</th><th>Created</th><th>Status</th><th>BreakMinutes</th><th>BreakReason</th></tr></thead>
+          <tbody id="cms-preview-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="page" id="page-calls">
   <div class="topbar">
     <div class="page-title">Call Review</div>
@@ -703,6 +763,8 @@ td.agent{color:var(--text);font-weight:500;}
   <div class="topbar">
     <div class="page-title">⏰ Time Report</div>
     <div class="topbar-right">
+      <button class="btn btn-outline" onclick="expandAllAgents(true)">⊞ Expand all</button>
+      <button class="btn btn-outline" onclick="expandAllAgents(false)">⊟ Collapse all</button>
       <button class="btn btn-outline" onclick="exportTimeReport('xlsx')">⬇️ Excel</button>
       <button class="btn btn-outline" onclick="exportTimeReport('csv')">⬇️ CSV</button>
       <button class="btn btn-outline" onclick="openOtPeriodsModal()">⚡ Overtime Rate</button>
@@ -2240,6 +2302,7 @@ function renderAgentProfile(data){
 }
 
 function showPage(id){
+  if(page==='cms-pull') cmsPageInit();
   // Access control: qa_users see only their own work; costs is admin-only
   const managerPages = ['analytics','billing','notes','rules','alerts','qa-users','manager-queue','time-report','skinblock'];
   const adminPages = ['costs'];
@@ -3002,6 +3065,157 @@ async function saveWeeklySchedule(){
   }catch(e){ showToast('Failed: '+e.message, true); }
 }
 
+function toggleAgentRows(key){
+  const open = document.querySelector('.' + key + '[data-open="1"]');
+  const rows = document.querySelectorAll('.' + key);
+  const caret = document.getElementById(key + '_caret');
+  const show = !open;
+  rows.forEach(tr => {
+    tr.style.display = show ? '' : 'none';
+    if(show) tr.setAttribute('data-open','1'); else tr.removeAttribute('data-open');
+  });
+  if(caret) caret.textContent = show ? '▼' : '▶';
+}
+
+function expandAllAgents(show){
+  document.querySelectorAll('.agent-detail').forEach(tr => {
+    tr.style.display = show ? '' : 'none';
+    if(show) tr.setAttribute('data-open','1'); else tr.removeAttribute('data-open');
+  });
+  document.querySelectorAll('[id$="_caret"]').forEach(c => c.textContent = show ? '▼' : '▶');
+}
+
+
+/* ---- pulling Clocker data straight from the CMS database ---- */
+const cmsOut = m => { const b=document.getElementById('cms-out'); if(b) b.textContent = m; };
+
+
+let cmsLastPreview = null;
+
+/* Pulls a date range from the CMS and shows it. Nothing is written anywhere —
+   the point is to eyeball the data against a familiar upload first. */
+async function cmsPreview(){
+  const from = document.getElementById('cms-from').value;
+  const to = document.getElementById('cms-to').value;
+  const sum = document.getElementById('cms-summary');
+  if(!from || !to){ cmsOut('Choose both dates first.'); return; }
+  sum.textContent = 'Pulling…';
+  document.getElementById('cms-preview-wrap').style.display = 'none';
+  try{
+    const r = await API.get(`/api/cms-db/preview?date_from=${from}&date_to=${to}`);
+    if(r.error){ cmsOut('❌ ' + r.error); sum.textContent=''; return; }
+    cmsLastPreview = r;
+    const body = document.getElementById('cms-preview-body');
+    body.innerHTML = (r.events||[]).map(e=>`<tr>
+      <td style="font-weight:600;">${e.employee_name||''}</td>
+      <td class="mono" style="font-size:11px;">${(e.event_time||'').replace('T',' ')}</td>
+      <td>${e.status||''}</td>
+      <td>${e.break_minutes==null?'':e.break_minutes}</td>
+      <td style="font-size:11px;color:var(--text3);">${e.break_reason||''}</td>
+    </tr>`).join('');
+    document.getElementById('cms-preview-wrap').style.display = '';
+    sum.textContent = `${r.total} events · ${r.agents.length} agents · ${r.days.length} days`
+                      + (r.truncated ? ' (showing first 5000)' : '');
+    cmsOut(`✅ ${r.total} events from ${r.date_from} to ${r.date_to} — nothing saved.\n\n`
+      + `Statuses: ${r.statuses.map(([s,n])=>s+' '+n).join('   ')}\n\n`
+      + `Events per agent:\n` + r.agents.map(([a,n])=>a+': '+n).join('   '));
+  }catch(e){ cmsOut('Failed: ' + e.message); sum.textContent=''; }
+}
+
+/* Same rows as a CSV, so they can be lined up against the sheet you'd normally
+   export from the CMS by hand. */
+function cmsPreviewCsv(){
+  if(!cmsLastPreview || !(cmsLastPreview.events||[]).length){ cmsOut('Pull some data first.'); return; }
+  const cols = ['EmployeeId','Created','Status','BreakMinutes','BreakReason'];
+  const esc = v => { const s = String(v==null?'':v); return /[",\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s; };
+  const lines = [cols.join(',')].concat(cmsLastPreview.events.map(e=>[
+    e.employee_name, (e.event_time||'').replace('T',' '), e.status,
+    e.break_minutes==null?'':e.break_minutes, e.break_reason||''
+  ].map(esc).join(',')));
+  const blob = new Blob(['\ufeff'+lines.join('\n')], {type:'text/csv;charset=utf-8;'});
+  _downloadBlob(blob, `cms-pull_${cmsLastPreview.date_from}_to_${cmsLastPreview.date_to}.csv`);
+}
+
+async function cmsTest(){
+  cmsOut('Connecting…');
+  try{
+    const r = await API.get('/api/cms-db/test');
+    cmsOut((r.ok?'✅ ':'❌ ') + (r.detected_type||r.type) + ' at ' + r.host + ':' + r.port + '/' + r.database + '\n'
+           + (r.version ? 'Server: ' + r.version + '\n' : '')
+           + (r.meaning||'') + (r.error ? '\n\n' + r.error : ''));
+  }catch(e){ cmsOut('Failed: ' + e.message); }
+}
+
+async function cmsPageInit(){
+  const today = new Date().toISOString().slice(0,10);
+  const wk = new Date(Date.now()-7*86400000).toISOString().slice(0,10);
+  const f=document.getElementById('cms-from'), t=document.getElementById('cms-to');
+  if(f && !f.value) f.value = wk;
+  if(t && !t.value) t.value = today;
+  try{
+    const r = await API.get('/api/cms-db/mapping');
+    const m = r.mapping || {};
+    ['table','employee','time','status','break_minutes','break_reason'].forEach(k=>{
+      const el = document.getElementById('cms-map-'+k); if(el && !el.value) el.value = m[k] || '';
+    });
+  }catch(e){}
+}
+
+async function cmsTables(){
+  cmsOut('Reading table list…');
+  try{
+    const r = await API.get('/api/cms-db/tables');
+    if(r.error){ cmsOut('❌ ' + r.error); return; }
+    const link = n => '<a href="#" onclick="cmsSample(\'' + n + '\');return false;" style="color:var(--accent)">' + n + '</a>';
+    document.getElementById('cms-out').innerHTML =
+      r.count + ' tables. Most likely:\n' + (r.likely||[]).map(link).join('   ')
+      + '\n\nAll tables:\n' + (r.tables||[]).map(link).join('   ');
+  }catch(e){ cmsOut('Failed: ' + e.message); }
+}
+
+async function cmsSample(table){
+  cmsOut('Reading ' + table + '…');
+  try{
+    const r = await API.get('/api/cms-db/sample?table=' + encodeURIComponent(table));
+    if(r.error){ cmsOut('❌ ' + r.error); return; }
+    const head = (r.columns||[]).join(' | ');
+    const body = (r.rows||[]).slice(0,8).map(row =>
+      row.map(v => String(v==null?'':v).slice(0,22)).join(' | ')).join('\n');
+    cmsOut('TABLE ' + table + '\n\n' + head + '\n' + '-'.repeat(Math.min(head.length,100)) + '\n' + body);
+    const el = document.getElementById('cms-map-table'); if(el) el.value = table;
+  }catch(e){ cmsOut('Failed: ' + e.message); }
+}
+
+async function cmsSaveMapping(){
+  const m = {};
+  ['table','employee','time','status','break_minutes','break_reason'].forEach(k=>{
+    const el = document.getElementById('cms-map-'+k);
+    m[k] = el && el.value ? el.value.trim() : '';
+  });
+  if(!m.table || !m.employee || !m.time || !m.status){
+    cmsOut('Table, employee, time and status are all needed before saving.'); return;
+  }
+  try{
+    await API.post('/api/cms-db/mapping', m);
+    cmsOut('✅ Mapping saved. Now choose a date range and click Import.');
+  }catch(e){ cmsOut('Failed: ' + e.message); }
+}
+
+async function cmsImport(){
+  const from = document.getElementById('cms-from').value;
+  const to = document.getElementById('cms-to').value;
+  if(!from || !to){ cmsOut('Choose both dates first.'); return; }
+  cmsOut('Importing ' + from + ' to ' + to + '…');
+  try{
+    const r = await API.post('/api/cms-db/import', {date_from:from, date_to:to});
+    if(r.error){ cmsOut('❌ ' + r.error); return; }
+    cmsOut('✅ Read ' + r.fetched + ' events for ' + r.agents + ' agents.\n'
+           + 'Stored ' + r.stored + ' new; ' + r.already_had + ' were already here.\n\n'
+           + 'Close this and reload the report.');
+    loadTimeReport();
+  }catch(e){ cmsOut('Failed: ' + e.message); }
+}
+
 async function loadDetectorLog(){
   const box = document.getElementById('detector-log');
   box.textContent = 'Loading…';
@@ -3542,8 +3756,71 @@ async function exportTimeReport(format){
     return;
   }
 
-  // Excel: detail sheet + payroll summary sheet
+  // Excel: an agent-grouped sheet first — one line per agent, with that agent's
+  // days tucked underneath as collapsible rows (the +/- outline in the margin).
+  // Excel opens with everything collapsed, so the first thing you see is one
+  // line per agent, exactly like the screen.
   const wb = XLSX.utils.book_new();
+
+  const grouped = [];
+  const rowLevels = [{}];                       // header row, level 0
+  const byAgentX = new Map();
+  res.report.forEach(r => {
+    if(!byAgentX.has(r.employee_name)) byAgentX.set(r.employee_name, []);
+    byAgentX.get(r.employee_name).push(r);
+  });
+  const agentTotalsX = Object.fromEntries((res.per_agent||[]).map(a=>[a.employee_name, a]));
+  [...byAgentX.keys()].sort().forEach(name => {
+    const shifts = byAgentX.get(name);
+    const a = agentTotalsX[name] || {};
+    const days = new Set(shifts.map(s=>s.shift_date)).size;
+    const offMin = shifts.reduce((s,x)=>s+((x.phone_deduction&&x.phone_deduction.total_minutes)||0),0);
+    const origPay = a.total_pay != null ? a.total_pay : shifts.reduce((s,x)=>s+(x.total_pay||0),0);
+    const payable = a.adjusted_total_pay != null ? a.adjusted_total_pay : origPay;
+    const dates = shifts.map(s=>s.shift_date).filter(Boolean).sort();
+    grouped.push({
+      'Agent': name,
+      'Period': dates.length ? dates[0] + ' to ' + dates[dates.length-1] : '',
+      'Days': days,
+      'Shifts': shifts.length,
+      'Net Hours': +shifts.reduce((s,x)=>s+(x.net_hours||0),0).toFixed(2),
+      'Regular Hours': a.regular_hours ?? '',
+      'Overtime Hours': a.overtime_hours ?? '',
+      'Hourly Rate': a.hourly_rate || '',
+      'Off Phone (min)': Math.round(offMin),
+      'Original Pay': +Number(origPay).toFixed(2),
+      'Deduction': +Number(origPay - payable).toFixed(2),
+      'PAYABLE PAY': +Number(payable).toFixed(2),
+    });
+    rowLevels.push({});                        // the agent line stays visible
+    shifts.forEach(r => {
+      const p = r.phone_deduction;
+      grouped.push({
+        'Agent': '',
+        'Period': r.shift_date,
+        'Days': fmtT(r.scheduled_in) + '-' + fmtT(r.scheduled_out),
+        'Shifts': fmtDT(r.actual_in) + ' → ' + fmtDT(r.actual_out),
+        'Net Hours': r.net_hours ?? '',
+        'Regular Hours': r.regular_hours ?? '',
+        'Overtime Hours': r.overtime_hours ?? '',
+        'Hourly Rate': r.hourly_rate ?? '',
+        'Off Phone (min)': p ? Math.round(p.total_minutes) : '',
+        'Original Pay': p ? p.original_pay : (r.total_pay ?? ''),
+        'Deduction': p ? +Number(p.pay_reduction||0).toFixed(2) : '',
+        'PAYABLE PAY': p ? p.adjusted_pay : (r.total_pay ?? ''),
+        'Status': r.status,
+        'Off Phone Detail': p ? (p.gaps_counted||[]).map(g=>
+            fmtT(g.from)+'-'+fmtT(g.to)+' '+Math.round(g.deducted_minutes)+'m '+g.reason).join(' | ') : '',
+        'Issues': (r.issues||[]).join('; '),
+      });
+      rowLevels.push({level: 1, hidden: true});  // the day lines fold away
+    });
+  });
+  const wsGrouped = XLSX.utils.json_to_sheet(grouped);
+  wsGrouped['!rows'] = rowLevels;
+  wsGrouped['!outline'] = {above: true};
+  XLSX.utils.book_append_sheet(wb, wsGrouped, 'By Agent');
+
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(detail), 'Shift Detail');
 
   const t = res.totals || {};
@@ -3909,7 +4186,7 @@ async function loadTimeReport(){
     const fmtSched = r => r.scheduled_in ? `${new Date(r.scheduled_in).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})} → ${new Date(r.scheduled_out).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}` : '—';
     const statusBadgeCls = s => s==='OK'?'badge-green':s==='Variance'?'badge-yellow':s==='No Show'?'badge-red':'badge-gray';
 
-    tbody.innerHTML = rows.map((r,idx)=>{
+    const shiftRow = (r, idx) => {
       const varColor = r.net_variance == null ? 'var(--text3)' : (r.net_variance < -0.1 ? 'var(--red)' : r.net_variance > 0.1 ? 'var(--green)' : 'var(--text2)');
       const lateTag = r.late_minutes != null && Math.abs(r.late_minutes) > 0
         ? `<span style="font-size:10px;color:${r.late_minutes>5?'var(--red)':'var(--text3)'};display:block;">${r.late_minutes>0?'+':''}${r.late_minutes}m</span>` : '';
@@ -3960,7 +4237,57 @@ async function loadTimeReport(){
         <td style="font-size:11px;color:var(--text3);max-width:220px;">${(r.issues||[]).join('; ')||'—'}</td>
         <td><button onclick="openAdjustModal(${idx})" style="background:none;border:none;color:${r.is_adjusted?'var(--yellow)':'var(--accent)'};cursor:pointer;font-size:11px;white-space:nowrap;">${r.is_adjusted?'Edit ✏️':'Adjust'}</button></td>
       </tr>`;
+    };
+
+    // ---- one line per agent, expandable -------------------------------
+    // A month of shifts is a thousand rows nobody reads. Each agent gets a
+    // single summary line; clicking it opens that agent's days underneath.
+    const byAgent = new Map();
+    rows.forEach((r, idx) => {
+      if(!byAgent.has(r.employee_name)) byAgent.set(r.employee_name, []);
+      byAgent.get(r.employee_name).push({ r, idx });
+    });
+    const agentTotals = Object.fromEntries((res.per_agent||[]).map(a => [a.employee_name, a]));
+
+    const money = v => '$' + (Number(v)||0).toFixed(2);
+    const dayFmt = d => d ? new Date(d + 'T00:00:00').toLocaleDateString([], {month:'short', day:'numeric'}) : '';
+
+    tbody.innerHTML = [...byAgent.entries()].sort((a,b)=>a[0].localeCompare(b[0])).map(([name, items]) => {
+      const a = agentTotals[name] || {};
+      const shifts = items.map(x => x.r);
+      const days = new Set(shifts.map(s => s.shift_date)).size;
+      const netHours = shifts.reduce((s,x)=>s+(x.net_hours||0), 0);
+      const offMin = shifts.reduce((s,x)=>s+((x.phone_deduction&&x.phone_deduction.total_minutes)||0), 0);
+      const origPay = a.total_pay != null ? a.total_pay : shifts.reduce((s,x)=>s+(x.total_pay||0),0);
+      const payable = a.adjusted_total_pay != null ? a.adjusted_total_pay : origPay;
+      const issues = shifts.filter(x => (x.issues||[]).length).length;
+      const dates = shifts.map(s=>s.shift_date).filter(Boolean).sort();
+      const period = dates.length ? `${dayFmt(dates[0])} – ${dayFmt(dates[dates.length-1])}` : '—';
+      const key = 'ag_' + name.replace(/[^a-z0-9]/gi,'_');
+
+      const summary = `<tr class="agent-summary" data-key="${key}" onclick="toggleAgentRows('${key}')"
+            style="cursor:pointer;background:var(--surface2);border-top:2px solid var(--border);">
+        <td style="font-weight:700;font-size:13px;">
+          <span id="${key}_caret" style="display:inline-block;width:12px;color:var(--accent);">▶</span> ${name}
+        </td>
+        <td colspan="2" style="font-size:11px;color:var(--text3);">${period} · ${days} day${days===1?'':'s'} · ${shifts.length} shift${shifts.length===1?'':'s'}</td>
+        <td colspan="4" style="font-size:11px;color:var(--text3);">${issues ? issues + ' day' + (issues===1?'':'s') + ' with issues' : 'no issues'}</td>
+        <td style="font-weight:600;">${netHours.toFixed(2)}h</td>
+        <td></td>
+        <td style="color:${(a.overtime_hours||0)>0?'var(--yellow)':'var(--text3)'};font-weight:600;">${(a.overtime_hours||0).toFixed(2)}h OT</td>
+        <td colspan="2" style="font-size:11px;">${a.hourly_rate?money(a.hourly_rate)+'/h':''}</td>
+        <td style="color:${offMin>0?'var(--red)':'var(--text3)'};font-weight:600;">${offMin>0?'-'+Math.round(offMin)+'m':'—'}</td>
+        <td style="font-weight:700;color:var(--green);font-size:13px;">${money(payable)}
+          ${payable<origPay?`<span style="display:block;font-size:10px;color:var(--text3);font-weight:400;">was ${money(origPay)}</span>`:''}</td>
+        <td colspan="3" style="font-size:11px;color:var(--text3);">click to see each day</td>
+      </tr>`;
+
+      const details = items.map(({r, idx}) =>
+        shiftRow(r, idx).replace('<tr>', `<tr class="agent-detail ${key}" style="display:none;">`)
+      ).join('');
+      return summary + details;
     }).join('');
+
   }catch(e){
     let msg = e.message || 'unknown error';
     if(msg.includes('<') || msg.includes('doctype') || msg.includes('JSON')){

@@ -366,6 +366,22 @@ def init_db():
         )
     ''')
 
+    # CMS-sourced clock events live in their OWN table. The point is that the
+    # existing upload-driven report keeps working untouched while the CMS
+    # version is proven — same columns, so the same code reads either one.
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS clocker_events_cms (
+            id SERIAL PRIMARY KEY,
+            employee_name TEXT NOT NULL,
+            event_time TIMESTAMP NOT NULL,
+            status TEXT NOT NULL,
+            break_minutes NUMERIC,
+            break_reason TEXT,
+            uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(employee_name, event_time, status)
+        )
+    ''')
+
     c.execute('''
         CREATE TABLE IF NOT EXISTS phone_status_snapshots (
             id SERIAL PRIMARY KEY,
@@ -3879,6 +3895,163 @@ def clocker_upload():
     conn.commit(); conn.close()
     return jsonify({'success': True, 'received': len(events), 'inserted': inserted})
 
+@app.route('/api/cms-db/test', methods=['GET'])
+@require_manager
+def cms_db_test():
+    """Can VoiceGuard reach the CMS database, and is the login accepted."""
+    import cms_db
+    return jsonify(cms_db.test())
+
+
+@app.route('/api/cms-db/tables', methods=['GET'])
+@require_manager
+def cms_db_tables():
+    """Every table, with the likely candidates listed first."""
+    import cms_db
+    try:
+        return jsonify(cms_db.tables())
+    except Exception as e:
+        return jsonify({'error': str(e)[:240]}), 400
+
+
+@app.route('/api/cms-db/sample', methods=['GET'])
+@require_manager
+def cms_db_sample():
+    """Columns and a few rows of one table, so the right one is obvious."""
+    import cms_db
+    table = request.args.get('table', '')
+    try:
+        out = cms_db.columns(table)
+        out.update(cms_db.sample(table, request.args.get('limit', 15)))
+        return jsonify(out)
+    except Exception as e:
+        return jsonify({'error': str(e)[:240]}), 400
+
+
+@app.route('/api/cms-db/mapping', methods=['GET', 'POST'])
+@require_manager
+def cms_db_mapping():
+    """Which table and columns hold the clock events. Saved once, then reused
+    by every import — every CMS names these differently."""
+    conn = get_db(); c = conn.cursor()
+    if request.method == 'POST':
+        m = request.json or {}
+        keep = {k: (m.get(k) or '') for k in
+                ('table', 'employee', 'time', 'status', 'break_minutes', 'break_reason')}
+        c.execute("""INSERT INTO app_settings (key, value) VALUES ('cms_db_mapping', %s)
+                     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value""",
+                  (json.dumps(keep),))
+        conn.commit(); conn.close()
+        return jsonify({'saved': True, 'mapping': keep})
+    c.execute("SELECT value FROM app_settings WHERE key = 'cms_db_mapping'")
+    r = c.fetchone(); conn.close()
+    try:
+        return jsonify({'mapping': json.loads(r[0]) if r and r[0] else {}})
+    except Exception:
+        return jsonify({'mapping': {}})
+
+
+@app.route('/api/cms-db/preview', methods=['GET'])
+@require_manager
+def cms_db_preview():
+    """Read clock events for a date range and just show them — nothing is saved.
+
+    This is the "does the data look right?" step. It returns the same fields the
+    uploaded spreadsheet has, so it can be compared against a familiar export
+    before anything is trusted or stored.
+    """
+    import cms_db
+    date_from = (request.args.get('date_from') or '')[:10]
+    date_to = (request.args.get('date_to') or '')[:10]
+    if not date_from or not date_to:
+        return jsonify({'error': 'Choose both dates'}), 400
+
+    conn = get_db(); c = conn.cursor()
+    c.execute("SELECT value FROM app_settings WHERE key = 'cms_db_mapping'")
+    r = c.fetchone(); conn.close()
+    try:
+        mapping = json.loads(r[0]) if r and r[0] else {}
+    except Exception:
+        mapping = {}
+    if not mapping.get('table'):
+        return jsonify({'error': 'Set the table and columns first (step 2 and 3 above)'}), 400
+
+    try:
+        events = cms_db.fetch_events(mapping, date_from, date_to)
+    except Exception as e:
+        return jsonify({'error': str(e)[:240]}), 400
+
+    by_agent = {}
+    by_status = {}
+    for e in events:
+        by_agent[e['employee_name']] = by_agent.get(e['employee_name'], 0) + 1
+        by_status[e['status']] = by_status.get(e['status'], 0) + 1
+    days = sorted({(e['event_time'] or '')[:10] for e in events if e['event_time']})
+    return jsonify({
+        'events': events[:5000],
+        'total': len(events),
+        'truncated': len(events) > 5000,
+        'agents': sorted(by_agent.items(), key=lambda x: -x[1]),
+        'statuses': sorted(by_status.items(), key=lambda x: -x[1]),
+        'days': days,
+        'date_from': date_from, 'date_to': date_to,
+        'stored': False,
+    })
+
+
+@app.route('/api/cms-db/import', methods=['POST', 'GET'])
+@require_manager
+def cms_db_import():
+    """Pull clock events for a date range straight from the CMS and store them
+    exactly as the spreadsheet upload does — so shifts, overtime and pay are
+    calculated the same way, with no manual export step.
+
+    Safe to re-run: identical events are ignored rather than duplicated.
+    """
+    import cms_db
+    d = (request.json or {}) if request.method == 'POST' else {}
+    date_from = (d.get('date_from') or request.args.get('date_from') or '')[:10]
+    date_to = (d.get('date_to') or request.args.get('date_to') or '')[:10]
+    if not date_from or not date_to:
+        return jsonify({'error': 'date_from and date_to are required'}), 400
+
+    conn = get_db(); c = conn.cursor()
+    c.execute("SELECT value FROM app_settings WHERE key = 'cms_db_mapping'")
+    r = c.fetchone()
+    mapping = {}
+    try:
+        mapping = json.loads(r[0]) if r and r[0] else {}
+    except Exception:
+        pass
+    if not mapping.get('table'):
+        conn.close()
+        return jsonify({'error': 'No column mapping saved yet — set it on the Time Report page first'}), 400
+
+    try:
+        events = cms_db.fetch_events(mapping, date_from, date_to)
+    except Exception as e:
+        conn.close()
+        return jsonify({'error': str(e)[:240]}), 400
+
+    stored = 0
+    for e in events:
+        try:
+            c.execute("""INSERT INTO clocker_events_cms
+                            (employee_name, event_time, status, break_minutes, break_reason)
+                         VALUES (%s,%s,%s,%s,%s)
+                         ON CONFLICT (employee_name, event_time, status) DO NOTHING""",
+                      (e['employee_name'], e['event_time'], e['status'],
+                       e['break_minutes'], e['break_reason']))
+            stored += c.rowcount
+        except Exception as ex:
+            print('[cms_db] skipped an event: ' + str(ex)[:120])
+    conn.commit(); conn.close()
+    return jsonify({'fetched': len(events), 'stored': stored,
+                    'already_had': len(events) - stored,
+                    'date_from': date_from, 'date_to': date_to,
+                    'agents': len({e['employee_name'] for e in events})})
+
+
 @app.route('/api/phone-status/collect', methods=['POST', 'GET'])
 @require_manager
 def phone_status_collect():
@@ -4089,6 +4262,17 @@ def _phone_identity_map():
     finally:
         conn.close()
     return ext_by_name, id_by_ext
+
+
+def _clocker_table():
+    """Which set of clock events to build the report from.
+
+    'cms' reads what was pulled from the CMS database, 'upload' reads what was
+    uploaded by hand. Two separate tables, so both reports can run side by side
+    and be compared before anything is retired.
+    """
+    src = (request.args.get('source') or '').strip().lower()
+    return 'clocker_events_cms' if src == 'cms' else 'clocker_events'
 
 
 def _time_report_impl():
