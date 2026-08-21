@@ -322,7 +322,7 @@ td.agent{color:var(--text);font-weight:500;}
       <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Setup <span style="font-size:11px;color:var(--text3);font-weight:400;">— once only</span></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
         <button onclick="cmsTest()" class="btn btn-outline" style="font-size:12px;">1 · Test connection</button>
-        <button onclick="cmsTables()" class="btn btn-outline" style="font-size:12px;">2 · Find the table</button>
+        <button onclick="cmsLoadTables()" class="btn btn-outline" style="font-size:12px;">2 · Find the table</button>
         <button onclick="cmsSaveMapping()" class="btn btn-outline" style="font-size:12px;">3 · Save mapping</button>
       </div>
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:6px;">
@@ -335,6 +335,27 @@ td.agent{color:var(--text);font-weight:500;}
       </div>
       <div id="cms-out" style="font-size:12px;color:var(--text2);white-space:pre-wrap;max-height:200px;overflow:auto;
            background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px;margin-top:10px;">Start with Test connection.</div>
+    </div>
+
+    <div class="card" style="padding:16px;margin-bottom:18px;">
+      <div style="font-size:13px;font-weight:700;margin-bottom:4px;">🔍 Explore the database</div>
+      <div style="font-size:11.5px;color:var(--text3);margin-bottom:10px;">
+        Look around freely — every database on the server, every table with its row count,
+        and a search for any table or column name. Read-only throughout.
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px;">
+        <select id="cms-db-select" class="cms-in" style="width:auto;min-width:170px;"
+                onchange="cmsLoadTables()"><option value="">(configured database)</option></select>
+        <button onclick="cmsLoadDatabases()" class="btn btn-outline" style="font-size:12px;">List databases</button>
+        <button onclick="cmsLoadTables()" class="btn btn-outline" style="font-size:12px;">List tables</button>
+        <input id="cms-search" class="cms-in" style="width:auto;min-width:180px;"
+               placeholder="find a table or column…" onkeydown="if(event.key==='Enter')cmsSearch()">
+        <button onclick="cmsSearch()" class="btn btn-outline" style="font-size:12px;">Search</button>
+      </div>
+      <div id="cms-explore" style="font-size:12px;color:var(--text2);max-height:260px;overflow:auto;
+           background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px;">
+        Click List databases or List tables to start looking around.
+      </div>
     </div>
 
     <div class="card" style="padding:16px;margin-bottom:18px;">
@@ -3136,6 +3157,55 @@ function cmsPreviewCsv(){
   _downloadBlob(blob, `cms-pull_${cmsLastPreview.date_from}_to_${cmsLastPreview.date_to}.csv`);
 }
 
+
+/* ---- free-form exploring: any database, any table, any column ---- */
+const cmsExp = html => { const b=document.getElementById('cms-explore'); if(b) b.innerHTML = html; };
+const cmsDb = () => document.getElementById('cms-db-select')?.value || '';
+
+async function cmsLoadDatabases(){
+  cmsExp('Reading…');
+  try{
+    const r = await API.get('/api/cms-db/databases');
+    if(r.error){ cmsExp('❌ ' + r.error); return; }
+    const sel = document.getElementById('cms-db-select');
+    sel.innerHTML = '<option value="">(configured: ' + r.current + ')</option>' +
+      (r.databases||[]).map(d=>`<option value="${d}"${d===r.current?' selected':''}>${d}</option>`).join('');
+    cmsExp(`${(r.databases||[]).length} databases on this server. Pick one, then List tables.`);
+  }catch(e){ cmsExp('Failed: ' + e.message); }
+}
+
+async function cmsLoadTables(){
+  cmsExp('Reading tables…');
+  try{
+    const r = await API.get('/api/cms-db/tables?database=' + encodeURIComponent(cmsDb()));
+    if(r.error){ cmsExp('❌ ' + r.error); return; }
+    const row = t => `<tr>
+        <td><a href="#" onclick="cmsSample('${t.name}');return false;" style="color:var(--accent)">${t.name}</a></td>
+        <td style="text-align:right;color:var(--text3)">${(t.rows||0).toLocaleString()}</td></tr>`;
+    const likely = new Set(r.likely||[]);
+    const sorted = (r.tables||[]);
+    cmsExp(`<div style="margin-bottom:8px;color:var(--text3)">${r.count} tables in <b>${r.database}</b>, most rows first. `
+      + `Likely clock data: ${(r.likely||[]).slice(0,10).map(n=>`<a href="#" onclick="cmsSample('${n}');return false;" style="color:var(--accent)">${n}</a>`).join(', ')||'none obvious'}</div>`
+      + `<table class="data-table"><thead><tr><th>Table</th><th style="text-align:right">Rows</th></tr></thead><tbody>`
+      + sorted.map(row).join('') + `</tbody></table>`);
+  }catch(e){ cmsExp('Failed: ' + e.message); }
+}
+
+async function cmsSearch(){
+  const q = document.getElementById('cms-search').value.trim();
+  if(q.length < 2){ cmsExp('Type at least two characters.'); return; }
+  cmsExp('Searching for “' + q + '”…');
+  try{
+    const r = await API.get(`/api/cms-db/search?q=${encodeURIComponent(q)}&database=${encodeURIComponent(cmsDb())}`);
+    if(r.error){ cmsExp('❌ ' + r.error); return; }
+    if(!r.matches){ cmsExp('Nothing matched “' + q + '” in ' + r.database); return; }
+    cmsExp(`<div style="margin-bottom:8px;color:var(--text3)">${r.matches} tables matched in <b>${r.database}</b></div>`
+      + r.tables.map(t=>`<div style="margin-bottom:6px;">
+          <a href="#" onclick="cmsSample('${t.table}');return false;" style="color:var(--accent);font-weight:600">${t.table}</a>
+          <span style="color:var(--text3);font-size:11px;"> — ${t.columns.join(', ')}</span></div>`).join(''));
+  }catch(e){ cmsExp('Failed: ' + e.message); }
+}
+
 async function cmsTest(){
   cmsOut('Connecting…');
   try{
@@ -3174,16 +3244,37 @@ async function cmsTables(){
 }
 
 async function cmsSample(table){
-  cmsOut('Reading ' + table + '…');
+  cmsExp('Reading ' + table + '…');
   try{
-    const r = await API.get('/api/cms-db/sample?table=' + encodeURIComponent(table));
-    if(r.error){ cmsOut('❌ ' + r.error); return; }
-    const head = (r.columns||[]).join(' | ');
-    const body = (r.rows||[]).slice(0,8).map(row =>
-      row.map(v => String(v==null?'':v).slice(0,22)).join(' | ')).join('\n');
-    cmsOut('TABLE ' + table + '\n\n' + head + '\n' + '-'.repeat(Math.min(head.length,100)) + '\n' + body);
-    const el = document.getElementById('cms-map-table'); if(el) el.value = table;
-  }catch(e){ cmsOut('Failed: ' + e.message); }
+    const r = await API.get(`/api/cms-db/sample?table=${encodeURIComponent(table)}&database=${encodeURIComponent(cmsDb())}&limit=25`);
+    if(r.error){ cmsExp('❌ ' + r.error); return; }
+    const cols = r.columns || [];
+    const types = Object.fromEntries((r.columns && r.columns.length && Array.isArray(r.columns)
+      ? [] : []).map(x=>[x,x]));
+    const head = cols.map(c=>`<th>${c}</th>`).join('');
+    const body = (r.rows||[]).map(row=>'<tr>' + row.map(v=>
+      `<td style="font-size:11px;white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis;">${
+        String(v==null?'':v)}</td>`).join('') + '</tr>').join('');
+    cmsExp(`<div style="margin-bottom:8px;"><b>${r.database}.${table}</b>
+        <span style="color:var(--text3);font-size:11px;"> — ${(r.rows||[]).length} sample rows</span>
+        <button onclick="cmsUseTable('${table}')" class="btn btn-outline" style="font-size:11px;padding:3px 8px;margin-left:8px;">Use for clock events</button></div>
+      <div style="overflow:auto;"><table class="data-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`);
+  }catch(e){ cmsExp('Failed: ' + e.message); }
+}
+
+/* Fills the mapping boxes from a table you liked, guessing the columns by name. */
+function cmsUseTable(table){
+  const set = (k,v) => { const el=document.getElementById('cms-map-'+k); if(el && v) el.value = v; };
+  set('table', table);
+  const guess = (names, want) => names.find(n => want.some(w => n.toLowerCase().includes(w))) || '';
+  const cols = [...document.querySelectorAll('#cms-explore thead th')].map(th=>th.textContent);
+  set('employee', guess(cols, ['employeeid','employee','agent','user','staff']));
+  set('time', guess(cols, ['created','time','date','stamp','when']));
+  set('status', guess(cols, ['status','state','type','action']));
+  set('break_minutes', guess(cols, ['breakmin','break_min','breakminutes','minutes']));
+  set('break_reason', guess(cols, ['reason','breakreason','note']));
+  cmsOut('Filled the mapping from ' + table + ' — check the boxes above, then Save mapping.');
+  window.scrollTo({top:0, behavior:'smooth'});
 }
 
 async function cmsSaveMapping(){

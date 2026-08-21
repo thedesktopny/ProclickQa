@@ -3903,13 +3903,43 @@ def cms_db_test():
     return jsonify(cms_db.test())
 
 
+@app.route('/api/cms-db/databases', methods=['GET'])
+@require_manager
+def cms_db_databases():
+    """Every database on the CMS server."""
+    import cms_db
+    try:
+        return jsonify(cms_db.databases())
+    except Exception as e:
+        return jsonify({'error': str(e)[:240]}), 400
+
+
 @app.route('/api/cms-db/tables', methods=['GET'])
 @require_manager
 def cms_db_tables():
-    """Every table, with the likely candidates listed first."""
+    """Tables with row counts, biggest first — and the likely clock-event ones
+    flagged. Works on any database on the server, not just the configured one."""
+    import cms_db
+    db = request.args.get('database') or None
+    try:
+        out = cms_db.tables_in(db)
+    except Exception as e:
+        return jsonify({'error': str(e)[:240]}), 400
+    hints = ('clock', 'attend', 'shift', 'agent', 'employee', 'login', 'session',
+             'timesheet', 'status', 'break', 'staff', 'user')
+    out['likely'] = [t['name'] for t in out['tables']
+                     if any(h in t['name'].lower() for h in hints)]
+    return jsonify(out)
+
+
+@app.route('/api/cms-db/search', methods=['GET'])
+@require_manager
+def cms_db_search():
+    """Find any table or column whose name contains a word — 'where is X kept?'"""
     import cms_db
     try:
-        return jsonify(cms_db.tables())
+        return jsonify(cms_db.search(request.args.get('q', ''),
+                                     request.args.get('database') or None))
     except Exception as e:
         return jsonify({'error': str(e)[:240]}), 400
 
@@ -3917,12 +3947,17 @@ def cms_db_tables():
 @app.route('/api/cms-db/sample', methods=['GET'])
 @require_manager
 def cms_db_sample():
-    """Columns and a few rows of one table, so the right one is obvious."""
+    """Columns and rows of one table, from any database on the server."""
     import cms_db
     table = request.args.get('table', '')
+    db = request.args.get('database') or None
     try:
-        out = cms_db.columns(table)
-        out.update(cms_db.sample(table, request.args.get('limit', 15)))
+        out = cms_db.sample(table, request.args.get('limit', 15), db)
+        try:
+            out.update(cms_db.columns(table, db))
+        except Exception:
+            pass
+        out['database'] = db or cms_db.NAME
         return jsonify(out)
     except Exception as e:
         return jsonify({'error': str(e)[:240]}), 400
