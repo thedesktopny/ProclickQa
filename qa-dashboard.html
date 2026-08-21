@@ -2302,7 +2302,6 @@ function renderAgentProfile(data){
 }
 
 function showPage(id){
-  if(page==='cms-pull') cmsPageInit();
   // Access control: qa_users see only their own work; costs is admin-only
   const managerPages = ['analytics','billing','notes','rules','alerts','qa-users','manager-queue','time-report','skinblock'];
   const adminPages = ['costs'];
@@ -2328,6 +2327,7 @@ function showPage(id){
     if(link) link.textContent = window.location.origin + '/skinblock';
     loadSkinblockHistory();
   }
+  if(id==='cms-pull') cmsPageInit();
   if(id==='manager-queue') renderManagerQueue();
   if(id==='time-report'){
     // Recurring schedules expand across a date range, so ensure one is set
