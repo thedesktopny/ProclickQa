@@ -4510,6 +4510,31 @@ def _time_report_impl():
     except Exception as _e:
         print('[time_report] availability unavailable: ' + str(_e)[:160])
 
+    # Roll the phone deductions up per agent and across the whole report, so the
+    # payroll table can show what was earned, what came off, and what's payable.
+    _tot_ded_min, _tot_ded_pay = 0.0, 0.0
+    for r in rows:
+        pd = r.get('phone_deduction')
+        if not pd:
+            continue
+        a = per_agent.get(r['employee_name'])
+        if a is not None:
+            a['deducted_minutes'] = round(a.get('deducted_minutes', 0) + (pd['total_minutes'] or 0), 1)
+            a['pay_reduction'] = round(a.get('pay_reduction', 0) + (pd['pay_reduction'] or 0), 2)
+            a['adjusted_total_pay'] = round(a['total_pay'] - a['pay_reduction'], 2)
+            a['payable_hours'] = round(
+                a.get('payable_hours', a['regular_hours'] + a['overtime_hours'])
+                - (pd['total_minutes'] or 0) / 60.0, 2)
+        _tot_ded_min += pd['total_minutes'] or 0
+        _tot_ded_pay += pd['pay_reduction'] or 0
+    for a in per_agent.values():
+        a.setdefault('deducted_minutes', 0)
+        a.setdefault('pay_reduction', 0)
+        a.setdefault('adjusted_total_pay', a['total_pay'])
+    totals['phone_deducted_minutes'] = round(_tot_ded_min, 1)
+    totals['phone_pay_reduction'] = round(_tot_ded_pay, 2)
+    totals['adjusted_total_pay'] = round((totals.get('total_pay') or 0) - _tot_ded_pay, 2)
+
     # Any special overtime rate currently in force
     now = datetime.now()
     active_ot = [p for p in ot_periods if p['starts_at'] <= now and (p['ends_at'] is None or p['ends_at'] >= now)]

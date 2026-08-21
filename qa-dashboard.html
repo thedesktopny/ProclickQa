@@ -344,7 +344,7 @@ td.agent{color:var(--text);font-weight:500;}
             </tr>
           </thead>
           <tbody id="calls-tbody">
-            <tr><td colspan="16" style="text-align:center;padding:32px;color:var(--text3)">Loading calls...</td></tr>
+            <tr><td colspan="18" style="text-align:center;padding:32px;color:var(--text3)">Loading calls...</td></tr>
           </tbody>
         </table>
       </div>
@@ -755,10 +755,11 @@ td.agent{color:var(--text);font-weight:500;}
             <th>Agent</th><th>Date</th><th>Scheduled</th><th>Actual In</th><th>Actual Out</th>
             <th>Break</th><th>Gross</th><th>Net</th><th>Variance</th>
             <th>Regular</th><th>Overtime</th><th>Rate</th><th>Pay</th>
+            <th title="Time clocked in but unable to take calls">Off Phone</th><th>Payable Pay</th>
             <th>Status</th><th>Issues</th><th></th>
           </tr></thead>
           <tbody id="tr-tbody">
-            <tr><td colspan="16" style="text-align:center;padding:32px;color:var(--text3)">Upload a Clocker report and add schedules to see the report.</td></tr>
+            <tr><td colspan="18" style="text-align:center;padding:32px;color:var(--text3)">Upload a Clocker report and add schedules to see the report.</td></tr>
           </tbody>
         </table>
       </div>
@@ -996,6 +997,18 @@ td.agent{color:var(--text);font-weight:500;}
         <button onclick="testConnection()" class="btn btn-primary" style="font-size:12px;">Test connection</button>
       </div>
       <div id="conn-result" style="font-size:12px;color:var(--text2);white-space:pre-wrap;"></div>
+    </div>
+
+    <div class="card" style="margin-bottom:20px;padding:16px;">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px;">
+        <div style="font-size:13px;font-weight:700;">⚡ Which detector each PC is using</div>
+        <button onclick="loadDetectorLog()" class="btn btn-outline" style="margin-left:auto;font-size:11px;padding:4px 10px;">Refresh</button>
+      </div>
+      <div style="font-size:11.5px;color:var(--text3);margin-bottom:10px;">
+        "This PC" means the photo is covered in a second or two. "Server" means it makes
+        a slow round trip — the reason is shown so it can be fixed.
+      </div>
+      <div id="detector-log" style="font-size:12px;color:var(--text2);">Click Refresh.</div>
     </div>
 
     <div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap;align-items:flex-end;">
@@ -2476,7 +2489,7 @@ function renderCalls(list){
   const tbody=document.getElementById('calls-tbody');
   if(!tbody)return;
   const data=list||calls;
-  if(data.length===0){tbody.innerHTML='<tr><td colspan="16" style="text-align:center;padding:32px;color:var(--text3)">No calls yet.</td></tr>';return;}
+  if(data.length===0){tbody.innerHTML='<tr><td colspan="18" style="text-align:center;padding:32px;color:var(--text3)">No calls yet.</td></tr>';return;}
   tbody.innerHTML=data.map(c=>{
     const sc=c.overall_score>0?scoreCircle(c.overall_score):`<div class="score-circle sc-gray" style="font-size:10px;color:var(--text3);">...</div>`;
     const stBadge=statusBadge(c.status, c.error_message);
@@ -2516,7 +2529,7 @@ function renderCalls(list){
       <td style="white-space:nowrap;">${stBadge}${retryBtn}</td>
     </tr>
     <tr id="expand-${c.call_id}" style="display:${isExp?'table-row':'none'};background:var(--bg);">
-      <td colspan="16" style="padding:0;">
+      <td colspan="18" style="padding:0;">
         <div id="expand-content-${c.call_id}" style="padding:20px 24px;border-bottom:2px solid var(--border);">
           ${isExp?buildExpandContent(c):''}
         </div>
@@ -2987,6 +3000,32 @@ async function saveWeeklySchedule(){
     loadRecurringList();
     loadTimeReport();
   }catch(e){ showToast('Failed: '+e.message, true); }
+}
+
+async function loadDetectorLog(){
+  const box = document.getElementById('detector-log');
+  box.textContent = 'Loading…';
+  try{
+    const r = await API.get('/api/skinblock/detector-log');
+    const items = r.items || [];
+    if(!items.length){ box.textContent = 'Nothing reported yet — ask an agent to open the tool.'; return; }
+    box.innerHTML = `<table class="data-table" style="width:100%">
+      <thead><tr><th>Ext</th><th>Detector</th><th>Speed</th><th>Details</th><th>Last seen</th></tr></thead>
+      <tbody>${items.map(i => {
+        const local = i.mode === 'local';
+        const speed = local ? (i.backend === 'webgpu' ? 'Instant' : 'Fast') : 'Slow';
+        const colour = local ? 'var(--success, #4ade80)' : 'var(--danger, #f87171)';
+        const detail = local
+          ? `${i.backend || ''}${i.threads ? ', ' + i.threads + ' cores' : ''}${i.isolated ? '' : ' (not isolated)'}`
+          : (i.reason || 'no reason reported');
+        return `<tr>
+          <td style="font-weight:600">${i.agent_ext || '—'}</td>
+          <td style="color:${colour}">${local ? 'This PC' : 'Server'}</td>
+          <td>${speed}</td>
+          <td style="font-size:11px">${detail}</td>
+          <td style="font-size:11px">${i.created_at ? new Date(i.created_at).toLocaleString() : ''}</td>
+        </tr>`; }).join('')}</tbody></table>`;
+  }catch(e){ box.textContent = 'Could not load: ' + e.message; }
 }
 
 async function showOutboundIp(){
@@ -3481,6 +3520,12 @@ async function exportTimeReport(format){
     'Adjusted By': r.adjusted_by_name || '',
     'Adjustment Reason': r.adjustment_reason || '',
     'From Weekly Schedule': r.from_recurring ? 'Yes' : 'No',
+    'Off Phone (min)': r.phone_deduction ? Math.round(r.phone_deduction.total_minutes) : '',
+    'Off Phone Detail': r.phone_deduction ? (r.phone_deduction.gaps_counted||[]).map(g=>
+        new Date(g.from).toLocaleTimeString()+'-'+new Date(g.to).toLocaleTimeString()+' '+
+        Math.round(g.deducted_minutes)+'m '+g.reason).join(' | ') : '',
+    'Original Pay': r.phone_deduction ? r.phone_deduction.original_pay : r.total_pay,
+    'Payable Pay': r.phone_deduction ? r.phone_deduction.adjusted_pay : r.total_pay,
     'Issues': (r.issues||[]).join('; '),
   }));
 
@@ -3815,6 +3860,10 @@ async function loadTimeReport(){
     // Per-agent payroll breakdown
     const pa = res.per_agent || [];
     const ps = document.getElementById('tr-payroll-summary');
+    // Only show the phone columns once availability data actually exists —
+    // otherwise every row would read "-0m" and look like a broken feature.
+    const hasDed = (t.phone_deducted_minutes || 0) > 0 ||
+                   pa.some(a => (a.deducted_minutes || 0) > 0);
     if(ps){
       ps.innerHTML = pa.length ? `
         <div class="card">
@@ -3822,7 +3871,7 @@ async function loadTimeReport(){
             <span style="font-size:11px;color:var(--text3)">Overtime standard ${res.default_ot_multiplier}× · anything outside scheduled hours</span></div>
           <div style="overflow-x:auto;">
             <table class="data-table">
-              <thead><tr><th>Agent</th><th>Rate</th><th>Regular Hrs</th><th>Regular Pay</th><th>OT Hrs</th><th>OT Breakdown</th><th>OT Pay</th><th>Total Pay</th></tr></thead>
+              <thead><tr><th>Agent</th><th>Rate</th><th>Regular Hrs</th><th>Regular Pay</th><th>OT Hrs</th><th>OT Breakdown</th><th>OT Pay</th><th>Total Pay</th>${hasDed?'<th title="Time the agent was clocked in but could not take calls">Off Phone</th><th>Payable</th>':''}</tr></thead>
               <tbody>${pa.map(a=>`<tr>
                 <td style="font-weight:600;">${a.employee_name}</td>
                 <td>${a.hourly_rate?'$'+a.hourly_rate.toFixed(2):'<span style="color:var(--red);font-size:11px;">no rate set</span>'}</td>
@@ -3831,7 +3880,9 @@ async function loadTimeReport(){
                 <td style="color:${a.overtime_hours>0?'var(--yellow)':'var(--text3)'};font-weight:600;">${a.overtime_hours.toFixed(2)}h</td>
                 <td style="font-size:11px;color:var(--text3);">${Object.entries(a.ot_breakdown||{}).map(([m,h])=>`${h}h @${m}×`).join(', ')||'—'}</td>
                 <td style="color:${a.overtime_pay>0?'var(--yellow)':'var(--text3)'};">$${a.overtime_pay.toFixed(2)}</td>
-                <td style="font-weight:700;color:var(--green);">$${a.total_pay.toFixed(2)}</td>
+                <td style="font-weight:${hasDed?'400':'700'};color:${hasDed?'var(--text2)':'var(--green)'};">$${a.total_pay.toFixed(2)}</td>
+                ${hasDed?`<td style="color:${(a.deducted_minutes||0)>0?'var(--red)':'var(--text3)'};">${(a.deducted_minutes||0)>0?`-${Math.round(a.deducted_minutes)}m<span style="display:block;font-size:10px;">-$${(a.pay_reduction||0).toFixed(2)}</span>`:'—'}</td>
+                <td style="font-weight:700;color:var(--green);">$${(a.adjusted_total_pay!=null?a.adjusted_total_pay:a.total_pay).toFixed(2)}</td>`:''}
               </tr>`).join('')}
               <tr style="border-top:2px solid var(--border);">
                 <td colspan="2" style="font-weight:700;">TOTAL</td>
@@ -3840,7 +3891,9 @@ async function loadTimeReport(){
                 <td style="font-weight:700;color:var(--yellow);">${(t.overtime_hours||0).toFixed(2)}h</td>
                 <td></td>
                 <td style="font-weight:700;color:var(--yellow);">$${(t.overtime_pay||0).toFixed(2)}</td>
-                <td style="font-weight:700;color:var(--green);font-size:14px;">$${(t.total_pay||0).toFixed(2)}</td>
+                <td style="font-weight:${hasDed?'400':'700'};color:${hasDed?'var(--text2)':'var(--green)'};font-size:14px;">$${(t.total_pay||0).toFixed(2)}</td>
+                ${hasDed?`<td style="font-weight:700;color:var(--red);">-${Math.round(t.phone_deducted_minutes||0)}m<span style="display:block;font-size:10px;">-$${(t.phone_pay_reduction||0).toFixed(2)}</span></td>
+                <td style="font-weight:700;color:var(--green);font-size:14px;">$${(t.adjusted_total_pay!=null?t.adjusted_total_pay:(t.total_pay||0)).toFixed(2)}</td>`:''}
               </tr></tbody>
             </table>
           </div>
@@ -3848,7 +3901,7 @@ async function loadTimeReport(){
     }
 
     if(!rows.length){
-      tbody.innerHTML = '<tr><td colspan="16" style="text-align:center;padding:32px;color:var(--text3)">No data for this range. Add schedules and upload a Clocker report.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="18" style="text-align:center;padding:32px;color:var(--text3)">No data for this range. Add schedules and upload a Clocker report.</td></tr>';
       return;
     }
 
@@ -3882,6 +3935,28 @@ async function loadTimeReport(){
         <td style="font-size:11px;">${r.hourly_rate?'$'+r.hourly_rate.toFixed(2):'—'}</td>
         <td style="font-weight:700;color:var(--green);">${r.total_pay?'$'+r.total_pay.toFixed(2):'—'}</td>
         <td><span class="badge ${statusBadgeCls(r.status)}">${r.status}</span></td>
+        <td style="font-size:11px;">${(()=>{
+          const p = r.phone_deduction;
+          if(!p) return '<span style="color:var(--text3)">—</span>';
+          if(!(p.total_minutes>0)) return '<span style="color:var(--green)">on phone</span>';
+          const detail = (p.gaps_counted||[]).map(g=>{
+            const f=new Date(g.from).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"});
+            const to=new Date(g.to).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"});
+            return `${f}-${to}  ${Math.round(g.deducted_minutes)}m  ${g.reason}`;
+          }).join(" | ");
+          const parts=[];
+          if(p.late_start_minutes>0) parts.push(`start ${Math.round(p.late_start_minutes)}m`);
+          if(p.midshift_minutes>0) parts.push(`mid ${Math.round(p.midshift_minutes)}m`);
+          if(p.early_finish_minutes>0) parts.push(`end ${Math.round(p.early_finish_minutes)}m`);
+          return `<span style="color:var(--red);font-weight:600;" title="${detail}">-${Math.round(p.total_minutes)}m</span>`+
+                 `<span style="display:block;font-size:10px;color:var(--text3);">${parts.join(" · ")}</span>`;
+        })()}</td>
+        <td style="font-size:11px;font-weight:600;color:var(--green);">${(()=>{
+          const p = r.phone_deduction;
+          if(!p || !(p.total_minutes>0)) return r.total_pay!=null?"$"+r.total_pay.toFixed(2):"—";
+          return `$${(p.adjusted_pay!=null?p.adjusted_pay:0).toFixed(2)}`+
+                 `<span style="display:block;font-size:10px;color:var(--text3);font-weight:400;">was $${(p.original_pay||0).toFixed(2)}</span>`;
+        })()}</td>
         <td style="font-size:11px;color:var(--text3);max-width:220px;">${(r.issues||[]).join('; ')||'—'}</td>
         <td><button onclick="openAdjustModal(${idx})" style="background:none;border:none;color:${r.is_adjusted?'var(--yellow)':'var(--accent)'};cursor:pointer;font-size:11px;white-space:nowrap;">${r.is_adjusted?'Edit ✏️':'Adjust'}</button></td>
       </tr>`;
@@ -3891,7 +3966,7 @@ async function loadTimeReport(){
     if(msg.includes('<') || msg.includes('doctype') || msg.includes('JSON')){
       msg = 'Server error building the report — the page may also need a hard refresh (Ctrl+Shift+R).';
     }
-    tbody.innerHTML = `<tr><td colspan="16" style="text-align:center;padding:24px;color:var(--red)">${msg}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="18" style="text-align:center;padding:24px;color:var(--red)">${msg}</td></tr>`;
   }
   loadSchedulesList();
   loadRecurringList();

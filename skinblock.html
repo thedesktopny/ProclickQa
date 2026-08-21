@@ -867,6 +867,7 @@ async function boot(){
     });
     LOCAL_MODEL = true;
     const threads = (window.ort && window.ort.env.wasm.numThreads) || 1;
+    reportDetector('local', '', backend, threads);
     statusText.textContent = backend === "webgpu"
       ? "Instant mode — using this PC's graphics"
       : ("Fast mode — this PC, " + threads + (threads > 1 ? " cores" : " core"));
@@ -877,7 +878,20 @@ async function boot(){
     console.warn("[SkinBlock] local model unavailable:", e);
     statusText.textContent = "Server mode — " + why;
     statusText.title = "Send this to David: " + why;
+    reportDetector('server', why, '', 0);
   }
+}
+
+/* Tells the server which detector we ended up on. If it's the slow server
+   path, the reason goes with it, so nobody has to read it off the screen. */
+function reportDetector(mode, reason, backend, threads){
+  try{
+    fetch('/api/skinblock/report-detector', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ agent_ext: AGENT_EXT, mode, reason, backend,
+                             threads, isolated: !!self.crossOriginIsolated })
+    });
+  }catch(e){}
 }
 
 /* ---------------- intake: click, drag in, paste ---------------- */
