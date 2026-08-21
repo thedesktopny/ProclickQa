@@ -302,6 +302,98 @@ def search(term, database=None):
             'tables': [{'table': t, 'columns': cols[:40]} for t, cols in sorted(hits.items())]}
 
 
+def find_value(value, database=None, budget_seconds=70, max_checks=4000):
+    """Search the whole database for a VALUE you can see on the CMS screen.
+
+    Far more reliable than guessing table names: type an extension, an email or
+    a name from the page you're looking at, and this reports every table and
+    column that contains it. That tells you exactly where the screen gets its
+    data from.
+
+    Text columns are matched with LIKE; if the value looks numeric, whole-number
+    columns are matched exactly as well. Every table is read-only and each check
+    stops at the first hit, so it stays cheap.
+    """
+    import time
+    value = str(value or '').strip()
+    if len(value) < 2:
+        raise RuntimeError('give at least two characters to look for')
+
+    k = kind()
+    db = database or NAME
+    conn = _connect(); cur = conn.cursor()
+
+    TEXT = ('varchar', 'nvarchar', 'char', 'nchar', 'text', 'ntext', 'character varying')
+    NUM = ('int', 'bigint', 'smallint', 'tinyint', 'numeric', 'decimal', 'integer')
+    if k == 'mssql':
+        pre = ('[%s].' % _safe(db)) if db and db != NAME else ''
+        cur.execute("""SELECT t.name, c.name, ty.name
+                       FROM %ssys.tables t
+                       JOIN %ssys.columns c ON c.object_id = t.object_id
+                       JOIN %ssys.types ty ON ty.user_type_id = c.user_type_id
+                       ORDER BY t.name""" % (pre, pre, pre))
+        cols = cur.fetchall()
+    else:
+        cur.execute("""SELECT table_name, column_name, data_type
+                       FROM information_schema.columns
+                       WHERE table_schema = %s ORDER BY table_name""", (db,))
+        cols = cur.fetchall()
+
+    numeric = value.lstrip('-').isdigit()
+    like = '%' + value + '%'
+    hits, checked, skipped = [], 0, 0
+    started = time.time()
+    stopped_early = False
+
+    for tname, cname, ctype in cols:
+        if time.time() - started > budget_seconds or checked >= max_checks:
+            stopped_early = True
+            break
+        t = str(ctype).lower()
+        is_text = any(x in t for x in TEXT)
+        is_num = any(t == x or t.startswith(x) for x in NUM)
+        if not (is_text or (numeric and is_num)):
+            continue
+        try:
+            _safe(tname); _safe(cname)
+        except Exception:
+            skipped += 1
+            continue
+        target = _qualified(tname, database)
+        q_ = '[%s]' if k == 'mssql' else ('"%s"' if k == 'postgres' else '`%s`')
+        col = q_ % cname
+        try:
+            if is_text:
+                sql = ('SELECT TOP 1 %s FROM %s WHERE %s LIKE %%s' % (col, target, col)) if k == 'mssql' \
+                      else ('SELECT %s FROM %s WHERE %s LIKE %%s LIMIT 1' % (col, target, col))
+                cur.execute(sql, (like,))
+            else:
+                sql = ('SELECT TOP 1 %s FROM %s WHERE %s = %%s' % (col, target, col)) if k == 'mssql' \
+                      else ('SELECT %s FROM %s WHERE %s = %%s LIMIT 1' % (col, target, col))
+                cur.execute(sql, (int(value),))
+            checked += 1
+            row = cur.fetchone()
+            if row:
+                hits.append({'table': tname, 'column': cname, 'type': str(ctype),
+                             'example': _plain(row[0])})
+        except Exception:
+            skipped += 1
+            continue
+
+    conn.close()
+    by_table = {}
+    for h in hits:
+        by_table.setdefault(h['table'], []).append(h)
+    return {
+        'value': value, 'database': db,
+        'hits': hits,
+        'tables': sorted(by_table.keys()),
+        'columns_checked': checked, 'columns_skipped': skipped,
+        'stopped_early': stopped_early,
+        'seconds': round(time.time() - started, 1),
+    }
+
+
 def columns(table, database=None):
     """Column names and types for one table."""
     _safe(table)

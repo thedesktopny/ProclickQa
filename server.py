@@ -3944,6 +3944,20 @@ def cms_db_search():
         return jsonify({'error': str(e)[:240]}), 400
 
 
+@app.route('/api/cms-db/find-value', methods=['GET'])
+@require_manager
+def cms_db_find_value():
+    """Search the database for a value you can see on a CMS screen — an
+    extension, an email, a name — and report which table and column holds it.
+    Much more reliable than guessing table names."""
+    import cms_db
+    try:
+        return jsonify(cms_db.find_value(request.args.get('value', ''),
+                                         request.args.get('database') or None))
+    except Exception as e:
+        return jsonify({'error': str(e)[:240]}), 400
+
+
 @app.route('/api/cms-db/sample', methods=['GET'])
 @require_manager
 def cms_db_sample():

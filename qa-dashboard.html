@@ -350,7 +350,10 @@ td.agent{color:var(--text);font-weight:500;}
         <button onclick="cmsLoadTables()" class="btn btn-outline" style="font-size:12px;">List tables</button>
         <input id="cms-search" class="cms-in" style="width:auto;min-width:180px;"
                placeholder="find a table or column…" onkeydown="if(event.key==='Enter')cmsSearch()">
-        <button onclick="cmsSearch()" class="btn btn-outline" style="font-size:12px;">Search</button>
+        <button onclick="cmsSearch()" class="btn btn-outline" style="font-size:12px;">Search names</button>
+        <input id="cms-value" class="cms-in" style="width:auto;min-width:200px;"
+               placeholder="or a value from the screen, e.g. 119" onkeydown="if(event.key==='Enter')cmsFindValue()">
+        <button onclick="cmsFindValue()" class="btn btn-primary" style="font-size:12px;">Find where it lives</button>
       </div>
       <div id="cms-explore" style="font-size:12px;color:var(--text2);max-height:260px;overflow:auto;
            background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px;">
@@ -3203,6 +3206,34 @@ async function cmsSearch(){
       + r.tables.map(t=>`<div style="margin-bottom:6px;">
           <a href="#" onclick="cmsSample('${t.table}');return false;" style="color:var(--accent);font-weight:600">${t.table}</a>
           <span style="color:var(--text3);font-size:11px;"> — ${t.columns.join(', ')}</span></div>`).join(''));
+  }catch(e){ cmsExp('Failed: ' + e.message); }
+}
+
+/* The surest way to locate data: search for something you can SEE on the CMS
+   page — an extension, an email — and let the database say which table holds it. */
+async function cmsFindValue(){
+  const v = document.getElementById('cms-value').value.trim();
+  if(v.length < 2){ cmsExp('Type at least two characters — an extension or an email works well.'); return; }
+  cmsExp('Looking through every table for “' + v + '” — this can take up to a minute…');
+  try{
+    const r = await API.get(`/api/cms-db/find-value?value=${encodeURIComponent(v)}&database=${encodeURIComponent(cmsDb())}`);
+    if(r.error){ cmsExp('❌ ' + r.error); return; }
+    if(!r.hits.length){
+      cmsExp(`Nothing in <b>${r.database}</b> contains “${r.value}”. `
+        + `Checked ${r.columns_checked} columns in ${r.seconds}s.`
+        + (r.stopped_early ? ' Stopped early — try a different database from the dropdown.' : '')
+        + `<br><br>Try another value from the same screen, or switch database above.`);
+      return;
+    }
+    cmsExp(`<div style="margin-bottom:8px;color:var(--text3)">Found “${r.value}” in
+        ${r.hits.length} column${r.hits.length===1?'':'s'} across ${r.tables.length}
+        table${r.tables.length===1?'':'s'} of <b>${r.database}</b>
+        (${r.columns_checked} columns checked, ${r.seconds}s)</div>`
+      + r.hits.map(h=>`<div style="margin-bottom:5px;">
+          <a href="#" onclick="cmsSample('${h.table}');return false;" style="color:var(--accent);font-weight:600">${h.table}</a>
+          <span style="color:var(--text2)">.${h.column}</span>
+          <span style="color:var(--text3);font-size:11px;"> — ${h.type}, e.g. ${String(h.example).slice(0,40)}</span>
+        </div>`).join(''));
   }catch(e){ cmsExp('Failed: ' + e.message); }
 }
 
