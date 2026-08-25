@@ -189,6 +189,79 @@ td.agent{color:var(--text);font-weight:500;}
 ::-webkit-scrollbar{width:6px;height:6px;}
 ::-webkit-scrollbar-track{background:var(--bg);}
 ::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px;}
+
+/* ============ Time Report: a pay run, laid out like a register ============
+   The page has one job — decide what each agent is paid and be able to defend
+   the number. So the period and the running total are pinned at the top, the
+   evidence is tucked behind tabs instead of stacked below, and money always
+   sits in the same right-hand column in tabular figures, the way a ledger
+   reads. Nothing here scrolls unless it is a list of people or days. */
+.runbar{
+  position:sticky; top:0; z-index:30;
+  display:flex; align-items:flex-end; gap:26px; flex-wrap:wrap;
+  padding:16px 28px; background:var(--surface); border-bottom:1px solid var(--border);
+}
+.runbar-label{
+  font-size:10px; letter-spacing:.14em; text-transform:uppercase;
+  color:var(--text3); margin-bottom:6px;
+}
+.runbar-dates{ display:flex; align-items:center; gap:8px; }
+.runbar-dates input{
+  background:var(--surface2); border:1px solid var(--border); color:var(--text);
+  padding:7px 10px; border-radius:8px; font-size:13px;
+}
+.runbar-dash{ color:var(--text3); }
+.runbar-quick{ display:flex; gap:4px; margin-top:8px; }
+.runbar-quick button{
+  background:transparent; border:1px solid var(--border); color:var(--text3);
+  border-radius:20px; padding:3px 10px; font-size:11px; cursor:pointer;
+}
+.runbar-quick button:hover{ color:var(--text); border-color:var(--accent); }
+.runbar-quick button.on{ background:var(--accent); border-color:var(--accent); color:#fff; }
+.runbar-filters{ display:flex; gap:16px; align-items:flex-end; }
+.runbar-filters label{
+  display:flex; flex-direction:column; gap:6px; font-size:10px;
+  letter-spacing:.14em; text-transform:uppercase; color:var(--text3);
+}
+.runbar-filters select, .runbar-filters input{
+  background:var(--surface2); border:1px solid var(--border); color:var(--text);
+  padding:7px 10px; border-radius:8px; font-size:13px; text-transform:none; letter-spacing:0;
+}
+/* the signature: the money column, always right, always tabular */
+.runbar-total{ margin-left:auto; text-align:right; }
+.runbar-money{
+  font-size:34px; font-weight:700; line-height:1; color:var(--green);
+  font-variant-numeric:tabular-nums; letter-spacing:-.02em;
+}
+.runbar-sub{ font-size:11.5px; color:var(--text3); margin-top:6px; }
+
+.runtabs{
+  position:sticky; top:73px; z-index:29;
+  display:flex; align-items:center; gap:4px; padding:0 28px;
+  background:var(--bg); border-bottom:1px solid var(--border);
+}
+.runtab{
+  background:none; border:0; border-bottom:2px solid transparent; color:var(--text3);
+  padding:12px 14px; font-size:13px; font-weight:500; cursor:pointer;
+}
+.runtab:hover{ color:var(--text); }
+.runtab.on{ color:var(--text); border-bottom-color:var(--accent); font-weight:600; }
+.runtabs-spacer{ flex:1; }
+.runtab-tools{ display:flex; gap:6px; padding:6px 0; }
+.runtab-tools .btn{ font-size:11.5px; padding:5px 10px; }
+
+.runbody{ padding:22px 28px 40px; }
+.runpanel table.data-table td:last-child,
+.runpanel table.data-table th:last-child{ text-align:right; }
+.runpanel .data-table td{ font-variant-numeric:tabular-nums; }
+
+@media (max-width:860px){
+  .runbar{ gap:16px; padding:12px 16px; }
+  .runbar-total{ margin-left:0; text-align:left; }
+  .runbar-money{ font-size:26px; }
+  .runtabs{ top:auto; position:static; overflow-x:auto; }
+  .runbody{ padding:16px; }
+}
 </style>
 </head>
 <body>
@@ -787,53 +860,79 @@ td.agent{color:var(--text);font-weight:500;}
   <div class="topbar">
     <div class="page-title">⏰ Time Report</div>
     <div class="topbar-right">
-      <button class="btn btn-outline" onclick="expandAllAgents(true)">⊞ Expand all</button>
-      <button class="btn btn-outline" onclick="expandAllAgents(false)">⊟ Collapse all</button>
       <button class="btn btn-outline" onclick="exportTimeReport('xlsx')">⬇️ Excel</button>
-      <button class="btn btn-outline" onclick="exportTimeReport('csv')">⬇️ CSV</button>
-      <button class="btn btn-outline" onclick="openOtPeriodsModal()">⚡ Overtime Rate</button>
-      <button class="btn btn-outline" onclick="openWeeklyScheduleModal()">📅 Weekly Schedule</button>
-      <button class="btn btn-outline" onclick="showModal('add-schedule-modal')">+ One-Off</button>
+      <button class="btn btn-outline" onclick="exportTimeReport('csv')">CSV</button>
       <label class="btn btn-primary" style="cursor:pointer;margin:0;">
         📤 Upload Clocker
         <input type="file" id="clocker-file-input" accept=".xlsx,.xls,.csv" style="display:none;" onchange="handleClockerUpload(event)">
       </label>
     </div>
   </div>
-  <div style="padding:28px;">
-    <div class="alert-bar" style="margin-bottom:20px;background:rgba(79,110,247,0.08);border-color:rgba(79,110,247,0.2)">
-      <span style="font-size:18px;">💡</span>
-      <span style="font-size:12px;color:var(--text2);flex:1;">Set a <strong>default pattern</strong> once, then adjust <strong>any single week</strong> without touching the weeks already worked — use the week arrows below and <strong>Copy last week</strong> to start from where you left off. <strong>+ One-Off</strong> still overrides a single date. Then upload the Clocker export from CMS to compare actual vs scheduled.</span>
-    </div>
 
-    <div style="display:flex;gap:12px;margin-bottom:20px;flex-wrap:wrap;align-items:center;">
-      <div>
-        <div style="font-size:11px;color:var(--text3);margin-bottom:4px;">From</div>
-        <input type="date" id="tr-date-from" onchange="loadTimeReport()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px 10px;border-radius:8px;font-size:13px;">
+  <!-- The pay run bar. Period and the number you're producing stay pinned while
+       you work, because every other figure on the page is an argument about it. -->
+  <div class="runbar">
+    <div class="runbar-period">
+      <div class="runbar-label">Pay period</div>
+      <div class="runbar-dates">
+        <input type="date" id="tr-date-from" onchange="loadTimeReport()">
+        <span class="runbar-dash">→</span>
+        <input type="date" id="tr-date-to" onchange="loadTimeReport()">
       </div>
-      <div>
-        <div style="font-size:11px;color:var(--text3);margin-bottom:4px;">To</div>
-        <input type="date" id="tr-date-to" onchange="loadTimeReport()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px 10px;border-radius:8px;font-size:13px;">
-      </div>
-      <div>
-        <div style="font-size:11px;color:var(--text3);margin-bottom:4px;">Agent</div>
-        <select id="tr-employee" onchange="loadTimeReport()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px 10px;border-radius:8px;font-size:13px;min-width:150px;">
-          <option value="">All agents</option>
-        </select>
-      </div>
-      <div>
-        <div style="font-size:11px;color:var(--text3);margin-bottom:4px;">Grace (min)</div>
-        <input type="number" id="tr-grace" value="5" min="0" max="60" onchange="loadTimeReport()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px 10px;border-radius:8px;font-size:13px;width:80px;">
+      <div class="runbar-quick">
+        <button onclick="setPayPeriod('this-week')">This week</button>
+        <button onclick="setPayPeriod('last-week')">Last week</button>
+        <button onclick="setPayPeriod('this-month')">This month</button>
+        <button onclick="setPayPeriod('last-month')">Last month</button>
       </div>
     </div>
 
-    <div id="ot-active-banner"></div>
+    <div class="runbar-filters">
+      <label>Agent
+        <select id="tr-employee" onchange="loadTimeReport()"><option value="">All</option></select>
+      </label>
+      <label>Grace
+        <input type="number" id="tr-grace" value="5" min="0" max="60" onchange="loadTimeReport()"> min
+      </label>
+    </div>
 
-    <div id="tr-summary" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px;margin-bottom:20px;"></div>
+    <div class="runbar-total">
+      <div class="runbar-label">Total to pay</div>
+      <div class="runbar-money" id="run-total">—</div>
+      <div class="runbar-sub" id="run-sub"></div>
+    </div>
+  </div>
 
-    <div id="tr-payroll-summary" style="margin-bottom:20px;"></div>
+  <div class="runtabs">
+    <button class="runtab on" data-tab="pay" onclick="showTimeTab('pay')">Pay run</button>
+    <button class="runtab" data-tab="days" onclick="showTimeTab('days')">Every shift</button>
+    <button class="runtab" data-tab="schedules" onclick="showTimeTab('schedules')">Schedules</button>
+    <span class="runtabs-spacer"></span>
+    <span class="runtab-tools" id="pay-tools">
+      <button class="btn btn-outline" onclick="expandAllAgents(true)">Expand all</button>
+      <button class="btn btn-outline" onclick="expandAllAgents(false)">Collapse</button>
+    </span>
+    <span class="runtab-tools" id="sched-tools" style="display:none;">
+      <button class="btn btn-outline" onclick="openOtPeriodsModal()">⚡ Overtime rate</button>
+      <button class="btn btn-outline" onclick="openWeeklyScheduleModal()">📅 Weekly schedule</button>
+      <button class="btn btn-outline" onclick="showModal('add-schedule-modal')">+ One-off</button>
+    </span>
+  </div>
 
-    <div class="card">
+  <div class="runbody">
+    <!-- PAY RUN: one line per agent, the money column on the right -->
+    <section class="runpanel" id="tab-pay">
+      <div id="tr-summary" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px;margin-bottom:20px;"></div>
+
+    
+      <div id="tr-payroll-summary" style="margin-bottom:20px;"></div>
+
+    
+    </section>
+
+    <!-- EVERY SHIFT: the day-by-day evidence behind the money -->
+    <section class="runpanel" id="tab-days" style="display:none;">
+      <div class="card">
       <div class="card-header"><span class="card-title">Attendance vs Schedule</span><span id="tr-count" style="font-size:11px;color:var(--text3)"></span></div>
       <div style="overflow-x:auto;">
         <table class="data-table" style="min-width:1620px;">
@@ -852,6 +951,11 @@ td.agent{color:var(--text);font-weight:500;}
     </div>
 
     <div style="margin-top:28px;">
+      
+    </section>
+
+    <!-- SCHEDULES: what they were supposed to work -->
+    <section class="runpanel" id="tab-schedules" style="display:none;">
       <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap;">
         <div style="font-size:14px;font-weight:700;">🔁 Weekly Schedules</div>
         <div style="display:flex;align-items:center;gap:6px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:4px 6px;">
@@ -877,7 +981,8 @@ td.agent{color:var(--text);font-weight:500;}
       </div>
     </div>
 
-    <div style="margin-top:28px;">
+    
+      <div style="margin-top:28px;">
       <div style="font-size:14px;font-weight:700;margin-bottom:12px;">📌 One-Off Overrides <span style="font-size:11px;color:var(--text3);font-weight:400;">— these replace the weekly pattern on specific dates</span></div>
       <div class="card">
         <div style="overflow-x:auto;">
@@ -889,7 +994,8 @@ td.agent{color:var(--text);font-weight:500;}
           </table>
         </div>
       </div>
-    </div>
+    
+    </section>
   </div>
 </div>
 
@@ -2362,7 +2468,9 @@ function showPage(id){
       f.value = weekAgo.toISOString().slice(0,10);
       if(t) t.value = today.toISOString().slice(0,10);
     }
-    loadClockerEmployees(); loadTimeReport();
+    loadClockerEmployees();
+    if(!document.querySelector('.runbar-quick button.on')) setPayPeriod('this-week');
+    else loadTimeReport();
   }
 }
 
@@ -3338,6 +3446,60 @@ async function cmsImport(){
   }catch(e){ cmsOut('Failed: ' + e.message); }
 }
 
+
+/* ---- Time Report: tabs, quick periods, and the running total ---- */
+function showTimeTab(name){
+  ['pay','days','schedules'].forEach(t=>{
+    const panel = document.getElementById('tab-'+t);
+    if(panel) panel.style.display = (t===name) ? '' : 'none';
+  });
+  document.querySelectorAll('.runtab').forEach(b=>
+    b.classList.toggle('on', b.dataset.tab===name));
+  const pay = document.getElementById('pay-tools'), sch = document.getElementById('sched-tools');
+  if(pay) pay.style.display = name==='pay' ? '' : 'none';
+  if(sch) sch.style.display = name==='schedules' ? '' : 'none';
+}
+
+/* Pay periods are the unit people actually think in — a week, a month —
+   so they get one click instead of two date pickers. */
+function setPayPeriod(which){
+  const iso = d => new Date(d.getTime() - d.getTimezoneOffset()*60000).toISOString().slice(0,10);
+  const now = new Date();
+  let from, to;
+  if(which==='this-week' || which==='last-week'){
+    const off = (now.getDay()+6)%7;                    // Monday start
+    from = new Date(now); from.setDate(now.getDate()-off);
+    if(which==='last-week') from.setDate(from.getDate()-7);
+    to = new Date(from); to.setDate(from.getDate()+6);
+  }else{
+    const m = now.getMonth() + (which==='last-month' ? -1 : 0);
+    from = new Date(now.getFullYear(), m, 1);
+    to = new Date(now.getFullYear(), m+1, 0);
+  }
+  document.getElementById('tr-date-from').value = iso(from);
+  document.getElementById('tr-date-to').value = iso(to);
+  document.querySelectorAll('.runbar-quick button').forEach(b=>
+    b.classList.toggle('on', b.getAttribute('onclick').includes("'"+which+"'")));
+  loadTimeReport();
+}
+
+/* Keeps the pinned total honest: it always shows what this pay run costs. */
+function updateRunTotal(res){
+  const t = (res && res.totals) || {};
+  const el = document.getElementById('run-total'), sub = document.getElementById('run-sub');
+  if(!el) return;
+  const payable = t.adjusted_total_pay != null ? t.adjusted_total_pay : (t.total_pay || 0);
+  el.textContent = '$' + Number(payable).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
+  const bits = [];
+  const agents = (res.per_agent||[]).length;
+  if(agents) bits.push(agents + ' agent' + (agents===1?'':'s'));
+  const hrs = (t.regular_hours||0) + (t.overtime_hours||0);
+  if(hrs) bits.push(hrs.toFixed(1) + 'h');
+  if(t.overtime_hours) bits.push(t.overtime_hours.toFixed(1) + 'h OT');
+  if(t.phone_deducted_minutes) bits.push('−' + Math.round(t.phone_deducted_minutes) + 'm off phone');
+  sub.textContent = bits.join(' · ');
+}
+
 async function loadDetectorLog(){
   const box = document.getElementById('detector-log');
   box.textContent = 'Loading…';
@@ -4219,6 +4381,7 @@ async function loadTimeReport(){
     const res = await API.get('/api/time-report' + params);
     const rows = res.report || [];
     lastTimeReportData = res;
+    updateRunTotal(res);
     document.getElementById('tr-count').textContent = `${rows.length} shift(s)`;
 
     // Banner when a special overtime rate is currently in force
