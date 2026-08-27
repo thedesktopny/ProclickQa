@@ -744,6 +744,12 @@ td.agent{color:var(--text);font-weight:500;}
       <div><div class="cn-lab">Phone number</div><input id="cn-phone" class="cms-in" placeholder="any part of it" onkeydown="if(event.key==='Enter')loadCallNotes()"></div>
       <div><div class="cn-lab">Account</div><input id="cn-account" class="cms-in" placeholder="account name or id" onkeydown="if(event.key==='Enter')loadCallNotes()"></div>
       <div><div class="cn-lab">Note contains</div><input id="cn-contains" class="cms-in" placeholder="word or phrase" onkeydown="if(event.key==='Enter')loadCallNotes()"></div>
+      <div><div class="cn-lab">AI scoring</div>
+        <select id="cn-processed" class="cms-in" onchange="loadCallNotes()">
+          <option value="">All notes</option>
+          <option value="yes">Only calls the AI scored</option>
+          <option value="no">Only calls the AI never scored</option>
+        </select></div>
     </div>
     <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
       <button onclick="cnRange(7)" class="btn btn-outline" style="font-size:11px;">7 days</button>
@@ -801,8 +807,8 @@ td.agent{color:var(--text);font-weight:500;}
   <div style="padding:0 28px 40px;">
     <div class="card">
       <div class="table-wrap"><table class="data-table">
-        <thead><tr><th>When</th><th>Agent</th><th>Phone</th><th>Account</th><th>Note</th><th>Score</th></tr></thead>
-        <tbody id="cn-tbody"><tr><td colspan="6" style="text-align:center;padding:32px;color:var(--text3)">Choose a range and search.</td></tr></tbody>
+        <thead><tr><th>When</th><th>Agent</th><th>Phone</th><th>Account</th><th>Note</th><th>AI</th><th>Score</th></tr></thead>
+        <tbody id="cn-tbody"><tr><td colspan="7" style="text-align:center;padding:32px;color:var(--text3)">Choose a range and search.</td></tr></tbody>
       </table></div>
     </div>
     <div style="display:flex;gap:8px;justify-content:center;margin-top:14px;">
@@ -3702,7 +3708,8 @@ let cnOffset = 0, cnLast = null;
 const cnVal = id => (document.getElementById(id)||{}).value || '';
 function cnFilters(){
   return { date_from:cnVal('cn-from'), date_to:cnVal('cn-to'), agent:cnVal('cn-agent'),
-           phone:cnVal('cn-phone'), account:cnVal('cn-account'), contains:cnVal('cn-contains') };
+           phone:cnVal('cn-phone'), account:cnVal('cn-account'), contains:cnVal('cn-contains'),
+           processed:cnVal('cn-processed') };
 }
 function cnRange(days){
   const iso = d => new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,10);
@@ -3723,21 +3730,22 @@ function cnPage(dir){
 
 async function loadCallNotes(){
   const tb = document.getElementById('cn-tbody');
-  tb.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:28px;color:var(--text3)">Loading…</td></tr>';
+  tb.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:28px;color:var(--text3)">Loading…</td></tr>';
   const f = cnFilters();
   const q = new URLSearchParams({...f, limit:100, offset:cnOffset});
   try{
     const r = await API.get('/api/call-notes?' + q.toString());
-    if(r.error){ tb.innerHTML = `<tr><td colspan="6" style="padding:20px;color:var(--red)">${r.error}</td></tr>`; return; }
+    if(r.error){ tb.innerHTML = `<tr><td colspan="7" style="padding:20px;color:var(--red)">${r.error}</td></tr>`; return; }
     cnLast = r;
-    document.getElementById('cn-count').textContent = r.total.toLocaleString() + ' notes match';
+    document.getElementById('cn-count').textContent = r.total.toLocaleString() + ' notes match'
+      + (r.not_analyzed ? ` · ${r.not_analyzed.toLocaleString()} from calls the AI never scored` : '');
     cnEstimate();
     document.getElementById('cn-ask-scope').textContent =
       r.total ? `— reads the ${Math.min(r.total,400).toLocaleString()} most recent of ${r.total.toLocaleString()} matching notes` : '';
     document.getElementById('cn-page').textContent =
       r.total ? `${cnOffset+1}–${Math.min(cnOffset+r.notes.length, r.total)} of ${r.total.toLocaleString()}` : '';
     if(!r.notes.length){
-      tb.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:28px;color:var(--text3)">No notes match these filters.</td></tr>';
+      tb.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:28px;color:var(--text3)">No notes match these filters.</td></tr>';
       return;
     }
     tb.innerHTML = r.notes.map(n=>`<tr>
@@ -3746,9 +3754,16 @@ async function loadCallNotes(){
       <td style="font-size:11px;white-space:nowrap;">${n.caller_id||''}</td>
       <td style="font-size:11px;">${n.account_name||n.customer_account_id||''}</td>
       <td style="font-size:12px;color:var(--text2);max-width:520px;">${(n.call_notes||'').replace(/</g,'&lt;')}</td>
+      <td style="font-size:11px;white-space:nowrap;">${(()=>{
+        const s = (n.status||'').toLowerCase();
+        const unscored = ['paused','failed','pending','processing'].includes(s);
+        return unscored
+          ? `<span style="color:var(--text3);" title="The note is here; the AI never scored this call">not scored · ${n.status}</span>`
+          : '<span style="color:var(--green);">scored</span>';
+      })()}</td>
       <td style="text-align:right;color:${n.notes_score>=70?'var(--green)':n.notes_score>=40?'var(--yellow)':'var(--red)'};">${n.notes_score==null?'—':n.notes_score}</td>
     </tr>`).join('');
-  }catch(e){ tb.innerHTML = `<tr><td colspan="6" style="padding:20px;color:var(--red)">${e.message}</td></tr>`; }
+  }catch(e){ tb.innerHTML = `<tr><td colspan="7" style="padding:20px;color:var(--red)">${e.message}</td></tr>`; }
 }
 
 /* What the next question will cost, before it's asked — the price depends on

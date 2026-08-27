@@ -4006,6 +4006,15 @@ def _call_notes_filters(a):
         params += ['%' + a['account'] + '%'] * 2
     if a.get('contains'):
         where.append('call_notes LIKE %s'); params.append('%' + a['contains'] + '%')
+    # Notes exist whether or not the AI ever scored the call — the record is
+    # saved the moment it arrives. This lets you look at just the ones the AI
+    # never got to (paused, failed, still queued), which are invisible on the
+    # quality pages precisely because they were never scored.
+    st = (a.get('processed') or '').lower()
+    if st == 'yes':
+        where.append("COALESCE(status,'') NOT IN ('Paused','Failed','Pending','Processing')")
+    elif st == 'no':
+        where.append("COALESCE(status,'') IN ('Paused','Failed','Pending','Processing')")
     return ' AND '.join(where), params
 
 
@@ -4014,7 +4023,7 @@ def _call_notes_filters(a):
 def call_notes_list():
     """Every call note, filterable by agent, date, phone number and account."""
     a = {k: (request.args.get(k) or '').strip() for k in
-         ('date_from', 'date_to', 'agent', 'phone', 'account', 'contains')}
+         ('date_from', 'date_to', 'agent', 'phone', 'account', 'contains', 'processed')}
     try:
         limit = min(2000, max(1, int(request.args.get('limit') or 300)))
         offset = max(0, int(request.args.get('offset') or 0))
@@ -4024,6 +4033,10 @@ def call_notes_list():
     conn = get_db(); c = conn.cursor(cursor_factory=RealDictCursor)
     c.execute('SELECT COUNT(*) AS n FROM calls WHERE ' + where, params)
     total = c.fetchone()['n']
+    c.execute("""SELECT COUNT(*) AS n FROM calls WHERE %s
+                 AND COALESCE(status,'') IN ('Paused','Failed','Pending','Processing')""" % where,
+              params)
+    not_analyzed = c.fetchone()['n']
     c.execute("""SELECT call_id, agent_name, agent_extension, caller_id, account_name,
                         customer_account_id, duration, created_at, call_notes, notes_score, status
                  FROM calls WHERE %s ORDER BY created_at DESC LIMIT %s OFFSET %s"""
@@ -4033,7 +4046,8 @@ def call_notes_list():
     for r in rows:
         if r.get('created_at'):
             r['created_at'] = r['created_at'].isoformat()
-    return jsonify({'notes': rows, 'total': total, 'limit': limit, 'offset': offset})
+    return jsonify({'notes': rows, 'total': total, 'not_analyzed': not_analyzed,
+                    'limit': limit, 'offset': offset})
 
 
 DEFAULT_NOTE_TOPICS = {
@@ -4065,7 +4079,7 @@ def call_notes_insights():
     from collections import Counter
 
     a = {k: (request.args.get(k) or '').strip() for k in
-         ('date_from', 'date_to', 'agent', 'phone', 'account', 'contains')}
+         ('date_from', 'date_to', 'agent', 'phone', 'account', 'contains', 'processed')}
     where, params = _call_notes_filters(a)
 
     conn = get_db(); c = conn.cursor(cursor_factory=RealDictCursor)
@@ -4163,7 +4177,7 @@ def call_notes_estimate():
     size of the notes that match the current filters — about 4 characters per
     token, which is close enough for a price shown to two decimal places."""
     a = {k: (request.args.get(k) or '').strip() for k in
-         ('date_from', 'date_to', 'agent', 'phone', 'account', 'contains')}
+         ('date_from', 'date_to', 'agent', 'phone', 'account', 'contains', 'processed')}
     where, params = _call_notes_filters(a)
     conn = get_db(); c = conn.cursor()
     c.execute('SELECT COUNT(*) FROM calls WHERE ' + where, params)
@@ -4205,7 +4219,7 @@ def call_notes_ask():
     if not question:
         return jsonify({'error': 'Type a question first'}), 400
     a = {k: (d.get(k) or '').strip() for k in
-         ('date_from', 'date_to', 'agent', 'phone', 'account', 'contains')}
+         ('date_from', 'date_to', 'agent', 'phone', 'account', 'contains', 'processed')}
     where, params = _call_notes_filters(a)
 
     # How many notes fit is a question of SIZE, not a round number of rows.
