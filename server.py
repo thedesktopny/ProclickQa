@@ -4471,6 +4471,24 @@ def cms_db_analyze():
         return jsonify({'error': str(e)[:240]}), 400
 
 
+@app.route('/api/cms-db/schema', methods=['GET'])
+@require_manager
+def cms_db_schema():
+    """The whole shape of a database — tables, columns, keys and how they link.
+    Returned as JSON, or as plain text with ?format=text for downloading."""
+    import cms_db
+    try:
+        rep = cms_db.schema_report(
+            request.args.get('database') or None,
+            include_samples=(request.args.get('samples') == '1'))
+    except Exception as e:
+        return jsonify({'error': str(e)[:240]}), 400
+    if request.args.get('format') == 'text':
+        from flask import Response
+        return Response(cms_db.schema_markdown(rep), mimetype='text/plain')
+    return jsonify(rep)
+
+
 @app.route('/api/cms-db/find-topic', methods=['GET'])
 @require_manager
 def cms_db_find_topic():

@@ -571,6 +571,222 @@ TOPIC_WORDS = {
 }
 
 
+def schema_report(database=None, include_samples=False, sample_values=3):
+    """A full map of the database: every table, its columns and types, its keys,
+    and — most usefully — how the tables link to each other.
+
+    The relationships matter more than anything else here. Knowing that
+    PackageSold.EmployeeId points at Employee.Id is what makes a report
+    possible; without it every join is a guess.
+    """
+    db = database or NAME
+    conn = _connect()
+    k = kind()
+    cur = conn.cursor()
+
+    def rows_of(sql, params=None):
+        cu = conn.cursor()
+        cu.execute(sql, params) if params else cu.execute(sql)
+        out = []
+        while True:
+            r = cu.fetchone()
+            if not r:
+                break
+            out.append(r)
+        return out
+
+    if k == 'mssql':
+        try:
+            conn.cursor().execute('USE [%s]' % _safe(db))
+        except Exception:
+            pass
+
+    tables = {}
+
+    # columns
+    cols, problem = _searchable_columns(conn, k, db, True)
+    if not cols:
+        conn.close()
+        raise RuntimeError('Could not read the schema of %s — %s' % (db, problem))
+
+    # richer column detail where the dialect allows it
+    detail = {}
+    try:
+        if k == 'mssql':
+            for t, cname, ctype, ln, nullable, ident in rows_of(
+                    """SELECT t.name, c.name, ty.name, c.max_length, c.is_nullable, c.is_identity
+                       FROM sys.tables t
+                       JOIN sys.columns c ON c.object_id = t.object_id
+                       JOIN sys.types ty ON ty.user_type_id = c.user_type_id"""):
+                detail[(t, cname)] = {'type': ty_fmt(ctype, ln), 'nullable': bool(nullable),
+                                      'identity': bool(ident)}
+        else:
+            for t, cname, ctype, nullable in rows_of(
+                    """SELECT table_name, column_name, data_type, is_nullable
+                       FROM information_schema.columns WHERE table_schema = %s""", (db,)):
+                detail[(t, cname)] = {'type': ctype, 'nullable': str(nullable).lower() == 'yes',
+                                      'identity': False}
+    except Exception:
+        pass
+
+    for t, cname, ctype in cols:
+        d = tables.setdefault(t, {'table': t, 'columns': [], 'primary_key': [],
+                                  'foreign_keys': [], 'referenced_by': [], 'rows': 0})
+        info = detail.get((t, cname), {})
+        d['columns'].append({'name': cname, 'type': info.get('type', str(ctype)),
+                             'nullable': info.get('nullable'), 'identity': info.get('identity')})
+
+    # row counts
+    try:
+        if k == 'mssql':
+            for t, n in rows_of("""SELECT t.name, SUM(p.rows) FROM sys.tables t
+                                   JOIN sys.partitions p ON p.object_id = t.object_id
+                                    AND p.index_id IN (0,1) GROUP BY t.name"""):
+                if t in tables:
+                    tables[t]['rows'] = int(n or 0)
+        elif k == 'mysql':
+            for t, n in rows_of("""SELECT table_name, table_rows FROM information_schema.tables
+                                   WHERE table_schema = %s""", (db,)):
+                if t in tables:
+                    tables[t]['rows'] = int(n or 0)
+        else:
+            for t, n in rows_of('SELECT relname, n_live_tup FROM pg_stat_user_tables'):
+                if t in tables:
+                    tables[t]['rows'] = int(n or 0)
+    except Exception:
+        pass
+
+    # primary keys
+    try:
+        if k == 'mssql':
+            pk_rows = rows_of("""SELECT t.name, c.name FROM sys.indexes i
+                                 JOIN sys.index_columns ic ON ic.object_id = i.object_id
+                                  AND ic.index_id = i.index_id
+                                 JOIN sys.columns c ON c.object_id = ic.object_id
+                                  AND c.column_id = ic.column_id
+                                 JOIN sys.tables t ON t.object_id = i.object_id
+                                 WHERE i.is_primary_key = 1""")
+        else:
+            pk_rows = rows_of("""SELECT k.table_name, k.column_name
+                                 FROM information_schema.table_constraints c
+                                 JOIN information_schema.key_column_usage k
+                                   ON k.constraint_name = c.constraint_name
+                                 WHERE c.constraint_type = 'PRIMARY KEY'
+                                   AND c.table_schema = %s""", (db,))
+        for t, cname in pk_rows:
+            if t in tables:
+                tables[t]['primary_key'].append(cname)
+    except Exception:
+        pass
+
+    # relationships — the part that makes joins possible
+    try:
+        if k == 'mssql':
+            fk_rows = rows_of("""SELECT pt.name, pc.name, rt.name, rc.name, fk.name
+                                 FROM sys.foreign_keys fk
+                                 JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id
+                                 JOIN sys.tables pt ON pt.object_id = fkc.parent_object_id
+                                 JOIN sys.columns pc ON pc.object_id = fkc.parent_object_id
+                                  AND pc.column_id = fkc.parent_column_id
+                                 JOIN sys.tables rt ON rt.object_id = fkc.referenced_object_id
+                                 JOIN sys.columns rc ON rc.object_id = fkc.referenced_object_id
+                                  AND rc.column_id = fkc.referenced_column_id""")
+        else:
+            fk_rows = rows_of("""SELECT k.table_name, k.column_name,
+                                        k.referenced_table_name, k.referenced_column_name,
+                                        k.constraint_name
+                                 FROM information_schema.key_column_usage k
+                                 WHERE k.referenced_table_name IS NOT NULL
+                                   AND k.table_schema = %s""", (db,))
+        for pt, pc, rt, rc, name in fk_rows:
+            if pt in tables:
+                tables[pt]['foreign_keys'].append({'column': pc, 'points_to': '%s.%s' % (rt, rc)})
+            if rt in tables:
+                tables[rt]['referenced_by'].append({'from': '%s.%s' % (pt, pc)})
+    except Exception:
+        pass
+
+    # optional: a few real values per column, which often explain a column
+    # better than its name does
+    if include_samples:
+        q_ = '[%s]' if k == 'mssql' else ('"%s"' if k == 'postgres' else '`%s`')
+        for t, d in list(tables.items()):
+            if d['rows'] == 0:
+                continue
+            try:
+                names = [c['name'] for c in d['columns']][:25]
+                sel = ', '.join(q_ % n for n in names)
+                top = ('SELECT TOP %d %s FROM %s' % (sample_values, sel, q_ % t)) if k == 'mssql' \
+                      else ('SELECT %s FROM %s LIMIT %d' % (sel, q_ % t, sample_values))
+                got = rows_of(top)
+                for i, cname in enumerate(names):
+                    vals = [str(_plain(r[i]))[:40] for r in got if r[i] is not None]
+                    if vals:
+                        for cc in d['columns']:
+                            if cc['name'] == cname:
+                                cc['examples'] = vals[:sample_values]
+            except Exception:
+                continue
+
+    conn.close()
+    ordered = sorted(tables.values(), key=lambda d: -d['rows'])
+    return {'database': db, 'kind': k, 'tables': ordered,
+            'table_count': len(ordered),
+            'column_count': sum(len(d['columns']) for d in ordered),
+            'relationship_count': sum(len(d['foreign_keys']) for d in ordered)}
+
+
+def ty_fmt(name, max_length):
+    """varchar(50) reads better than varchar."""
+    n = str(name)
+    if n.lower() in ('varchar', 'nvarchar', 'char', 'nchar', 'varbinary', 'binary'):
+        try:
+            L = int(max_length)
+            if L == -1:
+                return '%s(max)' % n
+            if n.lower().startswith('n'):
+                L = L // 2
+            return '%s(%d)' % (n, L)
+        except Exception:
+            pass
+    return n
+
+
+def schema_markdown(rep):
+    """The schema as plain text — easy to read, easy to send to someone."""
+    L = []
+    L.append('# Database: %s  (%s)' % (rep['database'], rep['kind']))
+    L.append('%d tables · %d columns · %d relationships'
+             % (rep['table_count'], rep['column_count'], rep['relationship_count']))
+    L.append('')
+    L.append('## Tables by size')
+    for d in rep['tables'][:40]:
+        L.append('- %s — %s rows, %d columns' % (d['table'], format(d['rows'], ','), len(d['columns'])))
+    L.append('')
+    for d in rep['tables']:
+        L.append('')
+        L.append('## %s  (%s rows)' % (d['table'], format(d['rows'], ',')))
+        if d['primary_key']:
+            L.append('Primary key: %s' % ', '.join(d['primary_key']))
+        for c in d['columns']:
+            bits = [c['name'], c['type']]
+            if c.get('identity'):
+                bits.append('identity')
+            if c.get('nullable') is False:
+                bits.append('required')
+            line = '  - %s' % '  '.join(bits)
+            if c.get('examples'):
+                line += '   e.g. ' + ' | '.join(c['examples'])
+            L.append(line)
+        if d['foreign_keys']:
+            L.append('  Links to:')
+            for fk in d['foreign_keys']:
+                L.append('    - %s -> %s' % (fk['column'], fk['points_to']))
+        if d['referenced_by']:
+            L.append('  Linked from: %s' % ', '.join(r['from'] for r in d['referenced_by'][:12]))
+    return '\n'.join(L)
+
+
 def find_topic(topic, database=None, max_tables=60):
     """Find which tables hold a KIND of data — payments, orders, customers.
 

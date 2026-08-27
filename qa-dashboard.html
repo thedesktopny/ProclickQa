@@ -455,6 +455,10 @@ td.agent{color:var(--text);font-weight:500;}
                 onchange="cmsLoadTables()"><option value="">(configured database)</option></select>
         <button onclick="cmsLoadDatabases()" class="btn btn-outline" style="font-size:12px;">List databases</button>
         <button onclick="cmsLoadTables()" class="btn btn-outline" style="font-size:12px;">List tables</button>
+        <button onclick="cmsSchema(false)" class="btn btn-outline" style="font-size:12px;"
+                title="Every table, column, key and relationship">📋 Schema report</button>
+        <button onclick="cmsSchema(true)" class="btn btn-outline" style="font-size:12px;"
+                title="Same, plus a few real values per column — slower">＋ with examples</button>
         <input id="cms-search" class="cms-in" style="width:auto;min-width:180px;"
                placeholder="find a table or column…" onkeydown="if(event.key==='Enter')cmsSearch()">
         <button onclick="cmsSearch()" class="btn btn-outline" style="font-size:12px;">Search names</button>
@@ -3607,6 +3611,46 @@ function anCsv(){
 
 /* "Where are the payments kept?" — judged by column names, since the table
    is rarely called what you'd expect. */
+
+/* The whole shape of the database in one file: tables, columns, types, keys and
+   how they link. Worth keeping — it's what makes building a report from this
+   database a matter of reading rather than guessing. */
+async function cmsSchema(withSamples){
+  const db = cmsDb();
+  cmsExp(`Reading the structure of ${db || 'the configured database'}${withSamples ? ' with sample values (slower)' : ''}…`);
+  try{
+    const r = await API.get(`/api/cms-db/schema?database=${encodeURIComponent(db)}&samples=${withSamples?1:0}`);
+    if(r.error){ cmsExp('❌ ' + r.error); return; }
+
+    // download it
+    const txtRes = await fetch(`/api/cms-db/schema?database=${encodeURIComponent(db)}&samples=${withSamples?1:0}&format=text`,
+      { headers: authHeaders() });   // the same auth every other request uses
+    const text = await txtRes.text();
+    _downloadBlob(new Blob([text], {type:'text/plain;charset=utf-8'}),
+      `schema_${r.database}${withSamples?'_with_examples':''}.txt`);
+
+    const linked = r.tables.filter(t=>t.foreign_keys.length);
+    cmsExp(`<div style="margin-bottom:10px;">
+        <b>${r.database}</b> — ${r.table_count} tables, ${r.column_count.toLocaleString()} columns,
+        <b>${r.relationship_count}</b> relationships between tables.
+        <span style="color:var(--green)">The full report has been downloaded.</span></div>
+      <div class="xhint">Biggest tables</div>
+      <div class="xscroll"><table class="data-table">
+        <thead><tr><th>Table</th><th>Rows</th><th>Columns</th><th>Key</th><th>Links to</th></tr></thead>
+        <tbody>${r.tables.slice(0,40).map(t=>`<tr>
+          <td><a href="#" onclick="cmsSample('${t.table}');return false;" style="color:var(--accent)">${t.table}</a></td>
+          <td style="text-align:right">${t.rows.toLocaleString()}</td>
+          <td style="text-align:right">${t.columns.length}</td>
+          <td style="font-size:11px;color:var(--text3)">${t.primary_key.join(', ')||'—'}</td>
+          <td style="font-size:11px;color:var(--text3)">${
+            t.foreign_keys.map(f=>`${f.column}→${f.points_to}`).join(', ')||'—'}</td>
+        </tr>`).join('')}</tbody></table></div>
+      ${linked.length ? '' : `<div style="margin-top:10px;color:var(--yellow);font-size:11.5px;">
+        No foreign keys are defined in this database, so table links aren't recorded —
+        joins will have to be worked out from column names (e.g. EmployeeId → Employee.Id).</div>`}`);
+  }catch(e){ cmsExp('Failed: ' + e.message); }
+}
+
 async function cmsFindTopic(topic){
   const t = topic || (document.getElementById('cms-topic')||{}).value || '';
   if(!t.trim()){ cmsExp('Pick a topic or type a few words.'); return; }
