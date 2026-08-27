@@ -249,12 +249,19 @@ def diagnose():
         # can we switch database at all?
         try:
             cur.execute('USE [%s]' % _safe(NAME))
-            cur.execute('SELECT DB_NAME(), COUNT(*) FROM sys.tables')
+            try:
+                cur.fetchall()
+            except Exception:
+                pass
+            cur.execute('SELECT DB_NAME()')
             r = cur.fetchone()
-            out['after_use_database'] = _plain(r[0])
-            out['tables_after_use'] = int(r[1] or 0)
+            out['after_use_database'] = _plain(r[0]) if r else None
+            cur.execute('SELECT COUNT(*) FROM sys.tables')
+            r2 = cur.fetchone()
+            out['tables_after_use'] = int(r2[0] or 0) if r2 else 0
         except Exception as e:
             out['after_use_database'] = 'error: ' + str(e)[:140]
+            out['tables_after_use'] = None
     else:
         one('connected_to_database', 'SELECT DATABASE()' if k == 'mysql' else 'SELECT current_database()')
         one('login_name', 'SELECT USER()' if k == 'mysql' else 'SELECT current_user')
@@ -620,6 +627,16 @@ def find_value(value, database=None, all_databases=False,
                 continue
 
     conn.close()
+
+    # Nothing listed anywhere? Ask the server why, now, rather than making
+    # someone click a second button to find out.
+    why = None
+    if not scanned_dbs:
+        try:
+            why = diagnose()
+        except Exception as e:
+            why = {'meaning': 'could not run the permission check: ' + str(e)[:140]}
+
     hits.sort(key=lambda x: -(x.get('matches') or 0))
     tables = sorted({(h['database'], h['table']) for h in hits})
     return {
@@ -637,6 +654,7 @@ def find_value(value, database=None, all_databases=False,
         'errors': errors,
         'stopped_early': stopped_early,
         'seconds': round(time.time() - started, 1),
+        'why': why,
     }
 
 
