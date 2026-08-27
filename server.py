@@ -12,6 +12,11 @@ import urllib.request
 import urllib.error
 import urllib.parse
 
+# Read once at startup. Two places used this name without it ever being defined,
+# so both failed with "name 'ANTHROPIC_API_KEY' is not defined" the moment they
+# were called — the notes questions and the QA rule-refinement helper.
+ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY', '')
+
 # Claude pricing, same figures the call scoring uses (dollars per million tokens)
 CLAUDE_INPUT_COST_PER_M = 3.00
 CLAUDE_OUTPUT_COST_PER_M = 15.00
@@ -4235,6 +4240,9 @@ def call_notes_ask():
             (r.get('call_notes') or '').replace('\n', ' ')[:600]))
     corpus = '\n'.join(lines)
 
+    if not ANTHROPIC_API_KEY:
+        return jsonify({'error': 'No Anthropic API key is set on the server '
+                                 '(ANTHROPIC_API_KEY). The free analysis above still works.'}), 400
     try:
         import anthropic
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
