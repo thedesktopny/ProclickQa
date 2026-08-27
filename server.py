@@ -4525,6 +4525,92 @@ def require_payments_code(f):
     return decorated
 
 
+@app.route('/api/customers/search', methods=['GET'])
+@require_manager
+def customers_search():
+    """Find an account by name, phone or email."""
+    import cms_db
+    try:
+        return jsonify({'items': cms_db.customer_search(request.args.get('q', ''))})
+    except Exception as e:
+        return jsonify({'error': str(e)[:240]}), 400
+
+
+@app.route('/api/customers/<int:account_id>', methods=['GET'])
+@require_manager
+def customer_profile_route(account_id):
+    """Everything held about one account."""
+    import cms_db
+    try:
+        return jsonify(cms_db.customer_profile(account_id))
+    except Exception as e:
+        return jsonify({'error': str(e)[:240]}), 400
+
+
+@app.route('/api/live', methods=['GET'])
+@require_manager
+def live_route():
+    """The whole floor in one read — agents, calls in progress, and the feed."""
+    import cms_db
+    try:
+        out = cms_db.live_snapshot()
+        out['as_of'] = datetime.now().isoformat()
+        return jsonify(out)
+    except Exception as e:
+        return jsonify({'error': str(e)[:240]}), 400
+
+
+@app.route('/api/agents/live', methods=['GET'])
+@require_manager
+def agents_live_route():
+    """Who is on shift and on the phone right now."""
+    import cms_db
+    try:
+        return jsonify({'agents': cms_db.agents_live(),
+                        'as_of': datetime.now().isoformat()})
+    except Exception as e:
+        return jsonify({'error': str(e)[:240]}), 400
+
+
+@app.route('/api/agents/<int:employee_id>/detail', methods=['GET'])
+@require_manager
+def agent_detail_route(employee_id):
+    """One agent's calls, notes, clock events and sales for a date range."""
+    import cms_db
+    a = request.args
+    today = datetime.now().strftime('%Y-%m-%d')
+    try:
+        return jsonify(cms_db.agent_detail(
+            employee_id, (a.get('date_from') or today)[:10], (a.get('date_to') or today)[:10]))
+    except Exception as e:
+        return jsonify({'error': str(e)[:240]}), 400
+
+
+@app.route('/api/recording-link', methods=['GET'])
+@require_manager
+def recording_link():
+    """Turns a stored recording path into a link that opens.
+
+    The CMS keeps a relative path like recordings/2026/08/20/abc.wav; the base
+    address it hangs off is a setting so it can be corrected without a deploy.
+    """
+    path = (request.args.get('path') or '').strip()
+    if not path:
+        return jsonify({'error': 'path required'}), 400
+    base = ''
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute("SELECT value FROM app_settings WHERE key = 'recording_base_url'")
+        r = c.fetchone(); conn.close()
+        base = (r[0] if r and r[0] else '') or os.getenv('RECORDING_BASE_URL', '')
+    except Exception:
+        base = os.getenv('RECORDING_BASE_URL', '')
+    if not base:
+        return jsonify({'error': 'No recording address is set yet (recording_base_url).',
+                        'path': path}), 400
+    return jsonify({'url': base.rstrip('/') + '/' + path.lstrip('/')})
+
+
 @app.route('/api/payments/unlock', methods=['POST'])
 @require_manager
 def payments_unlock():

@@ -571,6 +571,365 @@ TOPIC_WORDS = {
 }
 
 
+def customer_search(q, limit=40):
+    """Find an account by name, phone or email."""
+    q = (q or '').strip()
+    if len(q) < 2:
+        return []
+    like = '%' + q + '%'
+    conn = _connect(); cu = conn.cursor()
+    cu.execute("""SELECT TOP %d a.Id, a.FirstName, a.LastName, a.Phone, a.Email,
+                         a.MinutesLeft, a.isBusiness, a.Deleted,
+                         (SELECT COUNT(*) FROM AccountWork w WHERE w.AccountId = a.Id),
+                         (SELECT MAX(w2.StartTime) FROM AccountWork w2 WHERE w2.AccountId = a.Id)
+                  FROM Account a
+                  WHERE a.FirstName + ' ' + a.LastName LIKE %%s OR a.Phone LIKE %%s
+                     OR a.Email LIKE %%s OR a.HomePhone LIKE %%s OR a.Mobile LIKE %%s
+                  ORDER BY a.LastName, a.FirstName""" % int(limit),
+               (like, like, like, like, like))
+    out = []
+    while True:
+        r = cu.fetchone()
+        if not r:
+            break
+        out.append({'id': int(r[0]),
+                    'name': ('%s %s' % (r[1] or '', r[2] or '')).strip() or '(no name)',
+                    'phone': r[3], 'email': r[4], 'minutes_left': int(r[5] or 0),
+                    'business': bool(r[6]), 'deleted': bool(r[7]),
+                    'work_count': int(r[8] or 0), 'last_worked': _plain(r[9])})
+    conn.close()
+    return out
+
+
+def customer_profile(account_id, limit=120):
+    """Everything held about one account, in one read.
+
+    Pulls from every table that references Account: the calls worked, the notes
+    written at the time, payments, balance movements, texts, tickets, saved
+    cards and stored credentials. A recording link is included wherever the
+    call log has one.
+    """
+    aid = int(account_id)
+    conn = _connect()
+
+    def rows(sql, prm=()):
+        cu = conn.cursor()
+        cu.execute(sql, prm) if prm else cu.execute(sql)
+        out = []
+        while True:
+            r = cu.fetchone()
+            if not r:
+                break
+            out.append(r)
+        return out
+
+    a = rows("""SELECT Id, FirstName, LastName, Email, Phone, HomePhone, OtherPhone, Mobile,
+                       CreatedTime, MinutesLeft, ReviewStatus, Category, Modified, IsFree,
+                       Deleted, smsActivate, smsNumber, SMSDateEnd, isBusiness, lastAgent, ContactID
+                FROM Account WHERE Id = %s""", (aid,))
+    if not a:
+        conn.close()
+        raise RuntimeError('No account with id %d' % aid)
+    r = a[0]
+    account = {
+        'id': int(r[0]), 'name': ('%s %s' % (r[1] or '', r[2] or '')).strip(),
+        'email': r[3], 'phone': r[4], 'home_phone': r[5], 'other_phone': r[6], 'mobile': r[7],
+        'created': _plain(r[8]), 'minutes_left': int(r[9] or 0), 'review_status': r[10],
+        'category': r[11], 'modified': _plain(r[12]), 'is_free': bool(r[13]),
+        'deleted': bool(r[14]), 'sms_active': int(r[15] or 0), 'sms_number': r[16],
+        'sms_ends': _plain(r[17]), 'business': bool(r[18]), 'last_agent': r[19],
+        'crm_id': r[20],
+    }
+
+    # what the account is worth and how much we've worked on it
+    t = rows("""SELECT
+        (SELECT COUNT(*) FROM AccountWork WHERE AccountId = %s),
+        (SELECT ISNULL(SUM(MinutesBilled),0) FROM AccountWork WHERE AccountId = %s),
+        (SELECT ISNULL(SUM(AmountPaid),0) FROM PackageSold WHERE AccountId = %s),
+        (SELECT ISNULL(SUM(CASE WHEN ISNULL(Refunded,0)=1 THEN ISNULL(RefundAmount, AmountPaid) ELSE 0 END),0)
+           FROM PackageSold WHERE AccountId = %s),
+        (SELECT COUNT(*) FROM PackageSold WHERE AccountId = %s AND ISNULL(AmountPaid,0) > 0),
+        (SELECT ISNULL(SUM(CASE WHEN ISNULL(AmountPaid,0)=0 THEN ISNULL(PackageMinutes,0) ELSE 0 END),0)
+           FROM PackageSold WHERE AccountId = %s),
+        (SELECT MIN(StartTime) FROM AccountWork WHERE AccountId = %s),
+        (SELECT MAX(StartTime) FROM AccountWork WHERE AccountId = %s),
+        (SELECT COUNT(*) FROM SMSLog WHERE AccountId = %s),
+        (SELECT COUNT(*) FROM AccountNotes WHERE AccountId = %s)
+        """, (aid,)*10)[0]
+    n = lambda v: int(v or 0)
+    totals = {'work_sessions': n(t[0]), 'minutes_billed': n(t[1]),
+              'paid_cents': n(t[2]), 'refunded_cents': n(t[3]),
+              'collected_cents': n(t[2]) - n(t[3]), 'payments': n(t[4]),
+              'free_minutes': n(t[5]), 'first_worked': _plain(t[6]),
+              'last_worked': _plain(t[7]), 'sms_count': n(t[8]), 'note_count': n(t[9])}
+
+    # the work log, with the call and its recording alongside
+    work = [{'id': n(i), 'start': _plain(st), 'end': _plain(en),
+             'agent': ('%s %s' % (fn or '', ln or '')).strip(),
+             'minutes_billed': n(mb), 'note': note, 'task': task,
+             'paused_sec': n(ps), 'call_id': n(cid),
+             'phone': ph, 'direction': ('outbound' if out else 'inbound'),
+             'call_started': _plain(cst), 'call_ended': _plain(cen),
+             'recording': rec, 'dial_status': ds, 'missed': bool(miss),
+             'call_note': cnote}
+            for (i, st, en, fn, ln, mb, note, task, ps, cid, ph, out, cst, cen,
+                 rec, ds, miss, cnote) in rows("""
+        SELECT TOP %d w.Id, w.StartTime, w.EndTime, e.FirstName, e.LastName,
+               w.MinutesBilled, w.Note, w.TaskDescription, w.PausedSec,
+               w.PhoneCallId, p.Phone, p.IsOutbound, p.Started, p.Ended,
+               p.RecordingFileUrl, p.DialStatus, p.IsMissed, p.Note
+        FROM AccountWork w
+        LEFT JOIN Employee e ON e.Id = w.EmployeeId
+        LEFT JOIN PhoneCallsLog p ON p.Id = w.PhoneCallId
+        WHERE w.AccountId = %%s ORDER BY w.StartTime DESC""" % int(limit), (aid,))]
+
+    payments_list = [{'when': _plain(cr), 'amount_cents': n(amt), 'minutes': n(mins),
+                      'last4': l4, 'note': note, 'refunded': bool(refd),
+                      'refund_amount_cents': n(ramt), 'refund_reason': rr,
+                      'agent': ('%s %s' % (efn or '', eln or '')).strip(), 'stripe': ch}
+                     for (cr, amt, mins, l4, note, refd, ramt, rr, efn, eln, ch) in rows("""
+        SELECT TOP 100 ps.Created, ISNULL(ps.AmountPaid,0), ISNULL(ps.PackageMinutes,0),
+               ps.Last4, ps.Note, ISNULL(ps.Refunded,0), ISNULL(ps.RefundAmount,0),
+               ps.RefundReason, e.FirstName, e.LastName, ps.StripeChargeId
+        FROM PackageSold ps LEFT JOIN Employee e ON e.Id = ps.EmployeId
+        WHERE ps.AccountId = %s ORDER BY ps.Created DESC""", (aid,))]
+
+    notes = [{'when': _plain(cr), 'note': note,
+              'by': ('%s %s' % (fn or '', ln or '')).strip()}
+             for cr, note, fn, ln in rows("""
+        SELECT TOP 100 n.Created, n.Note, e.FirstName, e.LastName
+        FROM AccountNotes n LEFT JOIN Employee e ON e.Id = n.CreatedBy
+        WHERE n.AccountId = %s ORDER BY n.Created DESC""", (aid,))]
+
+    balance = [{'when': _plain(cr), 'from': n(pb), 'to': n(nb), 'change': n(nb) - n(pb),
+                'reason': reason}
+               for cr, pb, nb, reason in rows("""
+        SELECT TOP 100 Created, PreviousBalance, NewBalance, AdjustmentReason
+        FROM BalanceChangeLog WHERE AccountId = %s ORDER BY Created DESC""", (aid,))]
+
+    sms = [{'when': _plain(d), 'direction': io, 'from_to': cn, 'message': msg, 'media': media}
+           for d, io, cn, msg, media in rows("""
+        SELECT TOP 100 smsDate, InOut, ContactNumber, message, MediaURL
+        FROM SMSLog WHERE AccountId = %s ORDER BY smsDate DESC""", (aid,))]
+
+    tickets = [{'created': _plain(cr), 'status': st, 'priority': pr,
+                'subject': subj, 'description': desc, 'closed': _plain(cl)}
+               for cr, st, pr, subj, desc, cl in rows("""
+        SELECT TOP 50 CreatedTime, Status, Priority, Subject, Description, ClosedTime
+        FROM Ticket WHERE AccountId = %s ORDER BY CreatedTime DESC""", (aid,))]
+
+    cards = [{'brand': b, 'last4': l4, 'added': _plain(cr), 'last_used': _plain(lu)}
+             for b, l4, cr, lu in rows("""
+        SELECT TOP 20 Brand, Last4, Created, LastUsed FROM StripeCustomers
+        WHERE AccountId = %s ORDER BY LastUsed DESC""", (aid,))]
+
+    credentials = [{'title': ti, 'website': w, 'added': _plain(cr)}
+                   for ti, w, cr in rows("""
+        SELECT TOP 40 Title, Website, Created FROM CustomerCredentials
+        WHERE AccountId = %s ORDER BY Created DESC""", (aid,))]
+
+    conn.close()
+    return {'account': account, 'totals': totals, 'work': work, 'payments': payments_list,
+            'notes': notes, 'balance': balance, 'sms': sms, 'tickets': tickets,
+            'cards': cards, 'credentials': credentials}
+
+
+def live_snapshot(feed_limit=70, hours=6):
+    """One read of the whole floor: who is on, what is happening on the phones,
+    and every recent event in one stream.
+
+    Calls, work sessions and payments are fetched separately then merged by time
+    in the caller, so the feed reads like the day actually unfolded.
+    """
+    conn = _connect()
+    def rows(sql, prm=()):
+        cu = conn.cursor()
+        cu.execute(sql, prm) if prm else cu.execute(sql)
+        out = []
+        while True:
+            r = cu.fetchone()
+            if not r:
+                break
+            out.append(r)
+        return out
+    n = lambda v: int(v or 0)
+
+    agents = [{
+        'employee_id': n(r[0]), 'name': (r[1] or '').strip(), 'extension': r[2],
+        'clocked_in': n(r[3]) == 1, 'clocker_since': _plain(r[4]), 'break_minutes': n(r[5]),
+        'phone': (r[6] or ''), 'phone_since': _plain(r[7]), 'minutes_on_call': n(r[8]),
+        'calls_in': n(r[9]), 'calls_out': n(r[10]),
+        'last_call_phone': r[11], 'last_call_at': _plain(r[12]),
+    } for r in rows("""SELECT EmployeeId, EmployeeName, Extension, ClockerStatus, ClockerTime,
+                              BreakMinutes, SipPhoneStatus, SipPhoneTime, MinutesOnCall,
+                              NumCallsIn, NumCallsOut, LastCallPhone, LastCallStartAt
+                       FROM Tmp_LiveEmployeesStatusFinal""")]
+
+    # calls that have started but not ended — what is happening this second
+    in_progress = [{'call_id': n(i), 'phone': ph, 'started': _plain(st),
+                    'picked_up': _plain(pu), 'agent_ext': (by or ag or ''),
+                    'outbound': bool(ob), 'status': ds, 'called': ce}
+                   for i, ph, st, pu, by, ag, ob, ds, ce in rows("""
+        SELECT TOP 60 Id, Phone, Started, PickedUpTime, PickedUpBy, Agent, IsOutbound,
+               DialStatus, CalledExtension
+        FROM PhoneCallsLog
+        WHERE Ended IS NULL AND Started >= DATEADD(hour, -4, GETDATE())
+        ORDER BY Started DESC""")]
+
+    recent_calls = [{'kind': 'call', 'when': _plain(st), 'call_id': n(i), 'phone': ph,
+                     'agent_ext': (by or ag or ''), 'outbound': bool(ob),
+                     'missed': bool(miss), 'status': ds, 'recording': rec,
+                     'seconds': (int((en - st).total_seconds()) if (en and st) else None)}
+                    for i, ph, st, en, by, ag, ob, miss, ds, rec in rows("""
+        SELECT TOP %d Id, Phone, Started, Ended, PickedUpBy, Agent, IsOutbound,
+               IsMissed, DialStatus, RecordingFileUrl
+        FROM PhoneCallsLog WHERE Started >= DATEADD(hour, -%d, GETDATE())
+        ORDER BY Started DESC""" % (int(feed_limit), int(hours)))]
+
+    recent_work = [{'kind': 'work', 'when': _plain(st), 'account': ('%s %s' % (fn or '', ln or '')).strip(),
+                    'account_id': n(aid), 'agent': ('%s %s' % (efn or '', eln or '')).strip(),
+                    'minutes': n(mb), 'note': note, 'ended': _plain(en)}
+                   for st, en, aid, fn, ln, efn, eln, mb, note in rows("""
+        SELECT TOP %d w.StartTime, w.EndTime, w.AccountId, a.FirstName, a.LastName,
+               e.FirstName, e.LastName, w.MinutesBilled, w.Note
+        FROM AccountWork w
+        LEFT JOIN Account a ON a.Id = w.AccountId
+        LEFT JOIN Employee e ON e.Id = w.EmployeeId
+        WHERE w.StartTime >= DATEADD(hour, -%d, GETDATE())
+        ORDER BY w.StartTime DESC""" % (int(feed_limit), int(hours)))]
+
+    recent_payments = [{'kind': 'payment', 'when': _plain(cr),
+                        'account': ('%s %s' % (fn or '', ln or '')).strip(), 'account_id': n(aid),
+                        'agent': ('%s %s' % (efn or '', eln or '')).strip(),
+                        'amount_cents': n(amt), 'minutes': n(mins), 'last4': l4,
+                        'note': note, 'refunded': bool(refd)}
+                       for cr, aid, fn, ln, efn, eln, amt, mins, l4, note, refd in rows("""
+        SELECT TOP %d ps.Created, ps.AccountId, a.FirstName, a.LastName,
+               e.FirstName, e.LastName, ISNULL(ps.AmountPaid,0), ISNULL(ps.PackageMinutes,0),
+               ps.Last4, ps.Note, ISNULL(ps.Refunded,0)
+        FROM PackageSold ps
+        LEFT JOIN Account a ON a.Id = ps.AccountId
+        LEFT JOIN Employee e ON e.Id = ps.EmployeId
+        WHERE ps.Created >= DATEADD(hour, -%d, GETDATE())
+        ORDER BY ps.Created DESC""" % (int(feed_limit), int(hours * 4)))]
+
+    # today's running figures
+    d = rows("""SELECT
+        (SELECT COUNT(*) FROM PhoneCallsLog WHERE Started >= CAST(GETDATE() AS date)),
+        (SELECT COUNT(*) FROM PhoneCallsLog WHERE Started >= CAST(GETDATE() AS date) AND ISNULL(IsMissed,0)=1),
+        (SELECT COUNT(*) FROM AccountWork WHERE StartTime >= CAST(GETDATE() AS date)),
+        (SELECT ISNULL(SUM(MinutesBilled),0) FROM AccountWork WHERE StartTime >= CAST(GETDATE() AS date)),
+        (SELECT ISNULL(SUM(AmountPaid),0) FROM PackageSold WHERE Created >= CAST(GETDATE() AS date)),
+        (SELECT COUNT(*) FROM PackageSold WHERE Created >= CAST(GETDATE() AS date) AND ISNULL(AmountPaid,0) > 0),
+        (SELECT COUNT(DISTINCT AccountId) FROM AccountWork WHERE StartTime >= CAST(GETDATE() AS date))
+        """)[0]
+    today = {'calls': n(d[0]), 'missed': n(d[1]), 'work_sessions': n(d[2]),
+             'minutes_billed': n(d[3]), 'collected_cents': n(d[4]), 'payments': n(d[5]),
+             'accounts_touched': n(d[6])}
+
+    conn.close()
+    return {'agents': agents, 'in_progress': in_progress, 'today': today,
+            'feed': recent_calls + recent_work + recent_payments}
+
+
+def agents_live():
+    """Who is working right now, from the CMS's own live status table."""
+    conn = _connect(); cu = conn.cursor()
+    cu.execute("""SELECT EmployeeId, EmployeeName, Extension, ClockerStatus, ClockerTime,
+                         BreakMinutes, SipPhoneStatus, SipPhoneTime, MinutesOnCall,
+                         NumCallsIn, NumCallsOut, LastCallPhone, LastCallStartAt
+                  FROM Tmp_LiveEmployeesStatusFinal ORDER BY EmployeeName""")
+    out = []
+    while True:
+        r = cu.fetchone()
+        if not r:
+            break
+        n = lambda v: int(v or 0)
+        out.append({
+            'employee_id': n(r[0]), 'name': (r[1] or '').strip(), 'extension': r[2],
+            'clocked_in': n(r[3]) == 1, 'clocker_since': _plain(r[4]),
+            'break_minutes': n(r[5]), 'phone': (r[6] or ''), 'phone_since': _plain(r[7]),
+            'minutes_on_call': n(r[8]), 'calls_in': n(r[9]), 'calls_out': n(r[10]),
+            'last_call_phone': r[11], 'last_call_at': _plain(r[12]),
+        })
+    conn.close()
+    return out
+
+
+def agent_detail(employee_id, date_from, date_to, limit=150):
+    """One agent's day-to-day: the calls handled, what was written, what was
+    billed, when they clocked in and out, and what they sold."""
+    eid = int(employee_id)
+    conn = _connect()
+    def rows(sql, prm):
+        cu = conn.cursor(); cu.execute(sql, prm)
+        out = []
+        while True:
+            r = cu.fetchone()
+            if not r:
+                break
+            out.append(r)
+        return out
+    span = (date_from + ' 00:00:00', date_to + ' 23:59:59')
+    n = lambda v: int(v or 0)
+
+    who = rows("""SELECT Id, FirstName, LastName, Extension, HourlyRate, LeftFirm, Created
+                  FROM Employee WHERE Id = %s""", (eid,))
+    if not who:
+        conn.close()
+        raise RuntimeError('No employee with id %d' % eid)
+    w = who[0]
+    agent = {'id': n(w[0]), 'name': ('%s %s' % (w[1] or '', w[2] or '')).strip(),
+             'extension': w[3], 'hourly_rate_cents': n(w[4]), 'left_firm': bool(w[5]),
+             'since': _plain(w[6])}
+
+    t = rows("""SELECT COUNT(*), ISNULL(SUM(MinutesBilled),0),
+                       COUNT(DISTINCT AccountId), MIN(StartTime), MAX(StartTime),
+                       SUM(CASE WHEN ISNULL(Note,'') <> '' THEN 1 ELSE 0 END)
+                FROM AccountWork WHERE EmployeeId = %s AND StartTime >= %s AND StartTime < %s""",
+             (eid,) + span)[0]
+    totals = {'calls_worked': n(t[0]), 'minutes_billed': n(t[1]), 'accounts': n(t[2]),
+              'first': _plain(t[3]), 'last': _plain(t[4]), 'with_notes': n(t[5])}
+    p = rows("""SELECT COUNT(*), ISNULL(SUM(AmountPaid),0),
+                       SUM(CASE WHEN ISNULL(AmountPaid,0)=0 THEN ISNULL(PackageMinutes,0) ELSE 0 END)
+                FROM PackageSold WHERE EmployeId = %s AND Created >= %s AND Created < %s""",
+             (eid,) + span)[0]
+    totals.update({'payments': n(p[0]), 'collected_cents': n(p[1]), 'free_minutes': n(p[2])})
+
+    work = [{'start': _plain(st), 'end': _plain(en), 'account': ('%s %s' % (fn or '', ln or '')).strip(),
+             'account_id': n(aid), 'minutes_billed': n(mb), 'note': note, 'task': task,
+             'phone': ph, 'recording': rec, 'direction': ('outbound' if out else 'inbound'),
+             'missed': bool(miss)}
+            for (st, en, fn, ln, aid, mb, note, task, ph, rec, out, miss) in rows("""
+        SELECT TOP %d w.StartTime, w.EndTime, a.FirstName, a.LastName, w.AccountId,
+               w.MinutesBilled, w.Note, w.TaskDescription, p.Phone, p.RecordingFileUrl,
+               p.IsOutbound, p.IsMissed
+        FROM AccountWork w
+        LEFT JOIN Account a ON a.Id = w.AccountId
+        LEFT JOIN PhoneCallsLog p ON p.Id = w.PhoneCallId
+        WHERE w.EmployeeId = %%s AND w.StartTime >= %%s AND w.StartTime < %%s
+        ORDER BY w.StartTime DESC""" % int(limit), (eid,) + span)]
+
+    clocker = [{'when': _plain(cr), 'inout': (io or '').strip(),
+                'break_minutes': n(bm), 'reason': br}
+               for cr, io, bm, br in rows("""
+        SELECT TOP 200 Created, InOut, BreakMinutes, BreakReason FROM EmployeeClocker
+        WHERE EmployeeId = %s AND Created >= %s AND Created < %s ORDER BY Created DESC""",
+        (eid,) + span)]
+
+    by_day = [{'day': str(d), 'calls': n(c), 'minutes': n(m)}
+              for d, c, m in rows("""
+        SELECT CONVERT(varchar(10), StartTime, 120), COUNT(*), ISNULL(SUM(MinutesBilled),0)
+        FROM AccountWork WHERE EmployeeId = %s AND StartTime >= %s AND StartTime < %s
+        GROUP BY CONVERT(varchar(10), StartTime, 120)
+        ORDER BY CONVERT(varchar(10), StartTime, 120)""", (eid,) + span)]
+
+    conn.close()
+    return {'agent': agent, 'totals': totals, 'work': work,
+            'clocker': clocker, 'by_day': by_day,
+            'date_from': date_from, 'date_to': date_to}
+
+
 def payments(date_from, date_to, employee_id=None, account_id=None,
              account_search=None, recent_limit=60):
     """Everything the payments page shows, from PackageSold.
