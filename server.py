@@ -4467,8 +4467,10 @@ def cms_db_find_value():
     Much more reliable than guessing table names."""
     import cms_db
     try:
-        return jsonify(cms_db.find_value(request.args.get('value', ''),
-                                         request.args.get('database') or None))
+        return jsonify(cms_db.find_value(
+            request.args.get('value', ''),
+            request.args.get('database') or None,
+            all_databases=(request.args.get('all') == '1')))
     except Exception as e:
         return jsonify({'error': str(e)[:240]}), 400
 

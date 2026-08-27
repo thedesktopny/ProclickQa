@@ -407,17 +407,45 @@ def aggregate(table, date_col=None, date_from=None, date_to=None,
             'database': database or NAME}
 
 
-def find_value(value, database=None, budget_seconds=70, max_checks=4000):
-    """Search the whole database for a VALUE you can see on the CMS screen.
+def _searchable_columns(cur, k, db, is_current):
+    """Every column we could search in one database, with its type."""
+    if k == 'mssql':
+        pre = ('[%s].' % _safe(db)) if not is_current else ''
+        attempts = [
+            ("""SELECT t.name, c.name, ty.name FROM %ssys.tables t
+                JOIN %ssys.columns c ON c.object_id = t.object_id
+                JOIN %ssys.types ty ON ty.user_type_id = c.user_type_id
+                ORDER BY t.name""" % (pre, pre, pre), None),
+            ("""SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE FROM %sINFORMATION_SCHEMA.COLUMNS
+                ORDER BY TABLE_NAME""" % pre, None),
+        ]
+    else:
+        attempts = [("""SELECT table_name, column_name, data_type
+                        FROM information_schema.columns
+                        WHERE table_schema = %s ORDER BY table_name""", (db,))]
+    last = ''
+    for sql, prm in attempts:
+        try:
+            cur.execute(sql, prm) if prm else cur.execute(sql)
+            got = cur.fetchall()
+            if got:
+                return got, ''
+        except Exception as e:
+            last = str(e)[:160]
+    return [], (last or 'no columns returned')
 
-    Far more reliable than guessing table names: type an extension, an email or
-    a name from the page you're looking at, and this reports every table and
-    column that contains it. That tells you exactly where the screen gets its
-    data from.
 
-    Text columns are matched with LIKE; if the value looks numeric, whole-number
-    columns are matched exactly as well. Every table is read-only and each check
-    stops at the first hit, so it stays cheap.
+def find_value(value, database=None, all_databases=False,
+               budget_seconds=150, max_checks=20000, count_matches=True):
+    """Find every place a value appears.
+
+    Give it something you can see on a CMS screen — an extension, an order
+    number, an email — and it reports every table and column that contains it,
+    how many rows match in each, and an example. Optionally across every
+    database on the server, not just the configured one.
+
+    Read-only and bounded: each column is probed with a single cheap lookup, and
+    the whole thing stops at a time budget so it can't hang the page.
     """
     import time
     value = str(value or '').strip()
@@ -425,75 +453,108 @@ def find_value(value, database=None, budget_seconds=70, max_checks=4000):
         raise RuntimeError('give at least two characters to look for')
 
     k = kind()
-    db = database or NAME
-    conn = _connect(); cur = conn.cursor()
-
-    TEXT = ('varchar', 'nvarchar', 'char', 'nchar', 'text', 'ntext', 'character varying')
-    NUM = ('int', 'bigint', 'smallint', 'tinyint', 'numeric', 'decimal', 'integer')
-    if k == 'mssql':
-        pre = ('[%s].' % _safe(db)) if db and db != NAME else ''
-        cur.execute("""SELECT t.name, c.name, ty.name
-                       FROM %ssys.tables t
-                       JOIN %ssys.columns c ON c.object_id = t.object_id
-                       JOIN %ssys.types ty ON ty.user_type_id = c.user_type_id
-                       ORDER BY t.name""" % (pre, pre, pre))
-        cols = cur.fetchall()
-    else:
-        cur.execute("""SELECT table_name, column_name, data_type
-                       FROM information_schema.columns
-                       WHERE table_schema = %s ORDER BY table_name""", (db,))
-        cols = cur.fetchall()
-
+    started = time.time()
     numeric = value.lstrip('-').isdigit()
     like = '%' + value + '%'
-    hits, checked, skipped = [], 0, 0
-    started = time.time()
+    TEXT = ('varchar', 'nvarchar', 'char', 'nchar', 'text', 'ntext', 'character varying', 'string')
+    NUM = ('int', 'bigint', 'smallint', 'tinyint', 'numeric', 'decimal', 'integer', 'money', 'float', 'real')
+
+    conn = _connect(); cur = conn.cursor()
+
+    # which databases to look through
+    if all_databases and k in ('mssql', 'mysql'):
+        try:
+            targets = [d for d in databases()['databases']
+                       if d.lower() not in ('master', 'tempdb', 'model', 'msdb',
+                                            'information_schema', 'performance_schema',
+                                            'mysql', 'sys')]
+        except Exception:
+            targets = [database or NAME]
+    else:
+        targets = [database or NAME]
+
+    hits, checked, skipped, candidates = [], 0, 0, 0
+    errors, scanned_dbs, listing_problems = [], [], []
     stopped_early = False
 
-    for tname, cname, ctype in cols:
-        if time.time() - started > budget_seconds or checked >= max_checks:
+    for db in targets:
+        if time.time() - started > budget_seconds:
             stopped_early = True
             break
-        t = str(ctype).lower()
-        is_text = any(x in t for x in TEXT)
-        is_num = any(t == x or t.startswith(x) for x in NUM)
-        if not (is_text or (numeric and is_num)):
+        is_current = (db == NAME)
+        cols, problem = _searchable_columns(cur, k, db, is_current)
+        if problem:
+            listing_problems.append('%s: %s' % (db, problem))
             continue
-        try:
-            _safe(tname); _safe(cname)
-        except Exception:
-            skipped += 1
-            continue
-        target = _qualified(tname, database)
-        q_ = '[%s]' if k == 'mssql' else ('"%s"' if k == 'postgres' else '`%s`')
-        col = q_ % cname
-        try:
-            if is_text:
-                sql = ('SELECT TOP 1 %s FROM %s WHERE %s LIKE %%s' % (col, target, col)) if k == 'mssql' \
-                      else ('SELECT %s FROM %s WHERE %s LIKE %%s LIMIT 1' % (col, target, col))
-                cur.execute(sql, (like,))
-            else:
-                sql = ('SELECT TOP 1 %s FROM %s WHERE %s = %%s' % (col, target, col)) if k == 'mssql' \
-                      else ('SELECT %s FROM %s WHERE %s = %%s LIMIT 1' % (col, target, col))
-                cur.execute(sql, (int(value),))
-            checked += 1
-            row = cur.fetchone()
-            if row:
-                hits.append({'table': tname, 'column': cname, 'type': str(ctype),
-                             'example': _plain(row[0])})
-        except Exception:
-            skipped += 1
-            continue
+        scanned_dbs.append({'database': db, 'columns': len(cols)})
+
+        for tname, cname, ctype in cols:
+            if time.time() - started > budget_seconds or checked >= max_checks:
+                stopped_early = True
+                break
+            t = str(ctype).lower()
+            is_text = any(x in t for x in TEXT)
+            is_num = numeric and any(t == x or t.startswith(x) for x in NUM)
+            if not (is_text or is_num):
+                continue
+            try:
+                _safe(tname); _safe(cname)
+            except Exception:
+                skipped += 1
+                continue
+            candidates += 1
+            target = _qualified(tname, None if is_current else db)
+            q_ = '[%s]' if k == 'mssql' else ('"%s"' if k == 'postgres' else '`%s`')
+            col = q_ % cname
+            try:
+                if is_text:
+                    sql = ('SELECT TOP 1 %s FROM %s WHERE %s LIKE %%s' % (col, target, col)) if k == 'mssql' \
+                          else ('SELECT %s FROM %s WHERE %s LIKE %%s LIMIT 1' % (col, target, col))
+                    cur.execute(sql, (like,))
+                else:
+                    sql = ('SELECT TOP 1 %s FROM %s WHERE %s = %%s' % (col, target, col)) if k == 'mssql' \
+                          else ('SELECT %s FROM %s WHERE %s = %%s LIMIT 1' % (col, target, col))
+                    cur.execute(sql, (int(value),))
+                checked += 1
+                row = cur.fetchone()
+                if not row:
+                    continue
+
+                hit = {'database': db, 'table': tname, 'column': cname,
+                       'type': str(ctype), 'example': _plain(row[0]), 'matches': None}
+                # only now, on a real hit, is a full count worth paying for
+                if count_matches:
+                    try:
+                        if is_text:
+                            cur.execute('SELECT COUNT(*) FROM %s WHERE %s LIKE %%s' % (target, col), (like,))
+                        else:
+                            cur.execute('SELECT COUNT(*) FROM %s WHERE %s = %%s' % (target, col), (int(value),))
+                        hit['matches'] = int(cur.fetchone()[0] or 0)
+                    except Exception:
+                        pass
+                hits.append(hit)
+            except Exception as e:
+                skipped += 1
+                if len(errors) < 8:
+                    errors.append('%s.%s.%s: %s' % (db, tname, cname, str(e)[:110]))
+                continue
 
     conn.close()
-    by_table = {}
-    for h in hits:
-        by_table.setdefault(h['table'], []).append(h)
+    hits.sort(key=lambda x: -(x.get('matches') or 0))
+    tables = sorted({(h['database'], h['table']) for h in hits})
     return {
-        'value': value, 'database': db,
+        'value': value,
+        'database': database or NAME,
+        'searched_databases': scanned_dbs,
+        'all_databases': bool(all_databases),
         'hits': hits,
-        'tables': sorted(by_table.keys()),
-        'columns_checked': checked, 'columns_skipped': skipped,
+        'tables': ['%s.%s' % (d, t) for d, t in tables],
+        'columns_found': sum(s['columns'] for s in scanned_dbs),
+        'searchable_columns': candidates,
+        'columns_checked': checked,
+        'columns_skipped': skipped,
+        'listing_problems': listing_problems,
+        'errors': errors,
         'stopped_early': stopped_early,
         'seconds': round(time.time() - started, 1),
     }

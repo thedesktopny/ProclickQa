@@ -441,7 +441,9 @@ td.agent{color:var(--text);font-weight:500;}
         <button onclick="cmsSearch()" class="btn btn-outline" style="font-size:12px;">Search names</button>
         <input id="cms-value" class="cms-in" style="width:auto;min-width:200px;"
                placeholder="or a value from the screen, e.g. 119" onkeydown="if(event.key==='Enter')cmsFindValue()">
-        <button onclick="cmsFindValue()" class="btn btn-primary" style="font-size:12px;">Find where it lives</button>
+        <button onclick="cmsFindValue(false)" class="btn btn-primary" style="font-size:12px;">Find where it lives</button>
+        <button onclick="cmsFindValue(true)" class="btn btn-outline" style="font-size:12px;"
+                title="Slower, but looks in every database on the server">Search ALL databases</button>
       </div>
       <div id="cms-explore" style="font-size:12px;color:var(--text2);max-height:260px;overflow:auto;
            background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px;">
@@ -3571,30 +3573,72 @@ function anCsv(){
     `cms-analysis_${anLast.table}.csv`);
 }
 
-async function cmsFindValue(){
+async function cmsFindValue(everywhere){
   const v = document.getElementById('cms-value').value.trim();
-  if(v.length < 2){ cmsExp('Type at least two characters — an extension or an email works well.'); return; }
-  cmsExp('Looking through every table for “' + v + '” — this can take up to a minute…');
+  if(v.length < 2){ cmsExp('Type at least two characters — an extension, order number or email works well.'); return; }
+  cmsExp(`Looking through ${everywhere ? 'every database on the server' : 'this database'} for “${v}”…`
+    + '<br><span style="color:var(--text3);font-size:11px;">Every text and number column is checked — this can take a minute or two.</span>');
   try{
-    const r = await API.get(`/api/cms-db/find-value?value=${encodeURIComponent(v)}&database=${encodeURIComponent(cmsDb())}`);
+    const r = await API.get(`/api/cms-db/find-value?value=${encodeURIComponent(v)}`
+      + `&database=${encodeURIComponent(cmsDb())}&all=${everywhere ? 1 : 0}`);
     if(r.error){ cmsExp('❌ ' + r.error); return; }
+
+    const scope = (r.searched_databases||[]).map(d=>`${d.database} (${d.columns} cols)`).join(', ');
+    const foot = `<div style="margin-top:10px;font-size:11px;color:var(--text3);">`
+      + `Checked ${r.columns_checked.toLocaleString()} of ${r.searchable_columns.toLocaleString()} searchable columns`
+      + ` in ${r.seconds}s · databases: ${scope || '—'}`
+      + (r.stopped_early ? ` · <span style="color:var(--yellow)">stopped at the time limit — narrow to one database to finish</span>` : '')
+      + ((r.listing_problems||[]).length ? `<br>Could not read: ${r.listing_problems.join('; ')}` : '')
+      + ((r.errors||[]).length ? `<br>Some columns unreadable: ${r.errors.slice(0,3).join('; ')}` : '')
+      + `</div>`;
+
     if(!r.hits.length){
-      cmsExp(`Nothing in <b>${r.database}</b> contains “${r.value}”. `
-        + `Checked ${r.columns_checked} columns in ${r.seconds}s.`
-        + (r.stopped_early ? ' Stopped early — try a different database from the dropdown.' : '')
-        + `<br><br>Try another value from the same screen, or switch database above.`);
+      cmsExp((r.columns_checked
+        ? `Nothing containing “${r.value}” was found.`
+          + (everywhere ? '' : '<br><br>Try <b>Search ALL databases</b> — it may live in another database on this server.')
+        : `<b style="color:var(--red)">Nothing was searched.</b> The login can connect but cannot read the column list.`)
+        + foot);
       return;
     }
-    cmsExp(`<div style="margin-bottom:8px;color:var(--text3)">Found “${r.value}” in
-        ${r.hits.length} column${r.hits.length===1?'':'s'} across ${r.tables.length}
-        table${r.tables.length===1?'':'s'} of <b>${r.database}</b>
-        (${r.columns_checked} columns checked, ${r.seconds}s)</div>`
-      + r.hits.map(h=>`<div style="margin-bottom:5px;">
-          <a href="#" onclick="cmsSample('${h.table}');return false;" style="color:var(--accent);font-weight:600">${h.table}</a>
-          <span style="color:var(--text2)">.${h.column}</span>
-          <span style="color:var(--text3);font-size:11px;"> — ${h.type}, e.g. ${String(h.example).slice(0,40)}</span>
-        </div>`).join(''));
+
+    // group by table so the same record isn't listed as five separate findings
+    const byTable = {};
+    r.hits.forEach(hit=>{
+      const key = `${hit.database}.${hit.table}`;
+      (byTable[key] = byTable[key] || []).push(hit);
+    });
+    const blocks = Object.entries(byTable).map(([tbl, cols])=>{
+      const best = Math.max(...cols.map(c=>c.matches||0));
+      const [db, table] = tbl.split('.');
+      return `<div style="margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid var(--border);">
+        <div style="margin-bottom:4px;">
+          <a href="#" onclick="cmsDbSelect('${db}');cmsSample('${table}');return false;"
+             style="color:var(--accent);font-weight:700;font-size:13px;">${tbl}</a>
+          <span style="color:var(--text3);font-size:11px;"> — ${best.toLocaleString()} matching row${best===1?'':'s'}</span>
+        </div>
+        ${cols.map(c=>`<div style="font-size:11.5px;color:var(--text2);margin-left:10px;">
+            • <b>${c.column}</b> <span style="color:var(--text3)">(${c.type})</span>
+            — ${(c.matches==null?'?':c.matches.toLocaleString())} row${c.matches===1?'':'s'},
+            e.g. <span style="color:var(--text)">${String(c.example).slice(0,60)}</span></div>`).join('')}
+      </div>`;
+    }).join('');
+
+    cmsExp(`<div style="margin-bottom:10px;">Found “<b>${r.value}</b>” in
+        <b>${r.hits.length}</b> column${r.hits.length===1?'':'s'} across
+        <b>${r.tables.length}</b> table${r.tables.length===1?'':'s'}
+        ${everywhere ? 'on the whole server' : `of ${r.database}`}:</div>`
+      + blocks + foot);
   }catch(e){ cmsExp('Failed: ' + e.message); }
+}
+
+/* clicking a result switches the explorer to that database first */
+function cmsDbSelect(db){
+  const sel = document.getElementById('cms-db-select');
+  if(!sel) return;
+  if(![...sel.options].some(o=>o.value===db)){
+    sel.insertAdjacentHTML('beforeend', `<option value="${db}">${db}</option>`);
+  }
+  sel.value = db;
 }
 
 async function cmsTest(){
