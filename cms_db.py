@@ -212,6 +212,70 @@ def tables():
     return {'tables': names, 'likely': likely, 'count': len(names)}
 
 
+def diagnose():
+    """Ask SQL Server directly what this login actually is and can see.
+
+    'No columns returned' with no error is the classic signature of two very
+    different problems: either the connection is not in the database you think,
+    or the login has no permission on any object (SQL Server silently hides
+    objects you lack rights to rather than refusing). These questions separate
+    them.
+    """
+    out = {'configured_database': NAME, 'kind': kind()}
+    conn = _connect(); cur = conn.cursor()
+    k = kind()
+
+    def one(label, sql):
+        try:
+            cur.execute(sql)
+            r = cur.fetchone()
+            out[label] = _plain(r[0]) if r else None
+        except Exception as e:
+            out[label] = 'error: ' + str(e)[:120]
+
+    if k == 'mssql':
+        one('connected_to_database', 'SELECT DB_NAME()')
+        one('login_name', 'SELECT SUSER_SNAME()')
+        one('user_in_database', 'SELECT USER_NAME()')
+        one('is_sysadmin', "SELECT IS_SRVROLEMEMBER('sysadmin')")
+        one('can_view_definitions', "SELECT HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW ANY DEFINITION')")
+        one('tables_visible_sys', 'SELECT COUNT(*) FROM sys.tables')
+        one('tables_visible_info', 'SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES')
+        one('objects_visible', 'SELECT COUNT(*) FROM sys.all_objects')
+        one('roles', "SELECT STRING_AGG(r.name, ', ') FROM sys.database_role_members m "
+                     "JOIN sys.database_principals r ON r.principal_id = m.role_principal_id "
+                     "JOIN sys.database_principals u ON u.principal_id = m.member_principal_id "
+                     "WHERE u.name = USER_NAME()")
+        # can we switch database at all?
+        try:
+            cur.execute('USE [%s]' % _safe(NAME))
+            cur.execute('SELECT DB_NAME(), COUNT(*) FROM sys.tables')
+            r = cur.fetchone()
+            out['after_use_database'] = _plain(r[0])
+            out['tables_after_use'] = int(r[1] or 0)
+        except Exception as e:
+            out['after_use_database'] = 'error: ' + str(e)[:140]
+    else:
+        one('connected_to_database', 'SELECT DATABASE()' if k == 'mysql' else 'SELECT current_database()')
+        one('login_name', 'SELECT USER()' if k == 'mysql' else 'SELECT current_user')
+        one('tables_visible_info', 'SELECT COUNT(*) FROM information_schema.tables')
+    conn.close()
+
+    # a plain reading of the result
+    if isinstance(out.get('tables_after_use'), int) and out['tables_after_use'] > 0:
+        out['meaning'] = ('The login CAN see %d tables once we switch into %s explicitly — '
+                          'the connection simply was not in that database. Fixed by switching first.'
+                          % (out['tables_after_use'], NAME))
+    elif out.get('tables_visible_sys') in (0, '0'):
+        out['meaning'] = ('Connected as %s, but SQL Server shows zero tables. That means this login '
+                          'has no permission on any object in %s. Ask for db_datareader on the '
+                          'database you need to read.'
+                          % (out.get('login_name'), out.get('connected_to_database')))
+    else:
+        out['meaning'] = 'See the values above.'
+    return out
+
+
 def databases():
     """Every database on this server. A CMS often keeps different things in
     different databases, so being able to look around beats guessing."""
@@ -408,7 +472,23 @@ def aggregate(table, date_col=None, date_from=None, date_to=None,
 
 
 def _searchable_columns(cur, k, db, is_current):
-    """Every column we could search in one database, with its type."""
+    """Every column we could search in one database, with its type.
+
+    On SQL Server we switch into the database with USE first. Three-part names
+    work only when the login has rights in the other database, and a connection
+    is not always in the database you asked for — switching explicitly removes
+    both doubts.
+    """
+    if k == 'mssql':
+        try:
+            cur.execute('USE [%s]' % _safe(db))
+            try:
+                cur.fetchall()
+            except Exception:
+                pass
+            is_current = True          # we are now genuinely in it
+        except Exception:
+            pass
     if k == 'mssql':
         pre = ('[%s].' % _safe(db)) if not is_current else ''
         attempts = [

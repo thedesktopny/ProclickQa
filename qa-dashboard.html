@@ -411,6 +411,7 @@ td.agent{color:var(--text);font-weight:500;}
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
         <button onclick="cmsTest()" class="btn btn-outline" style="font-size:12px;">1 · Test connection</button>
         <button onclick="cmsLoadTables()" class="btn btn-outline" style="font-size:12px;">2 · Find the table</button>
+        <button onclick="cmsDiagnose()" class="btn btn-outline" style="font-size:12px;">Check permissions</button>
         <button onclick="cmsSaveMapping()" class="btn btn-outline" style="font-size:12px;">3 · Save mapping</button>
       </div>
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:6px;">
@@ -3639,6 +3640,22 @@ function cmsDbSelect(db){
     sel.insertAdjacentHTML('beforeend', `<option value="${db}">${db}</option>`);
   }
   sel.value = db;
+}
+
+/* When a search finds nothing, this says whether the login can see anything
+   at all — SQL Server hides objects you lack rights to instead of refusing. */
+async function cmsDiagnose(){
+  cmsOut('Asking the server what this login can see…');
+  try{
+    const r = await API.get('/api/cms-db/diagnose');
+    if(r.error){ cmsOut('❌ ' + r.error); return; }
+    const line = (k, v) => `${k.replace(/_/g,' ').padEnd(26)} ${v==null?'—':v}`;
+    const keys = ['login_name','connected_to_database','user_in_database','roles',
+                  'is_sysadmin','can_view_definitions','tables_visible_sys',
+                  'tables_visible_info','objects_visible','after_use_database','tables_after_use'];
+    cmsOut(keys.filter(k=>k in r).map(k=>line(k, r[k])).join('\n')
+           + '\n\n' + (r.meaning||''));
+  }catch(e){ cmsOut('Failed: ' + e.message); }
 }
 
 async function cmsTest(){

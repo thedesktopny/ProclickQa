@@ -3929,6 +3929,18 @@ def cms_db_databases():
         return jsonify({'error': str(e)[:240]}), 400
 
 
+@app.route('/api/cms-db/diagnose', methods=['GET'])
+@require_manager
+def cms_db_diagnose():
+    """What the login actually is and what it can see — for when a search comes
+    back with nothing and it isn't obvious whether that's permissions or not."""
+    import cms_db
+    try:
+        return jsonify(cms_db.diagnose())
+    except Exception as e:
+        return jsonify({'error': str(e)[:240]}), 400
+
+
 @app.route('/api/cms-db/tables', methods=['GET'])
 @require_manager
 def cms_db_tables():
