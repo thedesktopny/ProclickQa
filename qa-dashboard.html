@@ -374,6 +374,81 @@ td.agent{color:var(--text);font-weight:500;}
   .payfig{ font-size:30px; }
 }
 @media (max-width:620px){ .payhead{ grid-template-columns:1fr; } }
+
+/* ---- Payments: filter bar ----------------------------------------------
+   Native date fields and dropdowns are what made this look dated. Everything
+   here is one height, one radius, one focus treatment: a segmented track for
+   the period, the range as a single object, and type-ahead pickers instead of
+   selects. */
+#page-payments .paybar{ padding:14px 28px 14px; }
+#page-payments .payctl{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+#page-payments .payctl > *{ height:36px; }
+#page-payments .payscope{ height:auto; width:100%; margin:2px 0 0; font-size:11.5px; color:var(--text3); }
+
+#page-payments .segwrap{
+  display:inline-flex; background:var(--bg); border:1px solid var(--border);
+  border-radius:10px; padding:3px; gap:2px;
+}
+#page-payments .seg{
+  border:0; background:transparent; color:var(--text3); font-size:12.5px;
+  padding:0 13px; border-radius:8px; cursor:pointer; height:28px; white-space:nowrap;
+}
+#page-payments .seg:hover{ color:var(--text); }
+#page-payments .seg.on{ background:var(--pay-accent); color:#fff; font-weight:600; }
+
+#page-payments .daterange{
+  display:inline-flex; align-items:center; gap:2px; background:var(--bg);
+  border:1px solid var(--border); border-radius:10px; padding:0 10px;
+}
+#page-payments .daterange input{
+  background:transparent; border:0; color:var(--text); font-size:12.5px;
+  font-family:inherit; padding:0 2px; height:34px; width:112px;
+  font-variant-numeric:tabular-nums;
+}
+#page-payments .daterange input::-webkit-calendar-picker-indicator{
+  filter:invert(.55); cursor:pointer; opacity:.5;
+}
+#page-payments .daterange input::-webkit-calendar-picker-indicator:hover{ opacity:1; }
+#page-payments .daterange .arrow{ color:var(--text3); font-size:12px; padding:0 2px; }
+#page-payments .daterange:focus-within{ border-color:var(--pay-accent); box-shadow:0 0 0 3px var(--pay-glow); }
+
+#page-payments .picker{ position:relative; display:inline-flex; align-items:center; }
+#page-payments .pickinput{
+  background:var(--bg); border:1px solid var(--border); color:var(--text);
+  border-radius:10px; height:36px; padding:0 30px 0 12px; font-size:12.5px;
+  font-family:inherit; width:190px;
+}
+#page-payments .pickinput:focus{ outline:none; border-color:var(--pay-accent); box-shadow:0 0 0 3px var(--pay-glow); }
+#page-payments .pickclear{
+  position:absolute; right:6px; background:none; border:0; color:var(--text3);
+  font-size:16px; line-height:1; cursor:pointer; padding:2px 5px; border-radius:6px;
+}
+#page-payments .pickclear:hover{ color:var(--text); background:var(--surface2); }
+#page-payments .paydrop{ top:calc(100% + 4px); }
+
+/* ---- each section keeps its own height and scrolls inside it ------------
+   45,000 transactions should not make the page 400 screens tall. Every panel
+   is a fixed frame with its own scroll, so the page itself stays one screen
+   of structure. */
+#page-payments .paygrid > .card{ display:flex; flex-direction:column; max-height:460px; }
+#page-payments .paybody{
+  flex:1; overflow-y:auto; overscroll-behavior:contain; margin:0 -4px; padding:0 4px;
+  scrollbar-width:thin; scrollbar-color:var(--border) transparent;
+}
+#page-payments .paybody::-webkit-scrollbar{ width:9px; }
+#page-payments .paybody::-webkit-scrollbar-thumb{ background:var(--border); border-radius:5px; }
+#page-payments .paybody::-webkit-scrollbar-thumb:hover{ background:var(--text3); }
+/* the fade tells you there is more below without adding a scrollbar to the page */
+#page-payments .paygrid > .card{ position:relative; }
+#page-payments .paygrid > .card::after{
+  content:""; position:absolute; left:1px; right:9px; bottom:1px; height:26px; pointer-events:none;
+  background:linear-gradient(to bottom, transparent, var(--surface));
+  border-radius:0 0 16px 16px;
+}
+#page-payments .day{ max-height:none; }
+#page-payments #pay-chart{ overflow:visible; }
+#page-payments .paygrid > .card:has(#pay-chart){ max-height:none; }
+#page-payments .paygrid > .card:has(#pay-chart)::after{ display:none; }
 </style>
 </head>
 <body>
@@ -875,41 +950,40 @@ td.agent{color:var(--text);font-weight:500;}
     </div>
 
     <div class="paybar">
-      <div class="payfilters">
-        <div class="payf">
-          <div class="cn-lab">Period</div>
-          <div style="display:flex;gap:6px;flex-wrap:wrap;">
-            <button class="chip" onclick="payPeriod('mtd',this)">This month</button>
-            <button class="chip" onclick="payPeriod('lastmonth',this)">Last month</button>
-            <button class="chip on" onclick="payPeriod('12m',this)">12 months</button>
-            <button class="chip" onclick="payPeriod('ytd',this)">This year</button>
-          </div>
+      <div class="payctl">
+        <!-- period as a segmented track: one control, not four buttons -->
+        <div class="segwrap" role="group" aria-label="Period">
+          <button class="seg" onclick="payPeriod('mtd',this)">Month</button>
+          <button class="seg" onclick="payPeriod('lastmonth',this)">Last month</button>
+          <button class="seg on" onclick="payPeriod('12m',this)">12 months</button>
+          <button class="seg" onclick="payPeriod('ytd',this)">Year</button>
         </div>
-        <div class="payf">
-          <div class="cn-lab">From</div>
-          <input type="date" id="pay-from" class="cms-in" onchange="loadPayments()">
+
+        <!-- the range reads as one object rather than two form fields -->
+        <div class="daterange">
+          <input type="date" id="pay-from" onchange="payCustomDates()">
+          <span class="arrow">→</span>
+          <input type="date" id="pay-to" onchange="payCustomDates()">
         </div>
-        <div class="payf">
-          <div class="cn-lab">To</div>
-          <input type="date" id="pay-to" class="cms-in" onchange="loadPayments()">
+
+        <!-- searchable pickers, not native dropdowns -->
+        <div class="picker" id="pay-agent-picker">
+          <input id="pay-agent-input" class="pickinput" placeholder="All agents" autocomplete="off"
+                 oninput="payAgentSearch()" onfocus="payAgentSearch()">
+          <input type="hidden" id="pay-agent">
+          <button class="pickclear" onclick="payPickAgent('', 'All agents')" title="Clear">×</button>
+          <div id="pay-agent-list" class="paydrop"></div>
         </div>
-        <div class="payf">
-          <div class="cn-lab">Agent</div>
-          <select id="pay-agent" class="cms-in" onchange="loadPayments()">
-            <option value="">All agents</option>
-          </select>
+
+        <div class="picker" id="pay-account-picker">
+          <input id="pay-account" class="pickinput" placeholder="All accounts" autocomplete="off"
+                 oninput="payAccountSearch()" onkeydown="if(event.key==='Enter')loadPayments()">
+          <button class="pickclear" onclick="payClearAccount()" title="Clear">×</button>
+          <div id="pay-account-list" class="paydrop"></div>
         </div>
-        <div class="payf" style="min-width:210px;">
-          <div class="cn-lab">Account</div>
-          <div style="position:relative;">
-            <input id="pay-account" class="cms-in" placeholder="search name or phone…"
-                   autocomplete="off" oninput="payAccountSearch()" onkeydown="if(event.key==='Enter')loadPayments()">
-            <div id="pay-account-list" class="paydrop"></div>
-          </div>
-        </div>
-        <button onclick="payClear()" class="btn btn-outline" style="font-size:11.5px;align-self:flex-end;">Clear</button>
+
+        <div id="pay-scope" class="payscope"></div>
       </div>
-      <div id="pay-scope" class="payscope"></div>
     </div>
 
     <div style="padding:0 28px 44px;">
@@ -924,30 +998,30 @@ td.agent{color:var(--text);font-weight:500;}
         <div class="card" style="padding:18px 20px;">
           <h2 class="payh">Today, as it happened</h2>
           <div class="payhint" id="pay-recent-hint">Most recent first.</div>
-          <div id="pay-recent" class="day"></div>
+          <div class="paybody"><div id="pay-recent" class="day"></div></div>
         </div>
       </div>
       <div class="paygrid">
         <div class="card" style="padding:18px 20px;">
           <h2 class="payh">Who sold it</h2>
           <div class="payhint">Click an agent to see only their payments.</div>
-          <div id="pay-agents"></div>
+          <div class="paybody"><div id="pay-agents"></div></div>
         </div>
         <div class="card" style="padding:18px 20px;">
           <h2 class="payh">Who paid</h2>
           <div class="payhint">Click an account to see only theirs.</div>
-          <div id="pay-accounts"></div>
+          <div class="paybody"><div id="pay-accounts"></div></div>
         </div>
       </div>
       <div class="paygrid">
         <div class="card" style="padding:18px 20px;">
           <h2 class="payh">Refunds</h2>
-          <div id="pay-refunds"></div>
+          <div class="paybody"><div id="pay-refunds"></div></div>
         </div>
         <div class="card" style="padding:18px 20px;">
           <h2 class="payh">Minutes given away</h2>
           <div class="payhint">Grouped by the note written at the time.</div>
-          <div id="pay-free"></div>
+          <div class="paybody"><div id="pay-free"></div></div>
         </div>
       </div>
     </div>
@@ -4335,25 +4409,54 @@ function payPeriod(which, btn){
   else { from = new Date(now); from.setFullYear(now.getFullYear()-1); }
   document.getElementById('pay-from').value = iso(from);
   document.getElementById('pay-to').value = iso(to);
-  document.querySelectorAll('#page-payments .chip').forEach(b=>b.classList.remove('on'));
+  document.querySelectorAll('#page-payments .seg').forEach(b=>b.classList.remove('on'));
   if(btn) btn.classList.add('on');
   loadPayments();
 }
 
 function payClear(){
-  document.getElementById('pay-agent').value = '';
-  document.getElementById('pay-account').value = '';
-  payAccountId = null;
-  loadPayments();
+  payPickAgent('', 'All agents');
+  payClearAccount();
 }
+
+let payAgents = [];
 
 async function payLoadAgents(){
   try{
     const r = await payGet('/api/payments/people?kind=agents');
-    const sel = document.getElementById('pay-agent');
-    sel.innerHTML = '<option value="">All agents</option>' +
-      (r.items||[]).map(a=>`<option value="${a.id}">${a.name}${a.extra?' · '+a.extra:''}</option>`).join('');
-  }catch(e){}
+    payAgents = r.items || [];
+  }catch(e){ payAgents = []; }
+}
+
+/* Type-ahead over the agents already loaded — no waiting on the server for
+   each keystroke, and no native dropdown. */
+function payAgentSearch(){
+  const box = document.getElementById('pay-agent-input');
+  const list = document.getElementById('pay-agent-list');
+  const q = box.value.trim().toLowerCase();
+  const hits = payAgents.filter(a => !q || (a.name||'').toLowerCase().includes(q)
+                                       || String(a.extra||'').includes(q)).slice(0, 40);
+  list.innerHTML = `<div onclick="payPickAgent('', 'All agents')">All agents</div>` +
+    hits.map(a=>`<div onclick="payPickAgent(${a.id}, '${(a.name||'').replace(/'/g,"\\'")}')">
+        ${a.name}<span style="color:var(--text3)">${a.extra? ' · ext ' + a.extra : ''}</span></div>`).join('');
+  list.classList.add('open');
+}
+function payPickAgent(id, name){
+  document.getElementById('pay-agent').value = id || '';
+  document.getElementById('pay-agent-input').value = id ? name : '';
+  document.getElementById('pay-agent-list').classList.remove('open');
+  loadPayments();
+}
+function payClearAccount(){
+  payAccountId = null;
+  document.getElementById('pay-account').value = '';
+  document.getElementById('pay-account-list').classList.remove('open');
+  loadPayments();
+}
+/* typing a date by hand should count as a custom period */
+function payCustomDates(){
+  document.querySelectorAll('#page-payments .seg').forEach(b=>b.classList.remove('on'));
+  loadPayments();
 }
 
 let payAccTimer = null;
@@ -4405,7 +4508,7 @@ async function loadPayments(){
     payRenderAgents(r); payRenderAccounts(r); payRenderRefunds(r); payRenderFree(r);
     const bits = [];
     if(document.getElementById('pay-agent').value){
-      bits.push('agent: ' + document.getElementById('pay-agent').selectedOptions[0].text);
+      bits.push('agent: ' + document.getElementById('pay-agent-input').value);
     }
     if(document.getElementById('pay-account').value) bits.push('account: ' + document.getElementById('pay-account').value);
     document.getElementById('pay-scope').textContent =
@@ -4526,9 +4629,10 @@ function payRenderAgents(r){
     </div>`).join('');
 }
 function payFilterAgent(id){
-  const sel = document.getElementById('pay-agent');
-  sel.value = (sel.value === String(id)) ? '' : String(id);
-  loadPayments();
+  const cur = document.getElementById('pay-agent').value;
+  if(cur === String(id)){ payPickAgent('', 'All agents'); return; }
+  const a = payAgents.find(x => x.id === id);
+  payPickAgent(id, a ? a.name : 'Agent ' + id);
 }
 
 function payRenderAccounts(r){
@@ -4578,6 +4682,11 @@ function payExport(){
   _downloadBlob(new Blob(['\ufeff'+rows.map(r=>r.join(',')).join('\n')],{type:'text/csv;charset=utf-8;'}),
     `payments_${payData.date_from}_to_${payData.date_to}.csv`);
 }
+
+document.addEventListener('click', e=>{
+  if(!e.target.closest('#pay-agent-picker')) document.getElementById('pay-agent-list')?.classList.remove('open');
+  if(!e.target.closest('#pay-account-picker')) document.getElementById('pay-account-list')?.classList.remove('open');
+});
 
 function showNotesTab(which){
   document.getElementById('notes-tab-quality').style.display = which==='quality' ? '' : 'none';
