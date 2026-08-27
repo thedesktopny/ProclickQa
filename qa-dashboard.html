@@ -274,6 +274,24 @@ td.agent{color:var(--text);font-weight:500;}
   border-radius:20px;padding:4px 11px;font-size:11px;cursor:pointer;}
 .cn-chip:hover{color:var(--text);border-color:var(--accent);}
 .cn-h{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--text3);margin-bottom:7px;}
+
+/* Wide result tables scroll sideways rather than squeezing 40 columns into the
+   page. The first column stays put so you never lose track of which row. */
+#cms-explore table, #an-out table{ min-width:max-content; }
+#cms-explore .xscroll, #an-out .xscroll{
+  overflow-x:auto; overflow-y:hidden; padding-bottom:6px;
+  scrollbar-width:thin; scrollbar-color:var(--border) transparent;
+}
+#cms-explore .xscroll::-webkit-scrollbar, #an-out .xscroll::-webkit-scrollbar{ height:10px; }
+#cms-explore .xscroll::-webkit-scrollbar-thumb, #an-out .xscroll::-webkit-scrollbar-thumb{
+  background:var(--border); border-radius:5px; }
+#cms-explore .xscroll::-webkit-scrollbar-thumb:hover, #an-out .xscroll::-webkit-scrollbar-thumb:hover{
+  background:var(--text3); }
+#cms-explore table th:first-child, #cms-explore table td:first-child{
+  position:sticky; left:0; background:var(--surface); z-index:2;
+}
+#cms-explore table th, #cms-explore table td{ white-space:nowrap; }
+.xhint{ font-size:10.5px; color:var(--text3); margin-bottom:4px; }
 </style>
 </head>
 <body>
@@ -446,7 +464,19 @@ td.agent{color:var(--text);font-weight:500;}
         <button onclick="cmsFindValue(true)" class="btn btn-outline" style="font-size:12px;"
                 title="Slower, but looks in every database on the server">Search ALL databases</button>
       </div>
-      <div id="cms-explore" style="font-size:12px;color:var(--text2);max-height:260px;overflow:auto;
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px;">
+        <span style="font-size:11px;color:var(--text3);">Or find where a kind of data lives:</span>
+        <button class="cn-chip" onclick="cmsFindTopic('payments')">payments</button>
+        <button class="cn-chip" onclick="cmsFindTopic('orders')">orders</button>
+        <button class="cn-chip" onclick="cmsFindTopic('customers')">customers</button>
+        <button class="cn-chip" onclick="cmsFindTopic('invoices')">invoices</button>
+        <button class="cn-chip" onclick="cmsFindTopic('employees')">employees</button>
+        <button class="cn-chip" onclick="cmsFindTopic('calls')">calls</button>
+        <input id="cms-topic" class="cms-in" style="width:auto;min-width:170px;"
+               placeholder="or your own words, comma separated"
+               onkeydown="if(event.key==='Enter')cmsFindTopic()">
+      </div>
+      <div id="cms-explore" style="font-size:12px;color:var(--text2);max-height:420px;overflow:auto;
            background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px;">
         Click List databases or List tables to start looking around.
       </div>
@@ -3554,7 +3584,7 @@ async function cmsAnalyze(){
     const vals = r.rows.map(x => Number(x[r.headers.length - (r.headers.includes('rows')?2:1)]) || 0);
     const max = Math.max(...vals, 1);
     const fmt = n => Number(n).toLocaleString(undefined,{maximumFractionDigits:2});
-    box.innerHTML = `<table class="data-table"><thead><tr>${
+    box.innerHTML = `<div class="xscroll"><table class="data-table"><thead><tr>${
         r.headers.map(x=>`<th>${x}</th>`).join('')}<th style="width:38%"></th></tr></thead><tbody>${
       r.rows.map((row,i)=>`<tr>${row.map((v,j)=>
         `<td style="${j===0?'font-weight:600;':'font-variant-numeric:tabular-nums;'}">${
@@ -3572,6 +3602,61 @@ function anCsv(){
   const lines = [anLast.headers.join(',')].concat(anLast.rows.map(r=>r.map(esc).join(',')));
   _downloadBlob(new Blob(['\ufeff'+lines.join('\n')],{type:'text/csv;charset=utf-8;'}),
     `cms-analysis_${anLast.table}.csv`);
+}
+
+
+/* "Where are the payments kept?" — judged by column names, since the table
+   is rarely called what you'd expect. */
+async function cmsFindTopic(topic){
+  const t = topic || (document.getElementById('cms-topic')||{}).value || '';
+  if(!t.trim()){ cmsExp('Pick a topic or type a few words.'); return; }
+  cmsExp(`Looking for ${t} data in ${cmsDb() || 'the configured database'}…`);
+  try{
+    const r = await API.get(`/api/cms-db/find-topic?topic=${encodeURIComponent(t)}&database=${encodeURIComponent(cmsDb())}`);
+    if(r.error){ cmsExp('❌ ' + r.error); return; }
+    if(!r.tables.length){
+      cmsExp(`No table in <b>${r.database}</b> has columns that look like ${t}.`
+        + `<br>Scanned ${r.columns_scanned.toLocaleString()} columns for: ${r.words.join(', ')}`
+        + `<br><br>Try another database from the dropdown, or your own words.`);
+      return;
+    }
+    cmsExp(`<div style="margin-bottom:10px;">Tables that look like <b>${t}</b> in
+        <b>${r.database}</b> — best match first, biggest tables favoured:</div>`
+      + r.tables.map(tb=>`<div style="margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--border);">
+          <a href="#" onclick="cmsSample('${tb.table}');return false;"
+             style="color:var(--accent);font-weight:700;">${tb.table}</a>
+          <span style="color:var(--text3);font-size:11px;"> — ${tb.rows.toLocaleString()} rows,
+            ${tb.score} matching column${tb.score===1?'':'s'}</span>
+          <button class="cn-chip" style="margin-left:8px;"
+                  onclick="cmsUseForReport('${tb.table}')">Use for a report</button>
+          <div style="font-size:11px;color:var(--text2);margin-top:3px;">
+            ${tb.matched.slice(0,10).map(m=>`<b>${m.column}</b> <span style="color:var(--text3)">(${m.type})</span>`).join(' · ')}
+            ${tb.matched.length>10?` <span style="color:var(--text3)">+${tb.matched.length-10} more</span>`:''}
+          </div></div>`).join('')
+      + `<div style="font-size:11px;color:var(--text3);">Scanned ${r.columns_scanned.toLocaleString()} columns for: ${r.words.join(', ')}</div>`);
+  }catch(e){ cmsExp('Failed: ' + e.message); }
+}
+
+/* Sends a table straight into the analysis box below, guessing its date and
+   amount columns so a report is one click away. */
+async function cmsUseForReport(table){
+  document.getElementById('an-table').value = table;
+  try{
+    const r = await API.get(`/api/cms-db/sample?table=${encodeURIComponent(table)}&database=${encodeURIComponent(cmsDb())}&limit=1`);
+    const cols = r.columns || [];
+    const pick = want => cols.find(c => want.some(w => c.toLowerCase().includes(w))) || '';
+    document.getElementById('an-date').value = pick(['date','created','paid','time','stamp']);
+    document.getElementById('an-value').value = pick(['amount','total','price','paid','sum','value']);
+    if(document.getElementById('an-value').value){
+      document.getElementById('an-metric').value = 'sum';
+      anToggleValue();
+    }
+    anLastYear();
+    cmsExp(`Ready: <b>${table}</b> is set up below with date
+      “${document.getElementById('an-date').value || '—'}” and amount
+      “${document.getElementById('an-value').value || '—'}”. Check them and press Run.`);
+    document.getElementById('an-table').scrollIntoView({behavior:'smooth', block:'center'});
+  }catch(e){ cmsExp('Set the table below manually: ' + e.message); }
 }
 
 async function cmsFindValue(everywhere){
@@ -3717,7 +3802,8 @@ async function cmsSample(table){
     cmsExp(`<div style="margin-bottom:8px;"><b>${r.database}.${table}</b>
         <span style="color:var(--text3);font-size:11px;"> — ${(r.rows||[]).length} sample rows</span>
         <button onclick="cmsUseTable('${table}')" class="btn btn-outline" style="font-size:11px;padding:3px 8px;margin-left:8px;">Use for clock events</button></div>
-      <div style="overflow:auto;"><table class="data-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`);
+      <div class="xhint">${cols.length} columns — scroll sideways to see them all</div>
+      <div class="xscroll"><table class="data-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`);
   }catch(e){ cmsExp('Failed: ' + e.message); }
 }
 

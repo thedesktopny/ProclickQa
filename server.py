@@ -4471,6 +4471,19 @@ def cms_db_analyze():
         return jsonify({'error': str(e)[:240]}), 400
 
 
+@app.route('/api/cms-db/find-topic', methods=['GET'])
+@require_manager
+def cms_db_find_topic():
+    """Which tables hold a kind of data — payments, orders, customers — judged
+    by column names rather than a specific value."""
+    import cms_db
+    try:
+        return jsonify(cms_db.find_topic(request.args.get('topic', ''),
+                                         request.args.get('database') or None))
+    except Exception as e:
+        return jsonify({'error': str(e)[:240]}), 400
+
+
 @app.route('/api/cms-db/find-value', methods=['GET'])
 @require_manager
 def cms_db_find_value():

@@ -554,6 +554,89 @@ def _searchable_columns(conn, k, db, is_current):
     return [], '; '.join(tried) or 'no columns returned'
 
 
+TOPIC_WORDS = {
+    'payments':   ['payment', 'paid', 'amount', 'total', 'price', 'charge', 'card',
+                   'transaction', 'balance', 'due', 'refund', 'currency', 'cost', 'fee'],
+    'orders':     ['order', 'cart', 'checkout', 'purchase', 'item', 'qty', 'quantity',
+                   'sku', 'product', 'shipment', 'delivery'],
+    'customers':  ['customer', 'client', 'account', 'contact', 'address', 'email',
+                   'phone', 'company', 'billing', 'shipping'],
+    'employees':  ['employee', 'agent', 'staff', 'user', 'clock', 'shift', 'payroll',
+                   'wage', 'hour', 'extension'],
+    'calls':      ['call', 'caller', 'duration', 'recording', 'queue', 'extension',
+                   'disposition', 'note'],
+    'invoices':   ['invoice', 'bill', 'statement', 'tax', 'subtotal', 'discount',
+                   'credit', 'terms'],
+    'dates':      ['date', 'created', 'modified', 'updated', 'timestamp', 'time'],
+}
+
+
+def find_topic(topic, database=None, max_tables=60):
+    """Find which tables hold a KIND of data — payments, orders, customers.
+
+    Answers "where are the payments?" by looking at column NAMES rather than
+    values: a table with amount, paid_date, card_last4 and currency is a
+    payments table whatever it happens to be called. Tables are ranked by how
+    many matching columns they have and how many rows they hold, because the
+    real table is usually both the best match and a big one.
+    """
+    words = TOPIC_WORDS.get((topic or '').lower())
+    if not words:
+        words = [w.strip().lower() for w in str(topic or '').split(',') if len(w.strip()) > 2]
+    if not words:
+        raise RuntimeError('choose a topic, or type your own words separated by commas')
+
+    db = database or NAME
+    conn = _connect()
+    k = kind()
+    cols, problem = _searchable_columns(conn, k, db, db == NAME)
+    if problem and not cols:
+        conn.close()
+        raise RuntimeError('Could not list columns of %s — %s' % (db, problem))
+
+    by_table = {}
+    for tname, cname, ctype in cols:
+        low = str(cname).lower()
+        hit = [w for w in words if w in low]
+        if hit:
+            d = by_table.setdefault(tname, {'table': tname, 'matched': [], 'score': 0})
+            d['matched'].append({'column': cname, 'type': str(ctype), 'because': hit[0]})
+            d['score'] += 1
+
+    # row counts make the difference between a lookup table and the real thing
+    counts = {}
+    try:
+        cur = conn.cursor()
+        if k == 'mssql':
+            cur.execute("""SELECT t.name, SUM(p.rows) FROM sys.tables t
+                           JOIN sys.partitions p ON p.object_id = t.object_id
+                            AND p.index_id IN (0,1) GROUP BY t.name""")
+        elif k == 'mysql':
+            cur.execute("""SELECT table_name, table_rows FROM information_schema.tables
+                           WHERE table_schema = %s""", (db,))
+        else:
+            cur.execute('SELECT relname, n_live_tup FROM pg_stat_user_tables')
+        while True:
+            r = cur.fetchone()
+            if not r:
+                break
+            counts[r[0]] = int(r[1] or 0)
+    except Exception:
+        pass
+    conn.close()
+
+    out = []
+    for d in by_table.values():
+        d['rows'] = counts.get(d['table'], 0)
+        # a table with several matching columns AND real data ranks highest
+        d['rank'] = d['score'] * 10 + min(20, (d['rows'] ** 0.25) if d['rows'] > 0 else 0)
+        out.append(d)
+    out.sort(key=lambda d: -d['rank'])
+    return {'topic': topic, 'words': words, 'database': db,
+            'tables': out[:max_tables], 'total_matched': len(out),
+            'columns_scanned': len(cols)}
+
+
 def find_value(value, database=None, all_databases=False,
                budget_seconds=150, max_checks=20000, count_matches=True):
     """Find every place a value appears.
