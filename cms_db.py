@@ -80,10 +80,30 @@ def _open(k):
 
 
 def kind():
-    """Whatever we last connected as — drives the small dialect differences."""
+    """Which database we're talking to — this drives the dialect differences.
+
+    The type is only known once a connection has succeeded, so if nothing has
+    connected yet we make a throwaway connection to find out. Guessing here is
+    what made a SQL Server database get asked MySQL questions, which returned
+    nothing at all and looked like an empty database.
+    """
+    global _DETECTED
     if _DETECTED:
         return _DETECTED
-    return 'postgres' if DB_TYPE.startswith('post') else 'mysql'
+    if DB_TYPE.startswith('post'):
+        return 'postgres'
+    if DB_TYPE.startswith('my') or DB_TYPE.startswith('maria'):
+        return 'mysql'
+    if DB_TYPE.startswith('ms') or DB_TYPE.startswith('sql'):
+        return 'mssql'
+    if configured():
+        try:
+            _connect().close()          # sets _DETECTED as a side effect
+        except Exception:
+            pass
+    if _DETECTED:
+        return _DETECTED
+    return 'mssql' if PORT == 1433 else ('postgres' if PORT == 5432 else 'mysql')
 
 
 def _connect():
