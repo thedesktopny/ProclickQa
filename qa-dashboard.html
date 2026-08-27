@@ -3597,7 +3597,14 @@ async function cmsFindValue(everywhere){
       cmsExp((r.columns_checked
         ? `Nothing containing “${r.value}” was found.`
           + (everywhere ? '' : '<br><br>Try <b>Search ALL databases</b> — it may live in another database on this server.')
-        : `<b style="color:var(--red)">Nothing was searched.</b> The login can connect but cannot read the column list.`)
+        : `<b style="color:var(--red)">Nothing was searched.</b><br>`
+          + (r.why
+             ? `<div style="margin-top:8px;background:var(--surface);border:1px solid var(--border);
+                  border-radius:8px;padding:10px;font-size:11.5px;line-height:1.7;">`
+               + Object.entries(r.why).filter(([k])=>k!=='meaning')
+                   .map(([k,v])=>`${k.replace(/_/g,' ')}: <b>${v==null?'—':v}</b>`).join('<br>')
+               + `</div><div style="margin-top:8px;color:var(--yellow);">${r.why.meaning||''}</div>`
+             : 'The login can connect but cannot read the column list.'))
         + foot);
       return;
     }
