@@ -52,6 +52,7 @@ SMOOTH_PX = 2
 EXTEND_BY_COLOUR = True
 COLOUR_TOLERANCE = 12.0
 COARSE_ENOUGH = 0.28    # subject taller than this share of the frame -> one pass is enough
+COARSE_MAX_PARTS = 2    # ...but only if there are this few people in the picture
 MAX_GROW_PX = 90        # how far growth may travel from confirmed skin
 MAX_GROW_RATIO = 2.4    # throw the growth away if it balloons past this
 SECOND_PASS = True
@@ -280,12 +281,16 @@ def process(img, cover=(0, 0, 0), grid_face_threshold=4, include_neck=False):
     # Subject HEIGHT separates the two cases far more cleanly than area:
     # a portrait's largest skin patch runs ~40% of the frame height, while the
     # biggest face in a grid of thumbnails is ~14%.
-    tallest = 0
+    tallest, big_parts = 0, 0
     if coarse.any():
         nn, _, st, _ = cv2.connectedComponentsWithStats(coarse)
         if nn > 1:
             tallest = int(st[1:, cv2.CC_STAT_HEIGHT].max())
-    big_enough = tallest > h * COARSE_ENOUGH
+            big_parts = int((st[1:, cv2.CC_STAT_AREA] > (w * h) * 0.0008).sum())
+    # A portrait has one or two people; a screenshot grid has many. Without this
+    # check a wide screenshot containing one large person took the single-pass
+    # path and almost nothing got covered.
+    big_enough = tallest > h * COARSE_ENOUGH and big_parts <= COARSE_MAX_PARTS
     if big_enough:
         print('[skinblock] one large subject — a single pass is enough')
         mask = coarse

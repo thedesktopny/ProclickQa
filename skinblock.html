@@ -157,7 +157,7 @@
   }
   .bar-track{ width:64%; height:3px; border-radius:2px; background:#252A35; overflow:hidden; }
   .bar-fill{ height:100%; width:30%; background:var(--amber); transition:width .2s; }
-  .foot{ display:flex; align-items:center; gap:8px; padding:9px 10px; }
+  .foot{ display:flex; align-items:center; gap:8px; padding:9px 10px; flex-wrap:wrap; }
   .status{
     font-size:12px; display:flex; align-items:center; gap:6px; min-width:0;
   }
@@ -239,7 +239,7 @@
 <div id="app" style="display:none">
   <header>
     <div class="bar">
-      <div class="wordmark"><span id="dot" class="lamp"></span> Skin Block <span class="ver mono">v14.2</span></div>
+      <div class="wordmark"><span id="dot" class="lamp"></span> Skin Block <span class="ver mono">v15</span></div>
       <div class="bar-right">
         <span id="statusText">Starting…</span>
         <span id="extBadge" class="chip" style="display:none"></span>
@@ -366,8 +366,8 @@ async function initBrowserModel(onProgress){
   const ort = window.ort;
   ort.env.wasm.wasmPaths = ORT_WASM;
   // Threads only work when the browser has granted cross-origin isolation.
-  // Asking for them without it makes the runtime fail to load entirely, which
-  // is why this check has to stay.
+  // Asking for them without it makes the runtime fail to load ENTIRELY, which
+  // silently forces every photo onto the slow server path. This check must stay.
   try {
     ort.env.wasm.numThreads = self.crossOriginIsolated
       ? Math.min(4, navigator.hardwareConcurrency || 2) : 1;
@@ -399,6 +399,7 @@ async function initBrowserModel(onProgress){
       ortBackend = ep;
       break;
     } catch(e){
+      // Keep the reason. Throwing it away is why "no backend" told nobody anything.
       backendErrors.push(ep + ": " + ((e && e.message) || e));
     }
   }
@@ -703,7 +704,10 @@ function extendByColour(px, mask, w, h){
   return out;
 }
 
+let RUN_COUNT = 0, SINGLE_PASS_USED = false;
+
 async function processInBrowser(base, onStep){
+  RUN_COUNT = 0; SINGLE_PASS_USED = false;
   const w = base.width, h = base.height;
   const WINDOW = 260;                       // finer than before: more detail per thumbnail
   let cols = Math.max(1, Math.round(w / WINDOW));
@@ -725,6 +729,7 @@ async function processInBrowser(base, onStep){
   // 25 on an ordinary product photo.
   {
     const c = await scoreRegion(base, 0, 0, w, h, COARSE_SIZE);
+    RUN_COUNT++;
     blendScore(c.score, c.gw, c.gh, w, h, S, 0, 0, w);
     blendScore(c.cloth, c.gw, c.gh, w, h, C, 0, 0, w);
     if (onStep) onStep(1, 1);
@@ -746,7 +751,20 @@ async function processInBrowser(base, onStep){
     const { comps } = labelComponents(coarse, w, h);
     for (const c of comps){ const ch2 = c.maxy - c.miny + 1; if (ch2 > tallest) tallest = ch2; }
   }
-  const oneIsEnough = tallest > h * Number(SETTINGS.coarse_enough ?? 0.28);
+  // One big subject means a portrait — but a wide screenshot can hold one large
+  // person AND a dozen small ones. Counting the separate people is what tells
+  // them apart: a portrait has one or two, a grid has many. Getting this wrong
+  // means the whole screenshot gets a single low-resolution pass and almost
+  // nothing is covered.
+  let bigParts = 0;
+  {
+    const { comps } = labelComponents(coarse, w, h);
+    for (const c of comps) if (c.size > (w*h) * 0.0008) bigParts++;
+  }
+  SINGLE_PASS_USED = tallest > h * Number(SETTINGS.coarse_enough ?? 0.28)
+                     && bigParts <= Number(SETTINGS.coarse_max_parts ?? 2);
+  const oneIsEnough = tallest > h * Number(SETTINGS.coarse_enough ?? 0.28)
+                      && bigParts <= Number(SETTINGS.coarse_max_parts ?? 2);
   if (!oneIsEnough){
   const cw = w / cols, ch = h / rows;
   const OV = 0.12;
@@ -773,6 +791,7 @@ async function processInBrowser(base, onStep){
           for (let x = gx0; x < gx1; x += 2) if (gate[y*w + x]){ anyHere = true; break; }
         if (!anyHere){ done++; if (onStep) onStep(Math.min(done,total), total); continue; }
         const { score, cloth, gw, gh } = await scoreRegion(base, x0, y0, sw, sh);
+        RUN_COUNT++;
         blendScore(score, gw, gh, sw, sh, S, x0, y0, w);
         blendScore(cloth, gw, gh, sw, sh, C, x0, y0, w);
         boxes.push([x0, y0, sw, sh]);
@@ -810,7 +829,7 @@ async function processInBrowser(base, onStep){
              (SETTINGS.cover_mode || "blend"), SETTINGS.cover_color);
   let any = false;
   for (let i = 0; i < smoothed.length; i++) if (smoothed[i]){ any = true; break; }
-  return { canvas: out, found: any };
+  return { canvas: out, found: any, runs: RUN_COUNT, oneIsEnough: SINGLE_PASS_USED };
 }
 
 
@@ -820,7 +839,7 @@ async function processInBrowser(base, onStep){
 ========================================================== */
 
 const $ = id => document.getElementById(id);
-console.log("[SkinBlock] v14.1 — quality no longer depends on machine speed");
+console.log("[SkinBlock] v15 — isolation guard restored");
 
 const dot = $("dot"), statusText = $("statusText"), sheet = $("sheet"), bay = $("bay");
 const fileInput = $("fileInput"), saveAllBtn = $("saveAllBtn"), tally = $("tally");
@@ -1090,7 +1109,16 @@ async function handle(item){
       const r = await processInBrowser(base, (d,n) => setWork(item, `Covering… ${d}/${n}`, d/n*100));
       item.painted = r.canvas;
       item.found = r.found;
-      finish(item, ((performance.now()-t0)/1000).toFixed(1) + "s");
+      const secs = (performance.now()-t0)/1000;
+      // Say WHY it took as long as it did: where it ran, how many passes the
+      // picture needed, and how big it was. A slow result is then explainable
+      // rather than mysterious.
+      item.why = `${ortBackend === "webgpu" ? "this PC's graphics" : "this PC's processor"}`
+        + ` · ${r.runs} pass${r.runs === 1 ? "" : "es"}`
+        + (r.oneIsEnough ? " (one big subject)" : (r.runs > 6 ? " (many small people)" : ""))
+        + ` · ${base.width}×${base.height}`
+        + ` · ${(secs / Math.max(1, r.runs)).toFixed(2)}s per pass`;
+      finish(item, secs.toFixed(1) + "s");
       return;
     }catch(e){ console.warn("[SkinBlock] local pass failed, using server:", e && e.message); }
   }
@@ -1114,7 +1142,10 @@ async function handle(item){
     item.painted = painted;
     item.found = !!(resp.info && resp.info.painted);
     item.partial = !!(resp.info && resp.info.partial);
-    finish(item, resp.info && resp.info.seconds ? resp.info.seconds + "s" : "");
+    const inf = resp.info || {};
+    item.why = `the server (slow path) · ${inf.windows || "?"} pass${inf.windows === 1 ? "" : "es"}`
+      + ` · ${w}×${h}` + (inf.partial ? " · hit the time limit" : "");
+    finish(item, inf.seconds ? inf.seconds + "s" : "");
   } else {
     item.painted = null;
     item.found = false;
@@ -1133,6 +1164,16 @@ function finish(item, secs, failed){
   if (failed)            stamp(item, "Couldn't cover this one — check it by hand", "bad");
   else if (item.partial) stamp(item, "Part of this photo wasn't checked — look it over", "warn");
   else if (item.found)   stamp(item, "Skin covered" + (secs ? " · " + secs : ""), "");
+  if (item.why){
+    const foot = item.el.querySelector(".foot");
+    if (foot && !foot.querySelector(".why")){
+      const d = document.createElement("div");
+      d.className = "why";
+      d.style.cssText = "flex-basis:100%;font-size:10px;color:var(--faint);margin-top:2px;";
+      d.textContent = item.why;
+      foot.appendChild(d);
+    }
+  }
   else                   stamp(item, "No people found — check it", "none");
   logToServer(item, compose(item)).then(loadEarlier);
   updateTally();
