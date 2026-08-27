@@ -12,6 +12,16 @@ import urllib.request
 import urllib.error
 import urllib.parse
 
+# Claude pricing, same figures the call scoring uses (dollars per million tokens)
+CLAUDE_INPUT_COST_PER_M = 3.00
+CLAUDE_OUTPUT_COST_PER_M = 15.00
+
+# Claude reads a 200,000-token window — roughly 790,000 characters. The default
+# below leaves plenty of headroom and keeps a question at a few cents; raise
+# notes_char_budget in settings to read more per question, at more cost.
+NOTES_CHAR_BUDGET_DEFAULT = 400_000     # ~100k tokens, ~$0.30 a question
+MAX_NOTES_HARD = 8000                   # a sane ceiling on the database read
+
 load_dotenv()
 
 import re
@@ -3944,6 +3954,489 @@ def cms_db_search():
         return jsonify({'error': str(e)[:240]}), 400
 
 
+NOTE_STOPWORDS = set("""
+a an the and or but if then than so because as of to in on at for with from by about into over after
+before between out against during without within along across behind beyond up down off above below
+is are was were be been being am do does did doing have has had having will would shall should may
+might must can could i me my we our you your he him his she her it its they them their this that
+these those there here what which who whom when where why how all any both each few more most other
+some such no nor not only own same s t just dont should now got get getting im ive hes shes theyre
+said says say told tell asked ask call called calls caller customer client
+""".split())
+
+
+def _note_words(text):
+    import re
+    return [w for w in re.findall(r"[a-z']{2,}", (text or '').lower())]
+
+
+def _notes_char_budget():
+    """How much note text one question may read. Bigger reads mean more notes
+    considered and a higher cost per question."""
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute("SELECT value FROM app_settings WHERE key = 'notes_char_budget'")
+        r = c.fetchone(); conn.close()
+        if r and r[0]:
+            return max(20_000, min(750_000, int(float(r[0]))))
+    except Exception:
+        pass
+    return NOTES_CHAR_BUDGET_DEFAULT
+
+
+def _call_notes_filters(a):
+    """Shared filter for the notes browser and the question box, so an answer is
+    always about exactly the notes on screen."""
+    where, params = ["COALESCE(call_notes,'') <> ''"], []
+    if a.get('date_from'):
+        where.append('created_at >= %s'); params.append(a['date_from'] + ' 00:00:00')
+    if a.get('date_to'):
+        where.append('created_at <= %s'); params.append(a['date_to'] + ' 23:59:59')
+    if a.get('agent'):
+        where.append('agent_name = %s'); params.append(a['agent'])
+    if a.get('phone'):
+        where.append('caller_id LIKE %s'); params.append('%' + a['phone'] + '%')
+    if a.get('account'):
+        where.append('(account_name LIKE %s OR customer_account_id LIKE %s)')
+        params += ['%' + a['account'] + '%'] * 2
+    if a.get('contains'):
+        where.append('call_notes LIKE %s'); params.append('%' + a['contains'] + '%')
+    return ' AND '.join(where), params
+
+
+@app.route('/api/call-notes', methods=['GET'])
+@require_manager
+def call_notes_list():
+    """Every call note, filterable by agent, date, phone number and account."""
+    a = {k: (request.args.get(k) or '').strip() for k in
+         ('date_from', 'date_to', 'agent', 'phone', 'account', 'contains')}
+    try:
+        limit = min(2000, max(1, int(request.args.get('limit') or 300)))
+        offset = max(0, int(request.args.get('offset') or 0))
+    except Exception:
+        limit, offset = 300, 0
+    where, params = _call_notes_filters(a)
+    conn = get_db(); c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('SELECT COUNT(*) AS n FROM calls WHERE ' + where, params)
+    total = c.fetchone()['n']
+    c.execute("""SELECT call_id, agent_name, agent_extension, caller_id, account_name,
+                        customer_account_id, duration, created_at, call_notes, notes_score, status
+                 FROM calls WHERE %s ORDER BY created_at DESC LIMIT %s OFFSET %s"""
+              % (where, limit, offset), params)
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    for r in rows:
+        if r.get('created_at'):
+            r['created_at'] = r['created_at'].isoformat()
+    return jsonify({'notes': rows, 'total': total, 'limit': limit, 'offset': offset})
+
+
+DEFAULT_NOTE_TOPICS = {
+    'refund / money back': ['refund', 'money back', 'chargeback', 'credit back', 'reimburse'],
+    'cancel / leaving':    ['cancel', 'cancelled', 'canceling', 'close account', 'stop service', 'switch to'],
+    'complaint / upset':   ['complain', 'complaint', 'upset', 'angry', 'furious', 'frustrated', 'unhappy', 'rude'],
+    'billing question':    ['bill', 'billed', 'invoice', 'charge', 'overcharge', 'payment', 'price'],
+    'delivery / shipping': ['deliver', 'delivery', 'shipping', 'shipment', 'tracking', 'package', 'arrive'],
+    'broken / damaged':    ['broken', 'damaged', 'defect', 'not working', 'stopped working', 'faulty'],
+    'late / waiting':      ['late', 'delay', 'delayed', 'still waiting', 'never received', 'no response'],
+    'callback promised':   ['call back', 'callback', 'will call', 'follow up', 'get back to'],
+    'escalation':          ['manager', 'supervisor', 'escalate', 'escalated', 'complaint filed'],
+    'new order / sale':    ['ordered', 'new order', 'placed order', 'purchase', 'signed up', 'upgrade'],
+}
+
+
+@app.route('/api/call-notes/insights', methods=['GET'])
+@require_manager
+def call_notes_insights():
+    """Analysis of the filtered notes without any AI — free, and it reads every
+    matching note however many there are.
+
+    Counting, grouping and word frequency answer a surprising amount on their
+    own: what gets mentioned, which accounts come up most, how the volume moves
+    over time, and which notes look like nothing was written. Claude is for the
+    questions that need reading comprehension; this is for the rest.
+    """
+    import re
+    from collections import Counter
+
+    a = {k: (request.args.get(k) or '').strip() for k in
+         ('date_from', 'date_to', 'agent', 'phone', 'account', 'contains')}
+    where, params = _call_notes_filters(a)
+
+    conn = get_db(); c = conn.cursor(cursor_factory=RealDictCursor)
+
+    # --- things the database can count on its own, at any scale -------------
+    c.execute("""SELECT COUNT(*) AS n, MIN(created_at) AS first_at, MAX(created_at) AS last_at,
+                        AVG(LENGTH(call_notes))::numeric(10,1) AS avg_len
+                 FROM calls WHERE """ + where, params)
+    head = dict(c.fetchone())
+
+    c.execute("""SELECT DATE(created_at) AS day, COUNT(*) AS n
+                 FROM calls WHERE %s GROUP BY DATE(created_at)
+                 ORDER BY DATE(created_at)""" % where, params)
+    by_day = [{'day': str(r['day']), 'n': r['n']} for r in c.fetchall()]
+
+    c.execute("""SELECT COALESCE(NULLIF(agent_name,''),'(unknown)') AS k, COUNT(*) AS n,
+                        AVG(LENGTH(call_notes))::numeric(10,1) AS avg_len
+                 FROM calls WHERE %s GROUP BY 1 ORDER BY n DESC LIMIT 50""" % where, params)
+    by_agent = [dict(r) for r in c.fetchall()]
+
+    c.execute("""SELECT COALESCE(NULLIF(account_name,''), NULLIF(customer_account_id,''),'(none)') AS k,
+                        COUNT(*) AS n
+                 FROM calls WHERE %s GROUP BY 1 ORDER BY n DESC LIMIT 25""" % where, params)
+    by_account = [dict(r) for r in c.fetchall()]
+
+    c.execute("""SELECT COALESCE(NULLIF(caller_id,''),'(none)') AS k, COUNT(*) AS n
+                 FROM calls WHERE %s GROUP BY 1 HAVING COUNT(*) > 1
+                 ORDER BY n DESC LIMIT 25""" % where, params)
+    repeat_callers = [dict(r) for r in c.fetchall()]
+
+    # --- topics: counted in the database, so every note is included ---------
+    topics = []
+    for label, words in DEFAULT_NOTE_TOPICS.items():
+        clause = ' OR '.join(['LOWER(call_notes) LIKE %s'] * len(words))
+        c.execute('SELECT COUNT(*) AS n FROM calls WHERE (%s) AND (%s)' % (where, clause),
+                  params + ['%' + w + '%' for w in words])
+        n = c.fetchone()['n']
+        if n:
+            topics.append({'topic': label, 'notes': n,
+                           'pct': round(n / max(1, head['n']) * 100, 1)})
+    topics.sort(key=lambda t: -t['notes'])
+
+    # --- word and phrase counts: streamed in batches, no cap ---------------
+    words = Counter(); phrases = Counter(); exact = Counter()
+    scanned, batch, offset = 0, 5000, 0
+    while True:
+        c.execute("""SELECT call_notes FROM calls WHERE %s
+                     ORDER BY created_at DESC LIMIT %d OFFSET %d""" % (where, batch, offset), params)
+        chunk = c.fetchall()
+        if not chunk:
+            break
+        for r in chunk:
+            t = (r['call_notes'] or '').strip()
+            if not t:
+                continue
+            scanned += 1
+            key = re.sub(r'\s+', ' ', t.lower())
+            if len(key) >= 5:
+                exact[key] += 1
+            ws = re.findall(r"[a-z']{2,}", t.lower())
+            words.update(w for w in ws if w not in NOTE_STOPWORDS)
+            for i in range(len(ws) - 1):
+                if ws[i] in NOTE_STOPWORDS and ws[i+1] in NOTE_STOPWORDS:
+                    continue
+                phrases[' '.join(ws[i:i+2])] += 1
+        offset += batch
+        if len(chunk) < batch:
+            break
+    conn.close()
+
+    repeated = [{'text': t[:160], 'times': n} for t, n in exact.most_common(20) if n > 1]
+    return jsonify({
+        'total_notes': head['n'],
+        'scanned': scanned,
+        'first_at': head['first_at'].isoformat() if head.get('first_at') else None,
+        'last_at': head['last_at'].isoformat() if head.get('last_at') else None,
+        'avg_length': float(head['avg_len'] or 0),
+        'by_day': by_day,
+        'by_agent': [{'agent': r['k'], 'notes': r['n'], 'avg_length': float(r['avg_len'] or 0)}
+                     for r in by_agent],
+        'by_account': [{'account': r['k'], 'notes': r['n']} for r in by_account],
+        'repeat_callers': [{'phone': r['k'], 'calls': r['n']} for r in repeat_callers],
+        'topics': topics,
+        'top_words': words.most_common(40),
+        'top_phrases': phrases.most_common(30),
+        'repeated_notes': repeated,
+        'free': True,
+    })
+
+
+@app.route('/api/call-notes/estimate', methods=['GET'])
+@require_manager
+def call_notes_estimate():
+    """Roughly what the next question will cost, before it's asked. Based on the
+    size of the notes that match the current filters — about 4 characters per
+    token, which is close enough for a price shown to two decimal places."""
+    a = {k: (request.args.get(k) or '').strip() for k in
+         ('date_from', 'date_to', 'agent', 'phone', 'account', 'contains')}
+    where, params = _call_notes_filters(a)
+    conn = get_db(); c = conn.cursor()
+    c.execute('SELECT COUNT(*) FROM calls WHERE ' + where, params)
+    total = int(c.fetchone()[0] or 0)
+    budget = _notes_char_budget()
+    c.execute("""SELECT COALESCE(SUM(LENGTH(call_notes)), 0), COUNT(*) FROM (
+                     SELECT call_notes FROM calls WHERE %s
+                     ORDER BY created_at DESC LIMIT %d) t""" % (where, MAX_NOTES_HARD), params)
+    row = c.fetchone()
+    all_chars, fetched_n = int(row[0] or 0), int(row[1] or 0)
+    chars = min(all_chars, budget)
+    # how many notes that budget actually covers
+    notes_read = fetched_n if all_chars <= budget else max(1, int(fetched_n * budget / max(1, all_chars)))
+    c.execute("""SELECT COALESCE(SUM(cost_usd), 0) FROM api_usage
+                 WHERE service = 'claude-notes-question' AND used_at >= CURRENT_DATE""")
+    spent_today = float(c.fetchone()[0] or 0)
+    conn.close()
+
+    in_tok = chars / 4 + 400          # the notes, plus the question and instructions
+    out_tok = 500                     # a typical answer
+    cost = in_tok / 1_000_000 * CLAUDE_INPUT_COST_PER_M + out_tok / 1_000_000 * CLAUDE_OUTPUT_COST_PER_M
+    return jsonify({'estimate_usd': round(cost, 4), 'notes_matching': total,
+                    'notes_read': min(total, notes_read),
+                    'char_budget': budget,
+                    'spent_today_usd': round(spent_today, 4)})
+
+
+@app.route('/api/call-notes/ask', methods=['POST'])
+@require_manager
+def call_notes_ask():
+    """Ask a question about the notes currently filtered.
+
+    Only the notes matching the filters are sent, so the answer is grounded in
+    what's on screen rather than the whole database. If there are more notes
+    than fit in one question, the most recent are used and that is stated.
+    """
+    d = request.json or {}
+    question = (d.get('question') or '').strip()
+    if not question:
+        return jsonify({'error': 'Type a question first'}), 400
+    a = {k: (d.get(k) or '').strip() for k in
+         ('date_from', 'date_to', 'agent', 'phone', 'account', 'contains')}
+    where, params = _call_notes_filters(a)
+
+    # How many notes fit is a question of SIZE, not a round number of rows.
+    # Claude reads a 200,000-token window; at roughly 4 characters per token
+    # that's a lot of notes — thousands of short ones. So take notes until the
+    # character budget is used up rather than stopping at an arbitrary count.
+    # The ceiling is a setting, because a bigger read costs more per question.
+    budget_chars = _notes_char_budget()
+    conn = get_db(); c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('SELECT COUNT(*) AS n FROM calls WHERE ' + where, params)
+    total = c.fetchone()['n']
+    c.execute("""SELECT agent_name, caller_id, account_name, created_at, call_notes
+                 FROM calls WHERE %s ORDER BY created_at DESC LIMIT %s"""
+              % (where, MAX_NOTES_HARD), params)
+    fetched = [dict(r) for r in c.fetchall()]
+    rows, used_chars = [], 0
+    for r in fetched:
+        n = len(r.get('call_notes') or '') + 60      # the date/agent/account prefix
+        if rows and used_chars + n > budget_chars:
+            break
+        rows.append(r); used_chars += n
+    conn.close()
+    if not rows:
+        return jsonify({'answer': 'No notes match these filters, so there is nothing to read.',
+                        'notes_used': 0, 'total_matching': 0})
+
+    lines = []
+    for i, r in enumerate(rows, 1):
+        when = r['created_at'].strftime('%Y-%m-%d %H:%M') if r.get('created_at') else ''
+        lines.append('%d. [%s | %s | %s] %s' % (
+            i, when, r.get('agent_name') or '?', r.get('account_name') or '', 
+            (r.get('call_notes') or '').replace('\n', ' ')[:600]))
+    corpus = '\n'.join(lines)
+
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        prompt = f"""These are notes call-center agents wrote after phone calls. Each line is:
+number. [date time | agent | account] the note text.
+
+NOTES ({len(rows)} of {total} matching):
+{corpus}
+
+QUESTION: {question}
+
+Answer from these notes only. Be specific and quote or cite note numbers where it helps.
+If the notes don't contain the answer, say so plainly rather than guessing. Keep it brief
+and practical — the reader runs this call center."""
+        resp = client.messages.create(model='claude-sonnet-4-6', max_tokens=1200,
+                                      messages=[{'role': 'user', 'content': prompt}])
+        answer = ''.join(b.text for b in resp.content if getattr(b, 'type', '') == 'text')
+        in_tok = getattr(resp.usage, 'input_tokens', 0) or 0
+        out_tok = getattr(resp.usage, 'output_tokens', 0) or 0
+    except Exception as e:
+        return jsonify({'error': 'Could not reach Claude: ' + str(e)[:200]}), 502
+
+    # Same rates the call scoring uses, so this shows up in the cost page
+    # alongside everything else rather than being an invisible extra.
+    cost = (in_tok / 1_000_000 * CLAUDE_INPUT_COST_PER_M
+            + out_tok / 1_000_000 * CLAUDE_OUTPUT_COST_PER_M)
+    spent_today = 0.0
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute("""INSERT INTO api_usage (service, call_id, input_tokens, output_tokens, cost_usd)
+                     VALUES ('claude-notes-question', NULL, %s, %s, %s)""",
+                  (in_tok, out_tok, round(cost, 6)))
+        conn.commit()
+        c.execute("""SELECT COALESCE(SUM(cost_usd), 0) FROM api_usage
+                     WHERE service = 'claude-notes-question'
+                       AND used_at >= CURRENT_DATE""")
+        spent_today = float(c.fetchone()[0] or 0)
+        conn.close()
+    except Exception as e:
+        print('[notes-ask] could not record cost: ' + str(e)[:140])
+
+    return jsonify({'answer': answer, 'notes_used': len(rows), 'total_matching': total,
+                    'truncated': total > len(rows),
+                    'cost_usd': round(cost, 4),
+                    'input_tokens': in_tok, 'output_tokens': out_tok,
+                    'spent_today_usd': round(spent_today, 4)})
+
+
+@app.route('/api/analytics/notes-content', methods=['GET'])
+@require_manager
+def notes_content_analytics():
+    """What agents actually write after a call.
+
+    The existing notes page scores quality; this shows the content itself —
+    the phrases that come up again and again, notes copied word for word
+    between calls, how long they are, and who writes what. Reads VoiceGuard's
+    own call records, so it needs nothing from the CMS.
+    """
+    import re
+    from collections import Counter
+
+    date_from = request.args.get('date_from') or ''
+    date_to = request.args.get('date_to') or ''
+    agent = request.args.get('agent') or ''
+    limit = min(50000, max(100, int(request.args.get('limit') or 20000)))
+
+    where, params = ['1=1'], []
+    if date_from:
+        where.append('created_at >= %s'); params.append(date_from + ' 00:00:00')
+    if date_to:
+        where.append('created_at <= %s'); params.append(date_to + ' 23:59:59')
+    if agent:
+        where.append('agent_name = %s'); params.append(agent)
+
+    conn = get_db(); c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute("""SELECT agent_name, call_notes, notes_score, created_at
+                 FROM calls WHERE %s ORDER BY created_at DESC LIMIT %s"""
+              % (' AND '.join(where), limit), params)
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+
+    total = len(rows)
+    with_notes = [r for r in rows if (r.get('call_notes') or '').strip()]
+    missing = total - len(with_notes)
+
+    lengths = [len((r['call_notes'] or '').strip()) for r in with_notes]
+    words_per = [len(_note_words(r['call_notes'])) for r in with_notes]
+    lengths_sorted = sorted(lengths)
+    median = lengths_sorted[len(lengths_sorted)//2] if lengths_sorted else 0
+
+    # how substantial are they? buckets people can act on
+    buckets = {'empty': missing, 'under 10 chars': 0, '10-40': 0, '40-120': 0, 'over 120': 0}
+    for L in lengths:
+        if L < 10: buckets['under 10 chars'] += 1
+        elif L < 40: buckets['10-40'] += 1
+        elif L < 120: buckets['40-120'] += 1
+        else: buckets['over 120'] += 1
+
+    # phrases that keep coming up (two and three words, stopwords dropped)
+    bi, tri, uni = Counter(), Counter(), Counter()
+    for r in with_notes:
+        ws = [w for w in _note_words(r['call_notes'])]
+        keep = [w for w in ws if w not in NOTE_STOPWORDS]
+        uni.update(keep)
+        for i in range(len(ws) - 1):
+            if ws[i] in NOTE_STOPWORDS and ws[i+1] in NOTE_STOPWORDS:
+                continue
+            bi[' '.join(ws[i:i+2])] += 1
+        for i in range(len(ws) - 2):
+            if all(w in NOTE_STOPWORDS for w in ws[i:i+3]):
+                continue
+            tri[' '.join(ws[i:i+3])] += 1
+
+    # notes written word for word the same on different calls — a template,
+    # a copy-paste habit, or an agent not really writing anything
+    exact = Counter()
+    for r in with_notes:
+        t = re.sub(r'\s+', ' ', (r['call_notes'] or '').strip().lower())
+        if len(t) >= 5:
+            exact[t] += 1
+    repeated = [{'text': t[:200], 'times': n} for t, n in exact.most_common(25) if n > 1]
+    repeated_share = round(sum(n for _, n in exact.items() if n > 1) / max(1, len(with_notes)) * 100, 1)
+
+    # per agent
+    per = {}
+    for r in rows:
+        a = r.get('agent_name') or '(unknown)'
+        d = per.setdefault(a, {'agent': a, 'calls': 0, 'with_notes': 0, 'chars': 0,
+                               'words': 0, 'scores': [], 'texts': []})
+        d['calls'] += 1
+        t = (r.get('call_notes') or '').strip()
+        if t:
+            d['with_notes'] += 1
+            d['chars'] += len(t)
+            d['words'] += len(_note_words(t))
+            d['texts'].append(re.sub(r'\s+', ' ', t.lower()))
+        if r.get('notes_score') is not None:
+            try: d['scores'].append(float(r['notes_score']))
+            except Exception: pass
+    per_agent = []
+    for d in per.values():
+        n = max(1, d['with_notes'])
+        dup = len(d['texts']) - len(set(d['texts']))
+        per_agent.append({
+            'agent': d['agent'], 'calls': d['calls'],
+            'missing_notes': d['calls'] - d['with_notes'],
+            'missing_pct': round((d['calls'] - d['with_notes']) / max(1, d['calls']) * 100, 1),
+            'avg_chars': round(d['chars'] / n),
+            'avg_words': round(d['words'] / n, 1),
+            'repeated_notes': dup,
+            'repeated_pct': round(dup / n * 100, 1),
+            'avg_score': round(sum(d['scores']) / len(d['scores']), 1) if d['scores'] else None,
+        })
+    per_agent.sort(key=lambda x: -x['calls'])
+
+    # a few real examples, so the numbers stay grounded
+    shortest = sorted([r for r in with_notes if len((r['call_notes'] or '').strip()) < 25],
+                      key=lambda r: len(r['call_notes']))[:12]
+    return jsonify({
+        'total_calls': total,
+        'with_notes': len(with_notes),
+        'missing_notes': missing,
+        'missing_pct': round(missing / max(1, total) * 100, 1),
+        'avg_chars': round(sum(lengths) / max(1, len(lengths))),
+        'median_chars': median,
+        'avg_words': round(sum(words_per) / max(1, len(words_per)), 1),
+        'buckets': buckets,
+        'top_words': uni.most_common(40),
+        'top_phrases': bi.most_common(30),
+        'top_trigrams': tri.most_common(20),
+        'repeated': repeated,
+        'repeated_share_pct': repeated_share,
+        'per_agent': per_agent,
+        'examples_short': [{'agent': r.get('agent_name'), 'text': (r['call_notes'] or '')[:120]}
+                           for r in shortest],
+        'date_from': date_from, 'date_to': date_to, 'agent': agent,
+    })
+
+
+@app.route('/api/cms-db/analyze', methods=['GET'])
+@require_manager
+def cms_db_analyze():
+    """Group and total any CMS table — orders by month, by agent, by status.
+    Read-only, and every table/column name is validated before it reaches SQL."""
+    import cms_db
+    a = request.args
+    try:
+        return jsonify(cms_db.aggregate(
+            table=a.get('table', ''),
+            date_col=a.get('date_col') or None,
+            date_from=(a.get('date_from') or None),
+            date_to=(a.get('date_to') or None),
+            group_col=a.get('group_col') or None,
+            period=a.get('period') or None,
+            value_col=a.get('value_col') or None,
+            metric=a.get('metric', 'count'),
+            database=a.get('database') or None,
+            limit=int(a.get('limit') or 500)))
+    except Exception as e:
+        return jsonify({'error': str(e)[:240]}), 400
+
+
 @app.route('/api/cms-db/find-value', methods=['GET'])
 @require_manager
 def cms_db_find_value():
@@ -4311,17 +4804,6 @@ def _phone_identity_map():
     finally:
         conn.close()
     return ext_by_name, id_by_ext
-
-
-def _clocker_table():
-    """Which set of clock events to build the report from.
-
-    'cms' reads what was pulled from the CMS database, 'upload' reads what was
-    uploaded by hand. Two separate tables, so both reports can run side by side
-    and be compared before anything is retired.
-    """
-    src = (request.args.get('source') or '').strip().lower()
-    return 'clocker_events_cms' if src == 'cms' else 'clocker_events'
 
 
 def _time_report_impl():

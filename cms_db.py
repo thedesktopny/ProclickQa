@@ -302,6 +302,111 @@ def search(term, database=None):
             'tables': [{'table': t, 'columns': cols[:40]} for t, cols in sorted(hits.items())]}
 
 
+AGG_FUNCS = {'count': 'COUNT(*)', 'sum': 'SUM', 'avg': 'AVG', 'min': 'MIN', 'max': 'MAX'}
+PERIODS = ('day', 'week', 'month', 'quarter', 'year')
+
+
+def aggregate(table, date_col=None, date_from=None, date_to=None,
+              group_col=None, period=None, value_col=None, metric='count',
+              database=None, limit=500):
+    """Group and total any table — the engine behind 'analyse the orders'.
+
+    Everything is a validated identifier and the dates are parameters, so this
+    can answer new questions without anyone writing SQL. Read-only, like the
+    rest of this module.
+
+        metric  count | sum | avg | min | max      (sum/avg/min/max need value_col)
+        period  day | week | month | quarter | year — bucket the date column
+        group_col  any column, e.g. agent, company, status
+    """
+    metric = (metric or 'count').lower()
+    if metric not in AGG_FUNCS:
+        raise RuntimeError('metric must be one of: ' + ', '.join(AGG_FUNCS))
+    if metric != 'count' and not value_col:
+        raise RuntimeError('%s needs a column to work on' % metric)
+    if period and period not in PERIODS:
+        raise RuntimeError('period must be one of: ' + ', '.join(PERIODS))
+    if period and not date_col:
+        raise RuntimeError('grouping by %s needs a date column' % period)
+
+    k = kind()
+    target = _qualified(table, database)
+    q_ = '[%s]' if k == 'mssql' else ('"%s"' if k == 'postgres' else '`%s`')
+    for name in (date_col, group_col, value_col):
+        if name:
+            _safe(name)
+
+    # the time bucket, per dialect
+    bucket = None
+    if period:
+        d = q_ % date_col
+        if k == 'mssql':
+            bucket = {
+                'day':     "CONVERT(varchar(10), %s, 120)" % d,
+                'week':    "CONVERT(varchar(4), YEAR(%s)) + '-W' + RIGHT('0' + CONVERT(varchar(2), DATEPART(ISO_WEEK, %s)), 2)" % (d, d),
+                'month':   "CONVERT(varchar(7), %s, 120)" % d,
+                'quarter': "CONVERT(varchar(4), YEAR(%s)) + '-Q' + CONVERT(varchar(1), DATEPART(QUARTER, %s))" % (d, d),
+                'year':    "CONVERT(varchar(4), YEAR(%s))" % d,
+            }[period]
+        elif k == 'postgres':
+            bucket = "to_char(date_trunc('%s', %s), 'YYYY-MM-DD')" % (period, d)
+        else:
+            bucket = {
+                'day':     "DATE_FORMAT(%s, '%%%%Y-%%%%m-%%%%d')" % d,
+                'week':    "DATE_FORMAT(%s, '%%%%x-W%%%%v')" % d,
+                'month':   "DATE_FORMAT(%s, '%%%%Y-%%%%m')" % d,
+                'quarter': "CONCAT(YEAR(%s), '-Q', QUARTER(%s))" % (d, d),
+                'year':    "DATE_FORMAT(%s, '%%%%Y')" % d,
+            }[period]
+
+    selects, groups, headers = [], [], []
+    if bucket:
+        selects.append(bucket + ' AS period')
+        groups.append(bucket)
+        headers.append('period')
+    if group_col:
+        selects.append((q_ % group_col) + ' AS grp')
+        groups.append(q_ % group_col)
+        headers.append(group_col)
+
+    agg = 'COUNT(*)' if metric == 'count' else '%s(%s)' % (AGG_FUNCS[metric], q_ % value_col)
+    selects.append(agg + ' AS metric')
+    headers.append(metric if metric == 'count' else '%s of %s' % (metric, value_col))
+    if metric != 'count':
+        selects.append('COUNT(*) AS n')
+        headers.append('rows')
+
+    where, params = [], []
+    if date_col and date_from:
+        where.append('%s >= %%s' % (q_ % date_col)); params.append(date_from + ' 00:00:00')
+    if date_col and date_to:
+        where.append('%s < %%s' % (q_ % date_col)); params.append(date_to + ' 23:59:59')
+
+    sql = 'SELECT %s%s FROM %s' % ('TOP %d ' % int(limit) if k == 'mssql' else '',
+                                   ', '.join(selects), target)
+    if where:
+        sql += ' WHERE ' + ' AND '.join(where)
+    if groups:
+        sql += ' GROUP BY ' + ', '.join(groups)
+        sql += ' ORDER BY ' + (groups[0] if bucket else 'COUNT(*) DESC')
+    if k != 'mssql':
+        sql += ' LIMIT %d' % int(limit)
+
+    conn = _connect(); cur = conn.cursor()
+    cur.execute(sql, tuple(params))
+    rows = [[_plain(v) for v in r] for r in cur.fetchall()]
+    conn.close()
+    total = 0
+    try:
+        idx = len(headers) - (2 if metric != 'count' else 1)
+        total = sum(float(r[idx] or 0) for r in rows)
+    except Exception:
+        pass
+    return {'headers': headers, 'rows': rows, 'total': round(total, 2),
+            'sql_shape': sql.replace('%s', '?'), 'table': table,
+            'database': database or NAME}
+
+
 def find_value(value, database=None, budget_seconds=70, max_checks=4000):
     """Search the whole database for a VALUE you can see on the CMS screen.
 

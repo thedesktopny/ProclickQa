@@ -15,7 +15,13 @@
 }
 body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);display:flex;min-height:100vh;font-size:13px;}
 /* SIDEBAR */
-.sidebar{width:220px;background:var(--surface);border-right:1px solid var(--border);display:flex;flex-direction:column;padding:24px 0;position:fixed;height:100vh;z-index:100;}
+.sidebar{width:220px;background:var(--surface);border-right:1px solid var(--border);display:flex;flex-direction:column;padding:24px 0;position:fixed;height:100vh;z-index:100;overflow:hidden;}
+/* The menu keeps growing, so it scrolls on its own while the logo above and
+   the account below stay where they are. */
+.sidebar-scroll{flex:1;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;}
+.sidebar-scroll::-webkit-scrollbar{width:8px;}
+.sidebar-scroll::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px;}
+.sidebar-scroll::-webkit-scrollbar-thumb:hover{background:var(--text3);}
 .logo{padding:0 20px 28px;border-bottom:1px solid var(--border);margin-bottom:20px;}
 .logo-mark{font-family:'Space Grotesk',sans-serif;font-size:18px;font-weight:700;display:flex;align-items:center;gap:8px;}
 .logo-icon{width:28px;height:28px;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:14px;}
@@ -262,6 +268,12 @@ td.agent{color:var(--text);font-weight:500;}
   .runtabs{ top:auto; position:static; overflow-x:auto; }
   .runbody{ padding:16px; }
 }
+
+.cn-lab{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--text3);margin-bottom:5px;}
+.cn-chip{background:var(--surface2);border:1px solid var(--border);color:var(--text3);
+  border-radius:20px;padding:4px 11px;font-size:11px;cursor:pointer;}
+.cn-chip:hover{color:var(--text);border-color:var(--accent);}
+.cn-h{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--text3);margin-bottom:7px;}
 </style>
 </head>
 <body>
@@ -272,7 +284,8 @@ td.agent{color:var(--text);font-weight:500;}
     <div class="logo-mark"><div class="logo-icon">🎧</div>VoiceGuard</div>
     <div class="logo-sub">QA Intelligence Platform</div>
   </div>
-  <div class="nav-section">
+  <div class="sidebar-scroll">
+<div class="nav-section">
     <div class="nav-label">Main</div>
     <div class="nav-item active" onclick="showPage('dashboard')"><span class="icon">📊</span>Dashboard</div>
     <div class="nav-item" onclick="showPage('calls')"><span class="icon">📞</span>Call Review<span class="nav-badge" id="nb-review">0</span></div>
@@ -284,6 +297,7 @@ td.agent{color:var(--text);font-weight:500;}
     <div class="nav-item" onclick="showPage('analytics')"><span class="icon">📈</span>Trends</div>
     <div class="nav-item" onclick="showPage('billing')"><span class="icon">💰</span>Billing</div>
     <div class="nav-item" onclick="showPage('notes')"><span class="icon">📝</span>Notes Quality</div>
+    <div class="nav-item" onclick="showPage('call-notes')"><span class="icon">🗒️</span>Call Notes</div>
     <div class="nav-item admin-only" onclick="showPage('costs')"><span class="icon">💳</span>Costs</div>
   </div>
   <div class="nav-section manager-plus" style="margin-top:12px;display:none;">
@@ -307,7 +321,8 @@ td.agent{color:var(--text);font-weight:500;}
       </button>
     </div>
   </div>
-  <div class="sidebar-footer">
+  </div>
+<div class="sidebar-footer">
     <div class="avatar" id="sidebar-avatar">DV</div>
     <div>
       <div class="user-name" id="sidebar-name">David</div>
@@ -432,6 +447,39 @@ td.agent{color:var(--text);font-weight:500;}
            background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px;">
         Click List databases or List tables to start looking around.
       </div>
+    </div>
+
+    <div class="card" style="padding:16px;margin-bottom:18px;">
+      <div style="font-size:13px;font-weight:700;margin-bottom:4px;">📊 Analyse a table</div>
+      <div style="font-size:11.5px;color:var(--text3);margin-bottom:10px;">
+        Group and total anything — orders by month, revenue by agent, counts by status.
+        Pick the table, then the columns; nothing is written.
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-bottom:8px;">
+        <input id="an-table" class="cms-in" placeholder="table (e.g. orders)">
+        <input id="an-date" class="cms-in" placeholder="date column">
+        <select id="an-period" class="cms-in">
+          <option value="month">by month</option><option value="week">by week</option>
+          <option value="day">by day</option><option value="quarter">by quarter</option>
+          <option value="year">by year</option><option value="">no time grouping</option>
+        </select>
+        <input id="an-group" class="cms-in" placeholder="also group by (optional)">
+        <select id="an-metric" class="cms-in" onchange="anToggleValue()">
+          <option value="count">count rows</option><option value="sum">sum of…</option>
+          <option value="avg">average of…</option><option value="min">smallest…</option>
+          <option value="max">largest…</option>
+        </select>
+        <input id="an-value" class="cms-in" placeholder="amount column" style="display:none;">
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <input type="date" id="an-from" class="cms-in" style="width:auto;">
+        <input type="date" id="an-to" class="cms-in" style="width:auto;">
+        <button onclick="anLastYear()" class="btn btn-outline" style="font-size:11px;">Last 12 months</button>
+        <button onclick="cmsAnalyze()" class="btn btn-primary" style="font-size:12px;">Run</button>
+        <button onclick="anCsv()" class="btn btn-outline" style="font-size:11px;">⬇️ CSV</button>
+        <span id="an-total" style="margin-left:auto;font-size:13px;font-weight:700;color:var(--green);"></span>
+      </div>
+      <div id="an-out" style="margin-top:12px;font-size:12px;color:var(--text2);max-height:420px;overflow:auto;"></div>
     </div>
 
     <div class="card" style="padding:16px;margin-bottom:18px;">
@@ -679,11 +727,101 @@ td.agent{color:var(--text);font-weight:500;}
 </div>
 
 <!-- ===== NOTES QUALITY ===== -->
+<div class="page" id="page-call-notes">
+  <div class="topbar">
+    <div class="page-title">🗒️ Call Notes</div>
+    <div class="topbar-right">
+      <span id="cn-count" style="font-size:12px;color:var(--text3);"></span>
+      <button class="btn btn-outline" onclick="cnExport()">⬇️ CSV</button>
+    </div>
+  </div>
+
+  <div style="padding:20px 28px 0;">
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:12px;">
+      <div><div class="cn-lab">From</div><input type="date" id="cn-from" class="cms-in" onchange="loadCallNotes()"></div>
+      <div><div class="cn-lab">To</div><input type="date" id="cn-to" class="cms-in" onchange="loadCallNotes()"></div>
+      <div><div class="cn-lab">Agent</div><select id="cn-agent" class="cms-in" onchange="loadCallNotes()"><option value="">All agents</option></select></div>
+      <div><div class="cn-lab">Phone number</div><input id="cn-phone" class="cms-in" placeholder="any part of it" onkeydown="if(event.key==='Enter')loadCallNotes()"></div>
+      <div><div class="cn-lab">Account</div><input id="cn-account" class="cms-in" placeholder="account name or id" onkeydown="if(event.key==='Enter')loadCallNotes()"></div>
+      <div><div class="cn-lab">Note contains</div><input id="cn-contains" class="cms-in" placeholder="word or phrase" onkeydown="if(event.key==='Enter')loadCallNotes()"></div>
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
+      <button onclick="cnRange(7)" class="btn btn-outline" style="font-size:11px;">7 days</button>
+      <button onclick="cnRange(30)" class="btn btn-outline" style="font-size:11px;">30 days</button>
+      <button onclick="cnRange(90)" class="btn btn-outline" style="font-size:11px;">90 days</button>
+      <button onclick="cnClear()" class="btn btn-outline" style="font-size:11px;">Clear filters</button>
+      <button onclick="loadCallNotes()" class="btn btn-primary" style="font-size:12px;margin-left:auto;">Search</button>
+    </div>
+
+    <div class="card" style="padding:14px;margin-bottom:12px;">
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+        <span style="font-size:13px;font-weight:700;">Analyse these notes</span>
+        <span style="font-size:11px;color:var(--green);border:1px solid var(--green);
+              border-radius:20px;padding:2px 9px;">free · every matching note</span>
+        <button onclick="loadNoteInsights()" class="btn btn-outline" style="font-size:12px;margin-left:auto;">Analyse</button>
+      </div>
+      <div style="font-size:11px;color:var(--text3);margin-top:6px;">
+        Counting and grouping — what gets mentioned, who calls repeatedly, how the volume moves.
+        No AI, no cost, no limit on how many notes it reads.
+      </div>
+      <div id="cn-insights" style="margin-top:12px;"></div>
+    </div>
+
+    <!-- Ask about exactly the notes on screen. Grounding the question in the
+         current filters is the whole point: the answer can be trusted because
+         you can see what it read. -->
+    <div class="card" style="padding:14px;margin-bottom:18px;border-color:var(--accent);">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <span style="font-size:13px;font-weight:700;">Ask a question</span>
+        <span style="font-size:11px;color:var(--yellow);border:1px solid var(--yellow);
+              border-radius:20px;padding:2px 9px;">uses AI · costs a few cents</span>
+        <span id="cn-ask-scope" style="font-size:11px;color:var(--text3);"></span>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;">
+        <input id="cn-question" class="cms-in" style="flex:1;min-width:260px;"
+               placeholder="e.g. what are customers complaining about most?"
+               onkeydown="if(event.key==='Enter')askCallNotes()">
+        <button onclick="askCallNotes()" class="btn btn-primary" style="font-size:12px;">Ask</button>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;margin-top:8px;font-size:11px;color:var(--text3);">
+        <span id="cn-estimate">—</span>
+        <span id="cn-spent" style="margin-left:auto;"></span>
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;">
+        <button class="cn-chip" onclick="cnAsk('What are the most common reasons customers called?')">common reasons</button>
+        <button class="cn-chip" onclick="cnAsk('What problems or complaints come up repeatedly?')">recurring complaints</button>
+        <button class="cn-chip" onclick="cnAsk('Are there any notes that suggest a customer was unhappy or at risk of leaving?')">unhappy customers</button>
+        <button class="cn-chip" onclick="cnAsk('Which notes are too vague to be useful, and what is missing from them?')">vague notes</button>
+        <button class="cn-chip" onclick="cnAsk('Summarise what happened with this account across these calls.')">summarise account</button>
+      </div>
+      <div id="cn-answer" style="margin-top:12px;font-size:13px;line-height:1.6;color:var(--text2);white-space:pre-wrap;"></div>
+    </div>
+  </div>
+
+  <div style="padding:0 28px 40px;">
+    <div class="card">
+      <div class="table-wrap"><table class="data-table">
+        <thead><tr><th>When</th><th>Agent</th><th>Phone</th><th>Account</th><th>Note</th><th>Score</th></tr></thead>
+        <tbody id="cn-tbody"><tr><td colspan="6" style="text-align:center;padding:32px;color:var(--text3)">Choose a range and search.</td></tr></tbody>
+      </table></div>
+    </div>
+    <div style="display:flex;gap:8px;justify-content:center;margin-top:14px;">
+      <button onclick="cnPage(-1)" class="btn btn-outline" style="font-size:12px;">← Newer</button>
+      <span id="cn-page" style="font-size:12px;color:var(--text3);align-self:center;"></span>
+      <button onclick="cnPage(1)" class="btn btn-outline" style="font-size:12px;">Older →</button>
+    </div>
+  </div>
+</div>
+
 <div class="page" id="page-notes">
   <div class="topbar">
-    <div class="page-title">📝 Notes Quality</div>
+    <div class="page-title">📝 Notes</div>
+    <div class="topbar-right">
+      <button class="runtab on" data-ntab="quality" onclick="showNotesTab('quality')">Quality scores</button>
+      <button class="runtab" data-ntab="content" onclick="showNotesTab('content')">What they're writing</button>
+    </div>
   </div>
-  <div style="padding:28px;">
+  <div style="padding:28px;" id="notes-tab-quality">
     <div class="alert-bar" style="background:rgba(79,110,247,0.08);border-color:rgba(79,110,247,0.2);margin-bottom:24px;">
       <span style="font-size:18px;">📋</span>
       <span style="font-size:12px;color:var(--text2);flex:1;">Call notes are scored 0-100. Missing notes = Critical issue. Vague notes = Poor. Detailed accurate notes = Excellent.</span>
@@ -699,7 +837,50 @@ td.agent{color:var(--text);font-weight:500;}
         </table>
       </div>
     </div>
+  
+  <div style="padding:28px;display:none;" id="notes-tab-content">
+    <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:20px;">
+      <div>
+        <div style="font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--text3);margin-bottom:5px;">From</div>
+        <input type="date" id="nc-from" class="cms-in" style="width:auto;">
+      </div>
+      <div>
+        <div style="font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--text3);margin-bottom:5px;">To</div>
+        <input type="date" id="nc-to" class="cms-in" style="width:auto;">
+      </div>
+      <button onclick="ncRange(30)" class="btn btn-outline" style="font-size:11px;">30 days</button>
+      <button onclick="ncRange(90)" class="btn btn-outline" style="font-size:11px;">90 days</button>
+      <button onclick="loadNotesContent()" class="btn btn-primary" style="font-size:12px;">Show</button>
+      <span id="nc-scope" style="margin-left:auto;font-size:12px;color:var(--text3);"></span>
+    </div>
+
+    <div id="nc-stats" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:20px;"></div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;" id="nc-grid">
+      <div class="card">
+        <div class="card-header"><span class="card-title">Phrases they use most</span></div>
+        <div id="nc-phrases" style="padding:12px;font-size:12px;"></div>
+      </div>
+      <div class="card">
+        <div class="card-header"><span class="card-title">Written word-for-word on more than one call</span></div>
+        <div id="nc-repeats" style="padding:12px;font-size:12px;max-height:320px;overflow:auto;"></div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <div class="card-header"><span class="card-title">By agent</span></div>
+      <div class="table-wrap"><table class="data-table">
+        <thead><tr><th>Agent</th><th>Calls</th><th>No note</th><th>Avg words</th><th>Repeated</th><th>Avg score</th></tr></thead>
+        <tbody id="nc-agents"></tbody>
+      </table></div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span class="card-title">Shortest notes written</span></div>
+      <div id="nc-examples" style="padding:12px;font-size:12px;"></div>
+    </div>
   </div>
+</div>
 </div>
 
 <!-- ===== RULES ENGINE ===== -->
@@ -922,6 +1103,8 @@ td.agent{color:var(--text);font-weight:500;}
   <div class="runbody">
     <!-- PAY RUN: one line per agent, the money column on the right -->
     <section class="runpanel" id="tab-pay">
+      <!-- shows when a manager has declared a special overtime rate -->
+      <div id="ot-active-banner"></div>
       <div id="tr-summary" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px;margin-bottom:20px;"></div>
 
     
@@ -994,7 +1177,7 @@ td.agent{color:var(--text);font-weight:500;}
           </table>
         </div>
       </div>
-    
+    </div>
     </section>
   </div>
 </div>
@@ -2458,6 +2641,14 @@ function showPage(id){
     loadSkinblockHistory();
   }
   if(id==='cms-pull') cmsPageInit();
+  if(id==='call-notes'){
+    const sel = document.getElementById('cn-agent');
+    if(sel && sel.options.length <= 1 && Array.isArray(agentsData)){
+      sel.innerHTML = '<option value="">All agents</option>' +
+        agentsData.map(a=>`<option>${a.name||a.agent_name||a}</option>`).join('');
+    }
+    if(!document.getElementById('cn-from').value) cnRange(7); else loadCallNotes();
+  }
   if(id==='manager-queue') renderManagerQueue();
   if(id==='time-report'){
     // Recurring schedules expand across a date range, so ensure one is set
@@ -3319,6 +3510,61 @@ async function cmsSearch(){
 
 /* The surest way to locate data: search for something you can SEE on the CMS
    page — an extension, an email — and let the database say which table holds it. */
+
+let anLast = null;
+function anToggleValue(){
+  const m = document.getElementById('an-metric').value;
+  document.getElementById('an-value').style.display = (m === 'count') ? 'none' : '';
+}
+function anLastYear(){
+  const d = new Date();
+  const to = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const from = new Date(to); from.setFullYear(to.getFullYear() - 1);
+  const iso = x => new Date(x.getTime() - x.getTimezoneOffset()*60000).toISOString().slice(0,10);
+  document.getElementById('an-from').value = iso(from);
+  document.getElementById('an-to').value = iso(to);
+}
+
+async function cmsAnalyze(){
+  const g = id => (document.getElementById(id)||{}).value || '';
+  const box = document.getElementById('an-out');
+  if(!g('an-table')){ box.textContent = 'Enter a table name — use the explorer above to find it.'; return; }
+  const q = new URLSearchParams({
+    table:g('an-table'), date_col:g('an-date'), period:g('an-period'),
+    group_col:g('an-group'), metric:g('an-metric'), value_col:g('an-value'),
+    date_from:g('an-from'), date_to:g('an-to'), database:cmsDb()
+  });
+  box.textContent = 'Working…';
+  document.getElementById('an-total').textContent = '';
+  try{
+    const r = await API.get('/api/cms-db/analyze?' + q.toString());
+    if(r.error){ box.innerHTML = '❌ ' + r.error; return; }
+    anLast = r;
+    if(!r.rows.length){ box.textContent = 'No rows in that range.'; return; }
+    // a plain bar next to each row reads faster than a chart library
+    const vals = r.rows.map(x => Number(x[r.headers.length - (r.headers.includes('rows')?2:1)]) || 0);
+    const max = Math.max(...vals, 1);
+    const fmt = n => Number(n).toLocaleString(undefined,{maximumFractionDigits:2});
+    box.innerHTML = `<table class="data-table"><thead><tr>${
+        r.headers.map(x=>`<th>${x}</th>`).join('')}<th style="width:38%"></th></tr></thead><tbody>${
+      r.rows.map((row,i)=>`<tr>${row.map((v,j)=>
+        `<td style="${j===0?'font-weight:600;':'font-variant-numeric:tabular-nums;'}">${
+          typeof v==='number'?fmt(v):String(v==null?'':v)}</td>`).join('')}
+        <td><div style="height:8px;border-radius:4px;background:var(--accent);opacity:.75;width:${
+          Math.max(2, vals[i]/max*100)}%"></div></td></tr>`).join('')}</tbody></table>`;
+    const label = g('an-metric')==='count' ? 'rows' : g('an-metric') + ' of ' + g('an-value');
+    document.getElementById('an-total').textContent = `total ${label}: ${fmt(r.total)}`;
+  }catch(e){ box.textContent = 'Failed: ' + e.message; }
+}
+
+function anCsv(){
+  if(!anLast){ document.getElementById('an-out').textContent = 'Run it first.'; return; }
+  const esc = v => { const s=String(v==null?'':v); return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s; };
+  const lines = [anLast.headers.join(',')].concat(anLast.rows.map(r=>r.map(esc).join(',')));
+  _downloadBlob(new Blob(['\ufeff'+lines.join('\n')],{type:'text/csv;charset=utf-8;'}),
+    `cms-analysis_${anLast.table}.csv`);
+}
+
 async function cmsFindValue(){
   const v = document.getElementById('cms-value').value.trim();
   if(v.length < 2){ cmsExp('Type at least two characters — an extension or an email works well.'); return; }
@@ -3448,6 +3694,233 @@ async function cmsImport(){
 
 
 /* ---- Time Report: tabs, quick periods, and the running total ---- */
+
+/* ---- what agents write after a call ---- */
+
+/* ---- Call Notes: browse, filter, and ask about what you're looking at ---- */
+let cnOffset = 0, cnLast = null;
+const cnVal = id => (document.getElementById(id)||{}).value || '';
+function cnFilters(){
+  return { date_from:cnVal('cn-from'), date_to:cnVal('cn-to'), agent:cnVal('cn-agent'),
+           phone:cnVal('cn-phone'), account:cnVal('cn-account'), contains:cnVal('cn-contains') };
+}
+function cnRange(days){
+  const iso = d => new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,10);
+  document.getElementById('cn-from').value = iso(new Date(Date.now()-days*86400000));
+  document.getElementById('cn-to').value = iso(new Date());
+  cnOffset = 0; loadCallNotes();
+}
+function cnClear(){
+  ['cn-from','cn-to','cn-phone','cn-account','cn-contains'].forEach(id=>document.getElementById(id).value='');
+  document.getElementById('cn-agent').value = '';
+  cnOffset = 0; loadCallNotes();
+}
+function cnPage(dir){
+  const lim = 100;
+  cnOffset = Math.max(0, cnOffset + dir*lim);
+  loadCallNotes();
+}
+
+async function loadCallNotes(){
+  const tb = document.getElementById('cn-tbody');
+  tb.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:28px;color:var(--text3)">Loading…</td></tr>';
+  const f = cnFilters();
+  const q = new URLSearchParams({...f, limit:100, offset:cnOffset});
+  try{
+    const r = await API.get('/api/call-notes?' + q.toString());
+    if(r.error){ tb.innerHTML = `<tr><td colspan="6" style="padding:20px;color:var(--red)">${r.error}</td></tr>`; return; }
+    cnLast = r;
+    document.getElementById('cn-count').textContent = r.total.toLocaleString() + ' notes match';
+    cnEstimate();
+    document.getElementById('cn-ask-scope').textContent =
+      r.total ? `— reads the ${Math.min(r.total,400).toLocaleString()} most recent of ${r.total.toLocaleString()} matching notes` : '';
+    document.getElementById('cn-page').textContent =
+      r.total ? `${cnOffset+1}–${Math.min(cnOffset+r.notes.length, r.total)} of ${r.total.toLocaleString()}` : '';
+    if(!r.notes.length){
+      tb.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:28px;color:var(--text3)">No notes match these filters.</td></tr>';
+      return;
+    }
+    tb.innerHTML = r.notes.map(n=>`<tr>
+      <td style="white-space:nowrap;font-size:11px;color:var(--text3);">${n.created_at ? new Date(n.created_at).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : ''}</td>
+      <td style="font-weight:600;white-space:nowrap;">${n.agent_name||''}</td>
+      <td style="font-size:11px;white-space:nowrap;">${n.caller_id||''}</td>
+      <td style="font-size:11px;">${n.account_name||n.customer_account_id||''}</td>
+      <td style="font-size:12px;color:var(--text2);max-width:520px;">${(n.call_notes||'').replace(/</g,'&lt;')}</td>
+      <td style="text-align:right;color:${n.notes_score>=70?'var(--green)':n.notes_score>=40?'var(--yellow)':'var(--red)'};">${n.notes_score==null?'—':n.notes_score}</td>
+    </tr>`).join('');
+  }catch(e){ tb.innerHTML = `<tr><td colspan="6" style="padding:20px;color:var(--red)">${e.message}</td></tr>`; }
+}
+
+/* What the next question will cost, before it's asked — the price depends on
+   how many notes the filters match, so it moves as you filter. */
+
+/* ---- free analysis: counting and grouping, every matching note ---- */
+async function loadNoteInsights(){
+  const box = document.getElementById('cn-insights');
+  box.innerHTML = '<span style="color:var(--text3);font-size:12px;">Reading every matching note…</span>';
+  try{
+    const q = new URLSearchParams(cnFilters());
+    const r = await API.get('/api/call-notes/insights?' + q.toString());
+    if(r.error){ box.innerHTML = '❌ ' + r.error; return; }
+    if(!r.total_notes){ box.innerHTML = '<span style="color:var(--text3);font-size:12px;">No notes match these filters.</span>'; return; }
+
+    const bars = (items, labelKey, valKey, colour) => {
+      const max = Math.max(1, ...items.map(i=>i[valKey]));
+      return items.map(i=>`<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;font-size:12px;">
+        <span style="width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${i[labelKey]}</span>
+        <div style="flex:1;height:7px;border-radius:4px;background:${colour||'var(--accent)'};opacity:.75;width:${i[valKey]/max*100}%"></div>
+        <span style="color:var(--text3);font-variant-numeric:tabular-nums;min-width:52px;text-align:right;">${
+          i[valKey].toLocaleString()}${i.pct!=null?` · ${i.pct}%`:''}</span></div>`).join('');
+    };
+
+    // the day-by-day shape, drawn as a simple sparkline of bars
+    const days = r.by_day || [];
+    const maxDay = Math.max(1, ...days.map(d=>d.n));
+    const spark = days.length > 1 ? `<div style="display:flex;align-items:flex-end;gap:2px;height:46px;margin:6px 0 2px;">
+        ${days.map(d=>`<div title="${d.day}: ${d.n}" style="flex:1;min-width:2px;background:var(--accent);opacity:.7;
+          height:${Math.max(3, d.n/maxDay*46)}px;border-radius:2px 2px 0 0;"></div>`).join('')}
+      </div><div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text3);">
+        <span>${days[0].day}</span><span>${days[days.length-1].day}</span></div>` : '';
+
+    box.innerHTML = `
+      <div style="font-size:12px;color:var(--text3);margin-bottom:10px;">
+        Read <b style="color:var(--text)">${r.total_notes.toLocaleString()}</b> notes ·
+        average ${Math.round(r.avg_length)} characters</div>
+      ${spark ? `<div style="margin-bottom:14px;">${spark}</div>` : ''}
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:18px;">
+        <div><div class="cn-h">What gets mentioned</div>${
+          r.topics.length ? bars(r.topics,'topic','notes','var(--yellow)')
+                          : '<span style="color:var(--text3);font-size:12px;">Nothing from the standard list came up.</span>'}</div>
+        <div><div class="cn-h">Phrases used most</div>${
+          bars(r.top_phrases.slice(0,12).map(([p,n])=>({p,n})),'p','n')}</div>
+        <div><div class="cn-h">Accounts calling most</div>${
+          bars(r.by_account.slice(0,10),'account','notes','var(--accent2)')}</div>
+        <div><div class="cn-h">Numbers that called more than once</div>${
+          r.repeat_callers.length ? bars(r.repeat_callers.slice(0,10),'phone','calls','var(--accent2)')
+                                  : '<span style="color:var(--text3);font-size:12px;">Every caller called once.</span>'}</div>
+        <div><div class="cn-h">Notes per agent</div>${
+          bars(r.by_agent.slice(0,12),'agent','notes')}
+          <div style="font-size:10px;color:var(--text3);margin-top:6px;">${
+            r.by_agent.slice(0,12).map(a=>`${a.agent}: ${Math.round(a.avg_length)} chars avg`).join(' · ')}</div></div>
+        <div><div class="cn-h">Written word-for-word more than once</div>${
+          r.repeated_notes.length ? r.repeated_notes.slice(0,10).map(d=>
+            `<div style="font-size:12px;margin-bottom:4px;"><span style="color:var(--red);font-weight:700;">${d.times}×</span>
+             <span style="color:var(--text2);"> “${d.text}”</span></div>`).join('')
+          : '<span style="color:var(--text3);font-size:12px;">No note was written twice.</span>'}</div>
+      </div>`;
+  }catch(e){ box.innerHTML = 'Failed: ' + e.message; }
+}
+
+async function cnEstimate(){
+  const el = document.getElementById('cn-estimate');
+  if(!el) return;
+  try{
+    const q = new URLSearchParams(cnFilters());
+    const r = await API.get('/api/call-notes/estimate?' + q.toString());
+    if(r.error){ el.textContent = ''; return; }
+    el.textContent = r.notes_read
+      ? `Asking reads ${r.notes_read} note${r.notes_read===1?'':'s'} — about $${r.estimate_usd.toFixed(3)} per question`
+      : 'No notes to read yet';
+    const sp = document.getElementById('cn-spent');
+    if(sp) sp.textContent = r.spent_today_usd > 0
+      ? `spent on questions today: $${r.spent_today_usd.toFixed(2)}` : '';
+  }catch(e){ el.textContent = ''; }
+}
+
+function cnAsk(q){ document.getElementById('cn-question').value = q; askCallNotes(); }
+
+async function askCallNotes(){
+  const question = cnVal('cn-question').trim();
+  const box = document.getElementById('cn-answer');
+  if(!question){ box.textContent = 'Type a question first.'; return; }
+  box.textContent = 'Reading the notes…';
+  try{
+    const r = await API.post('/api/call-notes/ask', {...cnFilters(), question});
+    if(r.error){ box.textContent = r.error; return; }
+    box.textContent = r.answer
+      + `\n\n— based on ${r.notes_used} note${r.notes_used===1?'':'s'}`
+      + (r.truncated ? ` (the most recent of ${r.total_matching}; narrow the filters to cover the rest)` : '')
+      + `  ·  this question cost $${(r.cost_usd||0).toFixed(4)}`;
+    const sp = document.getElementById('cn-spent');
+    if(sp && r.spent_today_usd != null) sp.textContent = `spent on questions today: $${r.spent_today_usd.toFixed(2)}`;
+  }catch(e){ box.textContent = 'Failed: ' + e.message; }
+}
+
+function cnExport(){
+  if(!cnLast || !cnLast.notes.length){ return; }
+  const cols = ['created_at','agent_name','caller_id','account_name','customer_account_id','notes_score','call_notes'];
+  const esc = v => { const s=String(v==null?'':v); return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s; };
+  const lines = [cols.join(',')].concat(cnLast.notes.map(n=>cols.map(c=>esc(n[c])).join(',')));
+  _downloadBlob(new Blob(['\ufeff'+lines.join('\n')],{type:'text/csv;charset=utf-8;'}), 'call-notes.csv');
+}
+
+function showNotesTab(which){
+  document.getElementById('notes-tab-quality').style.display = which==='quality' ? '' : 'none';
+  document.getElementById('notes-tab-content').style.display = which==='content' ? '' : 'none';
+  document.querySelectorAll('[data-ntab]').forEach(b=>b.classList.toggle('on', b.dataset.ntab===which));
+  if(which==='content' && !document.getElementById('nc-from').value){ ncRange(30); }
+}
+function ncRange(days){
+  const iso = d => new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,10);
+  const to = new Date(), from = new Date(Date.now()-days*86400000);
+  document.getElementById('nc-from').value = iso(from);
+  document.getElementById('nc-to').value = iso(to);
+  loadNotesContent();
+}
+
+async function loadNotesContent(){
+  const from = document.getElementById('nc-from').value, to = document.getElementById('nc-to').value;
+  const stats = document.getElementById('nc-stats');
+  stats.innerHTML = '<div style="color:var(--text3);font-size:12px;">Reading notes…</div>';
+  try{
+    const r = await API.get(`/api/analytics/notes-content?date_from=${from}&date_to=${to}`);
+    if(r.error){ stats.innerHTML = '❌ ' + r.error; return; }
+    document.getElementById('nc-scope').textContent =
+      `${r.total_calls.toLocaleString()} calls · ${r.with_notes.toLocaleString()} with a note`;
+
+    const card = (label, value, tone, sub) => `<div class="card" style="padding:14px;">
+      <div style="font-size:22px;font-weight:700;color:${tone||'var(--text)'};font-variant-numeric:tabular-nums;">${value}</div>
+      <div style="font-size:11px;color:var(--text3);margin-top:3px;">${label}</div>
+      ${sub?`<div style="font-size:10px;color:var(--text3);margin-top:2px;">${sub}</div>`:''}</div>`;
+    stats.innerHTML =
+      card('left no note at all', r.missing_pct + '%',
+           r.missing_pct > 10 ? 'var(--red)' : 'var(--green)', r.missing_notes + ' calls') +
+      card('average note length', r.avg_words + ' words', null, r.avg_chars + ' characters') +
+      card('typical note (median)', r.median_chars + ' chars', null,
+           r.median_chars < 20 ? 'very short' : '') +
+      card('copied word-for-word', r.repeated_share_pct + '%',
+           r.repeated_share_pct > 40 ? 'var(--red)' : 'var(--yellow)', 'of notes written') +
+      card('notes under 10 chars', r.buckets['under 10 chars'], 'var(--yellow)', 'e.g. "ok", "done"');
+
+    const maxP = Math.max(1, ...(r.top_phrases||[]).map(p=>p[1]));
+    document.getElementById('nc-phrases').innerHTML = (r.top_phrases||[]).slice(0,18).map(([p,n])=>
+      `<div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;">
+         <span style="width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${p}</span>
+         <div style="flex:1;height:7px;border-radius:4px;background:var(--accent);opacity:.7;width:${n/maxP*100}%"></div>
+         <span style="color:var(--text3);font-variant-numeric:tabular-nums;">${n}</span></div>`).join('')
+      || '<span style="color:var(--text3)">Nothing to show for this range.</span>';
+
+    document.getElementById('nc-repeats').innerHTML = (r.repeated||[]).map(d=>
+      `<div style="margin-bottom:7px;padding-bottom:7px;border-bottom:1px solid var(--border);">
+         <span style="color:var(--red);font-weight:700;">${d.times}×</span>
+         <span style="color:var(--text2);"> “${d.text}”</span></div>`).join('')
+      || '<span style="color:var(--text3)">No note was written twice — good sign.</span>';
+
+    document.getElementById('nc-agents').innerHTML = (r.per_agent||[]).map(a=>`<tr>
+      <td style="font-weight:600;">${a.agent}</td>
+      <td>${a.calls}</td>
+      <td style="color:${a.missing_pct>10?'var(--red)':'var(--text2)'}">${a.missing_pct}%</td>
+      <td style="color:${a.avg_words<4?'var(--yellow)':'var(--text2)'}">${a.avg_words}</td>
+      <td style="color:${a.repeated_pct>50?'var(--red)':'var(--text2)'}">${a.repeated_pct}%</td>
+      <td>${a.avg_score==null?'—':a.avg_score}</td></tr>`).join('');
+
+    document.getElementById('nc-examples').innerHTML = (r.examples_short||[]).map(e=>
+      `<div style="margin-bottom:5px;"><span style="color:var(--text3);">${e.agent||''}:</span>
+       <span style="color:var(--text2);"> “${e.text}”</span></div>`).join('')
+      || '<span style="color:var(--text3)">No very short notes — good sign.</span>';
+  }catch(e){ stats.innerHTML = 'Failed: ' + e.message; }
+}
+
 function showTimeTab(name){
   ['pay','days','schedules'].forEach(t=>{
     const panel = document.getElementById('tab-'+t);
