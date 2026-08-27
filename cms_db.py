@@ -249,10 +249,6 @@ def diagnose():
         # can we switch database at all?
         try:
             cur.execute('USE [%s]' % _safe(NAME))
-            try:
-                cur.fetchall()
-            except Exception:
-                pass
             cur.execute('SELECT DB_NAME()')
             r = cur.fetchone()
             out['after_use_database'] = _plain(r[0]) if r else None
@@ -478,48 +474,64 @@ def aggregate(table, date_col=None, date_from=None, date_to=None,
             'database': database or NAME}
 
 
-def _searchable_columns(cur, k, db, is_current):
+def _searchable_columns(conn, k, db, is_current):
     """Every column we could search in one database, with its type.
 
-    On SQL Server we switch into the database with USE first. Three-part names
-    work only when the login has rights in the other database, and a connection
-    is not always in the database you asked for — switching explicitly removes
-    both doubts.
+    Takes the connection rather than a cursor on purpose: on SQL Server we
+    switch database with USE on one cursor and then run the listing on a fresh
+    one. Reusing a cursor across a statement that returns no result set is
+    exactly the sort of thing that makes a full database look empty, and a new
+    cursor costs nothing.
+
+    Returns (rows, note) where note explains an empty result.
     """
+    tried = []
     if k == 'mssql':
         try:
-            cur.execute('USE [%s]' % _safe(db))
-            try:
-                cur.fetchall()
-            except Exception:
-                pass
-            is_current = True          # we are now genuinely in it
-        except Exception:
-            pass
+            cu = conn.cursor()
+            cu.execute('USE [%s]' % _safe(db))
+            is_current = True
+        except Exception as e:
+            tried.append('USE failed: ' + str(e)[:100])
+
     if k == 'mssql':
         pre = ('[%s].' % _safe(db)) if not is_current else ''
         attempts = [
-            ("""SELECT t.name, c.name, ty.name FROM %ssys.tables t
+            ('sys.columns',
+             """SELECT t.name, c.name, ty.name FROM %ssys.tables t
                 JOIN %ssys.columns c ON c.object_id = t.object_id
                 JOIN %ssys.types ty ON ty.user_type_id = c.user_type_id
                 ORDER BY t.name""" % (pre, pre, pre), None),
-            ("""SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE FROM %sINFORMATION_SCHEMA.COLUMNS
-                ORDER BY TABLE_NAME""" % pre, None),
+            ('INFORMATION_SCHEMA',
+             """SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE
+                FROM %sINFORMATION_SCHEMA.COLUMNS ORDER BY TABLE_NAME""" % pre, None),
+            ('sys.all_columns',
+             """SELECT o.name, c.name, 'unknown' FROM %ssys.all_columns c
+                JOIN %ssys.objects o ON o.object_id = c.object_id
+                WHERE o.type = 'U' ORDER BY o.name""" % (pre, pre), None),
         ]
     else:
-        attempts = [("""SELECT table_name, column_name, data_type
+        attempts = [('information_schema',
+                     """SELECT table_name, column_name, data_type
                         FROM information_schema.columns
                         WHERE table_schema = %s ORDER BY table_name""", (db,))]
-    last = ''
-    for sql, prm in attempts:
+
+    for label, sql, prm in attempts:
         try:
-            cur.execute(sql, prm) if prm else cur.execute(sql)
-            got = cur.fetchall()
+            cu = conn.cursor()                     # fresh cursor every attempt
+            cu.execute(sql, prm) if prm else cu.execute(sql)
+            got = []
+            while True:                            # row by row: some drivers
+                r = cu.fetchone()                  # dislike fetchall here
+                if not r:
+                    break
+                got.append((r[0], r[1], r[2]))
             if got:
                 return got, ''
+            tried.append('%s returned 0 rows' % label)
         except Exception as e:
-            last = str(e)[:160]
-    return [], (last or 'no columns returned')
+            tried.append('%s: %s' % (label, str(e)[:110]))
+    return [], '; '.join(tried) or 'no columns returned'
 
 
 def find_value(value, database=None, all_databases=False,
@@ -569,7 +581,7 @@ def find_value(value, database=None, all_databases=False,
             stopped_early = True
             break
         is_current = (db == NAME)
-        cols, problem = _searchable_columns(cur, k, db, is_current)
+        cols, problem = _searchable_columns(conn, k, db, is_current)
         if problem:
             listing_problems.append('%s: %s' % (db, problem))
             continue
