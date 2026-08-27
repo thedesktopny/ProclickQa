@@ -239,10 +239,12 @@
 <div id="app" style="display:none">
   <header>
     <div class="bar">
-      <div class="wordmark"><span id="dot" class="lamp"></span> Skin Block <span class="ver mono">v14.1</span></div>
+      <div class="wordmark"><span id="dot" class="lamp"></span> Skin Block <span class="ver mono">v14.2</span></div>
       <div class="bar-right">
         <span id="statusText">Starting…</span>
         <span id="extBadge" class="chip" style="display:none"></span>
+        <button id="diagBtn" class="btn btn-ghost" style="padding:5px 10px;font-size:11.5px;display:none"
+                onclick="runDiagnostic()">Why is it slow?</button>
       </div>
     </div>
   </header>
@@ -300,6 +302,16 @@
   <div class="ed-stage"><canvas id="edCanvas"></canvas></div>
 </div>
 
+<div id="diag" style="display:none;position:fixed;inset:auto 16px 16px 16px;max-width:760px;margin:0 auto;
+     background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;z-index:70;
+     font-size:12.5px;max-height:60vh;overflow:auto;">
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+    <strong>Detector check</strong>
+    <button class="btn btn-ghost" style="margin-left:auto;padding:3px 9px;font-size:11px;"
+            onclick="document.getElementById('diag').style.display='none'">Close</button>
+  </div>
+  <pre id="diag-out" style="white-space:pre-wrap;margin:0;font-family:var(--mono);font-size:11.5px;line-height:1.55;"></pre>
+</div>
 <div id="toast" class="toast"></div>
 
 <script type="module">
@@ -353,7 +365,14 @@ async function initBrowserModel(onProgress){
   if (!window.ort) await loadScript(ORT_URL);
   const ort = window.ort;
   ort.env.wasm.wasmPaths = ORT_WASM;
-  try { ort.env.wasm.numThreads = Math.min(4, navigator.hardwareConcurrency || 2); } catch(e){}
+  // Threads only work when the browser has granted cross-origin isolation.
+  // Asking for them without it makes the runtime fail to load entirely, which
+  // is why this check has to stay.
+  try {
+    ort.env.wasm.numThreads = self.crossOriginIsolated
+      ? Math.min(4, navigator.hardwareConcurrency || 2) : 1;
+  } catch(e){ ort.env.wasm.numThreads = 1; }
+  ort.env.wasm.simd = true;
   ort.env.logLevel = "error";
 
   // fetch with progress so the one-time download doesn't look like a hang
@@ -373,14 +392,17 @@ async function initBrowserModel(onProgress){
   let off = 0;
   for (const p of parts){ buf.set(p, off); off += p.length; }
 
+  const backendErrors = [];
   for (const ep of ["webgpu", "wasm"]){
     try {
       ortSession = await ort.InferenceSession.create(buf, { executionProviders: [ep] });
       ortBackend = ep;
       break;
-    } catch(e){ /* try the next backend */ }
+    } catch(e){
+      backendErrors.push(ep + ": " + ((e && e.message) || e));
+    }
   }
-  if (!ortSession) throw new Error("no backend");
+  if (!ortSession) throw new Error(backendErrors.join(" | ") || "no backend");
   return ortBackend;
 }
 
@@ -879,6 +901,7 @@ async function boot(){
     statusText.textContent = "Server mode — " + why;
     statusText.title = "Send this to David: " + why;
     reportDetector('server', why, '', 0);
+    const db = document.getElementById("diagBtn"); if (db) db.style.display = "";
   }
 }
 
@@ -892,6 +915,52 @@ function reportDetector(mode, reason, backend, threads){
                              threads, isolated: !!self.crossOriginIsolated })
     });
   }catch(e){}
+}
+
+
+/* Checks each thing the fast detector needs, in order, and says which one
+   failed — so a slow machine can be diagnosed without opening a console. */
+async function runDiagnostic(){
+  const panel = document.getElementById("diag"), out = document.getElementById("diag-out");
+  panel.style.display = "block";
+  const lines = [];
+  const say = s => { lines.push(s); out.textContent = lines.join("\n"); };
+
+  say("Checking this PC…\n");
+  say((self.crossOriginIsolated ? "OK  " : "NO  ") + "cross-origin isolation" +
+      (self.crossOriginIsolated ? " — multiple cores usable" : " — falls back to one core (still fine)"));
+  say(((navigator.gpu ? "OK  " : "NO  ")) + "WebGPU" + (navigator.gpu ? " — graphics acceleration available" : " — this PC has no usable GPU for it; CPU will be used"));
+  say("--  " + (navigator.hardwareConcurrency || "?") + " CPU cores reported");
+
+  for (const [label, url] of [["detector library", ORT_URL], ["detector model", MODEL_URL]]){
+    try{
+      const t0 = performance.now();
+      const r = await fetch(url);
+      const buf = await r.arrayBuffer();
+      const ms = Math.round(performance.now() - t0);
+      const head = new Uint8Array(buf.slice(0, 4));
+      const looksText = head[0] === 0x7b || head[0] === 0x3c;   // { or <
+      say((r.ok && !looksText ? "OK  " : "NO  ") + label + ": HTTP " + r.status +
+          ", " + Math.round(buf.byteLength/1024) + " KB in " + ms + "ms" +
+          (looksText ? "  <-- this is text, not a file. The server sent an error page." : ""));
+      if (!r.ok || looksText){
+        try{ say("     server said: " + new TextDecoder().decode(buf.slice(0, 200))); }catch(e){}
+      }
+    }catch(e){
+      say("NO  " + label + " could not be fetched: " + ((e && e.message) || e));
+    }
+  }
+
+  try{
+    say("\nStarting the detector…");
+    const backend = await initBrowserModel(p => say("     downloading " + Math.round(p*100) + "%"));
+    LOCAL_MODEL = true;
+    say("OK  running on this PC (" + backend + ") — reload and photos will be fast.");
+  }catch(e){
+    say("NO  detector would not start:");
+    say("     " + ((e && e.message) || e));
+    say("\nSend this text to David.");
+  }
 }
 
 /* ---------------- intake: click, drag in, paste ---------------- */
