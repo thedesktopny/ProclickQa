@@ -5833,8 +5833,21 @@ def test_analyze():
 #  which the agents can already reach. Same idea as the recording relay.
 # ============================================================================
 SB_CACHE = os.path.join(os.getenv('HOME', '.'), 'sbassets_cache')
-SB_LIB_BASE = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/'
-SB_HF_BASE = 'https://huggingface.co/'
+# Several mirrors each. If one is unreachable from this data centre the next is
+# tried, and the one that worked is reported — a single blocked CDN was enough
+# to leave the detector unable to start with no explanation.
+SB_LIB_BASES = [
+    'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/',
+    'https://unpkg.com/onnxruntime-web@1.19.2/dist/',
+    'https://fastly.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/',
+    'https://gcore.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/',
+]
+SB_HF_BASES = [
+    'https://huggingface.co/',
+    'https://hf-mirror.com/',
+]
+SB_LIB_BASE = SB_LIB_BASES[0]
+SB_HF_BASE = SB_HF_BASES[0]
 SB_HF_ALLOWED = ('Xenova/segformer_b2_clothes/', 'Xenova/segformer_b0_clothes/')
 
 def _sb_looks_like_model(path):
@@ -5878,13 +5891,26 @@ def _sb_fetch(cache_key, url, expect_model=False):
 
     if not os.path.exists(path) or os.path.getsize(path) == 0:
         tmp = path + '.part.' + str(os.getpid())
-        req = urllib.request.Request(url, headers={'User-Agent': 'VoiceGuard-SkinBlock/1.0'})
-        with urllib.request.urlopen(req, timeout=600) as resp, open(tmp, 'wb') as f:
-            while True:
-                chunk = resp.read(1024 * 256)
-                if not chunk:
-                    break
-                f.write(chunk)
+        urls = url if isinstance(url, list) else [url]
+        errors = []
+        got = False
+        for u in urls:
+            try:
+                req = urllib.request.Request(u, headers={'User-Agent': 'VoiceGuard-SkinBlock/1.0'})
+                with urllib.request.urlopen(req, timeout=300) as resp, open(tmp, 'wb') as f:
+                    while True:
+                        chunk = resp.read(1024 * 256)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                got = True
+                print('[skinblock] mirrored %s from %s' % (safe, u.split('/')[2]))
+                break
+            except Exception as e:
+                errors.append('%s: %s' % (u.split('/')[2], str(e)[:120]))
+                continue
+        if not got:
+            raise RuntimeError('could not download from any source — ' + ' | '.join(errors))
         if expect_model:
             ok, why = _sb_looks_like_model(tmp)
             if not ok:
@@ -5895,6 +5921,50 @@ def _sb_fetch(cache_key, url, expect_model=False):
                 raise RuntimeError('downloaded file is not a model: %s (from %s)' % (why, url))
         os.replace(tmp, path)
     return path
+
+@app.route('/sbassets/warmup', methods=['GET'])
+def sb_warmup():
+    """Download everything the detector needs, now, and report each file.
+
+    The browser asks for these one at a time and gives up quietly if any of them
+    fails. Doing it here means one page tells you exactly which file could not be
+    fetched and why — and after a successful run the agents' browsers get
+    everything from our own disk.
+    """
+    wanted = [
+        ('lib', 'ort.min.js'),
+        ('lib', 'ort-wasm-simd-threaded.jsep.mjs'),
+        ('lib', 'ort-wasm-simd-threaded.jsep.wasm'),
+        ('lib', 'ort-wasm-simd-threaded.mjs'),
+        ('lib', 'ort-wasm-simd-threaded.wasm'),
+        ('model', 'Xenova/segformer_b2_clothes/resolve/main/onnx/model_quantized.onnx'),
+    ]
+    out, ok_count = [], 0
+    for kind_, name in wanted:
+        entry = {'file': name, 'kind': kind_}
+        try:
+            if kind_ == 'lib':
+                p = _sb_fetch('lib_' + name, [b + name for b in SB_LIB_BASES])
+            else:
+                p = _sb_fetch('hf_' + name, [b + name for b in SB_HF_BASES], expect_model=True)
+            entry['ok'] = True
+            entry['bytes'] = os.path.getsize(p)
+            entry['size'] = '%.1f MB' % (entry['bytes'] / 1048576.0)
+            ok_count += 1
+        except Exception as e:
+            entry['ok'] = False
+            entry['error'] = str(e)[:400]
+        out.append(entry)
+    essential = [e for e in out if e['file'] in ('ort.min.js',) or e['kind'] == 'model']
+    return jsonify({
+        'files': out,
+        'downloaded': ok_count,
+        'ready': all(e.get('ok') for e in essential),
+        'meaning': ('Everything needed is on the server — reload the Skin Block page.'
+                    if all(e.get('ok') for e in essential)
+                    else 'Something could not be downloaded; see the error next to each file.'),
+    })
+
 
 @app.route('/sbassets/status', methods=['GET'])
 def sb_assets_status():
@@ -5949,7 +6019,7 @@ def sb_lib(fname):
     if not re.fullmatch(r'[A-Za-z0-9._-]+', fname):
         return jsonify({'error': 'bad name'}), 400
     try:
-        p = _sb_fetch('lib_' + fname, SB_LIB_BASE + fname)
+        p = _sb_fetch('lib_' + fname, [b + fname for b in SB_LIB_BASES])
     except Exception as e:
         return jsonify({'error': str(e)[:200]}), 502
     mime = ('application/wasm' if fname.endswith('.wasm')
@@ -5967,7 +6037,7 @@ def sb_hf(hfpath):
     if '..' in hfpath or not hfpath.startswith(SB_HF_ALLOWED):
         return jsonify({'error': 'not allowed'}), 403
     try:
-        p = _sb_fetch('hf_' + hfpath, SB_HF_BASE + hfpath, expect_model=True)
+        p = _sb_fetch('hf_' + hfpath, [b + hfpath for b in SB_HF_BASES], expect_model=True)
     except Exception as e:
         return jsonify({'error': str(e)[:200]}), 502
     mime = 'application/json' if hfpath.endswith('.json') else 'application/octet-stream'
