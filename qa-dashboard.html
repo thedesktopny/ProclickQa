@@ -292,6 +292,88 @@ td.agent{color:var(--text);font-weight:500;}
 }
 #cms-explore table th, #cms-explore table td{ white-space:nowrap; }
 .xhint{ font-size:10.5px; color:var(--text3); margin-bottom:4px; }
+
+/* ================= Payments =================
+   Midnight direction: near-black, one violet accent, money green, minutes
+   given away gold. Figures use the interface face — tight, tabular, no
+   monospace — so nothing reads like a till receipt. */
+#page-payments{
+  --pay-accent:#7B6CF6; --pay-pos:#34D399; --pay-warn:#F5B93B; --pay-neg:#F2685A;
+  --pay-glow:rgba(123,108,246,.18);
+}
+#page-payments .num, #page-payments .paynum{
+  font-variant-numeric:tabular-nums; letter-spacing:-.025em; font-weight:600;
+}
+.paybar{
+  position:sticky; top:0; z-index:20; background:var(--surface);
+  border-bottom:1px solid var(--border); padding:16px 28px 12px;
+}
+.payfilters{ display:flex; gap:16px; flex-wrap:wrap; align-items:flex-end; }
+.payf{ display:flex; flex-direction:column; gap:6px; }
+.payscope{ font-size:11.5px; color:var(--text3); margin-top:10px; }
+.paydrop{
+  position:absolute; top:100%; left:0; right:0; z-index:40; margin-top:4px;
+  background:var(--surface2); border:1px solid var(--border); border-radius:10px;
+  max-height:240px; overflow:auto; display:none;
+}
+.paydrop.open{ display:block; }
+.paydrop div{ padding:8px 11px; font-size:12.5px; cursor:pointer; }
+.paydrop div:hover{ background:var(--surface); }
+
+.payhead{
+  display:grid; grid-template-columns:1.25fr 1fr 1fr 1fr; gap:14px; padding:22px 0 4px;
+}
+.paycard{ background:var(--surface); border:1px solid var(--border); border-radius:16px; padding:18px 20px; }
+.paycard .lab{ font-size:10.5px; letter-spacing:.13em; text-transform:uppercase; color:var(--text3); font-weight:600; }
+.payfig{ font-size:38px; line-height:1; letter-spacing:-.035em; font-weight:640; margin-top:12px; }
+.payfig .cents{ font-size:.52em; opacity:.5; font-weight:500; }
+.payfig .unit{ font-size:.4em; opacity:.45; font-weight:500; margin-left:5px; letter-spacing:.02em; }
+.paycard .sub{ font-size:12px; color:var(--text3); margin-top:9px; }
+.pos{ color:var(--pay-pos); } .warn{ color:var(--pay-warn); } .neg{ color:var(--pay-neg); }
+
+.paygrid{ display:grid; grid-template-columns:1.5fr 1fr; gap:14px; margin-top:14px; }
+.payh{ font-size:13px; font-weight:640; margin:0 0 2px; letter-spacing:-.01em; }
+.payhint{ font-size:11.5px; color:var(--text3); margin-bottom:14px; }
+
+/* the chart is drawn as SVG so the bars share a baseline exactly and the gap
+   between them is a measured value, not an accident of stacking */
+#pay-chart svg{ width:100%; height:auto; display:block; }
+#pay-chart .g{ stroke:var(--border); stroke-width:1; }
+#pay-chart .b-money{ fill:var(--pay-pos); }
+#pay-chart .b-free{ fill:var(--pay-warn); opacity:.75; }
+#pay-chart .minutes{ fill:none; stroke:var(--pay-accent); stroke-width:2; stroke-linejoin:round; }
+#pay-chart .dot{ fill:var(--pay-accent); }
+#pay-chart text{ font-size:10px; fill:var(--text3); font-family:inherit; }
+#pay-chart .x{ text-anchor:middle; }
+#pay-chart .yl{ text-anchor:end; } #pay-chart .yr{ text-anchor:start; }
+.paylegend{ display:flex; gap:16px; font-size:11.5px; color:var(--text2); margin-top:12px; flex-wrap:wrap; }
+.paylegend .sw{ display:inline-block; width:9px; height:9px; border-radius:3px; margin-right:6px; vertical-align:-1px; }
+
+.payrow{ display:flex; align-items:center; gap:12px; padding:9px 0; border-bottom:1px solid var(--border); cursor:pointer; }
+.payrow:last-child{ border-bottom:0; }
+.payrow:hover{ background:var(--surface2); }
+.payrow .nm{ flex:1; font-size:13px; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.payrow .mt{ font-size:11px; color:var(--text3); }
+.payrow.sel{ box-shadow:inset 3px 0 0 var(--pay-accent); padding-left:9px; }
+
+#page-payments .day{ position:relative; padding-left:24px; max-height:420px; overflow:auto; }
+#page-payments .day::before{ content:""; position:absolute; left:6px; top:6px; bottom:6px; width:1px; background:var(--border); }
+#page-payments .ev{ position:relative; padding:10px 0; }
+#page-payments .ev::before{
+  content:""; position:absolute; left:-22px; top:15px; width:9px; height:9px; border-radius:50%;
+  background:var(--pay-pos); box-shadow:0 0 0 3px var(--surface);
+}
+#page-payments .ev.is-free::before{ background:var(--pay-warn); }
+#page-payments .ev.is-refund::before{ background:var(--pay-neg); }
+#page-payments .ev .top{ display:flex; align-items:baseline; gap:10px; }
+#page-payments .ev .who{ flex:1; font-size:13px; font-weight:560; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#page-payments .ev .detail{ font-size:11px; color:var(--text3); margin-top:2px; }
+
+@media (max-width:1000px){
+  .payhead{ grid-template-columns:1fr 1fr; } .paygrid{ grid-template-columns:1fr; }
+  .payfig{ font-size:30px; }
+}
+@media (max-width:620px){ .payhead{ grid-template-columns:1fr; } }
 </style>
 </head>
 <body>
@@ -316,6 +398,7 @@ td.agent{color:var(--text);font-weight:500;}
     <div class="nav-item" onclick="showPage('billing')"><span class="icon">💰</span>Billing</div>
     <div class="nav-item" onclick="showPage('notes')"><span class="icon">📝</span>Notes Quality</div>
     <div class="nav-item" onclick="showPage('call-notes')"><span class="icon">🗒️</span>Call Notes</div>
+    <div class="nav-item" onclick="showPage('payments')"><span class="icon">💳</span>Payments <span style="font-size:9px;opacity:.5;">🔒</span></div>
     <div class="nav-item admin-only" onclick="showPage('costs')"><span class="icon">💳</span>Costs</div>
   </div>
   <div class="nav-section manager-plus" style="margin-top:12px;display:none;">
@@ -764,6 +847,113 @@ td.agent{color:var(--text);font-weight:500;}
 </div>
 
 <!-- ===== NOTES QUALITY ===== -->
+<div class="page" id="page-payments">
+  <!-- Locked behind a code even for signed-in managers. -->
+  <div id="pay-lock" style="min-height:70vh;display:grid;place-items:center;padding:40px 20px;">
+    <div style="width:min(360px,100%);background:var(--surface);border:1px solid var(--border);
+                border-radius:16px;padding:30px 28px;text-align:center;">
+      <div style="font-size:30px;margin-bottom:8px;">🔒</div>
+      <div style="font-size:17px;font-weight:650;margin-bottom:4px;">Payments</div>
+      <div style="font-size:12.5px;color:var(--text3);margin-bottom:20px;">Enter the code to open this page.</div>
+      <input id="pay-code" type="password" inputmode="numeric" maxlength="8" autocomplete="off"
+             placeholder="••••" onkeydown="if(event.key==='Enter')payUnlock()"
+             style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);
+                    border-radius:10px;padding:12px;font-size:22px;letter-spacing:.5em;text-align:center;">
+      <div id="pay-code-err" style="color:var(--red);font-size:12px;min-height:18px;margin-top:10px;"></div>
+      <button onclick="payUnlock()" class="btn btn-primary" style="width:100%;margin-top:6px;">Open</button>
+    </div>
+  </div>
+
+  <div id="pay-app" style="display:none;">
+    <div class="topbar">
+      <div class="page-title">💳 Payments</div>
+      <div class="topbar-right">
+        <span id="pay-locktimer" style="font-size:11px;color:var(--text3);"></span>
+        <button class="btn btn-outline" onclick="payExport()">⬇️ CSV</button>
+        <button class="btn btn-outline" onclick="payLock()">Lock</button>
+      </div>
+    </div>
+
+    <div class="paybar">
+      <div class="payfilters">
+        <div class="payf">
+          <div class="cn-lab">Period</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            <button class="chip" onclick="payPeriod('mtd',this)">This month</button>
+            <button class="chip" onclick="payPeriod('lastmonth',this)">Last month</button>
+            <button class="chip on" onclick="payPeriod('12m',this)">12 months</button>
+            <button class="chip" onclick="payPeriod('ytd',this)">This year</button>
+          </div>
+        </div>
+        <div class="payf">
+          <div class="cn-lab">From</div>
+          <input type="date" id="pay-from" class="cms-in" onchange="loadPayments()">
+        </div>
+        <div class="payf">
+          <div class="cn-lab">To</div>
+          <input type="date" id="pay-to" class="cms-in" onchange="loadPayments()">
+        </div>
+        <div class="payf">
+          <div class="cn-lab">Agent</div>
+          <select id="pay-agent" class="cms-in" onchange="loadPayments()">
+            <option value="">All agents</option>
+          </select>
+        </div>
+        <div class="payf" style="min-width:210px;">
+          <div class="cn-lab">Account</div>
+          <div style="position:relative;">
+            <input id="pay-account" class="cms-in" placeholder="search name or phone…"
+                   autocomplete="off" oninput="payAccountSearch()" onkeydown="if(event.key==='Enter')loadPayments()">
+            <div id="pay-account-list" class="paydrop"></div>
+          </div>
+        </div>
+        <button onclick="payClear()" class="btn btn-outline" style="font-size:11.5px;align-self:flex-end;">Clear</button>
+      </div>
+      <div id="pay-scope" class="payscope"></div>
+    </div>
+
+    <div style="padding:0 28px 44px;">
+      <div id="pay-head" class="payhead"></div>
+      <div class="paygrid">
+        <div class="card" style="padding:18px 20px;">
+          <h2 class="payh">Month by month</h2>
+          <div class="payhint">Collected and given away sit side by side, on the same baseline.
+            The line is minutes sold, read against the right-hand scale.</div>
+          <div id="pay-chart"></div>
+        </div>
+        <div class="card" style="padding:18px 20px;">
+          <h2 class="payh">Today, as it happened</h2>
+          <div class="payhint" id="pay-recent-hint">Most recent first.</div>
+          <div id="pay-recent" class="day"></div>
+        </div>
+      </div>
+      <div class="paygrid">
+        <div class="card" style="padding:18px 20px;">
+          <h2 class="payh">Who sold it</h2>
+          <div class="payhint">Click an agent to see only their payments.</div>
+          <div id="pay-agents"></div>
+        </div>
+        <div class="card" style="padding:18px 20px;">
+          <h2 class="payh">Who paid</h2>
+          <div class="payhint">Click an account to see only theirs.</div>
+          <div id="pay-accounts"></div>
+        </div>
+      </div>
+      <div class="paygrid">
+        <div class="card" style="padding:18px 20px;">
+          <h2 class="payh">Refunds</h2>
+          <div id="pay-refunds"></div>
+        </div>
+        <div class="card" style="padding:18px 20px;">
+          <h2 class="payh">Minutes given away</h2>
+          <div class="payhint">Grouped by the note written at the time.</div>
+          <div id="pay-free"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="page" id="page-call-notes">
   <div class="topbar">
     <div class="page-title">🗒️ Call Notes</div>
@@ -2684,6 +2874,12 @@ function showPage(id){
     loadSkinblockHistory();
   }
   if(id==='cms-pull') cmsPageInit();
+  if(id==='payments' && !payTicket){
+    // always ask for the code again on entering the page
+    document.getElementById('pay-app').style.display = 'none';
+    document.getElementById('pay-lock').style.display = 'grid';
+    setTimeout(()=>document.getElementById('pay-code').focus(), 60);
+  }
   if(id==='call-notes'){
     const sel = document.getElementById('cn-agent');
     if(sel && sel.options.length <= 1 && Array.isArray(agentsData)){
@@ -4065,6 +4261,322 @@ function cnExport(){
   const esc = v => { const s=String(v==null?'':v); return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s; };
   const lines = [cols.join(',')].concat(cnLast.notes.map(n=>cols.map(c=>esc(n[c])).join(',')));
   _downloadBlob(new Blob(['\ufeff'+lines.join('\n')],{type:'text/csv;charset=utf-8;'}), 'call-notes.csv');
+}
+
+
+/* ================= Payments =================
+   Locked behind a code, filtered by date, agent and account, and drawn from
+   PackageSold in the CMS. Money is held in cents everywhere until the moment
+   it is displayed. */
+let payTicket = null, payData = null, payTimer = null, payAccountId = null;
+
+const payMoney = c => '$' + (Math.round(c||0)/100).toLocaleString(undefined,
+  {minimumFractionDigits:2, maximumFractionDigits:2});
+const payMoneyShort = c => {
+  const v = (c||0)/100;
+  return v >= 1000 ? '$' + Math.round(v/1000) + 'k' : '$' + Math.round(v);
+};
+const payNum = n => (n||0).toLocaleString();
+
+async function payUnlock(){
+  const code = document.getElementById('pay-code').value.trim();
+  const err = document.getElementById('pay-code-err');
+  if(!code){ err.textContent = 'Enter the code.'; return; }
+  err.textContent = 'Checking…';
+  try{
+    const r = await API.post('/api/payments/unlock', {code});
+    if(!r.ok){ err.textContent = r.error || 'That code is not right.'; return; }
+    payTicket = r.ticket;
+    err.textContent = '';
+    document.getElementById('pay-code').value = '';
+    document.getElementById('pay-lock').style.display = 'none';
+    document.getElementById('pay-app').style.display = '';
+    payStartTimer(r.minutes || 45);
+    payPeriod('12m');
+    payLoadAgents();
+  }catch(e){ err.textContent = e.message || 'That code is not right.'; }
+}
+
+function payLock(){
+  payTicket = null; payData = null;
+  clearInterval(payTimer);
+  document.getElementById('pay-app').style.display = 'none';
+  document.getElementById('pay-lock').style.display = 'grid';
+}
+
+/* The pass expires on its own; showing the countdown means the page never
+   locks without warning in the middle of reading something. */
+function payStartTimer(mins){
+  let left = mins * 60;
+  clearInterval(payTimer);
+  const el = document.getElementById('pay-locktimer');
+  payTimer = setInterval(()=>{
+    left -= 1;
+    if(left <= 0){ clearInterval(payTimer); payLock(); return; }
+    el.textContent = 'locks in ' + Math.floor(left/60) + ':' + String(left%60).padStart(2,'0');
+  }, 1000);
+}
+
+function payHeaders(){ return Object.assign(authHeaders(), {'X-Payments-Ticket': payTicket || ''}); }
+
+async function payGet(url){
+  const r = await fetch(url, {headers: payHeaders()});
+  if(r.status === 403){ payLock(); throw new Error('The page locked — enter the code again.'); }
+  return r.json();
+}
+
+function payPeriod(which, btn){
+  const iso = d => new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,10);
+  const now = new Date(); let from, to = now;
+  if(which === 'mtd')            from = new Date(now.getFullYear(), now.getMonth(), 1);
+  else if(which === 'lastmonth'){ from = new Date(now.getFullYear(), now.getMonth()-1, 1);
+                                  to   = new Date(now.getFullYear(), now.getMonth(), 0); }
+  else if(which === 'ytd')       from = new Date(now.getFullYear(), 0, 1);
+  else { from = new Date(now); from.setFullYear(now.getFullYear()-1); }
+  document.getElementById('pay-from').value = iso(from);
+  document.getElementById('pay-to').value = iso(to);
+  document.querySelectorAll('#page-payments .chip').forEach(b=>b.classList.remove('on'));
+  if(btn) btn.classList.add('on');
+  loadPayments();
+}
+
+function payClear(){
+  document.getElementById('pay-agent').value = '';
+  document.getElementById('pay-account').value = '';
+  payAccountId = null;
+  loadPayments();
+}
+
+async function payLoadAgents(){
+  try{
+    const r = await payGet('/api/payments/people?kind=agents');
+    const sel = document.getElementById('pay-agent');
+    sel.innerHTML = '<option value="">All agents</option>' +
+      (r.items||[]).map(a=>`<option value="${a.id}">${a.name}${a.extra?' · '+a.extra:''}</option>`).join('');
+  }catch(e){}
+}
+
+let payAccTimer = null;
+function payAccountSearch(){
+  clearTimeout(payAccTimer);
+  const q = document.getElementById('pay-account').value.trim();
+  const list = document.getElementById('pay-account-list');
+  payAccountId = null;
+  if(q.length < 2){ list.classList.remove('open'); return; }
+  payAccTimer = setTimeout(async ()=>{
+    try{
+      const r = await payGet('/api/payments/people?kind=accounts&q=' + encodeURIComponent(q));
+      const items = r.items || [];
+      if(!items.length){ list.classList.remove('open'); return; }
+      list.innerHTML = items.map(a=>
+        `<div onclick="payPickAccount(${a.id}, '${(a.name||'').replace(/'/g,"\\'")}')">
+           ${a.name}<span style="color:var(--text3)"> · ${a.extra||''}</span></div>`).join('');
+      list.classList.add('open');
+    }catch(e){}
+  }, 250);
+}
+function payPickAccount(id, name){
+  payAccountId = id;
+  document.getElementById('pay-account').value = name;
+  document.getElementById('pay-account-list').classList.remove('open');
+  loadPayments();
+}
+
+async function loadPayments(){
+  if(!payTicket) return;
+  const q = new URLSearchParams({
+    date_from: document.getElementById('pay-from').value,
+    date_to:   document.getElementById('pay-to').value,
+    employee_id: document.getElementById('pay-agent').value,
+    account_id: payAccountId || '',
+    account_search: payAccountId ? '' : document.getElementById('pay-account').value.trim(),
+  });
+  document.getElementById('pay-head').innerHTML =
+    '<div style="color:var(--text3);font-size:12px;padding:8px 0;">Reading payments…</div>';
+  try{
+    const r = await payGet('/api/payments/data?' + q.toString());
+    if(r.error){
+      document.getElementById('pay-head').innerHTML =
+        `<div style="color:var(--red);font-size:12.5px;">${r.error}</div>`;
+      return;
+    }
+    payData = r;
+    payRenderHead(r); payRenderChart(r); payRenderRecent(r);
+    payRenderAgents(r); payRenderAccounts(r); payRenderRefunds(r); payRenderFree(r);
+    const bits = [];
+    if(document.getElementById('pay-agent').value){
+      bits.push('agent: ' + document.getElementById('pay-agent').selectedOptions[0].text);
+    }
+    if(document.getElementById('pay-account').value) bits.push('account: ' + document.getElementById('pay-account').value);
+    document.getElementById('pay-scope').textContent =
+      `${r.date_from} to ${r.date_to}` + (bits.length ? ' · ' + bits.join(' · ') : ' · everything');
+  }catch(e){
+    document.getElementById('pay-head').innerHTML =
+      `<div style="color:var(--red);font-size:12.5px;">${e.message}</div>`;
+  }
+}
+
+function payRenderHead(r){
+  const t = r.totals;
+  const avg = t.minutes_sold ? (t.collected_cents / t.minutes_sold) : 0;
+  const card = (lab, val, sub, cls) => `<div class="paycard">
+    <div class="lab">${lab}</div>
+    <div class="payfig paynum ${cls||''}">${val}</div>
+    <div class="sub">${sub}</div></div>`;
+  const money = c => {
+    const s = payMoney(c).split('.');
+    return s[0] + '<span class="cents">.' + s[1] + '</span>';
+  };
+  document.getElementById('pay-head').innerHTML =
+    card('Collected', money(t.collected_cents),
+         `${payNum(t.payments)} payments · ${payNum(t.accounts)} accounts`, 'pos') +
+    card('Minutes sold', payNum(t.minutes_sold) + '<span class="unit">min</span>',
+         avg ? `${payMoney(avg)} a minute on average` : '&nbsp;', '') +
+    card('Given free', payNum(t.minutes_free) + '<span class="unit">min</span>',
+         `${payNum(t.free_grants)} grants`, 'warn') +
+    card('Refunded', money(t.refunded_cents),
+         `${payNum(t.refunds)} refunds`, t.refunded_cents ? 'neg' : '');
+}
+
+/* Drawn as SVG: both bars sit on one baseline with a measured 4px gap, so the
+   green and gold line up instead of drifting apart. */
+function payRenderChart(r){
+  const m = r.by_month || [];
+  const box = document.getElementById('pay-chart');
+  if(!m.length){ box.innerHTML = '<div style="color:var(--text3);font-size:12px;">Nothing in this period.</div>'; return; }
+  const W = 660, H = 235, L = 52, R = 52, T = 14, B = 30;
+  const pw = W - L - R, ph = H - T - B;
+  const maxMoney = Math.max(1, ...m.map(x => Math.max(x.collected_cents, 0)),
+                               ...m.map(x => x.minutes_free ? 0 : 0));
+  const freeCents = x => Math.round((x.minutes_free||0) * (r.totals.minutes_sold
+      ? r.totals.collected_cents / r.totals.minutes_sold : 0));   // free minutes valued at the going rate
+  const topMoney = Math.max(maxMoney, ...m.map(freeCents)) * 1.12 || 1;
+  const topMins  = Math.max(1, ...m.map(x => x.minutes_sold)) * 1.12;
+  const band = pw / m.length, bw = Math.min(18, band * 0.30), gap = 4;
+
+  let bars = '', line = [], dots = '', xs = '';
+  m.forEach((x, i)=>{
+    const cx = L + band*i + band/2;
+    const h1 = Math.max(0, x.collected_cents) / topMoney * ph;
+    const h2 = freeCents(x) / topMoney * ph;
+    bars += `<rect class="b-money" x="${(cx-bw-gap/2).toFixed(1)}" y="${(T+ph-h1).toFixed(1)}"
+              width="${bw.toFixed(1)}" height="${Math.max(h1,1).toFixed(1)}" rx="3"><title>${x.month}: ${payMoney(x.collected_cents)} collected</title></rect>`;
+    bars += `<rect class="b-free" x="${(cx+gap/2).toFixed(1)}" y="${(T+ph-h2).toFixed(1)}"
+              width="${bw.toFixed(1)}" height="${Math.max(h2,1).toFixed(1)}" rx="3"><title>${x.month}: ${payNum(x.minutes_free)} minutes given free</title></rect>`;
+    const py = T + ph - (x.minutes_sold / topMins) * ph;
+    line.push(`${cx.toFixed(1)} ${py.toFixed(1)}`);
+    dots += `<circle class="dot" cx="${cx.toFixed(1)}" cy="${py.toFixed(1)}" r="3"><title>${x.month}: ${payNum(x.minutes_sold)} minutes sold</title></circle>`;
+    xs += `<text class="x" x="${cx.toFixed(1)}" y="${H-10}">${x.month.slice(5)}</text>`;
+  });
+  let grid = '', ys = '';
+  [0,.25,.5,.75,1].forEach(f=>{
+    const y = T + ph - f*ph;
+    grid += `<line class="g" x1="${L}" y1="${y.toFixed(1)}" x2="${W-R}" y2="${y.toFixed(1)}"/>`;
+    ys += `<text class="yl" x="${L-8}" y="${(y+4).toFixed(1)}">${payMoneyShort(topMoney*f)}</text>`;
+    ys += `<text class="yr" x="${W-R+8}" y="${(y+4).toFixed(1)}">${Math.round(topMins*f/1000)}k</text>`;
+  });
+  box.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img"
+      aria-label="Collected and given away by month, with minutes sold">
+      ${grid}${bars}<path class="minutes" d="M ${line.join(' L ')}"/>${dots}${xs}${ys}</svg>
+    <div class="paylegend">
+      <span><span class="sw" style="background:var(--pay-pos)"></span>collected</span>
+      <span><span class="sw" style="background:var(--pay-warn);opacity:.75"></span>given free (valued at the going rate)</span>
+      <span><span class="sw" style="background:var(--pay-accent)"></span>minutes sold — right scale</span>
+    </div>`;
+}
+
+function payRenderRecent(r){
+  const box = document.getElementById('pay-recent');
+  const evs = r.recent || [];
+  document.getElementById('pay-recent-hint').textContent =
+    evs.length ? `${evs.length} most recent of ${payNum(r.totals.payments + r.totals.free_grants)}` : '';
+  if(!evs.length){ box.innerHTML = '<div style="color:var(--text3);font-size:12px;">Nothing in this period.</div>'; return; }
+  box.innerHTML = evs.map(e=>{
+    const free = e.amount_cents === 0;
+    const cls = e.refunded ? 'is-refund' : (free ? 'is-free' : '');
+    const amt = e.refunded ? `<span class="neg paynum">−${payMoney(e.refund_amount_cents || e.amount_cents)}</span>`
+              : free ? '<span class="warn paynum">Free</span>'
+              : `<span class="pos paynum">${payMoney(e.amount_cents)}</span>`;
+    const when = e.when ? new Date(e.when).toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}) : '';
+    const bits = [];
+    if(e.minutes) bits.push(payNum(e.minutes) + ' min');
+    if(e.last4) bits.push('•••• ' + e.last4);
+    if(e.agent) bits.push(e.agent);
+    if(e.refunded && e.refund_reason) bits.push('“' + e.refund_reason + '”');
+    else if(free && e.note) bits.push('“' + e.note + '”');
+    return `<div class="ev ${cls}">
+      <div class="top"><span class="who">${e.account}</span>${amt}</div>
+      <div class="detail">${bits.join(' · ')} · ${when}</div></div>`;
+  }).join('');
+}
+
+function payRenderAgents(r){
+  const box = document.getElementById('pay-agents');
+  const list = r.by_agent || [];
+  if(!list.length){ box.innerHTML = '<div style="color:var(--text3);font-size:12px;">No payments.</div>'; return; }
+  const max = Math.max(1, ...list.map(a=>a.collected_cents));
+  const cur = document.getElementById('pay-agent').value;
+  box.innerHTML = list.map(a=>`
+    <div class="payrow ${String(a.employee_id)===cur?'sel':''}" onclick="payFilterAgent(${a.employee_id})">
+      <div class="nm">${a.agent}
+        <div class="mt">${payNum(a.payments)} payments${a.minutes_free?` · <span class="warn">${payNum(a.minutes_free)} min free</span>`:''}${a.refunded_cents?` · <span class="neg">${payMoney(a.refunded_cents)} refunded</span>`:''}</div>
+      </div>
+      <div style="width:90px;"><div style="height:6px;border-radius:3px;background:var(--pay-pos);opacity:.6;width:${a.collected_cents/max*100}%"></div></div>
+      <div class="paynum pos" style="font-size:13.5px;">${payMoney(a.collected_cents)}</div>
+    </div>`).join('');
+}
+function payFilterAgent(id){
+  const sel = document.getElementById('pay-agent');
+  sel.value = (sel.value === String(id)) ? '' : String(id);
+  loadPayments();
+}
+
+function payRenderAccounts(r){
+  const box = document.getElementById('pay-accounts');
+  const list = r.top_accounts || [];
+  if(!list.length){ box.innerHTML = '<div style="color:var(--text3);font-size:12px;">No payments.</div>'; return; }
+  box.innerHTML = list.slice(0,25).map(a=>`
+    <div class="payrow ${payAccountId===a.account_id?'sel':''}" onclick="payPickAccount(${a.account_id}, '${(a.account||'').replace(/'/g,"\\'")}')">
+      <div class="nm">${a.account}
+        <div class="mt">${payNum(a.payments)} payments${a.phone?' · '+a.phone:''}${a.last_paid?' · last '+new Date(a.last_paid).toLocaleDateString([], {month:'short', day:'numeric'}):''}</div>
+      </div>
+      <div class="paynum pos" style="font-size:13.5px;">${payMoney(a.collected_cents)}</div>
+    </div>`).join('');
+}
+
+function payRenderRefunds(r){
+  const box = document.getElementById('pay-refunds');
+  const list = r.refund_reasons || [];
+  if(!list.length){ box.innerHTML = '<div style="color:var(--text3);font-size:12px;">No refunds in this period.</div>'; return; }
+  const total = list.reduce((s,x)=>s+x.cents,0);
+  box.innerHTML = `<div class="payhint">${payNum(list.reduce((s,x)=>s+x.count,0))} refunds · ${payMoney(total)} returned</div>`
+    + list.map(x=>`<div class="payrow" style="cursor:default">
+        <div class="nm">${x.reason}<div class="mt">${payNum(x.count)} ${x.count===1?'refund':'refunds'}</div></div>
+        <div class="paynum neg">${payMoney(x.cents)}</div></div>`).join('');
+}
+
+function payRenderFree(r){
+  const box = document.getElementById('pay-free');
+  const list = r.free_reasons || [];
+  if(!list.length){ box.innerHTML = '<div style="color:var(--text3);font-size:12px;">No minutes given away in this period.</div>'; return; }
+  const max = Math.max(1, ...list.map(x=>x.minutes));
+  box.innerHTML = list.map(x=>`<div class="payrow" style="cursor:default">
+      <div class="nm">${x.reason}<div class="mt">${payNum(x.count)} ${x.count===1?'grant':'grants'}</div></div>
+      <div style="width:80px;"><div style="height:6px;border-radius:3px;background:var(--pay-warn);opacity:.6;width:${x.minutes/max*100}%"></div></div>
+      <div class="paynum warn">${payNum(x.minutes)} min</div></div>`).join('');
+}
+
+function payExport(){
+  if(!payData){ return; }
+  const esc = v => { const s=String(v==null?'':v); return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s; };
+  const rows = [['When','Account','Agent','Amount','Minutes','Card','Refunded','Refund amount','Reason','Note','Stripe id']];
+  (payData.recent||[]).forEach(e=>rows.push([
+    e.when, e.account, e.agent, (e.amount_cents/100).toFixed(2), e.minutes, e.last4,
+    e.refunded ? 'yes':'', e.refunded ? (e.refund_amount_cents/100).toFixed(2):'',
+    e.refund_reason||'', e.note||'', e.stripe||''
+  ].map(esc)));
+  _downloadBlob(new Blob(['\ufeff'+rows.map(r=>r.join(',')).join('\n')],{type:'text/csv;charset=utf-8;'}),
+    `payments_${payData.date_from}_to_${payData.date_to}.csv`);
 }
 
 function showNotesTab(which){

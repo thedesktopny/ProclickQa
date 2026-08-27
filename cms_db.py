@@ -571,6 +571,174 @@ TOPIC_WORDS = {
 }
 
 
+def payments(date_from, date_to, employee_id=None, account_id=None,
+             account_search=None, recent_limit=60):
+    """Everything the payments page shows, from PackageSold.
+
+    Notes on this table, learned from the schema:
+      - AmountPaid and RefundAmount are CENTS (Packages.Price is 18900 = $189).
+      - A row with AmountPaid = 0 is minutes GIVEN AWAY, not a sale. Those are
+        counted separately rather than dropped, because who gives away minutes
+        and why is worth seeing.
+      - Refunded is a bit; RefundAmount can be null on an older refund, so we
+        fall back to the amount paid.
+      - The column really is spelled EmployeId.
+    """
+    k = kind()
+    if k != 'mssql':
+        raise RuntimeError('the payments view is written for the CMS (SQL Server)')
+
+    where = ['ps.Created >= %s', 'ps.Created < %s']
+    params = [date_from + ' 00:00:00', date_to + ' 23:59:59']
+    if employee_id:
+        where.append('ps.EmployeId = %s'); params.append(int(employee_id))
+    if account_id:
+        where.append('ps.AccountId = %s'); params.append(int(account_id))
+    if account_search:
+        where.append("""(a.FirstName + ' ' + a.LastName LIKE %s OR a.Phone LIKE %s
+                         OR a.Email LIKE %s)""")
+        params += ['%' + account_search + '%'] * 3
+    W = ' AND '.join(where)
+
+    FROM = """FROM PackageSold ps
+              LEFT JOIN Account a ON a.Id = ps.AccountId
+              LEFT JOIN Employee e ON e.Id = ps.EmployeId"""
+
+    # money in cents; a refund with no recorded amount is treated as the full sale
+    PAID = 'ISNULL(ps.AmountPaid, 0)'
+    REF = "CASE WHEN ISNULL(ps.Refunded,0) = 1 THEN ISNULL(ps.RefundAmount, %s) ELSE 0 END" % PAID
+    MIN_SOLD = "CASE WHEN %s > 0 THEN ISNULL(ps.PackageMinutes,0) ELSE 0 END" % PAID
+    MIN_FREE = "CASE WHEN %s = 0 THEN ISNULL(ps.PackageMinutes,0) ELSE 0 END" % PAID
+
+    conn = _connect()
+    def rows(sql, prm):
+        cu = conn.cursor()
+        cu.execute(sql, tuple(prm))
+        out = []
+        while True:
+            r = cu.fetchone()
+            if not r:
+                break
+            out.append(r)
+        return out
+
+    # ---- headline ----
+    t = rows("""SELECT SUM(%s), SUM(%s), SUM(%s), SUM(%s),
+                       SUM(CASE WHEN %s > 0 THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN %s = 0 THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN ISNULL(ps.Refunded,0) = 1 THEN 1 ELSE 0 END),
+                       COUNT(DISTINCT ps.AccountId)
+                %s WHERE %s""" % (PAID, REF, MIN_SOLD, MIN_FREE, PAID, PAID, FROM, W), params)
+    r0 = t[0] if t else [0]*8
+    n = lambda v: int(v or 0)
+    totals = {
+        'gross_cents': n(r0[0]), 'refunded_cents': n(r0[1]),
+        'collected_cents': n(r0[0]) - n(r0[1]),
+        'minutes_sold': n(r0[2]), 'minutes_free': n(r0[3]),
+        'payments': n(r0[4]), 'free_grants': n(r0[5]),
+        'refunds': n(r0[6]), 'accounts': n(r0[7]),
+    }
+
+    # ---- by month ----
+    by_month = [{'month': m, 'collected_cents': n(g) - n(rf), 'refunded_cents': n(rf),
+                 'minutes_sold': n(ms), 'minutes_free': n(mf), 'payments': n(cnt)}
+                for m, g, rf, ms, mf, cnt in rows(
+        """SELECT CONVERT(varchar(7), ps.Created, 120), SUM(%s), SUM(%s), SUM(%s), SUM(%s),
+                  SUM(CASE WHEN %s > 0 THEN 1 ELSE 0 END)
+           %s WHERE %s
+           GROUP BY CONVERT(varchar(7), ps.Created, 120)
+           ORDER BY CONVERT(varchar(7), ps.Created, 120)"""
+        % (PAID, REF, MIN_SOLD, MIN_FREE, PAID, FROM, W), params)]
+
+    # ---- per agent ----
+    by_agent = [{'employee_id': n(eid),
+                 'agent': (('%s %s' % (fn or '', ln or '')).strip() or 'Unknown'),
+                 'extension': ext, 'collected_cents': n(g) - n(rf), 'refunded_cents': n(rf),
+                 'payments': n(cnt), 'minutes_free': n(mf)}
+                for eid, fn, ln, ext, g, rf, cnt, mf in rows(
+        """SELECT ps.EmployeId, MAX(e.FirstName), MAX(e.LastName), MAX(e.Extension),
+                  SUM(%s), SUM(%s), SUM(CASE WHEN %s > 0 THEN 1 ELSE 0 END), SUM(%s)
+           %s WHERE %s GROUP BY ps.EmployeId
+           ORDER BY SUM(%s) DESC""" % (PAID, REF, PAID, MIN_FREE, FROM, W, PAID), params)]
+
+    # ---- per account ----
+    top_accounts = [{'account_id': n(aid),
+                     'account': (('%s %s' % (fn or '', ln or '')).strip() or 'Unknown'),
+                     'phone': ph, 'collected_cents': n(g) - n(rf), 'payments': n(cnt),
+                     'minutes_sold': n(ms), 'last_paid': _plain(last)}
+                    for aid, fn, ln, ph, g, rf, cnt, ms, last in rows(
+        """SELECT TOP 50 ps.AccountId, MAX(a.FirstName), MAX(a.LastName), MAX(a.Phone),
+                  SUM(%s), SUM(%s), SUM(CASE WHEN %s > 0 THEN 1 ELSE 0 END), SUM(%s),
+                  MAX(ps.Created)
+           %s WHERE %s GROUP BY ps.AccountId
+           ORDER BY SUM(%s) DESC""" % (PAID, REF, PAID, MIN_SOLD, FROM, W, PAID), params)]
+
+    # ---- the transactions themselves ----
+    recent = [{'id': n(i), 'when': _plain(created),
+               'account': (('%s %s' % (fn or '', ln or '')).strip() or 'Unknown'),
+               'account_id': n(aid),
+               'agent': (('%s %s' % (efn or '', eln or '')).strip() or ''),
+               'amount_cents': n(amt), 'minutes': n(mins), 'last4': l4,
+               'note': note, 'refunded': bool(refd),
+               'refund_amount_cents': n(refamt), 'refund_reason': refreason,
+               'stripe': charge}
+              for (i, created, aid, fn, ln, efn, eln, amt, mins, l4, note,
+                   refd, refamt, refreason, charge) in rows(
+        """SELECT TOP %d ps.Id, ps.Created, ps.AccountId, a.FirstName, a.LastName,
+                  e.FirstName, e.LastName, %s, ISNULL(ps.PackageMinutes,0), ps.Last4, ps.Note,
+                  ISNULL(ps.Refunded,0), ISNULL(ps.RefundAmount,0), ps.RefundReason, ps.StripeChargeId
+           %s WHERE %s ORDER BY ps.Created DESC"""
+        % (int(recent_limit), PAID, FROM, W), params)]
+
+    # ---- why money went back ----
+    refund_reasons = [{'reason': (rr or 'No reason recorded'), 'count': n(cnt), 'cents': n(amt)}
+                      for rr, cnt, amt in rows(
+        """SELECT ps.RefundReason, COUNT(*), SUM(ISNULL(ps.RefundAmount, %s))
+           %s WHERE %s AND ISNULL(ps.Refunded,0) = 1
+           GROUP BY ps.RefundReason ORDER BY SUM(ISNULL(ps.RefundAmount, %s)) DESC"""
+        % (PAID, FROM, W, PAID), params)]
+
+    # ---- why minutes were given away ----
+    free_reasons = [{'reason': (nt or 'No note'), 'count': n(cnt), 'minutes': n(mins)}
+                    for nt, cnt, mins in rows(
+        """SELECT TOP 20 ps.Note, COUNT(*), SUM(ISNULL(ps.PackageMinutes,0))
+           %s WHERE %s AND %s = 0
+           GROUP BY ps.Note ORDER BY SUM(ISNULL(ps.PackageMinutes,0)) DESC"""
+        % (FROM, W, PAID), params)]
+
+    conn.close()
+    return {'totals': totals, 'by_month': by_month, 'by_agent': by_agent,
+            'top_accounts': top_accounts, 'recent': recent,
+            'refund_reasons': refund_reasons, 'free_reasons': free_reasons,
+            'date_from': date_from, 'date_to': date_to}
+
+
+def payment_people(kind_wanted='agents', search=''):
+    """Names for the agent and account pickers."""
+    conn = _connect()
+    cu = conn.cursor()
+    out = []
+    like = '%' + (search or '') + '%'
+    if kind_wanted == 'agents':
+        cu.execute("""SELECT DISTINCT TOP 200 e.Id, e.FirstName, e.LastName, e.Extension
+                      FROM Employee e JOIN PackageSold ps ON ps.EmployeId = e.Id
+                      WHERE (%s = '' OR e.FirstName + ' ' + e.LastName LIKE %s)
+                      ORDER BY e.FirstName""", (search or '', like))
+    else:
+        cu.execute("""SELECT TOP 60 a.Id, a.FirstName, a.LastName, a.Phone
+                      FROM Account a
+                      WHERE a.FirstName + ' ' + a.LastName LIKE %s OR a.Phone LIKE %s
+                      ORDER BY a.LastName""", (like, like))
+    while True:
+        r = cu.fetchone()
+        if not r:
+            break
+        out.append({'id': int(r[0]), 'name': ('%s %s' % (r[1] or '', r[2] or '')).strip(),
+                    'extra': r[3]})
+    conn.close()
+    return out
+
+
 def schema_report(database=None, include_samples=False, sample_values=3):
     """A full map of the database: every table, its columns and types, its keys,
     and — most usefully — how the tables link to each other.

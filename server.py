@@ -4471,6 +4471,102 @@ def cms_db_analyze():
         return jsonify({'error': str(e)[:240]}), 400
 
 
+PAYMENTS_CODE_DEFAULT = '2317'
+
+
+def _payments_code():
+    """The code that guards the payments page. Kept in settings so it can be
+    changed without a deploy; never sent to the browser."""
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute("SELECT value FROM app_settings WHERE key = 'payments_code'")
+        r = c.fetchone(); conn.close()
+        if r and r[0]:
+            return str(r[0]).strip()
+    except Exception:
+        pass
+    return PAYMENTS_CODE_DEFAULT
+
+
+def _payments_ticket(valid_minutes=45):
+    """A short-lived pass issued after the code is entered correctly. It is
+    signed with the app's secret, so the browser can hold it but cannot forge
+    one, and it expires on its own."""
+    import hmac, hashlib, base64, time
+    exp = int(time.time()) + valid_minutes * 60
+    secret = (os.getenv('SECRET_KEY') or app.secret_key or 'voiceguard').encode()
+    sig = hmac.new(secret, str(exp).encode(), hashlib.sha256).hexdigest()[:32]
+    return base64.urlsafe_b64encode(('%d.%s' % (exp, sig)).encode()).decode()
+
+
+def _payments_ticket_ok(ticket):
+    import hmac, hashlib, base64, time
+    try:
+        raw = base64.urlsafe_b64decode(str(ticket).encode()).decode()
+        exp_s, sig = raw.split('.', 1)
+        if int(exp_s) < time.time():
+            return False
+        secret = (os.getenv('SECRET_KEY') or app.secret_key or 'voiceguard').encode()
+        want = hmac.new(secret, exp_s.encode(), hashlib.sha256).hexdigest()[:32]
+        return hmac.compare_digest(sig, want)
+    except Exception:
+        return False
+
+
+def require_payments_code(f):
+    """Manager login AND the page code. The code is a second lock on top of the
+    normal login, so someone already signed in still cannot open this page."""
+    from functools import wraps
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not _payments_ticket_ok(request.headers.get('X-Payments-Ticket', '')):
+            return jsonify({'error': 'locked', 'need_code': True}), 403
+        return f(*args, **kwargs)
+    return decorated
+
+
+@app.route('/api/payments/unlock', methods=['POST'])
+@require_manager
+def payments_unlock():
+    """Check the code and hand back a pass that expires."""
+    code = str((request.json or {}).get('code') or '').strip()
+    import time
+    time.sleep(0.4)                      # slows down anyone trying codes in bulk
+    if code != _payments_code():
+        return jsonify({'ok': False, 'error': 'That code is not right.'}), 403
+    return jsonify({'ok': True, 'ticket': _payments_ticket(), 'minutes': 45})
+
+
+@app.route('/api/payments/data', methods=['GET'])
+@require_manager
+@require_payments_code
+def payments_data():
+    """Everything the payments page shows, for the chosen dates and filters."""
+    import cms_db
+    a = request.args
+    try:
+        return jsonify(cms_db.payments(
+            (a.get('date_from') or '')[:10], (a.get('date_to') or '')[:10],
+            employee_id=a.get('employee_id') or None,
+            account_id=a.get('account_id') or None,
+            account_search=(a.get('account_search') or '').strip() or None))
+    except Exception as e:
+        return jsonify({'error': str(e)[:240]}), 400
+
+
+@app.route('/api/payments/people', methods=['GET'])
+@require_manager
+@require_payments_code
+def payments_people():
+    """Names for the agent and account pickers."""
+    import cms_db
+    try:
+        return jsonify({'items': cms_db.payment_people(
+            request.args.get('kind', 'agents'), request.args.get('q', ''))})
+    except Exception as e:
+        return jsonify({'error': str(e)[:240]}), 400
+
+
 @app.route('/api/cms-db/schema', methods=['GET'])
 @require_manager
 def cms_db_schema():
