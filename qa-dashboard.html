@@ -465,6 +465,7 @@ td.agent{color:var(--text);font-weight:500;}
 .lvtile.on-call{ border-left-color:var(--green); }
 .lvtile.free{ border-left-color:var(--yellow); }
 .lvtile.brk{ border-left-color:#7B6CF6; }
+.lvtile.dnd{ border-left-color:#F2585F; background:linear-gradient(90deg, rgba(242,88,95,.10), var(--surface2) 60%); }
 .lvtile.off{ opacity:.45; }
 .lvtile.dim{ opacity:.2; }
 /* the detail on hover — status alone never says enough */
@@ -570,9 +571,64 @@ td.agent{color:var(--text);font-weight:500;}
   .lvfloor{ grid-template-columns:repeat(auto-fill, minmax(84px, 1fr)); }
   .paycard .lab{ font-size:9.5px; }
 }
+
+/* ---------- search fields ----------
+   A search box should look like one: a magnifier inside the field, a soft
+   focus ring instead of a hard outline, and a clear button that only appears
+   once there is something to clear. Applied by wrapping the existing inputs,
+   so each page keeps its own layout. */
+.srch{ position:relative; display:block; width:100%; }
+.srch > svg{
+  position:absolute; left:12px; top:50%; transform:translateY(-50%);
+  width:15px; height:15px; pointer-events:none;
+  stroke:var(--text3); fill:none; stroke-width:2; stroke-linecap:round; transition:stroke .15s;
+}
+.srch > input{
+  width:100%; background:var(--surface2); border:1px solid var(--border); color:var(--text);
+  border-radius:11px; padding:10px 32px 10px 34px; font-size:13.5px;
+  transition:border-color .15s, box-shadow .15s, background .15s;
+}
+.srch > input::placeholder{ color:var(--text3); }
+.srch > input:focus{
+  outline:none; background:var(--surface); border-color:var(--accent);
+  box-shadow:0 0 0 3px rgba(123,108,246,.16);
+}
+.srch:focus-within > svg{ stroke:var(--accent); }
+.srch > .clr{
+  position:absolute; right:8px; top:50%; transform:translateY(-50%);
+  width:19px; height:19px; border:0; border-radius:50%; background:var(--border);
+  color:var(--text2); font-size:13px; line-height:1; cursor:pointer;
+  display:none; align-items:center; justify-content:center; padding:0;
+}
+.srch > input:not(:placeholder-shown) ~ .clr{ display:flex; }
+.srch > .clr:hover{ background:var(--text3); color:var(--surface); }
+.srch.big > input{ padding:13px 34px 13px 38px; font-size:15px; border-radius:13px; }
+.srch.big > svg{ left:14px; width:16px; height:16px; }
+@media (max-width:820px){ .srch > input{ font-size:16px; } }
 </style>
 </head>
 <body>
+
+<div id="portal-login" style="display:none;position:fixed;inset:0;z-index:200;
+     background:var(--bg);place-items:center;padding:24px;">
+  <div style="width:min(380px,100%);background:var(--surface);border:1px solid var(--border);
+              border-radius:18px;padding:32px 30px;">
+    <div style="font-size:26px;margin-bottom:10px;">🎧</div>
+    <div style="font-size:19px;font-weight:660;letter-spacing:-.01em;">ProClick</div>
+    <div style="font-size:12.5px;color:var(--text3);margin:4px 0 22px;">
+      Sign in with the same user name and password you use for the CMS.</div>
+    <input id="portal-user" placeholder="User name or email" autocomplete="username"
+           onkeydown="if(event.key==='Enter')document.getElementById('portal-pass').focus()"
+           style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);
+                  border-radius:11px;padding:12px 14px;font-size:15px;margin-bottom:10px;">
+    <input id="portal-pass" type="password" placeholder="Password" autocomplete="current-password"
+           onkeydown="if(event.key==='Enter')portalLogin()"
+           style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);
+                  border-radius:11px;padding:12px 14px;font-size:15px;">
+    <div id="portal-err" style="color:var(--red);font-size:12.5px;min-height:20px;margin:8px 0 2px;"></div>
+    <button onclick="portalLogin()" class="btn btn-primary" style="width:100%;padding:11px;">Sign in</button>
+  </div>
+</div>
 
 <div class="navscrim" id="nav-scrim" onclick="toggleNav(false)"></div>
 <!-- SIDEBAR -->
@@ -599,6 +655,8 @@ td.agent{color:var(--text);font-weight:500;}
     <div class="nav-item" onclick="showPage('live')"><span class="icon">🟢</span>Live</div>
     <div class="nav-item" onclick="showPage('customers')"><span class="icon">👤</span>Customers</div>
     <div class="nav-item" onclick="showPage('agent-calls')"><span class="icon">🎧</span>Agent Calls</div>
+    <div class="nav-item" onclick="showPage('cms-settings')"><span class="icon">⚙️</span>CMS Settings</div>
+    <div class="nav-item" onclick="showPage('connections')"><span class="icon">🔌</span>Connections</div>
     <div class="nav-item admin-only" onclick="showPage('costs')"><span class="icon">💳</span>Costs</div>
   </div>
   <div class="nav-section manager-plus" style="margin-top:12px;display:none;">
@@ -713,6 +771,7 @@ td.agent{color:var(--text);font-weight:500;}
         <button onclick="cmsTest()" class="btn btn-outline" style="font-size:12px;">1 · Test connection</button>
         <button onclick="cmsLoadTables()" class="btn btn-outline" style="font-size:12px;">2 · Find the table</button>
         <button onclick="cmsDiagnose()" class="btn btn-outline" style="font-size:12px;">Check permissions</button>
+        <button onclick="cmsWriteReadiness()" class="btn btn-outline" style="font-size:12px;">Can we write?</button>
         <button onclick="cmsSaveMapping()" class="btn btn-outline" style="font-size:12px;">3 · Save mapping</button>
       </div>
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:6px;">
@@ -1047,6 +1106,49 @@ td.agent{color:var(--text);font-weight:500;}
 </div>
 
 <!-- ===== NOTES QUALITY ===== -->
+<div class="page" id="page-connections">
+  <div class="topbar">
+    <button class="navtoggle" onclick="toggleNav()" aria-label="Menu">☰</button>
+    <div class="page-title">🔌 Connections</div>
+    <div class="topbar-right">
+      <span id="cx-summary" style="font-size:12px;color:var(--text3);"></span>
+      <button class="btn btn-primary" onclick="loadConnections()">Test everything</button>
+    </div>
+  </div>
+  <div style="padding:18px 28px 44px;">
+    <div class="payhint" style="margin-bottom:16px;">
+      Every link between VoiceGuard, the phone system and the CMS. Nothing here changes
+      anything — it only checks whether each one is connected, and says what is missing when it isn't.
+    </div>
+    <div id="cx-body"><div style="color:var(--text3);font-size:13px;">Press “Test everything”.</div></div>
+    <div id="cx-facts" style="margin-top:18px;"></div>
+  </div>
+</div>
+
+<div class="page" id="page-cms-settings">
+  <div class="topbar">
+    <button class="navtoggle" onclick="toggleNav()" aria-label="Menu">☰</button>
+    <div class="page-title">⚙️ CMS Settings</div>
+    <div class="topbar-right">
+      <input id="cs-search" placeholder="Find a setting…" oninput="csFilter()" style="width:220px;">
+      <span id="cs-count" style="font-size:11.5px;color:var(--text3);"></span>
+      <button class="btn btn-outline" onclick="loadCmsSettings()">Refresh</button>
+      <button class="btn btn-outline" onclick="csExport()">⬇️ CSV</button>
+    </div>
+  </div>
+  <div style="padding:18px 28px 44px;">
+    <div class="alert-bar" style="background:rgba(242,88,95,.08);border-color:rgba(242,88,95,.28);margin-bottom:18px;">
+      <span style="font-size:16px;">🔒</span>
+      <span style="font-size:12px;color:var(--text2);flex:1;">
+        These are read from the CMS and shown as they are — nothing here changes it.
+        Secret keys are hidden: you can see whether one is set and whether it is live or test,
+        but not the key itself.
+      </span>
+    </div>
+    <div id="cs-body"><div style="color:var(--text3);font-size:13px;">Loading…</div></div>
+  </div>
+</div>
+
 <div class="page" id="page-live">
   <div class="topbar">
     <button class="navtoggle" onclick="toggleNav()" aria-label="Menu">☰</button><div class="page-title">🟢 Live</div>
@@ -1071,6 +1173,7 @@ td.agent{color:var(--text);font-weight:500;}
           <span><i class="lvdot" style="background:var(--green)"></i>on a call</span>
           <span><i class="lvdot" style="background:var(--yellow)"></i>free</span>
           <span><i class="lvdot" style="background:#7B6CF6"></i>on break</span>
+          <span><i class="lvdot" style="background:#F2585F"></i>do not disturb</span>
           <span><i class="lvdot" style="background:var(--text3);opacity:.5"></i>off shift</span>
         </span>
       </div>
@@ -2281,6 +2384,8 @@ function authHeaders(){
   const t = getToken();
   const h = {'Content-Type':'application/json'};
   if(t) h['Authorization'] = 'Bearer ' + t;
+  // in portal mode the CMS sign-in travels with every request
+  if(typeof portalTicket !== 'undefined' && portalTicket) h['X-Portal-Ticket'] = portalTicket;
   return h;
 }
 
@@ -3148,6 +3253,192 @@ function renderAgentProfile(data){
 
 /* The menu slides over the page on a phone; on a desktop it is always there
    and this does nothing. */
+
+/* Turns the plain inputs into proper search fields — icon, focus ring, clear
+   button — without each page having to know about it. Runs once at start and
+   again whenever a page is opened, since some fields are built on the fly. */
+const SEARCH_FIELDS = [
+  ['cu-search', 'cuSearch', true],
+  ['lv-search', 'lvFilter', false],
+  ['pay-account', 'payAccountSearch', false],
+  ['cn-contains', 'loadCallNotes', false],
+  ['cn-phone', 'loadCallNotes', false],
+  ['cn-account', 'loadCallNotes', false],
+  ['cms-search', null, false],
+  ['cms-value', null, false],
+  ['an-table', null, false],
+  ['cs-search', 'csFilter', false],
+];
+
+function enhanceSearchFields(){
+  SEARCH_FIELDS.forEach(([id, fn, big])=>{
+    const el = document.getElementById(id);
+    if(!el || el.parentElement.classList.contains('srch')) return;
+    const wrap = document.createElement('span');
+    wrap.className = 'srch' + (big ? ' big' : '');
+    // keep whatever width the page gave the field
+    const w = el.style.width;
+    if(w && w !== '100%') wrap.style.width = w;
+    el.parentNode.insertBefore(wrap, el);
+    wrap.appendChild(el);
+    el.style.width = '100%';
+    el.classList.remove('cms-in');
+    if(!el.placeholder) el.placeholder = 'Search…';
+    wrap.insertAdjacentHTML('afterbegin',
+      '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>');
+    const btn = document.createElement('button');
+    btn.className = 'clr'; btn.type = 'button'; btn.tabIndex = -1;
+    btn.setAttribute('aria-label', 'Clear'); btn.innerHTML = '&times;';
+    btn.onclick = () => {
+      el.value = ''; el.focus();
+      if(fn && typeof window[fn] === 'function') window[fn]();
+      else el.dispatchEvent(new Event('input', {bubbles:true}));
+    };
+    wrap.appendChild(btn);
+  });
+}
+document.addEventListener('DOMContentLoaded', enhanceSearchFields);
+
+
+/* ================= CMS settings =================
+   Read only, on purpose: these values drive the phone system, and a mistyped
+   one there is a live outage rather than a wrong number on a report. */
+let csData = null;
+
+async function loadCmsSettings(){
+  const box = document.getElementById('cs-body');
+  box.innerHTML = '<div style="color:var(--text3);font-size:13px;">Reading the settings…</div>';
+  try{
+    const r = await API.get('/api/cms-settings');
+    if(r.error){ box.innerHTML = `<div style="color:var(--red)">${r.error}</div>`; return; }
+    csData = r;
+    document.getElementById('cs-count').textContent =
+      `${r.groups.length} groups · ${r.groups.reduce((s,g)=>s+g.count,0)} settings`;
+    csRender();
+  }catch(e){ box.innerHTML = `<div style="color:var(--red)">${e.message}</div>`; }
+}
+
+function csFilter(){ if(csData) csRender(); }
+
+function csRender(){
+  const q = (document.getElementById('cs-search').value || '').toLowerCase().trim();
+  const box = document.getElementById('cs-body');
+  const blocks = csData.groups.map(g=>{
+    const rows = q ? g.rows.filter(r => r.join(' ').toLowerCase().includes(q) ||
+                                        g.title.toLowerCase().includes(q)) : g.rows;
+    if(q && !rows.length) return '';
+    return `<div class="card" style="padding:0;margin-bottom:14px;">
+      <div style="padding:14px 18px 10px;">
+        <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;">
+          <h2 class="payh" style="margin:0;">${g.title}</h2>
+          <span style="font-size:11px;color:var(--text3);">${rows.length} of ${g.count}</span>
+        </div>
+        <div class="payhint" style="margin:4px 0 0;">${g.note||''}</div>
+        ${g.error?`<div style="color:var(--red);font-size:11.5px;margin-top:6px;">${g.error}</div>`:''}
+      </div>
+      ${rows.length ? `<div class="table-wrap"><table class="data-table">
+        <thead><tr>${g.columns.map(c=>`<th>${esc(c)}</th>`).join('')}</tr></thead>
+        <tbody>${rows.map(r=>`<tr>${r.map((v,i)=>{
+          const s = String(v==null?'':v);
+          const hidden = s.includes('(hidden');
+          return `<td style="font-size:12.5px;${i===0?'color:var(--text3);width:60px;':''}${
+            hidden?'color:var(--text3);font-style:italic;':''}">${esc(s)}</td>`;
+        }).join('')}</tr>`).join('')}</tbody></table></div>` : ''}
+    </div>`;
+  }).filter(Boolean).join('');
+  box.innerHTML = blocks || '<div style="color:var(--text3);font-size:13px;">Nothing matches that.</div>';
+}
+
+function csExport(){
+  if(!csData) return;
+  const q = String.fromCharCode(34);
+  const esc2 = v => {
+    const s = String(v == null ? '' : v);
+    return (s.indexOf(',') >= 0 || s.indexOf(q) >= 0 || s.indexOf('\n') >= 0)
+      ? q + s.split(q).join(q + q) + q : s;
+  };
+  const lines = [];
+  csData.groups.forEach(g => {
+    lines.push(g.title);
+    lines.push(g.columns.map(esc2).join(','));
+    g.rows.forEach(r => lines.push(r.map(esc2).join(',')));
+    lines.push('');
+  });
+  _downloadBlob(new Blob(['\ufeff' + lines.join('\n')], {type: 'text/csv;charset=utf-8;'}),
+    'cms-settings.csv');
+}
+
+
+/* ================= Portal mode =================
+   The same application, served at its own address for people who have CMS
+   accounts. Only the CMS-backed pages are shown, and payments and settings
+   appear only for managers — decided by the server, not by hiding buttons. */
+const IS_PORTAL = document.body.getAttribute('data-portal') === '1'
+  || location.pathname.startsWith('/portal');
+let portalTicket = null, portalPages = [];
+
+function portalHeaders(){
+  const h = {'Content-Type':'application/json'};
+  if(portalTicket) h['X-Portal-Ticket'] = portalTicket;
+  return h;
+}
+
+async function portalLogin(){
+  const u = document.getElementById('portal-user').value.trim();
+  const p = document.getElementById('portal-pass').value;
+  const err = document.getElementById('portal-err');
+  if(!u || !p){ err.textContent = 'Enter your user name and password.'; return; }
+  err.textContent = 'Checking…';
+  try{
+    const res = await fetch('/api/portal/login', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({username:u, password:p})
+    });
+    const r = await res.json();
+    if(!r.ok){ err.textContent = r.error || 'Could not sign you in.'; return; }
+    portalTicket = r.ticket; portalPages = r.pages || [];
+    try{ sessionStorage.setItem('portal_ticket', r.ticket); }catch(e){}
+    document.getElementById('portal-login').style.display = 'none';
+    portalApply(r.name, r.is_manager);
+  }catch(e){ err.textContent = 'Could not reach the server.'; }
+}
+
+/* Shows only the pages this person may open, and labels who they are. */
+function portalApply(name, isManager){
+  document.querySelectorAll('.nav-item').forEach(el=>{
+    const m = (el.getAttribute('onclick')||'').match(/showPage\('([^']+)'\)/);
+    el.style.display = (m && portalPages.includes(m[1])) ? '' : 'none';
+  });
+  document.querySelectorAll('.nav-section-title, .sidebar-footer').forEach(el=>el.style.display='none');
+  const logo = document.querySelector('.logo-sub');
+  if(logo) logo.textContent = name + (isManager ? ' · manager' : '');
+  showPage(portalPages[0] || 'live');
+}
+
+async function portalBoot(){
+  if(!IS_PORTAL) return;
+  document.getElementById('portal-login').style.display = 'grid';
+  let saved = null;
+  try{ saved = sessionStorage.getItem('portal_ticket'); }catch(e){}
+  if(saved){
+    portalTicket = saved;
+    try{
+      const res = await fetch('/api/portal/me', {headers: portalHeaders()});
+      if(res.ok){
+        const me = await res.json();
+        portalPages = me.pages || [];
+        document.getElementById('portal-login').style.display = 'none';
+        portalApply(me.name, me.is_manager);
+        return;
+      }
+    }catch(e){}
+    portalTicket = null;
+    try{ sessionStorage.removeItem('portal_ticket'); }catch(e){}
+  }
+  setTimeout(()=>document.getElementById('portal-user').focus(), 80);
+}
+document.addEventListener('DOMContentLoaded', portalBoot);
+
 function toggleNav(force){
   const sb = document.querySelector('.sidebar');
   const scrim = document.getElementById('nav-scrim');
@@ -3191,9 +3482,12 @@ function showPage(id){
     loadSkinblockHistory();
   }
   if(window.innerWidth <= 820) toggleNav(false);
+  setTimeout(enhanceSearchFields, 0);
   if(id==='cms-pull') cmsPageInit();
   if(id==='agent-calls'){ acLoadLive(); acAutoToggle(); }
   if(id==='live'){ loadLive(); lvAutoToggle(); }
+  if(id==='cms-settings') loadCmsSettings();
+  if(id==='connections') loadConnections();
   if(id!=='live') clearInterval(lvTimer);
   if(id!=='agent-calls') clearInterval(acTimer);
   if(id==='payments' && !payTicket){
@@ -4298,6 +4592,63 @@ function cmsDbSelect(db){
 
 /* When a search finds nothing, this says whether the login can see anything
    at all — SQL Server hides objects you lack rights to instead of refusing. */
+/* Before any write is built, find out what this login may actually do and
+   whether a practice copy of the database is possible from here. */
+
+/* ================= Connections =================
+   One page that proves each wire is connected, and names the missing piece
+   when it isn't. */
+async function loadConnections(){
+  const box = document.getElementById('cx-body');
+  box.innerHTML = '<div style="color:var(--text3);font-size:13px;">Testing each connection — this takes a few seconds…</div>';
+  document.getElementById('cx-facts').innerHTML = '';
+  try{
+    const r = await API.get('/api/connections');
+    if(r.error){ box.innerHTML = `<div style="color:var(--red)">${r.error}</div>`; return; }
+    document.getElementById('cx-summary').textContent =
+      `${r.ok} of ${r.total} connected · checked ${new Date(r.as_of).toLocaleTimeString()}`;
+    box.innerHTML = r.checks.map(c=>`
+      <div class="card" style="padding:14px 18px;margin-bottom:10px;border-left:3px solid ${c.ok?'var(--green)':'var(--red)'};">
+        <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;">
+          <span style="font-size:14px;">${c.ok?'✅':'❌'}</span>
+          <b style="font-size:13.5px;">${esc(c.name)}</b>
+          <span style="font-size:11.5px;color:var(--text3);">${esc(c.purpose)}</span>
+        </div>
+        <div style="font-size:12.5px;color:var(--text2);margin-top:6px;">${esc(c.detail)}</div>
+        ${(!c.ok && c.fix)?`<div style="font-size:12px;color:var(--yellow);margin-top:6px;">→ ${esc(c.fix)}</div>`:''}
+      </div>`).join('');
+    document.getElementById('cx-facts').innerHTML = `
+      <div class="card" style="padding:14px 18px;">
+        <b style="font-size:12.5px;">Details someone may ask you for</b>
+        <div style="font-size:12px;color:var(--text2);margin-top:8px;line-height:1.9;">
+          <div>Calls should be posted to:
+            <span style="color:var(--text);">${esc(r.analyze_url)}</span></div>
+          <div>This server appears as:
+            <span style="color:var(--text);">${esc(r.outbound_ip||'unknown')}</span>
+            <span style="color:var(--text3);"> — the address to allowlist</span></div>
+        </div>
+      </div>`;
+  }catch(e){ box.innerHTML = `<div style="color:var(--red)">${e.message}</div>`; }
+}
+
+async function cmsWriteReadiness(){
+  cmsOut('Checking what this login is allowed to do…');
+  try{
+    const r = await API.get('/api/cms-db/write-readiness');
+    if(r.error){ cmsOut('❌ ' + r.error); return; }
+    const yn = v => v === 1 || v === '1' ? 'yes' : v === 0 || v === '0' ? 'no' : String(v);
+    const lines = [
+      ['login', r.login],
+      ['can change data', yn(r.can_insert) + ' (insert) · ' + yn(r.can_update) + ' (update) · ' + yn(r.can_delete) + ' (delete)'],
+      ['owns this database', yn(r.is_db_owner)],
+      ['can create databases', yn(r.can_create_databases)],
+      ['is sysadmin', yn(r.is_sysadmin)],
+      ['practice copies found', (r.existing_copies||[]).join(', ') || 'none'],
+    ];
+    cmsOut(lines.map(([k,v])=>`${k.padEnd(24)} ${v}`).join('\n') + '\n\n' + (r.meaning||''));
+  }catch(e){ cmsOut('Failed: ' + e.message); }
+}
+
 async function cmsDiagnose(){
   cmsOut('Asking the server what this login can see…');
   try{
@@ -4651,10 +5002,12 @@ function lvRenderToday(){
   const t = lvData.today, a = lvData.agents || [];
   const onCall = a.filter(x=>(x.phone||'').toUpperCase()==='IN_USE').length;
   const onShift = a.filter(x=>x.clocked_in).length;
+  const onDnd = a.filter(x=>x.clocked_in && x.dnd && (x.phone||'').toUpperCase()!=='IN_USE').length;
   const stat = (lab,val,sub,cls) => `<div class="paycard"><div class="lab">${lab}</div>
     <div class="payfig paynum ${cls||''}">${val}</div><div class="sub">${sub||'&nbsp;'}</div></div>`;
   document.getElementById('lv-today').innerHTML =
-    stat('On a call now', onCall, `${onShift} on shift`, onCall?'pos':'') +
+    stat('On a call now', onCall,
+         `${onShift} on shift${onDnd?` · ${onDnd} on do not disturb`:''}`, onCall?'pos':'') +
     stat('Calls today', (t.calls||0).toLocaleString(),
          t.missed ? `${t.missed} missed` : 'none missed', t.missed?'warn':'') +
     stat('Work today', (t.work_sessions||0).toLocaleString(),
@@ -4671,15 +5024,21 @@ function lvRenderFloor(){
   const onCall = list.filter(a=>(a.phone||'').toUpperCase()==='IN_USE').length;
   const onShift = list.filter(a=>a.clocked_in).length;
   const onBreak = list.filter(a=>a.clocked_in && a.break_minutes > 0).length;
+  const onDnd = list.filter(a=>a.clocked_in && a.dnd && (a.phone||'').toUpperCase()!=='IN_USE').length;
   document.getElementById('lv-floor-counts').textContent =
-    `${onShift} on shift · ${onCall} on a call · ${onShift-onCall} free${onBreak?` · ${onBreak} on break`:''} · ${list.length} agents in total`;
+    `${onShift} on shift · ${onCall} on a call · ${onShift-onCall-onDnd} free`
+    + `${onDnd?` · ${onDnd} on do not disturb`:''}${onBreak?` · ${onBreak} on break`:''}`
+    + ` · ${list.length} agents in total`;
 
   document.getElementById('lv-floor').innerHTML = list.map(a=>{
     const busy = (a.phone||'').toUpperCase()==='IN_USE';
-    const brk = a.clocked_in && a.break_minutes > 0 && !busy;
-    const cls = !a.clocked_in ? 'off' : busy ? 'on-call' : brk ? 'brk' : 'free';
-    const state = !a.clocked_in ? 'off shift' : busy ? 'on a call' : brk ? 'on break' : 'free';
-    const colour = !a.clocked_in ? 'var(--text3)' : busy ? 'var(--green)' : brk ? '#7B6CF6' : 'var(--yellow)';
+    const dnd = !!a.dnd && !busy;                 // a call in progress outranks DND
+    const brk = a.clocked_in && a.break_minutes > 0 && !busy && !dnd;
+    const cls = !a.clocked_in ? 'off' : busy ? 'on-call' : dnd ? 'dnd' : brk ? 'brk' : 'free';
+    const state = !a.clocked_in ? 'off shift' : busy ? 'on a call'
+                : dnd ? 'do not disturb' : brk ? 'on break' : 'free';
+    const colour = !a.clocked_in ? 'var(--text3)' : busy ? 'var(--green)'
+                 : dnd ? '#F2585F' : brk ? '#7B6CF6' : 'var(--yellow)';
     const hit = !q || (a.name||'').toLowerCase().includes(q) ||
                 String(a.extension||'').includes(q) || String(a.last_call_phone||'').includes(q);
     return `<div class="lvtile ${cls} ${q && !hit ? 'dim':''}" onclick="lvOpenAgent(${a.employee_id})">
@@ -4690,6 +5049,8 @@ function lvRenderFloor(){
         <b>${esc(a.name)}</b> <span class="k">ext ${a.extension||'—'}</span>
         <div><span class="k">now:</span> ${state}${busy&&a.phone_since?' for '+lvAgo(a.phone_since).replace(' ago',''):''}</div>
         ${a.clocked_in&&a.clocker_since?`<div><span class="k">clocked in:</span> ${lvTime(a.clocker_since)} (${lvAgo(a.clocker_since).replace(' ago','')})</div>`:''}
+        ${a.dnd?`<div style="color:#F2585F;"><span class="k" style="color:#F2585F;opacity:.7">do not disturb:</span>
+           ${a.dnd_note?esc(a.dnd_note):'no reason given'}${a.dnd_since?' · since '+lvTime(a.dnd_since):''}</div>`:''}
         ${a.break_minutes?`<div><span class="k">break so far:</span> ${a.break_minutes} min</div>`:''}
         <div><span class="k">calls today:</span> ${a.calls_in} in · ${a.calls_out} out</div>
         ${a.minutes_on_call?`<div><span class="k">time on calls:</span> ${a.minutes_on_call} min</div>`:''}
@@ -4979,7 +5340,8 @@ async function acLoadLive(){
 
     const onShift = list.filter(a=>a.clocked_in);
     const onCall = list.filter(a=>(a.phone||'').toUpperCase()==='IN_USE');
-    const idle = onShift.filter(a=>(a.phone||'').toUpperCase()!=='IN_USE');
+    const idle = onShift.filter(a=>(a.phone||'').toUpperCase()!=='IN_USE' && !a.dnd);
+  const dndCount = onShift.filter(a=>a.dnd && (a.phone||'').toUpperCase()!=='IN_USE').length;
     const calls = list.reduce((s,a)=>s+a.calls_in+a.calls_out,0);
     const stat = (lab,val,sub,cls) => `<div class="paycard"><div class="lab">${lab}</div>
       <div class="payfig paynum ${cls||''}">${val}</div><div class="sub">${sub||'&nbsp;'}</div></div>`;
@@ -4987,6 +5349,7 @@ async function acLoadLive(){
       stat('On shift', onShift.length, `of ${list.length} agents`, 'pos') +
       stat('On a call', onCall.length, 'right now', onCall.length?'pos':'') +
       stat('Free', idle.length, 'clocked in, phone idle', idle.length?'warn':'') +
+      (dndCount ? stat('Do not disturb', dndCount, 'not taking calls', 'neg') : '') +
       stat('Calls today', calls.toLocaleString(), 'in and out');
 
     const ago = d => {
@@ -5001,8 +5364,11 @@ async function acLoadLive(){
         ((b.phone==='IN_USE')-(a.phone==='IN_USE')) || a.name.localeCompare(b.name))
       .map(a=>{
         const busy = (a.phone||'').toUpperCase()==='IN_USE';
-        const dot = !a.clocked_in ? 'var(--text3)' : busy ? 'var(--green)' : 'var(--yellow)';
-        const state = !a.clocked_in ? 'off shift' : busy ? 'on a call' : 'free';
+        const dnd = !!a.dnd && !busy;
+        const dot = !a.clocked_in ? 'var(--text3)' : busy ? 'var(--green)'
+                  : dnd ? '#F2585F' : 'var(--yellow)';
+        const state = !a.clocked_in ? 'off shift' : busy ? 'on a call'
+                    : dnd ? 'do not disturb' + (a.dnd_note ? ' — ' + esc(a.dnd_note) : '') : 'free';
         return `<div class="payrow ${acSelected===a.employee_id?'sel':''}" onclick="acOpen(${a.employee_id})">
           <span style="width:9px;height:9px;border-radius:50%;background:${dot};flex:none;"></span>
           <div class="nm">${esc(a.name)} <span style="color:var(--text3);font-size:11px;">ext ${a.extension||'—'}</span>

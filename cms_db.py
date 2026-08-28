@@ -571,6 +571,263 @@ TOPIC_WORDS = {
 }
 
 
+SECRET_HINTS = ('key', 'secret', 'token', 'password', 'pwd', 'apikey', 'api_key',
+                'privatekey', 'sk_live', 'sk_test', 'auth')
+
+
+def _mask(name, value):
+    """Never hand a live credential to a browser.
+
+    AdminSettings holds the Stripe secret key among ordinary settings. Anyone
+    who can read it can take payments, so the value is replaced with its shape:
+    enough to tell test from live and to confirm something is set, and useless
+    to anyone who copies it.
+    """
+    v = '' if value is None else str(value)
+    looks_secret = any(hw in (name or '').lower() for hw in SECRET_HINTS)
+    if looks_secret or v.startswith(('sk_live', 'sk_test', 'rk_live', 'whsec_')):
+        if not v:
+            return {'value': '', 'masked': True, 'empty': True}
+        head = v[:7] if len(v) > 12 else v[:3]
+        return {'value': head + '•' * 12, 'masked': True,
+                'length': len(v),
+                'mode': ('live' if 'live' in v[:8] else 'test' if 'test' in v[:8] else None)}
+    return {'value': v, 'masked': False}
+
+
+def portal_login(username, password):
+    """Sign in with a CMS account.
+
+    Looks the person up by user name or email in AspNetUsers, checks the
+    password against the stored ASP.NET Identity hash, then finds their Employee
+    row and their roles. Read-only: nothing about the account is changed, and
+    the password is never stored anywhere.
+    """
+    import aspnet_auth
+    u = (username or '').strip()
+    if not u or not password:
+        raise RuntimeError('Enter a user name and password')
+
+    conn = _connect(); cu = conn.cursor()
+    cu.execute("""SELECT TOP 1 Id, UserName, Email, PasswordHash, LockoutEnabled, LockoutEndDateUtc
+                  FROM AspNetUsers WHERE UserName = %s OR Email = %s""", (u, u))
+    row = cu.fetchone()
+    if not row:
+        conn.close()
+        raise RuntimeError('No account with that user name')
+    user_id, uname, email, phash, lockout_on, lockout_until = row
+
+    if not aspnet_auth.verify_password(password, phash or ''):
+        conn.close()
+        raise RuntimeError('That password is not right')
+
+    import datetime as _dt
+    if lockout_on and lockout_until and lockout_until > _dt.datetime.utcnow():
+        conn.close()
+        raise RuntimeError('That account is locked in the CMS')
+
+    # who they are on the floor
+    cu.execute("""SELECT TOP 1 Id, FirstName, LastName, Extension, LeftFirm
+                  FROM Employee WHERE AspNetUserId = %s""", (user_id,))
+    emp = cu.fetchone()
+
+    # what they are allowed to do, from the CMS's own roles
+    roles = []
+    try:
+        cu.execute("""SELECT r.Name FROM AspNetUserRoles ur
+                      JOIN AspNetRoles r ON r.Id = ur.RoleId
+                      WHERE ur.UserId = %s""", (user_id,))
+        while True:
+            r = cu.fetchone()
+            if not r:
+                break
+            roles.append(str(r[0]))
+    except Exception:
+        pass
+    conn.close()
+
+    if emp and emp[4]:
+        raise RuntimeError('That person has left the firm')
+
+    low = [r.lower() for r in roles]
+    is_manager = any(k in ' '.join(low) for k in ('admin', 'manager', 'owner', 'supervisor'))
+    return {
+        'user_id': str(user_id),
+        'username': uname, 'email': email,
+        'employee_id': int(emp[0]) if emp else None,
+        'name': (('%s %s' % (emp[1] or '', emp[2] or '')).strip() if emp else (uname or email)),
+        'extension': (emp[3] if emp else None),
+        'roles': roles,
+        'is_manager': is_manager,
+    }
+
+
+def write_readiness():
+    """What this login is allowed to do, and whether a test copy is possible.
+
+    Answers three questions before any write is attempted: can we change data at
+    all, can we create a database to practise in, and does a practice copy
+    already exist.
+    """
+    conn = _connect(); cu = conn.cursor()
+    out = {'database': NAME}
+
+    def one(label, sql, default=None):
+        try:
+            cu.execute(sql)
+            r = cu.fetchone()
+            out[label] = _plain(r[0]) if r else default
+        except Exception as e:
+            out[label] = 'error: ' + str(e)[:120]
+
+    one('login', 'SELECT SUSER_SNAME()')
+    one('is_sysadmin', "SELECT IS_SRVROLEMEMBER('sysadmin')")
+    one('can_create_databases', "SELECT IS_SRVROLEMEMBER('dbcreator')")
+    one('is_db_owner', "SELECT IS_ROLEMEMBER('db_owner')")
+    one('can_insert', "SELECT HAS_PERMS_BY_NAME(NULL, NULL, 'INSERT')")
+    one('can_update', "SELECT HAS_PERMS_BY_NAME(NULL, NULL, 'UPDATE')")
+    one('can_delete', "SELECT HAS_PERMS_BY_NAME(NULL, NULL, 'DELETE')")
+
+    # is there already a copy to practise on?
+    try:
+        cu.execute("""SELECT name FROM sys.databases
+                      WHERE name LIKE %s OR name LIKE %s ORDER BY name""",
+                   (NAME + '_test%', NAME + '_copy%'))
+        found = []
+        while True:
+            r = cu.fetchone()
+            if not r:
+                break
+            found.append(r[0])
+        out['existing_copies'] = found
+    except Exception as e:
+        out['existing_copies'] = []
+
+    conn.close()
+    can_write = str(out.get('is_db_owner')) == '1' or str(out.get('can_insert')) == '1'
+    out['can_write'] = can_write
+    out['meaning'] = (
+        ('This login can change data. ' if can_write else 'This login cannot change data. ') +
+        ('It can also create databases, so a practice copy can be made from here. '
+         if str(out.get('can_create_databases')) == '1'
+         else 'It cannot create databases, so the practice copy has to come from the hosting panel. ') +
+        ('A copy already exists: ' + ', '.join(out['existing_copies'])
+         if out.get('existing_copies') else 'No practice copy exists yet.'))
+    return out
+
+
+def try_write(sql, params=(), commit=False):
+    """Run a write and, unless told otherwise, undo it.
+
+    This is the safety net while there is no practice database. The statement
+    runs for real inside a transaction — so constraints, triggers and types all
+    apply exactly as they would — and is then rolled back. You see how many rows
+    it would have touched and any error it would have raised, and the database
+    is left untouched.
+    """
+    conn = _connect()
+    out = {'committed': False, 'rows_affected': None, 'dry_run': not commit}
+    try:
+        cu = conn.cursor()
+        cu.execute('BEGIN TRANSACTION')
+        cu.execute(sql, tuple(params)) if params else cu.execute(sql)
+        try:
+            out['rows_affected'] = cu.rowcount
+        except Exception:
+            pass
+        if commit:
+            cu.execute('COMMIT TRANSACTION')
+            out['committed'] = True
+        else:
+            cu.execute('ROLLBACK TRANSACTION')
+        out['ok'] = True
+    except Exception as e:
+        out['ok'] = False
+        out['error'] = str(e)[:300]
+        try:
+            conn.cursor().execute('ROLLBACK TRANSACTION')
+        except Exception:
+            pass
+    finally:
+        conn.close()
+    return out
+
+
+def settings_all():
+    """Every configuration table in the CMS, read only.
+
+    These are the tables that decide how the system behaves — as opposed to the
+    ones that record what happened. Each is returned with its rows so it can be
+    shown as-is; nothing here is written.
+    """
+    conn = _connect()
+    def rows(sql):
+        cu = conn.cursor(); cu.execute(sql)
+        cols = [d[0] for d in cu.description] if cu.description else []
+        out = []
+        while True:
+            r = cu.fetchone()
+            if not r:
+                break
+            out.append([_plain(v) for v in r])
+        return cols, out
+
+    groups = []
+
+    def add(title, note, sql, transform=None):
+        try:
+            cols, data = rows(sql)
+            if transform:
+                cols, data = transform(cols, data)
+            groups.append({'title': title, 'note': note, 'columns': cols,
+                           'rows': data, 'count': len(data)})
+        except Exception as e:
+            groups.append({'title': title, 'note': note, 'columns': [], 'rows': [],
+                           'count': 0, 'error': str(e)[:160]})
+
+    def mask_admin(cols, data):
+        # AdminSettings is Name / SettingValue — mask by the name
+        out = []
+        for r in data:
+            name = r[1] if len(r) > 1 else ''
+            m = _mask(name, r[2] if len(r) > 2 else '')
+            row = list(r)
+            row[2] = m['value'] + ('' if not m['masked'] else
+                                   ('   (hidden%s%s)' % (
+                                       ', ' + m['mode'] if m.get('mode') else '',
+                                       ', %d characters' % m['length'] if m.get('length') else '')))
+            out.append(row)
+        return cols, out
+
+    add('Admin settings', 'How the system is configured. Secret keys are hidden on purpose.',
+        'SELECT Id, Name, SettingValue FROM AdminSettings ORDER BY Name', mask_admin)
+    add('Packages sold', 'What customers can buy. Price is in cents.',
+        'SELECT Id, Name, Minutes, Price, Currency, Commission, PhoneSystemOption FROM Packages ORDER BY Price')
+    add('Payment types', 'How agents are paid.',
+        'SELECT Id, Type FROM PaymentType ORDER BY Id')
+    add('Call status choices', 'What an agent can mark a call as.',
+        'SELECT Id, SelectionText FROM CallStatusSelection ORDER BY Id')
+    add('Feedback questions', 'What customers are asked after a call.',
+        'SELECT Id, PromptOrder, Description, MaxInput, FileName FROM FeedbackConfig ORDER BY PromptOrder')
+    add('Questions', 'Questions attached to calls.',
+        'SELECT id, questionDesc, isYesNo, istext, created FROM Question ORDER BY id')
+    add('Opening hours', 'The usual week. Day 0 is Sunday.',
+        """SELECT s.Id, s.CompanyId, s.DayOfWeek, s.IsOpen, s.OpenTime, s.CloseTime
+           FROM CompanyUsualSchedule s ORDER BY s.CompanyId, s.DayOfWeek""")
+    add('Special dates', 'Days that differ from the usual week — holidays and closures.',
+        'SELECT TOP 100 * FROM CompanySpecialSchedule ORDER BY 1 DESC')
+    add('Agent schedules', 'The shift patterns agents are assigned to.',
+        'SELECT TOP 200 * FROM EmployeeSchedule ORDER BY 1')
+    add('Text message templates', 'Prepared messages for campaigns.',
+        'SELECT TOP 100 * FROM SMSCompaignMessage ORDER BY 1 DESC')
+    add('Companies', 'The businesses this system runs for.',
+        'SELECT TOP 100 * FROM TableCompanies ORDER BY 1')
+
+    conn.close()
+    return {'groups': [g for g in groups if g['count'] or g.get('error')],
+            'database': NAME}
+
+
 def customer_search(q, limit=40):
     """Find an account by name, phone or email."""
     q = (q or '').strip()
@@ -734,6 +991,34 @@ def customer_profile(account_id, limit=120):
             'cards': cards, 'credentials': credentials}
 
 
+def _dnd_now(conn):
+    """Who is on Do Not Disturb right now.
+
+    NotDistrubStatus is a log of starts and ends, so the current state is the
+    most recent row per agent: NOT_DISTRUB means still on it, END_NOT_DISTRUB
+    means finished. The note usually says why, which is the part worth seeing.
+    """
+    out = {}
+    try:
+        cu = conn.cursor()
+        cu.execute("""SELECT n.EmployeeID, n.Status, n.Created, n.Note, n.TypeDND
+                      FROM NotDistrubStatus n
+                      JOIN (SELECT EmployeeID, MAX(Id) AS Id
+                            FROM NotDistrubStatus
+                            WHERE Created >= DATEADD(day, -2, GETDATE())
+                            GROUP BY EmployeeID) last
+                        ON last.Id = n.Id""")
+        while True:
+            r = cu.fetchone()
+            if not r:
+                break
+            if str(r[1] or '').upper() == 'NOT_DISTRUB':
+                out[int(r[0] or 0)] = {'since': _plain(r[2]), 'note': r[3], 'type': r[4]}
+    except Exception as e:
+        print('[cms] could not read DND status: ' + str(e)[:120])
+    return out
+
+
 def live_snapshot(feed_limit=70, hours=6):
     """One read of the whole floor: who is on, what is happening on the phones,
     and every recent event in one stream.
@@ -764,6 +1049,14 @@ def live_snapshot(feed_limit=70, hours=6):
                               BreakMinutes, SipPhoneStatus, SipPhoneTime, MinutesOnCall,
                               NumCallsIn, NumCallsOut, LastCallPhone, LastCallStartAt
                        FROM Tmp_LiveEmployeesStatusFinal""")]
+
+    dnd = _dnd_now(conn)
+    for a in agents:
+        d = dnd.get(a['employee_id'])
+        a['dnd'] = bool(d)
+        a['dnd_since'] = d['since'] if d else None
+        a['dnd_note'] = (d.get('note') if d else None)
+        a['dnd_type'] = (d.get('type') if d else None)
 
     # calls that have started but not ended — what is happening this second
     in_progress = [{'call_id': n(i), 'phone': ph, 'started': _plain(st),
@@ -852,6 +1145,12 @@ def agents_live():
             'minutes_on_call': n(r[8]), 'calls_in': n(r[9]), 'calls_out': n(r[10]),
             'last_call_phone': r[11], 'last_call_at': _plain(r[12]),
         })
+    dnd = _dnd_now(conn)
+    for a in out:
+        d = dnd.get(a['employee_id'])
+        a['dnd'] = bool(d)
+        a['dnd_since'] = d['since'] if d else None
+        a['dnd_note'] = (d.get('note') if d else None)
     conn.close()
     return out
 

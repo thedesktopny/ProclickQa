@@ -4525,8 +4525,283 @@ def require_payments_code(f):
     return decorated
 
 
-@app.route('/api/customers/search', methods=['GET'])
+def _setting(key, default=''):
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute('SELECT value FROM app_settings WHERE key = %s', (key,))
+        r = c.fetchone(); conn.close()
+        return (r[0] if r and r[0] else '') or default
+    except Exception:
+        return default
+
+
+# ---------------------------------------------------------------- portal ----
+# A second way in, for the people who already have CMS accounts. It serves the
+# same pages but only the ones built on the CMS, and it signs people in with
+# their existing user name and password rather than a second set of logins.
+PORTAL_PAGES = ['live', 'customers', 'agent-calls']          # everyone
+PORTAL_MANAGER_PAGES = ['payments', 'cms-settings']          # managers only
+
+
+def _portal_ticket(user, minutes=600):
+    import hmac, hashlib, base64, time, json as _json
+    exp = int(time.time()) + minutes * 60
+    body = _json.dumps({'u': user.get('user_id'), 'e': user.get('employee_id'),
+                        'n': user.get('name'), 'm': bool(user.get('is_manager')),
+                        'x': exp}, separators=(',', ':'))
+    secret = (os.getenv('SECRET_KEY') or app.secret_key or 'voiceguard').encode()
+    sig = hmac.new(secret, body.encode(), hashlib.sha256).hexdigest()[:32]
+    return base64.urlsafe_b64encode((body + '.' + sig).encode()).decode()
+
+
+def _portal_user(ticket):
+    """Returns the signed-in person, or None. The signature is checked before
+    anything in the ticket is believed."""
+    import hmac, hashlib, base64, time, json as _json
+    try:
+        raw = base64.urlsafe_b64decode(str(ticket).encode()).decode()
+        body, sig = raw.rsplit('.', 1)
+        secret = (os.getenv('SECRET_KEY') or app.secret_key or 'voiceguard').encode()
+        want = hmac.new(secret, body.encode(), hashlib.sha256).hexdigest()[:32]
+        if not hmac.compare_digest(sig, want):
+            return None
+        data = _json.loads(body)
+        if int(data.get('x', 0)) < time.time():
+            return None
+        return data
+    except Exception:
+        return None
+
+
+def portal_or_manager(f):
+    """Either a VoiceGuard manager login or a valid CMS portal sign-in."""
+    from functools import wraps
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if _portal_user(request.headers.get('X-Portal-Ticket', '')):
+            return f(*args, **kwargs)
+        user = get_token_user(get_request_token())
+        if user and user.get('role') in ('admin', 'manager'):
+            return f(*args, **kwargs)
+        if session.get('logged_in'):
+            return f(*args, **kwargs)
+        return jsonify({'error': 'Sign in first'}), 401
+    return decorated
+
+
+def portal_manager_only(f):
+    """Payments and settings: managers only, from either door."""
+    from functools import wraps
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        p = _portal_user(request.headers.get('X-Portal-Ticket', ''))
+        if p and p.get('m'):
+            return f(*args, **kwargs)
+        if p:
+            return jsonify({'error': 'Managers only'}), 403
+        user = get_token_user(get_request_token())
+        if (user and user.get('role') in ('admin', 'manager')) or session.get('logged_in'):
+            return f(*args, **kwargs)
+        return jsonify({'error': 'Managers only'}), 403
+    return decorated
+
+
+@app.route('/portal')
+@app.route('/portal/')
+def portal_page():
+    """The CMS side of the system, on its own address."""
+    try:
+        with open('qa-dashboard.html', 'r', encoding='utf-8') as fh:
+            html = fh.read()
+    except Exception:
+        return 'Portal page missing', 500
+    html = html.replace('<body>', '<body data-portal="1">', 1)
+    resp = make_response(html)
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
+
+@app.route('/api/portal/login', methods=['POST'])
+def portal_login_route():
+    """Sign in with a CMS user name and password."""
+    import cms_db
+    d = request.json or {}
+    import time as _t
+    _t.sleep(0.35)                       # slows down anyone trying passwords in bulk
+    try:
+        user = cms_db.portal_login(d.get('username'), d.get('password'))
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)[:160]}), 403
+    return jsonify({'ok': True, 'ticket': _portal_ticket(user),
+                    'name': user['name'], 'is_manager': user['is_manager'],
+                    'extension': user.get('extension'),
+                    'pages': PORTAL_PAGES + (PORTAL_MANAGER_PAGES if user['is_manager'] else [])})
+
+
+@app.route('/api/portal/me', methods=['GET'])
+def portal_me():
+    p = _portal_user(request.headers.get('X-Portal-Ticket', ''))
+    if not p:
+        return jsonify({'signed_in': False}), 401
+    return jsonify({'signed_in': True, 'name': p.get('n'), 'is_manager': bool(p.get('m')),
+                    'pages': PORTAL_PAGES + (PORTAL_MANAGER_PAGES if p.get('m') else [])})
+
+
+@app.route('/api/connections', methods=['GET'])
 @require_manager
+def connections_check():
+    """Tests every link between VoiceGuard, the phone system and the CMS.
+
+    Each check answers the same question in plain terms: is this wire connected,
+    and if not, what exactly is missing. Nothing here changes anything.
+    """
+    import socket, time as _t
+    checks = []
+
+    def add(name, purpose, ok, detail, fix=''):
+        checks.append({'name': name, 'purpose': purpose, 'ok': bool(ok),
+                       'detail': detail, 'fix': fix})
+
+    # 1 — calls arriving from the phone system
+    try:
+        conn = get_db(); c = conn.cursor(cursor_factory=RealDictCursor)
+        c.execute("""SELECT COUNT(*) AS n, MAX(created_at) AS last
+                     FROM calls WHERE created_at >= NOW() - INTERVAL '24 hours'""")
+        r = dict(c.fetchone())
+        c.execute("SELECT COUNT(*) AS n FROM calls")
+        total = dict(c.fetchone())['n']
+        conn.close()
+        last = r['last']
+        mins = int((datetime.now() - last).total_seconds() / 60) if last else None
+        add('Calls arriving', 'The phone system posts each finished call to /api/analyze',
+            bool(last and mins is not None and mins < 240),
+            (('%d calls in the last 24 hours · most recent %d minutes ago' % (r['n'], mins))
+             if last else 'No calls have ever arrived') + ' · %d in total' % total,
+            'Ask Igor to confirm the phone system is still posting to /api/analyze on this server.')
+    except Exception as e:
+        add('Calls arriving', 'The phone system posts each finished call', False, str(e)[:160], '')
+
+    # 2 — agent availability API
+    try:
+        import phone_status as PS
+        if not PS.configured():
+            add('Agent availability', 'Reads who was reachable, from the phone system API',
+                False, 'No API key is set (PHONE_API_KEY).',
+                'Add PHONE_API_KEY in the App Service settings with the token from Igor.')
+        else:
+            t0 = _t.time()
+            today = datetime.now().strftime('%Y-%m-%d')
+            rows_ = PS.fetch(today + ' 00:00:00', today + ' 23:59:59', timeout=20)
+            ms = int((_t.time() - t0) * 1000)
+            conn = get_db(); c = conn.cursor()
+            c.execute('SELECT COUNT(*), MAX(snapshot_at) FROM phone_status_snapshots')
+            stored, newest = c.fetchone(); conn.close()
+            add('Agent availability', 'Reads who was reachable, from the phone system API',
+                True, '%d rows returned in %dms · %s stored here%s'
+                % (len(rows_), ms, format(int(stored or 0), ','),
+                   (' · newest ' + newest.strftime('%d %b %H:%M')) if newest else ' · nothing stored yet'),
+                '' if stored else 'Run a collection from the Time Report page to start storing it.')
+    except Exception as e:
+        add('Agent availability', 'Reads who was reachable, from the phone system API',
+            False, str(e)[:200], 'Check PHONE_API_KEY and that the API is reachable.')
+
+    # 3 — the CMS database
+    try:
+        import cms_db
+        t = cms_db.test()
+        add('CMS database', 'Customers, calls, payments and settings',
+            bool(t.get('ok')),
+            (('%s · %s' % (t.get('detected_type') or t.get('type'), t.get('version', '')[:40]))
+             if t.get('ok') else t.get('meaning', '')),
+            '' if t.get('ok') else 'Check CMS_DB_HOST / NAME / USER / PASSWORD.')
+    except Exception as e:
+        add('CMS database', 'Customers, calls, payments and settings', False, str(e)[:180],
+            'Set the CMS_DB_* settings on the App Service.')
+
+    # 4 — recordings
+    base = _setting('recording_base_url', os.getenv('RECORDING_BASE_URL', ''))
+    if not base:
+        add('Call recordings', 'Turns a stored path into a link that opens', False,
+            'No address is set, so recording links cannot be built.',
+            "Add a setting called recording_base_url with the address recordings are served from "
+            "(ask Igor), e.g. https://recordings.example.com")
+    else:
+        try:
+            req = urllib.request.Request(base, method='HEAD',
+                                         headers={'User-Agent': 'VoiceGuard/1.0'})
+            with urllib.request.urlopen(req, timeout=8) as r:
+                add('Call recordings', 'Turns a stored path into a link that opens',
+                    True, '%s answers (HTTP %d)' % (base, r.status), '')
+        except Exception as e:
+            add('Call recordings', 'Turns a stored path into a link that opens',
+                False, '%s did not answer: %s' % (base, str(e)[:120]),
+                'Check the address, or whether it needs a login.')
+
+    # 5 — the recording relay
+    if not RELAY_URL:
+        add('Recording relay', 'Downloads audio when this server cannot reach it directly',
+            True, 'Not in use — audio is fetched directly.', '')
+    else:
+        try:
+            req = urllib.request.Request(RELAY_URL.rstrip('/') + '/health',
+                                         headers={'User-Agent': 'VoiceGuard/1.0'})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                add('Recording relay', 'Downloads audio when this server cannot reach it directly',
+                    r.status < 400, '%s answered HTTP %d' % (RELAY_URL, r.status), '')
+        except Exception as e:
+            add('Recording relay', 'Downloads audio when this server cannot reach it directly',
+                False, str(e)[:160], 'The relay app may be stopped — check it in Azure.')
+
+    # 6 — the scoring engines
+    add('Claude', 'Scores calls and answers questions about notes',
+        bool(ANTHROPIC_API_KEY and 'your_' not in ANTHROPIC_API_KEY),
+        'Key is set' if ANTHROPIC_API_KEY else 'No key set',
+        '' if ANTHROPIC_API_KEY else 'Add ANTHROPIC_API_KEY in the App Service settings.')
+    gem = os.getenv('GEMINI_API_KEY', '')
+    add('Gemini', 'Transcribes the audio',
+        bool(gem and 'your_' not in gem), 'Key is set' if gem else 'No key set',
+        '' if gem else 'Add GEMINI_API_KEY in the App Service settings.')
+
+    # 7 — this server's own address, for anyone allowlisting us
+    out_ip = None
+    try:
+        with urllib.request.urlopen('https://api.ipify.org', timeout=6) as r:
+            out_ip = r.read().decode().strip()
+    except Exception:
+        pass
+
+    ok_count = sum(1 for c_ in checks if c_['ok'])
+    return jsonify({'checks': checks, 'ok': ok_count, 'total': len(checks),
+                    'outbound_ip': out_ip,
+                    'analyze_url': request.url_root.rstrip('/') + '/api/analyze',
+                    'as_of': datetime.now().isoformat()})
+
+
+@app.route('/api/cms-db/write-readiness', methods=['GET'])
+@require_manager
+def cms_write_readiness():
+    """Can this login change data, and can it make a practice copy?"""
+    import cms_db
+    try:
+        return jsonify(cms_db.write_readiness())
+    except Exception as e:
+        return jsonify({'error': str(e)[:240]}), 400
+
+
+@app.route('/api/cms-settings', methods=['GET'])
+@portal_manager_only
+def cms_settings_route():
+    """Every configuration table in the CMS, read only. Secret keys are masked
+    before they leave the server."""
+    import cms_db
+    try:
+        return jsonify(cms_db.settings_all())
+    except Exception as e:
+        return jsonify({'error': str(e)[:240]}), 400
+
+
+@app.route('/api/customers/search', methods=['GET'])
+@portal_or_manager
 def customers_search():
     """Find an account by name, phone or email."""
     import cms_db
@@ -4537,7 +4812,7 @@ def customers_search():
 
 
 @app.route('/api/customers/<int:account_id>', methods=['GET'])
-@require_manager
+@portal_or_manager
 def customer_profile_route(account_id):
     """Everything held about one account."""
     import cms_db
@@ -4548,7 +4823,7 @@ def customer_profile_route(account_id):
 
 
 @app.route('/api/live', methods=['GET'])
-@require_manager
+@portal_or_manager
 def live_route():
     """The whole floor in one read — agents, calls in progress, and the feed."""
     import cms_db
@@ -4561,7 +4836,7 @@ def live_route():
 
 
 @app.route('/api/agents/live', methods=['GET'])
-@require_manager
+@portal_or_manager
 def agents_live_route():
     """Who is on shift and on the phone right now."""
     import cms_db
@@ -4573,7 +4848,7 @@ def agents_live_route():
 
 
 @app.route('/api/agents/<int:employee_id>/detail', methods=['GET'])
-@require_manager
+@portal_or_manager
 def agent_detail_route(employee_id):
     """One agent's calls, notes, clock events and sales for a date range."""
     import cms_db
@@ -4587,7 +4862,7 @@ def agent_detail_route(employee_id):
 
 
 @app.route('/api/recording-link', methods=['GET'])
-@require_manager
+@portal_or_manager
 def recording_link():
     """Turns a stored recording path into a link that opens.
 
@@ -4612,7 +4887,7 @@ def recording_link():
 
 
 @app.route('/api/payments/unlock', methods=['POST'])
-@require_manager
+@portal_manager_only
 def payments_unlock():
     """Check the code and hand back a pass that expires."""
     code = str((request.json or {}).get('code') or '').strip()
@@ -4624,7 +4899,7 @@ def payments_unlock():
 
 
 @app.route('/api/payments/data', methods=['GET'])
-@require_manager
+@portal_manager_only
 @require_payments_code
 def payments_data():
     """Everything the payments page shows, for the chosen dates and filters."""
@@ -4641,7 +4916,7 @@ def payments_data():
 
 
 @app.route('/api/payments/people', methods=['GET'])
-@require_manager
+@portal_manager_only
 @require_payments_code
 def payments_people():
     """Names for the agent and account pickers."""
@@ -6146,8 +6421,47 @@ def skinblock_page():
     resp.headers['Cross-Origin-Embedder-Policy'] = 'require-corp'
     return resp
 
+# Hostnames that serve ONLY the CMS side. Anything else on these addresses is
+# refused, so this stays a separate system from the QA dashboard even though
+# one application serves both.
+PORTAL_HOSTS = [hh.strip().lower() for hh in
+                os.getenv('PORTAL_HOSTS', 'proclick.myhellodesk.com').split(',') if hh.strip()]
+
+
+def _is_portal_host():
+    host = (request.host or '').split(':')[0].lower()
+    return host in PORTAL_HOSTS
+
+
+# What the CMS address is allowed to reach. Everything else there is a 404 —
+# the QA dashboard, the Skin Block tool and the QA APIs are simply not part of
+# this system.
+PORTAL_ALLOWED_PREFIXES = (
+    '/api/portal/', '/api/live', '/api/customers', '/api/agents',
+    '/api/recording-link', '/api/payments/', '/api/cms-settings',
+    '/api/cms-db/', '/api/connections', '/static/', '/favicon',
+)
+
+
+@app.before_request
+def _portal_host_guard():
+    """On the CMS address, serve the portal and nothing else."""
+    if not _is_portal_host():
+        return None
+    p = request.path
+    if p in ('/', '/portal', '/portal/'):
+        return None
+    if p.startswith(PORTAL_ALLOWED_PREFIXES):
+        return None
+    # not part of this system
+    return jsonify({'error': 'Not available on this address'}), 404
+
+
 @app.route('/')
 def index():
+    """The QA dashboard normally; the CMS portal on its own hostname."""
+    if _is_portal_host():
+        return portal_page()
     return send_from_directory('.', 'qa-dashboard.html')
 
 try:
