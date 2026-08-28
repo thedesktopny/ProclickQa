@@ -6193,7 +6193,31 @@ def test_analyze():
 #  (Azure is unfiltered), caches them on disk, and serves them from OUR domain,
 #  which the agents can already reach. Same idea as the recording relay.
 # ============================================================================
-SB_CACHE = os.path.join(os.getenv('HOME', '.'), 'sbassets_cache')
+def _sb_cache_dir():
+    """Where the detector files live between deploys.
+
+    On Azure App Service /home is real storage that survives a restart or a new
+    deploy; anywhere else in the container does not. Keeping the cache there is
+    the difference between downloading 60 MB once and downloading it again after
+    every push — which is why the agents kept dropping back to the slow path.
+    """
+    for path in (os.getenv('SB_CACHE_DIR'), '/home/sbassets_cache',
+                 os.path.join(os.getenv('HOME', '.'), 'sbassets_cache')):
+        if not path:
+            continue
+        try:
+            os.makedirs(path, exist_ok=True)
+            probe = os.path.join(path, '.writable')
+            with open(probe, 'w') as fh:
+                fh.write('x')
+            os.remove(probe)
+            return path
+        except Exception:
+            continue
+    return os.path.join('.', 'sbassets_cache')
+
+
+SB_CACHE = _sb_cache_dir()
 # Several mirrors each. If one is unreachable from this data centre the next is
 # tried, and the one that worked is reported — a single blocked CDN was enough
 # to leave the detector unable to start with no explanation.
@@ -6470,6 +6494,41 @@ try:
     init_db()
 except Exception as e:
     print(f'⚠️ DB init warning: {e}')
+
+
+def _warm_skinblock_assets():
+    """Fetch the detector files once at startup if they aren't already here.
+
+    Runs in the background so it never delays the app coming up. If the cache
+    survived the deploy this does nothing."""
+    import threading
+
+    def run():
+        try:
+            wanted = [('lib', 'ort.min.js'),
+                      ('lib', 'ort-wasm-simd-threaded.jsep.mjs'),
+                      ('lib', 'ort-wasm-simd-threaded.jsep.wasm'),
+                      ('lib', 'ort-wasm-simd-threaded.mjs'),
+                      ('lib', 'ort-wasm-simd-threaded.wasm'),
+                      ('model', 'Xenova/segformer_b2_clothes/resolve/main/onnx/model_quantized.onnx')]
+            have = 0
+            for kind_, name in wanted:
+                try:
+                    if kind_ == 'lib':
+                        _sb_fetch('lib_' + name, [b + name for b in SB_LIB_BASES])
+                    else:
+                        _sb_fetch('hf_' + name, [b + name for b in SB_HF_BASES], expect_model=True)
+                    have += 1
+                except Exception as e:
+                    print('[skinblock] warm-up could not get %s: %s' % (name, str(e)[:140]))
+            print('[skinblock] detector files ready: %d of %d in %s' % (have, len(wanted), SB_CACHE))
+        except Exception as e:
+            print('[skinblock] warm-up failed: ' + str(e)[:160])
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+_warm_skinblock_assets()
 
 if __name__ == '__main__':
     print('\n✅ VoiceGuard QA Server running!')
