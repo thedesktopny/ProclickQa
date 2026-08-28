@@ -4621,6 +4621,86 @@ def portal_page():
     return resp
 
 
+@app.route('/api/portal/diagnose', methods=['POST'])
+@require_manager
+def portal_diagnose():
+    """Why a CMS sign-in is being refused.
+
+    Reports what the account looks like without revealing anything secret: is
+    the user name found at all, what the stored hash format is, whether it is
+    linked to an Employee, and what roles it has. Only reachable from the QA
+    dashboard by a manager.
+    """
+    import cms_db, base64
+    d = request.json or {}
+    u = (d.get('username') or '').strip()
+    pw = d.get('password') or ''
+    if not u:
+        return jsonify({'error': 'username required'}), 400
+    out = {'looked_for': u}
+    try:
+        conn = cms_db._connect(); cu = conn.cursor()
+        cu.execute("""SELECT TOP 5 Id, UserName, Email, PasswordHash, LockoutEnabled,
+                             LockoutEndDateUtc, EmailConfirmed
+                      FROM AspNetUsers
+                      WHERE UserName = %s OR Email = %s
+                         OR UserName LIKE %s OR Email LIKE %s""",
+                   (u, u, '%' + u + '%', '%' + u + '%'))
+        matches = []
+        while True:
+            r = cu.fetchone()
+            if not r:
+                break
+            h = r[3] or ''
+            fmt, note = 'unknown', ''
+            try:
+                blob = base64.b64decode(h)
+                if blob and blob[0] == 0x00:
+                    fmt = 'ASP.NET Identity v2'
+                    note = 'supported' if len(blob) == 49 else 'unexpected length %d' % len(blob)
+                elif blob and blob[0] == 0x01:
+                    fmt = 'ASP.NET Identity v3'; note = 'supported'
+                elif not h:
+                    fmt = 'no password set'; note = 'this account cannot sign in'
+                else:
+                    fmt = 'something else (first byte %d)' % blob[0]
+                    note = 'not a format we can check'
+            except Exception:
+                fmt = 'not base64'
+                note = 'length %d — may be a different hashing scheme' % len(h)
+            matches.append({'user_name': r[1], 'email': r[2],
+                            'hash_format': fmt, 'hash_note': note,
+                            'hash_length': len(h),
+                            'lockout_enabled': bool(r[4]),
+                            'locked_until': cms_db._plain(r[5]),
+                            'exact_match': (r[1] == u or r[2] == u)})
+        out['accounts_found'] = matches
+        cu.execute('SELECT COUNT(*) FROM AspNetUsers')
+        out['total_accounts'] = int((cu.fetchone() or [0])[0] or 0)
+        conn.close()
+    except Exception as e:
+        out['error'] = str(e)[:200]
+        return jsonify(out), 400
+
+    if pw:
+        try:
+            user = cms_db.portal_login(u, pw)
+            out['sign_in'] = 'works — ' + user['name'] + (' (manager)' if user['is_manager'] else '')
+        except Exception as e:
+            out['sign_in'] = 'refused: ' + str(e)[:160]
+
+    if not matches:
+        out['meaning'] = ('No account in AspNetUsers matches that, even loosely. '
+                          'There are %d accounts in total — the sign-in name may differ '
+                          'from what people use day to day.' % out.get('total_accounts', 0))
+    elif not any(m['exact_match'] for m in matches):
+        out['meaning'] = ('Nothing matches exactly, but similar names exist — try one of '
+                          'the user names listed above.')
+    else:
+        out['meaning'] = 'The account exists. See the hash format and the sign-in result above.'
+    return jsonify(out)
+
+
 @app.route('/api/portal/login', methods=['POST'])
 def portal_login_route():
     """Sign in with a CMS user name and password."""
@@ -6448,6 +6528,8 @@ def skinblock_page():
 # Hostnames that serve ONLY the CMS side. Anything else on these addresses is
 # refused, so this stays a separate system from the QA dashboard even though
 # one application serves both.
+SERVER_BUILD = 'portal-hosts-2'      # bump when you need to confirm a deploy landed
+
 PORTAL_HOSTS = [hh.strip().lower() for hh in
                 os.getenv('PORTAL_HOSTS',
                           'cms.myhellodesk.com,proclick.myhellodesk.com').split(',')
@@ -6463,7 +6545,7 @@ def _is_portal_host():
 # the QA dashboard, the Skin Block tool and the QA APIs are simply not part of
 # this system.
 PORTAL_ALLOWED_PREFIXES = (
-    '/api/portal/', '/api/live', '/api/customers', '/api/agents',
+    '/api/whoami', '/api/portal/', '/api/live', '/api/customers', '/api/agents',
     '/api/recording-link', '/api/payments/', '/api/cms-settings',
     '/api/cms-db/', '/api/connections', '/static/', '/favicon',
 )
@@ -6481,6 +6563,24 @@ def _portal_host_guard():
         return None
     # not part of this system
     return jsonify({'error': 'Not available on this address'}), 404
+
+
+@app.route('/api/whoami')
+def whoami():
+    """What address the server thinks it is answering on.
+
+    If the CMS login isn't appearing, this says whether the hostname reached the
+    server as expected and whether it is on the recognised list — which
+    separates a DNS or deploy problem from a browser cache.
+    """
+    host = (request.host or '').split(':')[0].lower()
+    return jsonify({
+        'host_seen_by_server': host,
+        'recognised_cms_hosts': PORTAL_HOSTS,
+        'is_cms_address': _is_portal_host(),
+        'serves': 'the CMS portal' if _is_portal_host() else 'the QA dashboard',
+        'version': SERVER_BUILD,
+    })
 
 
 @app.route('/')

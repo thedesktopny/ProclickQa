@@ -1122,6 +1122,21 @@ td.agent{color:var(--text);font-weight:500;}
     </div>
     <div id="cx-body"><div style="color:var(--text3);font-size:13px;">Press “Test everything”.</div></div>
     <div id="cx-facts" style="margin-top:18px;"></div>
+    <div class="card" style="padding:16px 20px;margin-top:14px;">
+      <h2 class="payh">Test a CMS sign-in</h2>
+      <div class="payhint">Checks why a CMS user name and password is being refused at
+        cms.myhellodesk.com. The password is only used for the test and never stored.</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;">
+        <div><div class="cn-lab">User name or email</div>
+          <input id="pd-user" class="cms-in" style="min-width:200px;" placeholder="e.g. dfried"></div>
+        <div><div class="cn-lab">Password (optional)</div>
+          <input id="pd-pass" type="password" class="cms-in" style="min-width:170px;"
+                 onkeydown="if(event.key==='Enter')portalDiagnose()"></div>
+        <button onclick="portalDiagnose()" class="btn btn-primary" style="font-size:12px;">Test</button>
+      </div>
+      <pre id="pd-out" style="white-space:pre-wrap;font-size:11.5px;color:var(--text2);
+           margin:12px 0 0;line-height:1.7;"></pre>
+    </div>
   </div>
 </div>
 
@@ -4598,6 +4613,33 @@ function cmsDbSelect(db){
 /* ================= Connections =================
    One page that proves each wire is connected, and names the missing piece
    when it isn't. */
+
+/* Explains a refused CMS sign-in: is the account there, what hash format does
+   it use, and what happens when the password is actually tried. */
+async function portalDiagnose(){
+  const out = document.getElementById('pd-out');
+  const u = document.getElementById('pd-user').value.trim();
+  if(!u){ out.textContent = 'Enter a user name or email.'; return; }
+  out.textContent = 'Checking…';
+  try{
+    const r = await API.post('/api/portal/diagnose', {
+      username: u, password: document.getElementById('pd-pass').value });
+    if(r.error && !r.accounts_found){ out.textContent = '❌ ' + r.error; return; }
+    const lines = [];
+    lines.push(`${(r.accounts_found||[]).length} matching account(s) of ${r.total_accounts} in the CMS`);
+    (r.accounts_found||[]).forEach(a=>{
+      lines.push('');
+      lines.push(`  user name : ${a.user_name}${a.exact_match?'   ← exact match':''}`);
+      lines.push(`  email     : ${a.email||'—'}`);
+      lines.push(`  password  : ${a.hash_format} (${a.hash_note}), ${a.hash_length} characters`);
+      if(a.locked_until) lines.push(`  locked until: ${a.locked_until}`);
+    });
+    if(r.sign_in){ lines.push(''); lines.push('  signing in: ' + r.sign_in); }
+    if(r.meaning){ lines.push(''); lines.push(r.meaning); }
+    out.textContent = lines.join('\n');
+  }catch(e){ out.textContent = 'Failed: ' + e.message; }
+}
+
 async function loadConnections(){
   const box = document.getElementById('cx-body');
   box.innerHTML = '<div style="color:var(--text3);font-size:13px;">Testing each connection — this takes a few seconds…</div>';
