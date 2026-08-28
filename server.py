@@ -4727,6 +4727,62 @@ def portal_me():
                     'pages': PORTAL_PAGES + (PORTAL_MANAGER_PAGES if p.get('m') else [])})
 
 
+@app.route('/api/recording-base/find', methods=['GET', 'POST'])
+@require_manager
+def recording_base_find():
+    """Finds the recording address and proves it by fetching a real recording.
+
+    Each candidate is tried against an actual path from the call log. The first
+    that answers is saved, so recording links start working without anyone
+    having to be asked.
+    """
+    import cms_db
+    try:
+        info = cms_db.find_recording_base()
+    except Exception as e:
+        return jsonify({'error': str(e)[:240]}), 400
+
+    tried, winner = [], None
+    sample = (info.get('sample_paths') or [None])[0]
+    if sample:
+        for base in info['candidates']:
+            url = base.rstrip('/') + '/' + sample.lstrip('/')
+            entry = {'base': base, 'url': url}
+            try:
+                req = urllib.request.Request(url, method='HEAD',
+                                             headers={'User-Agent': 'VoiceGuard/1.0'})
+                with urllib.request.urlopen(req, timeout=8) as r:
+                    entry['status'] = r.status
+                    entry['type'] = r.headers.get('Content-Type', '')
+                    entry['works'] = r.status < 400 and 'html' not in entry['type'].lower()
+            except Exception as e:
+                entry['status'] = None
+                entry['works'] = False
+                entry['error'] = str(e)[:110]
+            tried.append(entry)
+            if entry.get('works'):
+                winner = base
+                break
+
+    saved = False
+    if winner and request.method == 'POST':
+        try:
+            conn = get_db(); c = conn.cursor()
+            c.execute("""INSERT INTO app_settings (key, value) VALUES ('recording_base_url', %s)
+                         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value""", (winner,))
+            conn.commit(); conn.close()
+            saved = True
+        except Exception as e:
+            info['notes'].append('could not save: ' + str(e)[:120])
+
+    return jsonify({**info, 'tried': tried, 'winner': winner, 'saved': saved,
+                    'meaning': (('Recordings are served from %s%s' % (winner, ' — saved.' if saved else '.'))
+                                if winner else
+                                'None of the addresses tried returned a recording. '
+                                'Ask Igor what address recordings are served from, or whether '
+                                'they need a login.')})
+
+
 @app.route('/api/connections', methods=['GET'])
 @require_manager
 def connections_check():
@@ -4960,6 +5016,8 @@ def recording_link():
         base = (r[0] if r and r[0] else '') or os.getenv('RECORDING_BASE_URL', '')
     except Exception:
         base = os.getenv('RECORDING_BASE_URL', '')
+    if path.lower().startswith(('http://', 'https://')):
+        return jsonify({'url': path})          # already a full address
     if not base:
         return jsonify({'error': 'No recording address is set yet (recording_base_url).',
                         'path': path}), 400

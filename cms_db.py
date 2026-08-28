@@ -595,6 +595,83 @@ def _mask(name, value):
     return {'value': v, 'masked': False}
 
 
+def find_recording_base(sample_limit=5):
+    """Work out the address recordings are served from.
+
+    The call log only stores a relative path, so the beginning of the address
+    has to come from somewhere. Three places are checked, in order of how
+    trustworthy they are: a setting in the CMS, any full URL stored elsewhere in
+    the database, and finally the addresses the phone system is known to use.
+    A real recording path is then tried against each candidate, so the answer is
+    proved rather than guessed.
+    """
+    conn = _connect()
+    def rows(sql, prm=()):
+        cu = conn.cursor()
+        cu.execute(sql, prm) if prm else cu.execute(sql)
+        out = []
+        while True:
+            r = cu.fetchone()
+            if not r:
+                break
+            out.append(r)
+        return out
+
+    found_in_db, notes = [], []
+
+    # 1 — a setting that looks like an address
+    try:
+        for name, val in rows("""SELECT Name, SettingValue FROM AdminSettings
+                                 WHERE SettingValue LIKE 'http%' OR Name LIKE '%url%'
+                                    OR Name LIKE '%record%' OR Name LIKE '%path%'"""):
+            found_in_db.append({'where': 'AdminSettings.' + str(name), 'value': str(val)})
+    except Exception as e:
+        notes.append('AdminSettings: ' + str(e)[:100])
+
+    # 2 — a full URL stored anywhere in the recording columns
+    for tbl, col in (('PhoneCallsLog', 'RecordingFileUrl'),
+                     ('PhoneCallsLog', 'RecordingScreenURL'),
+                     ('PhoneCallsLog', 'RecordingCamURL'),
+                     ('EmployeeRecordings', 'FileUrl'),
+                     ('EmployeeRecordings', 'RecordingUrl')):
+        try:
+            for (v,) in rows("""SELECT TOP 3 %s FROM %s
+                                WHERE %s LIKE 'http%%' ORDER BY 1 DESC""" % (col, tbl, col)):
+                found_in_db.append({'where': '%s.%s' % (tbl, col), 'value': str(v)})
+        except Exception:
+            continue
+
+    # a real path to test with
+    samples = []
+    try:
+        for (v,) in rows("""SELECT TOP %d RecordingFileUrl FROM PhoneCallsLog
+                            WHERE RecordingFileUrl IS NOT NULL AND RecordingFileUrl <> ''
+                            ORDER BY Started DESC""" % int(sample_limit)):
+            samples.append(str(v))
+    except Exception as e:
+        notes.append('sample paths: ' + str(e)[:100])
+    conn.close()
+
+    # 3 — addresses the phone system already answers on
+    candidates = []
+    for f in found_in_db:
+        v = f['value']
+        if v.lower().startswith('http'):
+            base = v.split('/recordings/')[0] if '/recordings/' in v else '/'.join(v.split('/')[:3])
+            if base not in candidates:
+                candidates.append(base)
+    for guess in ('https://panel.myhellodesk.com',
+                  'https://cms.myhellodesk.com',
+                  'https://myhellodesk.com',
+                  'https://panel.myhellodesk.com/media',
+                  'https://panel.myhellodesk.com/files'):
+        if guess not in candidates:
+            candidates.append(guess)
+
+    return {'found_in_database': found_in_db, 'sample_paths': samples,
+            'candidates': candidates, 'notes': notes}
+
+
 def portal_login(username, password):
     """Sign in with a CMS account.
 

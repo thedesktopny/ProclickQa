@@ -1123,6 +1123,15 @@ td.agent{color:var(--text);font-weight:500;}
     <div id="cx-body"><div style="color:var(--text3);font-size:13px;">Press “Test everything”.</div></div>
     <div id="cx-facts" style="margin-top:18px;"></div>
     <div class="card" style="padding:16px 20px;margin-top:14px;">
+      <h2 class="payh">Find the recording address</h2>
+      <div class="payhint">Looks through the CMS for it, then proves it by trying a real
+        recording. If one works it is saved and the links start working.</div>
+      <button onclick="findRecordingBase()" class="btn btn-primary" style="font-size:12px;">Find it</button>
+      <pre id="rb-out" style="white-space:pre-wrap;font-size:11.5px;color:var(--text2);
+           margin:12px 0 0;line-height:1.7;"></pre>
+    </div>
+
+    <div class="card" style="padding:16px 20px;margin-top:14px;">
       <h2 class="payh">Test a CMS sign-in</h2>
       <div class="payhint">Checks why a CMS user name and password is being refused at
         cms.myhellodesk.com. The password is only used for the test and never stored.</div>
@@ -2408,7 +2417,9 @@ const API={
   async get(p){
     const r=await fetch(p,{headers:authHeaders()});
     if(r.status===401){
-      if(p==='/api/auth-check'){clearToken();showModal('login-modal');}
+      if(p==='/api/auth-check'){
+        if(!(typeof IS_PORTAL_EARLY !== 'undefined' && IS_PORTAL_EARLY)){ clearToken(); showModal('login-modal'); }
+      }
       throw new Error('Unauthorized');
     }
     return r.json();
@@ -2438,8 +2449,19 @@ document.addEventListener('DOMContentLoaded',async()=>{
 
 let currentRole='admin';
 let currentUserData=null;
+// declared here so the auth check below can see it whatever the load order
+var IS_PORTAL_EARLY = (document.body && document.body.getAttribute('data-portal') === '1')
+  || location.pathname.startsWith('/portal');
 
 async function checkAuth(){
+  // On the CMS address there is no VoiceGuard login — signing in happens with a
+  // CMS account instead, so the QA login must not appear over the portal.
+  if(typeof IS_PORTAL_EARLY !== 'undefined' && IS_PORTAL_EARLY){
+    document.body.style.visibility='visible';
+    hideModal('login-modal');
+    isAdmin = true; currentRole = 'admin';   // page access is decided by the server
+    return;
+  }
   // If no token at all, go straight to login
   if(!getToken()){
     document.body.style.visibility='visible';
@@ -3388,8 +3410,8 @@ function csExport(){
    The same application, served at its own address for people who have CMS
    accounts. Only the CMS-backed pages are shown, and payments and settings
    appear only for managers — decided by the server, not by hiding buttons. */
-const IS_PORTAL = document.body.getAttribute('data-portal') === '1'
-  || location.pathname.startsWith('/portal');
+const IS_PORTAL = (typeof IS_PORTAL_EARLY !== 'undefined') ? IS_PORTAL_EARLY
+  : (document.body.getAttribute('data-portal') === '1' || location.pathname.startsWith('/portal'));
 let portalTicket = null, portalPages = [];
 
 function portalHeaders(){
@@ -4616,6 +4638,36 @@ function cmsDbSelect(db){
 
 /* Explains a refused CMS sign-in: is the account there, what hash format does
    it use, and what happens when the password is actually tried. */
+
+/* Hunts for the address recordings live at, and proves it by fetching one. */
+async function findRecordingBase(){
+  const out = document.getElementById('rb-out');
+  out.textContent = 'Looking through the CMS, then trying each address…';
+  try{
+    const r = await API.post('/api/recording-base/find', {});
+    if(r.error){ out.textContent = '❌ ' + r.error; return; }
+    const lines = [];
+    if((r.found_in_database||[]).length){
+      lines.push('Addresses stored in the CMS:');
+      r.found_in_database.forEach(f=>lines.push(`   ${f.where}: ${f.value}`));
+    } else {
+      lines.push('Nothing address-like is stored in the CMS.');
+    }
+    if((r.sample_paths||[]).length){
+      lines.push('', 'A real recording path to test with:');
+      lines.push('   ' + r.sample_paths[0]);
+    }
+    if((r.tried||[]).length){
+      lines.push('', 'Addresses tried:');
+      r.tried.forEach(t=>lines.push(
+        `   ${t.works?'WORKS':'no   '}  ${t.base}   ${t.status?('HTTP '+t.status):(t.error||'')}`));
+    }
+    lines.push('', r.meaning || '');
+    out.textContent = lines.join('\n');
+    if(r.saved) setTimeout(loadConnections, 400);
+  }catch(e){ out.textContent = 'Failed: ' + e.message; }
+}
+
 async function portalDiagnose(){
   const out = document.getElementById('pd-out');
   const u = document.getElementById('pd-user').value.trim();
