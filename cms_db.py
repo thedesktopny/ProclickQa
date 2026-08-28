@@ -935,6 +935,54 @@ def customer_search(q, limit=40):
     return out
 
 
+def recent_accounts(limit=25):
+    """Accounts worth seeing without searching: the ones just worked on, and
+    the ones just created."""
+    conn = _connect()
+    def rows(sql):
+        cu = conn.cursor(); cu.execute(sql)
+        out = []
+        while True:
+            r = cu.fetchone()
+            if not r:
+                break
+            out.append(r)
+        return out
+    n = lambda v: int(v or 0)
+
+    worked = [{'id': n(i), 'name': ('%s %s' % (fn or '', ln or '')).strip() or '(no name)',
+               'phone': ph, 'minutes_left': n(ml), 'when': _plain(w),
+               'agent': ('%s %s' % (efn or '', eln or '')).strip(), 'note': note}
+              for i, fn, ln, ph, ml, w, efn, eln, note in rows("""
+        SELECT TOP %d a.Id, a.FirstName, a.LastName, a.Phone, a.MinutesLeft,
+               w.StartTime, e.FirstName, e.LastName, w.Note
+        FROM AccountWork w
+        JOIN Account a ON a.Id = w.AccountId
+        LEFT JOIN Employee e ON e.Id = w.EmployeeId
+        WHERE w.StartTime >= DATEADD(day, -3, GETDATE())
+        ORDER BY w.StartTime DESC""" % (int(limit) * 3))]
+    # one row per account, keeping the most recent
+    seen, worked_unique = set(), []
+    for a in worked:
+        if a['id'] in seen:
+            continue
+        seen.add(a['id'])
+        worked_unique.append(a)
+        if len(worked_unique) >= limit:
+            break
+
+    created = [{'id': n(i), 'name': ('%s %s' % (fn or '', ln or '')).strip() or '(no name)',
+                'phone': ph, 'email': em, 'when': _plain(cr), 'minutes_left': n(ml),
+                'business': bool(b)}
+               for i, fn, ln, ph, em, cr, ml, b in rows("""
+        SELECT TOP %d Id, FirstName, LastName, Phone, Email, CreatedTime, MinutesLeft, isBusiness
+        FROM Account WHERE ISNULL(Deleted,0) = 0
+        ORDER BY CreatedTime DESC""" % int(limit))]
+
+    conn.close()
+    return {'recently_worked': worked_unique, 'recently_created': created}
+
+
 def customer_profile(account_id, limit=120):
     """Everything held about one account, in one read.
 

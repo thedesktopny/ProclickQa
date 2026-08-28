@@ -1243,9 +1243,22 @@ td.agent{color:var(--text);font-weight:500;}
              autocomplete="off" oninput="cuSearch()" style="font-size:15px;padding:11px 14px;">
       <div id="cu-results" class="paydrop"></div>
     </div>
-    <div id="cu-empty" style="color:var(--text3);font-size:13px;padding:40px 0;text-align:center;">
-      Search for an account to see everything we hold about it — calls worked, recordings,
-      payments, notes, texts, tickets and balance changes.
+    <div id="cu-empty">
+      <div style="color:var(--text3);font-size:12.5px;margin-bottom:14px;">
+        Search above for any account, or pick one of these.
+      </div>
+      <div class="paygrid" style="margin-top:0;">
+        <div class="card" style="padding:16px 20px;">
+          <h2 class="payh">Just worked on</h2>
+          <div class="payhint">Accounts an agent has touched in the last three days.</div>
+          <div id="cu-recent-worked"><div style="color:var(--text3);font-size:12px;">Loading…</div></div>
+        </div>
+        <div class="card" style="padding:16px 20px;">
+          <h2 class="payh">Newest accounts</h2>
+          <div class="payhint">Most recently created.</div>
+          <div id="cu-recent-new"></div>
+        </div>
+      </div>
     </div>
     <div id="cu-profile" style="display:none;"></div>
   </div>
@@ -3442,6 +3455,11 @@ async function portalLogin(){
 
 /* Shows only the pages this person may open, and labels who they are. */
 function portalApply(name, isManager){
+  // banners about QA call processing mean nothing here
+  ['processing-paused-banner','ot-active-banner','retry-log-panel'].forEach(id=>{
+    const el = document.getElementById(id);
+    if(el) el.style.display = 'none';
+  });
   document.querySelectorAll('.nav-item').forEach(el=>{
     const m = (el.getAttribute('onclick')||'').match(/showPage\('([^']+)'\)/);
     el.style.display = (m && portalPages.includes(m[1])) ? '' : 'none';
@@ -3525,6 +3543,7 @@ function showPage(id){
   if(id==='live'){ loadLive(); lvAutoToggle(); }
   if(id==='cms-settings') loadCmsSettings();
   if(id==='connections') loadConnections();
+  if(id==='customers') cuLoadRecent();
   if(id!=='live') clearInterval(lvTimer);
   if(id!=='agent-calls') clearInterval(acTimer);
   if(id==='payments' && !payTicket){
@@ -5224,6 +5243,44 @@ function lvOpenAgent(id){
    call we worked, what the agent wrote at the time, what was billed, and the
    recording — with payments, notes, texts, balance and tickets alongside. */
 let cuTimer = null, cuData = null;
+
+
+/* What the page shows before anyone searches — the accounts most likely to be
+   wanted are the ones just worked on or just created. */
+async function cuLoadRecent(){
+  const w = document.getElementById('cu-recent-worked');
+  const n = document.getElementById('cu-recent-new');
+  if(!w) return;
+  try{
+    const r = await API.get('/api/customers/recent');
+    if(r.error){ w.innerHTML = `<div style="color:var(--red);font-size:12px;">${r.error}</div>`; return; }
+    const ago = d => {
+      if(!d) return '';
+      const m = Math.round((Date.now() - new Date(d).getTime())/60000);
+      if(m < 60) return m + 'm ago';
+      if(m < 1440) return Math.floor(m/60) + 'h ago';
+      return Math.floor(m/1440) + 'd ago';
+    };
+    w.innerHTML = (r.recently_worked||[]).map(a=>`
+      <div class="payrow" onclick="cuOpen(${a.id})">
+        <div class="nm">${esc(a.name)}
+          <div class="mt">${esc(a.phone)||''}${a.agent?' · '+esc(a.agent):''}
+            ${a.note?' · “'+esc(String(a.note).slice(0,44))+'”':''}</div></div>
+        <div style="text-align:right;font-size:11px;color:var(--text3);white-space:nowrap;">
+          ${ago(a.when)}<div>${(a.minutes_left||0).toLocaleString()} min left</div></div>
+      </div>`).join('') ||
+      '<div style="color:var(--text3);font-size:12px;">Nothing worked on in the last three days.</div>';
+
+    n.innerHTML = (r.recently_created||[]).map(a=>`
+      <div class="payrow" onclick="cuOpen(${a.id})">
+        <div class="nm">${esc(a.name)}${a.business?' <span style="color:var(--text3);font-size:10px">business</span>':''}
+          <div class="mt">${esc(a.phone)||''}${a.email?' · '+esc(a.email):''}</div></div>
+        <div style="text-align:right;font-size:11px;color:var(--text3);white-space:nowrap;">
+          ${a.when?new Date(a.when).toLocaleDateString([], {month:'short', day:'numeric', year:'numeric'}):''}</div>
+      </div>`).join('') ||
+      '<div style="color:var(--text3);font-size:12px;">No accounts found.</div>';
+  }catch(e){ w.innerHTML = `<div style="color:var(--red);font-size:12px;">${e.message}</div>`; }
+}
 
 function cuSearch(){
   clearTimeout(cuTimer);

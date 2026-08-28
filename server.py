@@ -4617,7 +4617,9 @@ def portal_page():
         return 'Portal page missing', 500
     html = html.replace('<body>', '<body data-portal="1">', 1)
     resp = make_response(html)
-    resp.headers['Cache-Control'] = 'no-store'
+    resp.headers['Cache-Control'] = 'no-store, must-revalidate'
+    resp.headers['Pragma'] = 'no-cache'
+    resp.headers['X-Build'] = SERVER_BUILD
     return resp
 
 
@@ -4932,6 +4934,17 @@ def cms_settings_route():
     import cms_db
     try:
         return jsonify(cms_db.settings_all())
+    except Exception as e:
+        return jsonify({'error': str(e)[:240]}), 400
+
+
+@app.route('/api/customers/recent', methods=['GET'])
+@portal_or_manager
+def customers_recent():
+    """What to show before anyone searches: just worked on, and just created."""
+    import cms_db
+    try:
+        return jsonify(cms_db.recent_accounts())
     except Exception as e:
         return jsonify({'error': str(e)[:240]}), 400
 
@@ -6643,10 +6656,18 @@ def whoami():
 
 @app.route('/')
 def index():
-    """The QA dashboard normally; the CMS portal on its own hostname."""
+    """The QA dashboard normally; the CMS portal on its own hostname.
+
+    The page is never cached. It changes with every deploy, and a browser
+    holding yesterday's copy shows the wrong login entirely — which is exactly
+    what happened on the CMS address.
+    """
     if _is_portal_host():
         return portal_page()
-    return send_from_directory('.', 'qa-dashboard.html')
+    resp = make_response(send_from_directory('.', 'qa-dashboard.html'))
+    resp.headers['Cache-Control'] = 'no-store, must-revalidate'
+    resp.headers['Pragma'] = 'no-cache'
+    return resp
 
 try:
     init_db()
