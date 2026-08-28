@@ -6425,7 +6425,9 @@ def skinblock_page():
 # refused, so this stays a separate system from the QA dashboard even though
 # one application serves both.
 PORTAL_HOSTS = [hh.strip().lower() for hh in
-                os.getenv('PORTAL_HOSTS', 'proclick.myhellodesk.com').split(',') if hh.strip()]
+                os.getenv('PORTAL_HOSTS',
+                          'cms.myhellodesk.com,proclick.myhellodesk.com').split(',')
+                if hh.strip()]
 
 
 def _is_portal_host():
