@@ -106,6 +106,55 @@ def kind():
     return 'mssql' if PORT == 1433 else ('postgres' if PORT == 5432 else 'mysql')
 
 
+def _make_read_friendly(conn, kind_):
+    """Make our reads harmless to the live phone system.
+
+    The CMS writes to PhoneCallsLog and AccountWork constantly. A normal read
+    takes shared locks on those rows, which collides with those writes — SQL
+    Server then kills one side, and it killed us (error 1205, deadlock victim).
+
+    Reading uncommitted means we take no locks at all: we never block the phone
+    system and it can never block us. The trade is that a row being written at
+    that exact moment may be read mid-change. For a dashboard refreshing every
+    fifteen seconds that is the right trade; for anything we ever WRITE, the
+    write path sets a proper isolation level of its own.
+
+    A lock timeout is set as well, so a query gives up in seconds rather than
+    hanging the page.
+    """
+    if kind_ != 'mssql':
+        return
+    try:
+        cu = conn.cursor()
+        cu.execute('SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED')
+        cu.execute('SET LOCK_TIMEOUT 15000')
+        cu.execute('SET DEADLOCK_PRIORITY LOW')   # if there is a fight, we lose it, not the CMS
+    except Exception as e:
+        print('[cms] could not set read options: ' + str(e)[:120])
+
+
+def _retrying(fn, attempts=3):
+    """Runs a read again if SQL Server killed it as a deadlock victim.
+
+    Deadlocks are transient by nature — the same query usually succeeds a moment
+    later. Retrying quietly is better than showing the person a database error
+    they can do nothing about.
+    """
+    import time
+    last = None
+    for i in range(attempts):
+        try:
+            return fn()
+        except Exception as e:
+            msg = str(e)
+            last = e
+            if '1205' in msg or 'deadlock' in msg.lower():
+                time.sleep(0.4 * (i + 1))
+                continue
+            raise
+    raise last
+
+
 def _connect():
     """Opens a read-only-intent connection, working out the database kind if it
     was not specified. Once one works, that answer is reused."""
@@ -117,6 +166,7 @@ def _connect():
         try:
             conn = _open(k)
             _DETECTED = k
+            _make_read_friendly(conn, k)
             return conn
         except Exception as e:
             msg = str(e)
@@ -806,6 +856,9 @@ def try_write(sql, params=(), commit=False):
     out = {'committed': False, 'rows_affected': None, 'dry_run': not commit}
     try:
         cu = conn.cursor()
+        # a write needs proper isolation, whatever the read default is
+        cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        cu.execute('SET DEADLOCK_PRIORITY NORMAL')
         cu.execute('BEGIN TRANSACTION')
         cu.execute(sql, tuple(params)) if params else cu.execute(sql)
         try:
@@ -933,6 +986,80 @@ def customer_search(q, limit=40):
                     'work_count': int(r[8] or 0), 'last_worked': _plain(r[9])})
     conn.close()
     return out
+
+
+def company_info():
+    """The shared reference list — logins, numbers and other things staff look up.
+
+    Values are returned as they are because using them is the whole point, but
+    anything that looks like a password is flagged so the page can keep it
+    covered until someone asks to see it. That stops a screen share or a
+    passer-by picking up a company password.
+    """
+    conn = _connect(); cu = conn.cursor()
+    cu.execute("""SELECT Id, InfoKey, InfoValue, Created, Updated
+                  FROM CompanyInfo ORDER BY InfoKey""")
+    out = []
+    while True:
+        r = cu.fetchone()
+        if not r:
+            break
+        key = (r[1] or '').strip()
+        val = (r[2] or '').strip()
+        sensitive = any(w in key.lower() for w in
+                        ('login', 'password', 'pass', 'pin', 'code', 'key', 'account'))
+        out.append({'id': int(r[0]), 'key': key, 'value': val,
+                    'sensitive': sensitive,
+                    'created': _plain(r[3]), 'updated': _plain(r[4])})
+    conn.close()
+    return {'items': out}
+
+
+def packages():
+    """What a customer can buy, with the price per minute worked out."""
+    conn = _connect(); cu = conn.cursor()
+    cu.execute("""SELECT Id, Name, Minutes, Price, Currency, Commission, PhoneSystemOption
+                  FROM Packages ORDER BY Price""")
+    out = []
+    while True:
+        r = cu.fetchone()
+        if not r:
+            break
+        mins = int(r[2] or 0)
+        cents = int(r[3] or 0)
+        out.append({'id': int(r[0]), 'name': (r[1] or '').strip() or '(unnamed)',
+                    'minutes': mins, 'price_cents': cents,
+                    'currency': (r[4] or 'usd').upper(),
+                    'per_minute_cents': round(cents / mins, 2) if mins else None,
+                    'commission': int(r[5] or 0), 'phone_option': r[6]})
+    conn.close()
+    return {'packages': out}
+
+
+def agent_list(include_left=False):
+    """Everyone and their extension — the thing people look up most often."""
+    conn = _connect(); cu = conn.cursor()
+    cu.execute("""SELECT e.Id, e.FirstName, e.LastName, e.Extension, e.PhoneName,
+                         e.LeftFirm, e.Created, e.QA, e.WithCamera, e.Gender,
+                         e.ExperienceLevel, e.notLogIn, e.ScheduleId
+                  FROM Employee e
+                  WHERE %s ORDER BY e.LeftFirm, e.FirstName, e.LastName"""
+               % ('1=1' if include_left else 'ISNULL(e.LeftFirm,0) = 0'))
+    out = []
+    while True:
+        r = cu.fetchone()
+        if not r:
+            break
+        out.append({'id': int(r[0]),
+                    'name': ('%s %s' % (r[1] or '', r[2] or '')).strip() or '(no name)',
+                    'first': r[1], 'last': r[2],
+                    'extension': (r[3] or '').strip(),
+                    'phone_name': r[4], 'left_firm': bool(r[5]),
+                    'since': _plain(r[6]), 'qa': bool(r[7]), 'camera': bool(r[8]),
+                    'experience': (int(r[10]) if r[10] is not None else None),
+                    'cannot_log_in': bool(r[11]), 'schedule_id': r[12]})
+    conn.close()
+    return {'agents': out, 'includes_former': include_left}
 
 
 def recent_accounts(limit=25):
@@ -1145,6 +1272,10 @@ def _dnd_now(conn):
 
 
 def live_snapshot(feed_limit=70, hours=6):
+    return _retrying(lambda: _live_snapshot(feed_limit, hours))
+
+
+def _live_snapshot(feed_limit=70, hours=6):
     """One read of the whole floor: who is on, what is happening on the phones,
     and every recent event in one stream.
 

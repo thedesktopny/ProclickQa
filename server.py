@@ -4539,7 +4539,8 @@ def _setting(key, default=''):
 # A second way in, for the people who already have CMS accounts. It serves the
 # same pages but only the ones built on the CMS, and it signs people in with
 # their existing user name and password rather than a second set of logins.
-PORTAL_PAGES = ['live', 'customers', 'agent-calls']          # everyone
+PORTAL_PAGES = ['live', 'customers', 'agent-calls',
+                'agent-list', 'packages', 'company-info']   # everyone
 PORTAL_MANAGER_PAGES = ['payments', 'cms-settings']          # managers only
 
 
@@ -4610,17 +4611,8 @@ def portal_manager_only(f):
 @app.route('/portal/')
 def portal_page():
     """The CMS side of the system, on its own address."""
-    try:
-        with open('qa-dashboard.html', 'r', encoding='utf-8') as fh:
-            html = fh.read()
-    except Exception:
-        return 'Portal page missing', 500
-    html = html.replace('<body>', '<body data-portal="1">', 1)
-    resp = make_response(html)
-    resp.headers['Cache-Control'] = 'no-store, must-revalidate'
-    resp.headers['Pragma'] = 'no-cache'
-    resp.headers['X-Build'] = SERVER_BUILD
-    return resp
+    return _serve_page('qa-dashboard.html',
+                       lambda h: h.replace('<body>', '<body data-portal="1">', 1))
 
 
 @app.route('/api/portal/diagnose', methods=['POST'])
@@ -4934,6 +4926,39 @@ def cms_settings_route():
     import cms_db
     try:
         return jsonify(cms_db.settings_all())
+    except Exception as e:
+        return jsonify({'error': str(e)[:240]}), 400
+
+
+@app.route('/api/company-info', methods=['GET'])
+@portal_or_manager
+def company_info_route():
+    """Shared logins and reference details."""
+    import cms_db
+    try:
+        return jsonify(cms_db.company_info())
+    except Exception as e:
+        return jsonify({'error': str(e)[:240]}), 400
+
+
+@app.route('/api/packages', methods=['GET'])
+@portal_or_manager
+def packages_route():
+    """The refill packages customers can buy."""
+    import cms_db
+    try:
+        return jsonify(cms_db.packages())
+    except Exception as e:
+        return jsonify({'error': str(e)[:240]}), 400
+
+
+@app.route('/api/agent-list', methods=['GET'])
+@portal_or_manager
+def agent_list_route():
+    """Everyone and their extension."""
+    import cms_db
+    try:
+        return jsonify(cms_db.agent_list(request.args.get('include_left') == '1'))
     except Exception as e:
         return jsonify({'error': str(e)[:240]}), 400
 
@@ -6636,6 +6661,35 @@ def _portal_host_guard():
     return jsonify({'error': 'Not available on this address'}), 404
 
 
+def _serve_page(path_, transform=None):
+    """Serves a page so the browser always has the current version without
+    downloading it every time.
+
+    A fingerprint of the file goes out with it. On the next visit the browser
+    asks "still this one?" and gets a 200-byte "yes" if nothing changed, or the
+    new page if it did. That is the difference between 112 KB on every load and
+    112 KB only after a deploy — while still never showing a stale page, which
+    is what caused the wrong login to appear.
+    """
+    import hashlib
+    try:
+        with open(path_, 'r', encoding='utf-8') as fh:
+            html = fh.read()
+    except Exception:
+        return 'Page missing', 500
+    if transform:
+        html = transform(html)
+    tag = '"%s"' % hashlib.md5(html.encode('utf-8')).hexdigest()[:16]
+    if request.headers.get('If-None-Match') == tag:
+        resp = make_response('', 304)
+    else:
+        resp = make_response(html)
+    resp.headers['ETag'] = tag
+    resp.headers['Cache-Control'] = 'no-cache, must-revalidate'   # check, don't blindly reuse
+    resp.headers['X-Build'] = SERVER_BUILD
+    return resp
+
+
 @app.route('/api/whoami')
 def whoami():
     """What address the server thinks it is answering on.
@@ -6664,10 +6718,7 @@ def index():
     """
     if _is_portal_host():
         return portal_page()
-    resp = make_response(send_from_directory('.', 'qa-dashboard.html'))
-    resp.headers['Cache-Control'] = 'no-store, must-revalidate'
-    resp.headers['Pragma'] = 'no-cache'
-    return resp
+    return _serve_page('qa-dashboard.html')
 
 try:
     init_db()

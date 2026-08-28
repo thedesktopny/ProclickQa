@@ -1230,6 +1230,54 @@ td.agent{color:var(--text);font-weight:500;}
   </div>
 </div>
 
+<div class="page" id="page-agent-list">
+  <div class="topbar">
+    <button class="navtoggle" onclick="toggleNav()" aria-label="Menu">☰</button>
+    <div class="page-title">📇 Agents</div>
+    <div class="topbar-right">
+      <input id="al-search" placeholder="Name or extension…" oninput="alRender()" style="width:200px;">
+      <label style="font-size:11.5px;color:var(--text3);display:flex;align-items:center;gap:6px;">
+        <input type="checkbox" id="al-former" onchange="loadAgentList()"> include former staff
+      </label>
+      <span id="al-count" style="font-size:11.5px;color:var(--text3);"></span>
+    </div>
+  </div>
+  <div style="padding:18px 28px 44px;"><div id="al-body"></div></div>
+</div>
+
+<div class="page" id="page-packages">
+  <div class="topbar">
+    <button class="navtoggle" onclick="toggleNav()" aria-label="Menu">☰</button>
+    <div class="page-title">📦 Packages</div>
+    <div class="topbar-right"><span id="pk-count" style="font-size:11.5px;color:var(--text3);"></span></div>
+  </div>
+  <div style="padding:18px 28px 44px;">
+    <div class="payhint" style="margin-bottom:16px;">
+      What a customer can buy when they run low on minutes.</div>
+    <div id="pk-body"></div>
+  </div>
+</div>
+
+<div class="page" id="page-company-info">
+  <div class="topbar">
+    <button class="navtoggle" onclick="toggleNav()" aria-label="Menu">☰</button>
+    <div class="page-title">🔑 Info &amp; Logins</div>
+    <div class="topbar-right">
+      <input id="ci-search" placeholder="Search…" oninput="ciRender()" style="width:200px;">
+      <span id="ci-count" style="font-size:11.5px;color:var(--text3);"></span>
+    </div>
+  </div>
+  <div style="padding:18px 28px 44px;">
+    <div class="alert-bar" style="background:rgba(242,88,95,.08);border-color:rgba(242,88,95,.28);margin-bottom:16px;">
+      <span style="font-size:16px;">🔒</span>
+      <span style="font-size:12px;color:var(--text2);flex:1;">
+        Passwords stay covered until you tap Show, so nothing is exposed on a shared screen.
+      </span>
+    </div>
+    <div id="ci-body"></div>
+  </div>
+</div>
+
 <div class="page" id="page-customers">
   <div class="topbar">
     <button class="navtoggle" onclick="toggleNav()" aria-label="Menu">☰</button><div class="page-title">👤 Customers</div>
@@ -3318,6 +3366,8 @@ const SEARCH_FIELDS = [
   ['cms-value', null, false],
   ['an-table', null, false],
   ['cs-search', 'csFilter', false],
+  ['al-search', 'alRender', false],
+  ['ci-search', 'ciRender', false],
 ];
 
 function enhanceSearchFields(){
@@ -3454,20 +3504,157 @@ async function portalLogin(){
 }
 
 /* Shows only the pages this person may open, and labels who they are. */
+
+/* ================= Agents, packages and the shared info list ================= */
+let alData = null, ciData = null;
+
+async function loadAgentList(){
+  const box = document.getElementById('al-body');
+  box.innerHTML = '<div style="color:var(--text3);font-size:13px;">Loading…</div>';
+  try{
+    const inc = document.getElementById('al-former').checked ? '1' : '0';
+    const r = await API.get('/api/agent-list?include_left=' + inc);
+    if(r.error){ box.innerHTML = `<div style="color:var(--red)">${r.error}</div>`; return; }
+    alData = r; alRender();
+  }catch(e){ box.innerHTML = `<div style="color:var(--red)">${e.message}</div>`; }
+}
+
+function alRender(){
+  if(!alData) return;
+  const q = (document.getElementById('al-search').value||'').toLowerCase().trim();
+  const list = alData.agents.filter(a => !q ||
+    a.name.toLowerCase().includes(q) || String(a.extension||'').includes(q));
+  document.getElementById('al-count').textContent =
+    `${list.length} of ${alData.agents.length}`;
+  document.getElementById('al-body').innerHTML = list.length ? `
+    <div class="lvfloor">${list.map(a=>`
+      <div class="lvtile ${a.left_firm?'off':'free'}" onclick="portalOpenAgent(${a.id})"
+           style="border-left-color:${a.left_firm?'var(--text3)':'var(--accent)'}">
+        <div class="nm">${esc(a.name)}</div>
+        <div class="ex">ext ${esc(a.extension)||'—'}</div>
+        <div class="st" style="color:var(--text3)">
+          ${a.left_firm?'former':(a.qa?'QA':'agent')}${a.camera?' · camera':''}</div>
+      </div>`).join('')}</div>`
+    : '<div style="color:var(--text3);font-size:13px;">Nobody matches that.</div>';
+}
+
+function portalOpenAgent(id){
+  if(document.getElementById('page-agent-calls')){ showPage('agent-calls'); setTimeout(()=>acOpen(id), 200); }
+}
+
+async function loadPackages(){
+  const box = document.getElementById('pk-body');
+  box.innerHTML = '<div style="color:var(--text3);font-size:13px;">Loading…</div>';
+  try{
+    const r = await API.get('/api/packages');
+    if(r.error){ box.innerHTML = `<div style="color:var(--red)">${r.error}</div>`; return; }
+    const money = c => '$' + (Math.round(c||0)/100).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+    document.getElementById('pk-count').textContent = `${r.packages.length} packages`;
+    const best = Math.min(...r.packages.filter(p=>p.per_minute_cents).map(p=>p.per_minute_cents));
+    box.innerHTML = `<div class="paygrid" style="grid-template-columns:repeat(auto-fill,minmax(220px,1fr));margin-top:0;">
+      ${r.packages.map(p=>`
+        <div class="card" style="padding:18px 20px;${p.per_minute_cents===best?'border-color:var(--accent);':''}">
+          <div style="font-size:13.5px;font-weight:650;">${esc(p.name)}</div>
+          <div class="payfig paynum pos" style="font-size:28px;margin-top:10px;">${money(p.price_cents)}</div>
+          <div style="font-size:12.5px;color:var(--text2);margin-top:6px;">
+            ${(p.minutes||0).toLocaleString()} minutes</div>
+          <div style="font-size:11.5px;color:var(--text3);margin-top:3px;">
+            ${p.per_minute_cents ? (p.per_minute_cents/100).toFixed(3).replace(/0+$/,'') + ' a minute' : ''}
+            ${p.per_minute_cents===best?' · best value':''}</div>
+          ${p.commission?`<div style="font-size:11px;color:var(--text3);margin-top:4px;">commission ${money(p.commission)}</div>`:''}
+        </div>`).join('')}</div>`;
+  }catch(e){ box.innerHTML = `<div style="color:var(--red)">${e.message}</div>`; }
+}
+
+async function loadCompanyInfo(){
+  const box = document.getElementById('ci-body');
+  box.innerHTML = '<div style="color:var(--text3);font-size:13px;">Loading…</div>';
+  try{
+    const r = await API.get('/api/company-info');
+    if(r.error){ box.innerHTML = `<div style="color:var(--red)">${r.error}</div>`; return; }
+    ciData = r; ciRender();
+  }catch(e){ box.innerHTML = `<div style="color:var(--red)">${e.message}</div>`; }
+}
+
+function ciRender(){
+  if(!ciData) return;
+  const q = (document.getElementById('ci-search').value||'').toLowerCase().trim();
+  const list = ciData.items.filter(i => !q ||
+    i.key.toLowerCase().includes(q) || (!i.sensitive && i.value.toLowerCase().includes(q)));
+  document.getElementById('ci-count').textContent = `${list.length} of ${ciData.items.length}`;
+  document.getElementById('ci-body').innerHTML = list.map(i=>`
+    <div class="card" style="padding:13px 18px;margin-bottom:8px;">
+      <div style="display:flex;gap:12px;align-items:baseline;flex-wrap:wrap;">
+        <b style="font-size:13px;">${esc(i.key)}</b>
+        ${i.updated?`<span style="font-size:10.5px;color:var(--text3);">updated ${new Date(i.updated).toLocaleDateString()}</span>`:''}
+        <span style="margin-left:auto;display:flex;gap:6px;">
+          ${i.sensitive?`<button class="cn-chip" onclick="ciToggle(${i.id})" id="ci-btn-${i.id}">Show</button>`:''}
+          <button class="cn-chip" onclick="ciCopy(${i.id})">Copy</button>
+        </span>
+      </div>
+      <div id="ci-val-${i.id}" style="font-size:13px;color:var(--text);margin-top:6px;
+           word-break:break-all;${i.sensitive?'filter:blur(5px);user-select:none;':''}">${esc(i.value)}</div>
+    </div>`).join('') || '<div style="color:var(--text3);font-size:13px;">Nothing matches.</div>';
+}
+
+function ciToggle(id){
+  const el = document.getElementById('ci-val-' + id);
+  const btn = document.getElementById('ci-btn-' + id);
+  const hidden = el.style.filter !== '';
+  el.style.filter = hidden ? '' : 'blur(5px)';
+  el.style.userSelect = hidden ? 'text' : 'none';
+  if(btn) btn.textContent = hidden ? 'Hide' : 'Show';
+}
+
+function ciCopy(id){
+  const item = (ciData.items||[]).find(i => i.id === id);
+  if(!item) return;
+  navigator.clipboard.writeText(item.value).then(
+    ()=>showToast('Copied'), ()=>showToast('Could not copy', true));
+}
+
 function portalApply(name, isManager){
+  // Build the menu from scratch rather than hiding parts of the QA one — that
+  // depended on the QA markup staying exactly as it is, and it silently left
+  // the menu empty.
+  const PAGES = {
+    'live':         ['🟢', 'Live'],
+    'customers':    ['👤', 'Customers'],
+    'agent-calls':  ['🎧', 'Agents & Calls'],
+    'agent-list':   ['📇', 'Agents'],
+    'packages':     ['📦', 'Packages'],
+    'company-info': ['🔑', 'Info & Logins'],
+    'payments':     ['💳', 'Payments'],
+    'cms-settings': ['⚙️', 'Settings'],
+  };
+  const scroll = document.querySelector('.sidebar-scroll');
+  if(scroll){
+    scroll.innerHTML = '<div class="nav-section">'
+      + '<div class="nav-label">ProClick</div>'
+      + portalPages.filter(p => PAGES[p]).map((p, i) =>
+          `<div class="nav-item${i===0?' active':''}" data-page="${p}" onclick="showPage('${p}')">`
+          + `<span class="icon">${PAGES[p][0]}</span>${PAGES[p][1]}</div>`).join('')
+      + '</div>'
+      + '<div class="nav-section"><div class="nav-label">Account</div>'
+      + '<div class="nav-item" onclick="portalSignOut()"><span class="icon">↩︎</span>Sign out</div>'
+      + '</div>';
+  }
   // banners about QA call processing mean nothing here
   ['processing-paused-banner','ot-active-banner','retry-log-panel'].forEach(id=>{
     const el = document.getElementById(id);
     if(el) el.style.display = 'none';
   });
-  document.querySelectorAll('.nav-item').forEach(el=>{
-    const m = (el.getAttribute('onclick')||'').match(/showPage\('([^']+)'\)/);
-    el.style.display = (m && portalPages.includes(m[1])) ? '' : 'none';
-  });
-  document.querySelectorAll('.nav-section-title, .sidebar-footer').forEach(el=>el.style.display='none');
-  const logo = document.querySelector('.logo-sub');
-  if(logo) logo.textContent = name + (isManager ? ' · manager' : '');
+  const sub = document.querySelector('.logo-sub');
+  if(sub) sub.textContent = name + (isManager ? ' · manager' : '');
+  const mark = document.querySelector('.logo-mark');
+  if(mark) mark.innerHTML = '<div class="logo-icon">🎧</div>ProClick';
   showPage(portalPages[0] || 'live');
+}
+
+function portalSignOut(){
+  portalTicket = null;
+  try{ sessionStorage.removeItem('portal_ticket'); }catch(e){}
+  location.reload();
 }
 
 async function portalBoot(){
@@ -3537,6 +3724,10 @@ function showPage(id){
     loadSkinblockHistory();
   }
   if(window.innerWidth <= 820) toggleNav(false);
+  if(typeof IS_PORTAL_EARLY !== 'undefined' && IS_PORTAL_EARLY){
+    document.querySelectorAll('.nav-item[data-page]').forEach(el=>
+      el.classList.toggle('active', el.getAttribute('data-page') === id));
+  }
   setTimeout(enhanceSearchFields, 0);
   if(id==='cms-pull') cmsPageInit();
   if(id==='agent-calls'){ acLoadLive(); acAutoToggle(); }
@@ -3544,6 +3735,9 @@ function showPage(id){
   if(id==='cms-settings') loadCmsSettings();
   if(id==='connections') loadConnections();
   if(id==='customers') cuLoadRecent();
+  if(id==='agent-list') loadAgentList();
+  if(id==='packages') loadPackages();
+  if(id==='company-info') loadCompanyInfo();
   if(id!=='live') clearInterval(lvTimer);
   if(id!=='agent-calls') clearInterval(acTimer);
   if(id==='payments' && !payTicket){
