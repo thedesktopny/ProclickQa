@@ -2169,10 +2169,22 @@ def _safe(name):
 
 
 def _plain(v):
-    from datetime import datetime, date, timedelta
+    """Turns a database value into something JSON can carry.
+
+    Opening hours come back as a bare time, which json refuses — that is what
+    broke the settings page. uuid and memoryview appear in this database too.
+    """
+    from datetime import datetime, date, time, timedelta
     from decimal import Decimal
+    import uuid as _uuid
     if isinstance(v, (datetime, date)):
         return v.isoformat()
+    if isinstance(v, time):
+        return v.strftime('%H:%M') if not v.second else v.strftime('%H:%M:%S')
+    if isinstance(v, _uuid.UUID):
+        return str(v)
+    if isinstance(v, memoryview):
+        return bytes(v).decode('utf-8', 'replace')
     if isinstance(v, timedelta):
         return str(v)
     if isinstance(v, Decimal):

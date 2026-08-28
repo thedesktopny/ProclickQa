@@ -6641,7 +6641,8 @@ def _is_portal_host():
 # the QA dashboard, the Skin Block tool and the QA APIs are simply not part of
 # this system.
 PORTAL_ALLOWED_PREFIXES = (
-    '/api/whoami', '/api/portal/', '/api/live', '/api/customers', '/api/agents',
+    '/api/whoami', '/api/portal/', '/api/live', '/api/customers',
+    '/api/agents', '/api/agent-list', '/api/packages', '/api/company-info',
     '/api/recording-link', '/api/payments/', '/api/cms-settings',
     '/api/cms-db/', '/api/connections', '/static/', '/favicon',
 )
