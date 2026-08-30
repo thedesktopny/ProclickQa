@@ -685,7 +685,17 @@ input[type="checkbox"]:checked{
 input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2); outline:none; }
 
 /* dialogs: a softer sheet, and the page behind it pushed back */
-.modal{ backdrop-filter:blur(3px); }
+/* No blurred backdrop. It looks nice, but the browser has to repaint the
+   whole screen behind the dialog on every scroll frame, which showed as the
+   screen blinking while scrolling the package list. A slightly darker
+   backdrop does the same job for nothing. */
+.modal{ background:rgba(6,8,18,.72); }
+
+/* Scrolling regions are told to keep their painting to themselves, so a long
+   list cannot cause work outside it. */
+.pick-scroll, #buy-body, #sms-thread, .table-wrap, .lvfeed{
+  contain:paint; will-change:scroll-position;
+}
 .modal-box{
   border-radius:18px; padding:26px 28px;
   box-shadow:0 24px 60px rgba(0,0,0,.5);
@@ -1324,7 +1334,13 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
     </div>
 
     <div class="card" style="padding:16px 20px;margin-top:14px;">
-      <h2 class="payh">Find the recording address</h2>
+      <h2 class="payh">Recordings</h2>
+      <div class="payhint">Takes the last few calls and actually tries to fetch their
+        recordings, so this is a real answer rather than a setting that looks right.</div>
+      <button onclick="testRecordings()" class="btn btn-outline" style="font-size:12px;">Test them</button>
+      <pre id="rec-test" style="white-space:pre-wrap;font-size:11.5px;color:var(--text2);
+           margin:12px 0 0;line-height:1.8;"></pre>
+      <h2 class="payh" style="margin-top:18px;">Find the recording address</h2>
       <div class="payhint">Looks through the CMS for it, then proves it by trying a real
         recording. If one works it is saved and the links start working.</div>
       <button onclick="findRecordingBase()" class="btn btn-primary" style="font-size:12px;">Find it</button>
@@ -5694,6 +5710,29 @@ async function loadRecentTexts(){
             <div>to ${esc(m.our_number||'?')}</div></div>
         </div>`).join('');
   }catch(e){ box.innerHTML = `<div style="color:var(--red)">${e.message}</div>`; }
+}
+
+
+/* Tries real recordings rather than trusting a setting. */
+async function testRecordings(){
+  const out = document.getElementById('rec-test');
+  out.textContent = 'Trying the last few recordings…';
+  try{
+    const r = await API.get('/api/recordings/test');
+    if(r.error){ out.textContent = '❌ ' + r.error; return; }
+    const lines = [];
+    lines.push('base address set here: ' + (r.base_setting || '(none)'));
+    lines.push('');
+    (r.samples || []).forEach(s=>{
+      lines.push(`call ${s.call_id} · ${String(s.when||'').slice(0,16).replace('T',' ')}`);
+      lines.push(`   stored : ${s.stored}`);
+      lines.push(`   ${s.absolute ? 'a full address' : 'a path, needs a base in front'}`);
+      lines.push(`   ${s.works ? '✓' : '✗'} ${s.result}`);
+      lines.push('');
+    });
+    lines.push(r.meaning || '');
+    out.textContent = lines.join('\n');
+  }catch(e){ out.textContent = 'Failed: ' + e.message; }
 }
 
 async function findRecordingBase(){
