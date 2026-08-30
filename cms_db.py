@@ -992,6 +992,34 @@ def customer_search(q, limit=40):
     return out
 
 
+def credential_fields(credential_id):
+    """The username and password stored against one customer login.
+
+    Reading this is a privileged act, so the caller records who looked before
+    the value is returned — see the route. Nothing is cached here.
+    """
+    conn = _connect(); cu = conn.cursor()
+    cu.execute("""SELECT d.Id, d.Name, d.DataType, d.Value, d.Updated,
+                         c.Title, c.Website, c.AccountId
+                  FROM CustomerCredentialData d
+                  JOIN CustomerCredentials c ON c.Id = d.CredentialsId
+                  WHERE d.CredentialsId = %s
+                  ORDER BY d.Id""", (int(credential_id),))
+    fields, meta = [], {}
+    while True:
+        r = cu.fetchone()
+        if not r:
+            break
+        meta = {'title': r[5], 'website': r[6], 'account_id': int(r[7] or 0)}
+        fields.append({'id': int(r[0]), 'name': r[1], 'type': r[2],
+                       'value': r[3], 'updated': _plain(r[4]),
+                       'secret': str(r[2] or r[1] or '').lower().find('pass') >= 0})
+    conn.close()
+    if not fields:
+        raise RuntimeError('That login has nothing stored against it.')
+    return {'credential_id': int(credential_id), 'fields': fields, **meta}
+
+
 def company_info():
     """The shared reference list — logins, numbers and other things staff look up.
 
@@ -1236,10 +1264,13 @@ def customer_profile(account_id, limit=120):
         SELECT TOP 20 Brand, Last4, Created, LastUsed FROM StripeCustomers
         WHERE AccountId = %s ORDER BY LastUsed DESC""", (aid,))]
 
-    credentials = [{'title': ti, 'website': w, 'added': _plain(cr)}
-                   for ti, w, cr in rows("""
-        SELECT TOP 40 Title, Website, Created FROM CustomerCredentials
-        WHERE AccountId = %s ORDER BY Created DESC""", (aid,))]
+    credentials = [{'id': n(i), 'title': ti, 'website': w, 'added': _plain(cr),
+                    'fields': n(cnt)}
+                   for i, ti, w, cr, cnt in rows("""
+        SELECT TOP 40 c.Id, c.Title, c.Website, c.Created,
+               (SELECT COUNT(*) FROM CustomerCredentialData d WHERE d.CredentialsId = c.Id)
+        FROM CustomerCredentials c
+        WHERE c.AccountId = %s ORDER BY c.Created DESC""", (aid,))]
 
     conn.close()
     return {'account': account, 'totals': totals, 'work': work, 'payments': payments_list,

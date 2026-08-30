@@ -742,6 +742,90 @@ def require_manager(f):
         return f(*args, **kwargs)
     return decorated
 
+
+def _portal_ticket(user, minutes=600):
+    import hmac, hashlib, base64, time, json as _json
+    exp = int(time.time()) + minutes * 60
+    body = _json.dumps({'u': user.get('user_id'), 'e': user.get('employee_id'),
+                        'n': user.get('name'), 'm': bool(user.get('is_manager')),
+                        'q': bool(user.get('is_qa')),
+                        'a': bool(user.get('is_admin')), 'x': exp}, separators=(',', ':'))
+    secret = (os.getenv('SECRET_KEY') or app.secret_key or 'voiceguard').encode()
+    sig = hmac.new(secret, body.encode(), hashlib.sha256).hexdigest()[:32]
+    return base64.urlsafe_b64encode((body + '.' + sig).encode()).decode()
+
+
+def _portal_user(ticket):
+    """Returns the signed-in person, or None. The signature is checked before
+    anything in the ticket is believed."""
+    import hmac, hashlib, base64, time, json as _json
+    try:
+        raw = base64.urlsafe_b64decode(str(ticket).encode()).decode()
+        body, sig = raw.rsplit('.', 1)
+        secret = (os.getenv('SECRET_KEY') or app.secret_key or 'voiceguard').encode()
+        want = hmac.new(secret, body.encode(), hashlib.sha256).hexdigest()[:32]
+        if not hmac.compare_digest(sig, want):
+            return None
+        data = _json.loads(body)
+        if int(data.get('x', 0)) < time.time():
+            return None
+        return data
+    except Exception:
+        return None
+
+
+def portal_or_manager(f):
+    """Either a VoiceGuard manager login or a valid CMS portal sign-in."""
+    from functools import wraps
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if _portal_user(request.headers.get('X-Portal-Ticket', '')):
+            return f(*args, **kwargs)
+        user = get_token_user(get_request_token())
+        if user and user.get('role') in ('admin', 'manager'):
+            return f(*args, **kwargs)
+        if session.get('logged_in'):
+            return f(*args, **kwargs)
+        return jsonify({'error': 'Sign in first'}), 401
+    return decorated
+
+
+def portal_admin_only(f):
+    """The money pages. In the CMS, Admin sits above Manager, and a manager has
+    no business seeing every payment and refund — so this checks for Admin
+    specifically, on the server, not just in the menu."""
+    from functools import wraps
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        p = _portal_user(request.headers.get('X-Portal-Ticket', ''))
+        if p:
+            if p.get('a'):
+                return f(*args, **kwargs)
+            return jsonify({'error': 'Only an administrator can open the payments pages.'}), 403
+        user = get_token_user(get_request_token())
+        if (user and user.get('role') == 'admin') or session.get('role') == 'admin' \
+           or session.get('admin'):
+            return f(*args, **kwargs)
+        return jsonify({'error': 'Administrators only'}), 403
+    return decorated
+
+
+def portal_manager_only(f):
+    """Settings: managers and admins, from either door."""
+    from functools import wraps
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        p = _portal_user(request.headers.get('X-Portal-Ticket', ''))
+        if p and p.get('m'):
+            return f(*args, **kwargs)
+        if p:
+            return jsonify({'error': 'Managers only'}), 403
+        user = get_token_user(get_request_token())
+        if (user and user.get('role') in ('admin', 'manager')) or session.get('logged_in'):
+            return f(*args, **kwargs)
+        return jsonify({'error': 'Managers only'}), 403
+    return decorated
+
 def require_login(f):
     from functools import wraps
     @wraps(f)
@@ -1200,7 +1284,7 @@ def delete_manual_cost(cost_id):
     conn.close()
     return jsonify({'success': True})
 @app.route('/api/qa-users', methods=['GET'])
-@require_manager
+@portal_manager_only
 def get_qa_users():
     conn = get_db()
     c = conn.cursor(cursor_factory=RealDictCursor)
@@ -1258,7 +1342,7 @@ def create_qa_user():
         return jsonify({'error': str(e)}), 400
 
 @app.route('/api/qa-users/<int:user_id>/drilldown', methods=['GET'])
-@require_manager
+@portal_manager_only
 def qa_user_drilldown(user_id):
     conn = get_db()
     c = conn.cursor(cursor_factory=RealDictCursor)
@@ -1367,7 +1451,7 @@ def delete_qa_user(user_id):
     return jsonify({'success': True})
 
 @app.route('/api/qa-users/<int:user_id>/assign', methods=['POST'])
-@require_manager
+@portal_manager_only
 def assign_agents_to_qa_user(user_id):
     """Assign call agents to a QA user. Replaces existing assignments."""
     data = request.json
@@ -1384,7 +1468,7 @@ def assign_agents_to_qa_user(user_id):
     return jsonify({'success': True, 'assigned': len(agent_ids)})
 
 @app.route('/api/qa-users/<int:user_id>/assignments', methods=['GET'])
-@require_manager
+@portal_manager_only
 def get_qa_user_assignments(user_id):
     conn = get_db()
     c = conn.cursor(cursor_factory=RealDictCursor)
@@ -1401,7 +1485,7 @@ def get_qa_user_assignments(user_id):
     return jsonify(agents)
 
 @app.route('/api/qa-users/performance', methods=['GET'])
-@require_manager
+@portal_manager_only
 def qa_user_performance():
     """Admin view: how each QA user is performing."""
     conn = get_db()
@@ -4562,95 +4646,11 @@ def _setting(key, default=''):
 # their existing user name and password rather than a second set of logins.
 PORTAL_PAGES = ['live', 'customers', 'agent-calls',
                 'agent-list', 'packages', 'company-info']   # everyone
-PORTAL_MANAGER_PAGES = ['cms-settings']                      # managers and admins
+PORTAL_MANAGER_PAGES = ['cms-settings', 'qa-users']           # managers and admins
 PORTAL_ADMIN_PAGES = ['payments']                            # admins only — real money
 # QA reviewers additionally get the monitoring side. They are doing QA work, so
 # they need the same call review tools the QA dashboard has.
 PORTAL_QA_PAGES = ['calls', 'human-review', 'call-notes', 'notes', 'analytics']
-
-
-def _portal_ticket(user, minutes=600):
-    import hmac, hashlib, base64, time, json as _json
-    exp = int(time.time()) + minutes * 60
-    body = _json.dumps({'u': user.get('user_id'), 'e': user.get('employee_id'),
-                        'n': user.get('name'), 'm': bool(user.get('is_manager')),
-                        'q': bool(user.get('is_qa')),
-                        'a': bool(user.get('is_admin')), 'x': exp}, separators=(',', ':'))
-    secret = (os.getenv('SECRET_KEY') or app.secret_key or 'voiceguard').encode()
-    sig = hmac.new(secret, body.encode(), hashlib.sha256).hexdigest()[:32]
-    return base64.urlsafe_b64encode((body + '.' + sig).encode()).decode()
-
-
-def _portal_user(ticket):
-    """Returns the signed-in person, or None. The signature is checked before
-    anything in the ticket is believed."""
-    import hmac, hashlib, base64, time, json as _json
-    try:
-        raw = base64.urlsafe_b64decode(str(ticket).encode()).decode()
-        body, sig = raw.rsplit('.', 1)
-        secret = (os.getenv('SECRET_KEY') or app.secret_key or 'voiceguard').encode()
-        want = hmac.new(secret, body.encode(), hashlib.sha256).hexdigest()[:32]
-        if not hmac.compare_digest(sig, want):
-            return None
-        data = _json.loads(body)
-        if int(data.get('x', 0)) < time.time():
-            return None
-        return data
-    except Exception:
-        return None
-
-
-def portal_or_manager(f):
-    """Either a VoiceGuard manager login or a valid CMS portal sign-in."""
-    from functools import wraps
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        if _portal_user(request.headers.get('X-Portal-Ticket', '')):
-            return f(*args, **kwargs)
-        user = get_token_user(get_request_token())
-        if user and user.get('role') in ('admin', 'manager'):
-            return f(*args, **kwargs)
-        if session.get('logged_in'):
-            return f(*args, **kwargs)
-        return jsonify({'error': 'Sign in first'}), 401
-    return decorated
-
-
-def portal_admin_only(f):
-    """The money pages. In the CMS, Admin sits above Manager, and a manager has
-    no business seeing every payment and refund — so this checks for Admin
-    specifically, on the server, not just in the menu."""
-    from functools import wraps
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        p = _portal_user(request.headers.get('X-Portal-Ticket', ''))
-        if p:
-            if p.get('a'):
-                return f(*args, **kwargs)
-            return jsonify({'error': 'Only an administrator can open the payments pages.'}), 403
-        user = get_token_user(get_request_token())
-        if (user and user.get('role') == 'admin') or session.get('role') == 'admin' \
-           or session.get('admin'):
-            return f(*args, **kwargs)
-        return jsonify({'error': 'Administrators only'}), 403
-    return decorated
-
-
-def portal_manager_only(f):
-    """Settings: managers and admins, from either door."""
-    from functools import wraps
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        p = _portal_user(request.headers.get('X-Portal-Ticket', ''))
-        if p and p.get('m'):
-            return f(*args, **kwargs)
-        if p:
-            return jsonify({'error': 'Managers only'}), 403
-        user = get_token_user(get_request_token())
-        if (user and user.get('role') in ('admin', 'manager')) or session.get('logged_in'):
-            return f(*args, **kwargs)
-        return jsonify({'error': 'Managers only'}), 403
-    return decorated
 
 
 @app.route('/portal')
@@ -5008,6 +5008,66 @@ def cms_settings_route():
         return jsonify({'error': str(e)[:240]}), 400
 
 
+@app.route('/api/credentials/<int:credential_id>', methods=['POST'])
+@portal_or_manager
+def credential_reveal(credential_id):
+    """Shows a customer's stored login — and records who looked, first.
+
+    Someone reading a customer's password is exactly the kind of thing an owner
+    wants to be able to review afterwards, so the record is written BEFORE the
+    value is handed over. If the logging fails, nothing is shown.
+    """
+    import cms_db, json
+    who = _who()
+    d = request.json or {}
+    reason = (d.get('reason') or '').strip()[:200]
+    action = 'copy_credential' if d.get('copied') else 'view_credential'
+    try:
+        info = cms_db.credential_fields(credential_id)
+    except Exception as e:
+        return jsonify({'error': str(e)[:200]}), 400
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute("""INSERT INTO cms_audit
+                     (who, employee_id, action, table_name, row_id, before_json,
+                      after_json, committed)
+                     VALUES (%s, %s, %s, 'CustomerCredentials', %s, NULL, %s, TRUE)""",
+                  (who.get('name'), who.get('employee_id'), action, credential_id,
+                   json.dumps({'account_id': info.get('account_id'),
+                               'title': info.get('title'),
+                               'reason': reason,
+                               'ip': request.headers.get('X-Forwarded-For', request.remote_addr)})))
+        conn.commit(); conn.close()
+    except Exception as e:
+        # no record, no reveal
+        return jsonify({'error': 'Could not record who is looking, so the login '
+                                 'was not shown. ' + str(e)[:120]}), 500
+    return jsonify({**info, 'logged_as': who.get('name')})
+
+
+@app.route('/api/credential-access', methods=['GET'])
+@portal_manager_only
+def credential_access_log():
+    """Who has looked at customer logins."""
+    conn = get_db(); c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute("""SELECT at, who, employee_id, action, row_id, after_json
+                 FROM cms_audit
+                 WHERE action IN ('view_credential', 'copy_credential')
+                 ORDER BY at DESC LIMIT 300""")
+    rows = []
+    import json as _json
+    for r in c.fetchall():
+        r = dict(r)
+        try:
+            extra = _json.loads(r.pop('after_json') or '{}')
+        except Exception:
+            extra = {}
+        r['at'] = r['at'].isoformat() if r['at'] else None
+        rows.append({**r, **extra})
+    conn.close()
+    return jsonify({'accesses': rows})
+
+
 @app.route('/api/company-info', methods=['GET'])
 @portal_or_manager
 def company_info_route():
@@ -5221,10 +5281,48 @@ def recording_link():
         base = os.getenv('RECORDING_BASE_URL', '')
     if path.lower().startswith(('http://', 'https://')):
         return jsonify({'url': path})          # already a full address
+
     if not base:
-        return jsonify({'error': 'No recording address is set yet (recording_base_url).',
-                        'path': path}), 400
-    return jsonify({'url': base.rstrip('/') + '/' + path.lstrip('/')})
+        # Nobody set it, so work it out rather than refusing. The candidates are
+        # tried against this very recording, and the one that answers is saved.
+        tried = []
+        for cand in ('https://panel.myhellodesk.com',
+                     'https://cms.myhellodesk.com',
+                     'https://myhellodesk.com',
+                     'https://panel.myhellodesk.com/media',
+                     'https://panel.myhellodesk.com/files',
+                     'https://panel.myhellodesk.com/recordings'):
+            url = cand.rstrip('/') + '/' + path.lstrip('/')
+            try:
+                req = urllib.request.Request(url, method='HEAD',
+                                             headers={'User-Agent': 'VoiceGuard/1.0'})
+                with urllib.request.urlopen(req, timeout=6) as r:
+                    ctype = r.headers.get('Content-Type', '')
+                    if r.status < 400 and 'html' not in ctype.lower():
+                        base = cand
+                        try:
+                            conn = get_db(); c = conn.cursor()
+                            c.execute("""INSERT INTO app_settings (key, value)
+                                         VALUES ('recording_base_url', %s)
+                                         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value""",
+                                      (base,))
+                            conn.commit(); conn.close()
+                        except Exception:
+                            pass
+                        break
+                    tried.append('%s → HTTP %d %s' % (cand, r.status, ctype[:24]))
+            except Exception as e:
+                tried.append('%s → %s' % (cand, str(e)[:60]))
+        if not base:
+            return jsonify({
+                'error': 'The address recordings are served from is not known yet.',
+                'path': path,
+                'tried': tried,
+                'fix': ('Ask Igor for the address these files are served from, then add a '
+                        'setting called recording_base_url with it. The file is at: ' + path),
+            }), 400
+
+    return jsonify({'url': base.rstrip('/') + '/' + path.lstrip('/'), 'base': base})
 
 
 @app.route('/api/payments/unlock', methods=['POST'])
@@ -6809,6 +6907,7 @@ PORTAL_ALLOWED_PREFIXES = (
     '/api/whoami', '/api/portal/', '/api/live', '/api/customers',
     '/api/agents', '/api/agent-list', '/api/packages', '/api/company-info',
     '/api/recording-link', '/api/payments/', '/api/cms-settings',
+    '/api/qa-users', '/api/credentials', '/api/credential-access',
     '/api/cms-db/', '/api/connections', '/static/', '/favicon',
 )
 

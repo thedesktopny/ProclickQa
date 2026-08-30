@@ -3694,13 +3694,14 @@ function portalApply(name, isManager){
     'company-info': ['🔑', 'Info & Logins'],
     'payments':     ['💳', 'Payments'],
     'cms-settings': ['⚙️', 'Settings'],
+    'qa-users':     ['🛡️', 'QA Assignments'],
     'calls':        ['📞', 'Call Review'],
     'human-review': ['👁', 'Human Review'],
     'call-notes':   ['🗒️', 'Call Notes'],
     'notes':        ['📝', 'Note Quality'],
     'analytics':    ['📈', 'Analytics'],
   };
-  const QA_SET = ['calls','human-review','call-notes','notes','analytics'];
+  const QA_SET = ['calls','human-review','call-notes','notes','analytics','qa-users'];
   const item = (p, active) =>
     `<div class="nav-item${active?' active':''}" data-page="${p}" onclick="showPage('${p}')">`
     + `<span class="icon">${PAGES[p][0]}</span>${PAGES[p][1]}</div>`;
@@ -5861,18 +5862,60 @@ function cuTab(which){
       </div>
       <div class="card" style="padding:16px 18px;">
         <h2 class="payh">Stored logins</h2>
-        <div class="payhint">Titles only — no passwords are read.</div>
+        <div class="payhint">Opening one is recorded — who looked, when, and at which account.</div>
         ${r.credentials.length ? r.credentials.map(c=>`<div class="payrow" style="cursor:default">
-            <div class="nm">${esc(c.title)}<div class="mt">${esc(c.website)||''} · ${cuDate(c.added)}</div></div>
-          </div>`).join('') : '<div class="payhint">None.</div>'}
+            <div class="nm">${esc(c.title)}<div class="mt">${esc(c.website)||''} · ${cuDate(c.added)}
+              ${c.fields?` · ${c.fields} fields`:''}</div></div>
+            <button class="cn-chip" onclick="cuCredOpen(${c.id})">Show</button>
+          </div>
+          <div id="cred-${c.id}" style="display:none;padding:8px 0 12px;"></div>`).join('')
+          : '<div class="payhint">None.</div>'}
       </div></div>`;
   }
+}
+
+
+/* Opening a customer's stored login is recorded before the value is shown —
+   who looked, at which account, and when. An owner should be able to review
+   that afterwards, which is only possible if it is written down every time. */
+async function cuCredOpen(id){
+  const box = document.getElementById('cred-' + id);
+  if(!box) return;
+  if(box.style.display === 'block'){ box.style.display = 'none'; box.innerHTML = ''; return; }
+  box.style.display = 'block';
+  box.innerHTML = '<div style="color:var(--text3);font-size:11.5px;">Opening…</div>';
+  try{
+    const r = await API.post('/api/credentials/' + id, {});
+    if(r.error){ box.innerHTML = `<div style="color:var(--red);font-size:12px;">${r.error}</div>`; return; }
+    box.innerHTML = `
+      <div style="background:var(--surface2);border:1px solid var(--border);border-radius:9px;padding:10px 12px;">
+        ${r.fields.map(f=>`<div style="display:flex;gap:10px;align-items:baseline;padding:3px 0;">
+          <span style="font-size:11px;color:var(--text3);width:88px;">${esc(f.type||f.name)}</span>
+          <span style="font-size:12.5px;flex:1;word-break:break-all;${f.secret?'letter-spacing:.05em;':''}">${esc(f.value)}</span>
+          <button class="cn-chip" onclick="cuCredCopy(${id}, ${JSON.stringify(f.value).replace(/"/g,'&quot;')})">Copy</button>
+        </div>`).join('')}
+        <div style="font-size:10.5px;color:var(--text3);margin-top:8px;">
+          Recorded as opened by ${esc(r.logged_as || 'you')}.</div>
+      </div>`;
+  }catch(e){ box.innerHTML = `<div style="color:var(--red);font-size:12px;">${e.message}</div>`; }
+}
+
+async function cuCredCopy(id, value){
+  navigator.clipboard.writeText(value).then(()=>showToast('Copied'), ()=>showToast('Could not copy', true));
+  try{ await API.post('/api/credentials/' + id, {copied: true}); }catch(e){}
 }
 
 async function cuPlay(path){
   try{
     const r = await API.get('/api/recording-link?path=' + encodeURIComponent(path));
-    if(r.error){ showToast(r.error + ' — path: ' + path, true); return; }
+    if(r.error){
+      // say what was tried, so this is a question for Igor rather than a shrug
+      const lines = [r.error, '', 'File: ' + path];
+      if(r.tried && r.tried.length){ lines.push('', 'Addresses tried:'); r.tried.forEach(t=>lines.push('  ' + t)); }
+      if(r.fix) lines.push('', r.fix);
+      alert(lines.join('\n'));
+      return;
+    }
     window.open(r.url, '_blank');
   }catch(e){ showToast('Could not open the recording', true); }
 }

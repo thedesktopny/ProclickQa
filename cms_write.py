@@ -121,20 +121,31 @@ def create(table, values, who, dry_run=True):
     try:
         cu = conn.cursor()
         cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
-        cu.execute('BEGIN TRANSACTION')
         cu.execute(sql, tuple(params))
         r = cu.fetchone()
         out['new_id'] = int(r[0]) if r else None
+        # The driver holds its own transaction. Committing in SQL alone leaves
+        # that one open, and closing the connection then throws the work away —
+        # which looked exactly like a successful save that changed nothing.
         if dry_run:
-            cu.execute('ROLLBACK TRANSACTION')
+            conn.rollback()
             out['committed'] = False
             out['meaning'] = ('This would create %s #%s. Nothing has been saved.'
                               % (table, out.get('new_id')))
+            out['ok'] = True
         else:
-            cu.execute('COMMIT TRANSACTION')
-            out['committed'] = True
-            out['meaning'] = 'Created %s #%s.' % (table, out.get('new_id'))
-        out['ok'] = True
+            conn.commit()
+            # read it back — a new row that cannot be found was not created
+            check = _row_now(conn, table, out['new_id']) if out.get('new_id') else None
+            if check is None:
+                out['ok'] = False
+                out['committed'] = False
+                out['error'] = ('The database reported success but the new record cannot be '
+                                'found. The login may not have permission to write.')
+            else:
+                out['committed'] = True
+                out['ok'] = True
+                out['meaning'] = 'Created %s #%s.' % (table, out.get('new_id'))
     except Exception as e:
         try:
             conn.cursor().execute('ROLLBACK TRANSACTION')
@@ -170,21 +181,37 @@ def update(table, row_id, values, who, dry_run=True):
         out['before'] = {k: before.get(k) for k in clean}
         cu = conn.cursor()
         cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
-        cu.execute('BEGIN TRANSACTION')
         cu.execute(sql, tuple(params))
         affected = cu.rowcount
         out['rows_affected'] = None if affected is None or affected < 0 else affected
         if dry_run:
-            cu.execute('ROLLBACK TRANSACTION')
+            conn.rollback()
             out['committed'] = False
             n = out['rows_affected']
             out['meaning'] = ('This would change %s. Nothing has been saved.'
                               % ('1 row' if n in (None, 1) else '%d rows' % n))
+            out['ok'] = True
         else:
-            cu.execute('COMMIT TRANSACTION')
-            out['committed'] = True
-            out['meaning'] = 'Saved.'
-        out['ok'] = True
+            conn.commit()
+            # Prove it. Reading the row back is the only honest way to say
+            # "saved" — the driver reporting success is not the same thing.
+            after = _row_now(conn, table, row_id)
+            changed = {k: after.get(k) for k in clean} if after else {}
+            wanted = {k: (str(v) if v is not None else None) for k, v in clean.items()}
+            got = {k: (str(v) if v is not None else None) for k, v in changed.items()}
+            mismatched = [k for k in wanted
+                          if k not in ('isBusiness', 'IsFree') and wanted[k] != got.get(k)]
+            out['after'] = changed
+            if mismatched:
+                out['ok'] = False
+                out['committed'] = False
+                out['error'] = ('The database accepted the change but the record still reads '
+                                'the same (%s). The login may not have permission to write.'
+                                % ', '.join(mismatched))
+            else:
+                out['committed'] = True
+                out['ok'] = True
+                out['meaning'] = 'Saved and confirmed.'
     except WriteRefused:
         conn.close()
         raise
