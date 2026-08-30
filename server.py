@@ -528,6 +528,20 @@ def init_db():
         conn.commit()
     except Exception: pass
 
+    # Who reviews whom. Both sides are people who already exist in the CMS —
+    # QA reviewers carry the QA flag and agents are the rest — so nothing is
+    # created here, only the pairing, which is ours rather than the CMS's.
+    try:
+        c.execute('''CREATE TABLE IF NOT EXISTS qa_assignments (
+            agent_employee_id INTEGER PRIMARY KEY,
+            reviewer_employee_id INTEGER NOT NULL,
+            assigned_at TIMESTAMP DEFAULT NOW(),
+            assigned_by TEXT
+        )''')
+        conn.commit()
+    except Exception as e:
+        print('[init] qa_assignments: ' + str(e)[:120])
+
     # every change this system makes to the CMS is recorded here, in our own
     # database rather than theirs
     try:
@@ -4653,9 +4667,9 @@ def _setting(key, default=''):
 # A second way in, for the people who already have CMS accounts. It serves the
 # same pages but only the ones built on the CMS, and it signs people in with
 # their existing user name and password rather than a second set of logins.
-PORTAL_PAGES = ['live', 'missed', 'texts', 'customers', 'agent-calls',
+PORTAL_PAGES = ['live', 'missed', 'customers', 'agent-calls',
                 'agent-list', 'packages', 'company-info']   # everyone
-PORTAL_MANAGER_PAGES = ['cms-settings', 'qa-users']           # managers and admins
+PORTAL_MANAGER_PAGES = ['cms-settings', 'qa-assign']           # managers and admins
 PORTAL_ADMIN_PAGES = ['payments']                            # admins only — real money
 # QA reviewers additionally get the monitoring side. They are doing QA work, so
 # they need the same call review tools the QA dashboard has.
@@ -5119,6 +5133,75 @@ def packages_route():
         return jsonify(cms_db.packages())
     except Exception as e:
         return jsonify({'error': str(e)[:240]}), 400
+
+
+@app.route('/api/qa-assignments', methods=['GET'])
+@portal_manager_only
+def qa_assignments_get():
+    """Who reviews whom, using the people already in the CMS.
+
+    Reviewers are employees carrying the QA flag; agents are everyone else.
+    No accounts are created here — the pairing is the only new information.
+    """
+    import cms_db
+    people = cms_db.agent_list(include_left=False)['agents']
+    reviewers = [p for p in people if p.get('qa')]
+    agents = [p for p in people if not p.get('qa')]
+
+    pairs = {}
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute('SELECT agent_employee_id, reviewer_employee_id FROM qa_assignments')
+        pairs = {int(a): int(r) for a, r in c.fetchall()}
+        conn.close()
+    except Exception as e:
+        print('[qa] could not read assignments: ' + str(e)[:120])
+
+    by_reviewer = {}
+    for a in agents:
+        rid = pairs.get(a['id'])
+        a['reviewer_id'] = rid
+        if rid:
+            by_reviewer.setdefault(rid, []).append(a['id'])
+    for r in reviewers:
+        r['agent_ids'] = by_reviewer.get(r['id'], [])
+        r['agent_count'] = len(r['agent_ids'])
+
+    return jsonify({'reviewers': reviewers, 'agents': agents,
+                    'unassigned': len([a for a in agents if not a['reviewer_id']])})
+
+
+@app.route('/api/qa-assignments', methods=['POST'])
+@portal_manager_only
+def qa_assignments_set():
+    """Set which agents a reviewer is responsible for.
+
+    Replaces that reviewer's list. An agent belongs to one reviewer, so
+    assigning them here takes them off whoever had them before.
+    """
+    d = request.json or {}
+    try:
+        reviewer_id = int(d.get('reviewer_id'))
+    except Exception:
+        return jsonify({'ok': False, 'error': 'reviewer_id required'}), 400
+    agent_ids = [int(x) for x in (d.get('agent_ids') or [])]
+    who = _who().get('name')
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute('DELETE FROM qa_assignments WHERE reviewer_employee_id = %s', (reviewer_id,))
+        for aid in agent_ids:
+            c.execute("""INSERT INTO qa_assignments
+                         (agent_employee_id, reviewer_employee_id, assigned_by, assigned_at)
+                         VALUES (%s, %s, %s, NOW())
+                         ON CONFLICT (agent_employee_id) DO UPDATE
+                         SET reviewer_employee_id = EXCLUDED.reviewer_employee_id,
+                             assigned_by = EXCLUDED.assigned_by,
+                             assigned_at = NOW()""",
+                      (aid, reviewer_id, who))
+        conn.commit(); conn.close()
+        return jsonify({'ok': True, 'assigned': len(agent_ids)})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)[:200]}), 400
 
 
 @app.route('/api/agent-list', methods=['GET'])
@@ -5620,6 +5703,38 @@ def work_pause(work_id):
         return jsonify({'ok': False, 'error': 'Could not change the pause.',
                         'raw_error': str(e)[:300]}), 400
     return jsonify(out), (200 if out.get('ok') else 400)
+
+
+@app.route('/api/customers/<int:account_id>/texts', methods=['POST'])
+@portal_or_manager
+def customer_send_text(account_id):
+    """Text a customer from the number already assigned to them.
+
+    Does not set up a number for an account that has none — that is done in
+    the CMS, deliberately.
+    """
+    import cms_write
+    d = request.json or {}
+    try:
+        out = cms_write.send_text(account_id, d.get('message'), _who(),
+                                  media_url=d.get('media_url'))
+    except cms_write.WriteRefused as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'The message could not be sent.',
+                        'raw_error': str(e)[:300]}), 400
+    return jsonify(out), (200 if out.get('ok') else 400)
+
+
+@app.route('/api/customers/<int:account_id>/texts/read', methods=['POST'])
+@portal_or_manager
+def customer_texts_read(account_id):
+    """Opening a conversation marks its messages read."""
+    import cms_write
+    try:
+        return jsonify(cms_write.mark_texts_read(account_id))
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)[:200]}), 400
 
 
 @app.route('/api/texts/unread', methods=['GET'])
@@ -7452,7 +7567,7 @@ PORTAL_ALLOWED_PREFIXES = (
     '/api/whoami', '/api/portal/', '/api/live', '/api/customers',
     '/api/agents', '/api/agent-list', '/api/packages', '/api/company-info',
     '/api/recording-link', '/api/payments/', '/api/cms-settings',
-    '/api/qa-users', '/api/credentials', '/api/credential-access', '/api/work',
+    '/api/qa-users', '/api/qa-assignments', '/api/credentials', '/api/credential-access', '/api/work',
     '/api/customers/', '/api/calls/', '/api/my-call', '/api/phone-event',
     '/api/phone-event/recent', '/api/phone-event/check',
     '/api/missed-calls', '/api/texts/',

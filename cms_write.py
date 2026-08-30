@@ -16,6 +16,7 @@ The CMS application enforces rules we cannot see, so this deliberately covers
 only records that stand alone. Payments, minute balances and logins are not
 here: those touch several tables at once and belong to the CMS.
 """
+import os
 import cms_db
 
 
@@ -604,6 +605,138 @@ def end_work(work_id, minutes_billed, note, who, task=None, dry_run=False):
                               'previous_balance': out.get('previous_balance'),
                               'new_balance': out.get('new_balance')}})
     return out
+
+
+BULKVS_SEND_URL = 'https://portal.bulkvs.com/api/v1.0/messageSend'
+
+
+def send_text(account_id, message, who, media_url=None):
+    """Send a text to a customer from the number already assigned to them.
+
+    Copied from the CMS's SendSMS, including the character escaping it applies
+    before handing the message to BulkVS. Two things it deliberately does NOT
+    do: order a number for an account that has none, and touch the campaign
+    settings. Both are delicate and belong in the CMS for now.
+
+    The message is only recorded here after BulkVS accepts it, so the history
+    never shows a message that was not actually sent.
+    """
+    import json as _json
+    import urllib.request as _u
+
+    account_id = int(account_id)
+    message = (message or '').strip()
+    if not message and not media_url:
+        raise WriteRefused('Write something first.')
+    if len(message) > 1600:
+        raise WriteRefused('That is longer than a text can be (%d characters, limit 1600).'
+                           % len(message))
+
+    conn = cms_db._connect()
+    cu = conn.cursor()
+    cu.execute("""SELECT ISNULL(smsActivate,0), smsNumber, Phone, Mobile,
+                         FirstName, LastName
+                  FROM Account WHERE Id = %s""", (account_id,))
+    row = cu.fetchone()
+    if row is None:
+        conn.close()
+        raise WriteRefused('There is no account with id %d.' % account_id)
+    active, our_number, phone, mobile, first, last = row
+    their_number = (phone or mobile or '').strip()
+    our_number = (our_number or '').strip()
+    name = ('%s %s' % (first or '', last or '')).strip()
+
+    if not our_number or int(active or 0) != 1:
+        conn.close()
+        raise WriteRefused(
+            '%s has no texting number yet. Setting one up is done in the CMS.' % (name or 'This account'))
+    if not their_number:
+        conn.close()
+        raise WriteRefused('%s has no phone number to text.' % (name or 'This account'))
+
+    # the same escaping the CMS applies before sending
+    escaped = message
+    for ch, code in (('@', '\\u0040'), ('?', '\\u003F'), ('$', '\\u0024'),
+                     ('#', '\\u0023'), ("'", '\\u0027'), ('*', '\\u002A'),
+                     ('_', '\\u005F'), ('+', '\\u002B'), ('&', '\\u0026'),
+                     (';', '\\u003B'), ('.', '\\u002E'), ('=', '\\u003D'),
+                     ('"', '\\u0022')):
+        escaped = escaped.replace(ch, code)
+    escaped = escaped.replace('\r', '\\u000D').replace('\n', '\\n')
+
+    body = {'From': our_number, 'To': [their_number], 'Message': escaped}
+    if media_url:
+        body['MediaURLs'] = [media_url]
+
+    auth = os.getenv('BULKVS_AUTH', '')
+    if not auth:
+        conn.close()
+        raise WriteRefused('The texting service is not configured here yet '
+                           '(BULKVS_AUTH). Ask David to add it.')
+
+    out = {'table': 'SMSLog', 'action': 'send_text', 'account_id': account_id,
+           'to': their_number, 'from': our_number, 'dry_run': False,
+           'values': {'message': message[:120]}}
+    try:
+        req = _u.Request(BULKVS_SEND_URL,
+                         data=_json.dumps(body).encode(),
+                         headers={'Authorization': 'Basic ' + auth,
+                                  'Content-Type': 'application/json'})
+        with _u.urlopen(req, timeout=20) as resp:
+            answer = _json.loads(resp.read().decode() or '{}')
+        ref = answer.get('RefID')
+        if not ref:
+            raise RuntimeError('the texting service did not accept it: %s'
+                               % str(answer)[:180])
+
+        # only now is it real, so only now is it written down
+        cu2 = conn.cursor()
+        cu2.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        cu2.execute("""INSERT INTO [SMSLog]
+                       (AccountId, AccountSMSNumber, ContactNumber, InOut,
+                        message, smsDate, smsNotRead, MediaURL)
+                       VALUES (%s, %s, %s, 'Out', %s, GETDATE(), 0, %s)""",
+                    (account_id, our_number, their_number, message, media_url))
+        conn.commit()
+        out.update({'ok': True, 'committed': True, 'ref': ref,
+                    'meaning': 'Sent to %s.' % their_number})
+    except WriteRefused:
+        raise
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        out.update({'ok': False, 'committed': False,
+                    'error': _explain(e), 'raw_error': str(e)[:300]})
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    _log(who, out, before=None)
+    return out
+
+
+def mark_texts_read(account_id):
+    """Once a conversation has been opened, its messages are no longer unread."""
+    conn = cms_db._connect()
+    try:
+        cu = conn.cursor()
+        cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        cu.execute("""UPDATE [SMSLog] SET smsNotRead = 0
+                      WHERE AccountId = %s AND InOut = 'In'
+                        AND ISNULL(smsNotRead, 0) = 1""", (int(account_id),))
+        n = cu.rowcount
+        conn.commit()
+        conn.close()
+        return {'ok': True, 'marked': (n if n and n > 0 else 0)}
+    except Exception as e:
+        try:
+            conn.rollback(); conn.close()
+        except Exception:
+            pass
+        return {'ok': False, 'error': str(e)[:200]}
 
 
 def _log(who, result, before=None):
