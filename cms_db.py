@@ -1527,15 +1527,19 @@ def customer_profile(account_id, limit=120):
         LEFT JOIN PhoneCallsLog p ON p.Id = w.PhoneCallId
         WHERE w.AccountId = %%s ORDER BY w.StartTime DESC""" % int(limit), (aid,))]
 
-    payments_list = [{'when': _plain(cr), 'amount_cents': n(amt), 'minutes': n(mins),
-                      'last4': l4, 'note': note, 'refunded': bool(refd),
-                      'refund_amount_cents': n(ramt), 'refund_reason': rr,
-                      'agent': ('%s %s' % (efn or '', eln or '')).strip(), 'stripe': ch}
-                     for (cr, amt, mins, l4, note, refd, ramt, rr, efn, eln, ch) in rows("""
-        SELECT TOP 100 ps.Created, ISNULL(ps.AmountPaid,0), ISNULL(ps.PackageMinutes,0),
+    payments_list = [{'id': n(pid), 'when': _plain(cr), 'amount_cents': n(amt),
+                      'minutes': n(mins), 'last4': l4, 'note': note,
+                      'refunded': bool(refd), 'refund_amount_cents': n(ramt),
+                      'refund_reason': rr, 'currency': (cur or 'USD'),
+                      'agent': ('%s %s' % (efn or '', eln or '')).strip(),
+                      'stripe': ch, 'can_refund': bool(ch) and not bool(refd) and n(amt) > 0}
+                     for (pid, cr, amt, mins, l4, note, refd, ramt, rr, efn, eln, ch, cur) in rows("""
+        SELECT TOP 100 ps.Id, ps.Created, ISNULL(ps.AmountPaid,0), ISNULL(ps.PackageMinutes,0),
                ps.Last4, ps.Note, ISNULL(ps.Refunded,0), ISNULL(ps.RefundAmount,0),
-               ps.RefundReason, e.FirstName, e.LastName, ps.StripeChargeId
-        FROM PackageSold ps LEFT JOIN Employee e ON e.Id = ps.EmployeId
+               ps.RefundReason, e.FirstName, e.LastName, ps.StripeChargeId, p.Currency
+        FROM PackageSold ps
+        LEFT JOIN Employee e ON e.Id = ps.EmployeId
+        LEFT JOIN Packages p ON p.Id = ps.PackageId
         WHERE ps.AccountId = %s ORDER BY ps.Created DESC""", (aid,))]
 
     notes = [{'when': _plain(cr), 'note': note,

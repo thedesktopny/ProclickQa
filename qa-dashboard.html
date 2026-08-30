@@ -15,7 +15,10 @@
   --bg:#0B0E1A;--surface:#131729;--surface2:#1C2240;--border:#252D4A;
   --accent:#4F6EF7;--accent2:#7C3AED;--green:#10D48E;--yellow:#F5A623;
   --red:#F24E4E;--purple:#8B5CF6;--cyan:#06B6D4;
-  --text:#E8EAFF;--text2:#8B93C4;--text3:#4F5880;
+  /* Contrast measured against the page background. The old --text3 sat at
+     2.78 against 4.5 being the readable minimum, which is why so much of the
+     interface looked washed out; these are 17.5, 9.7 and 5.3. */
+  --text:#F2F4FF;--text2:#AEB6E4;--text3:#7A84B8;
 }
 body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);display:flex;min-height:100vh;font-size:13px;}
 /* SIDEBAR */
@@ -688,6 +691,28 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
 @media (max-width:820px){
   .cms-in{ font-size:16px; padding:12px 13px; }   /* 16px stops iOS zooming */
   .modal-box{ padding:22px 20px; border-radius:16px; }
+}
+
+/* ---------- work history ----------
+   The note column carries pasted shopping links hundreds of characters long.
+   Left alone one row stretches the table sideways and every other column
+   drifts, so the columns are fixed and the note wraps within its own width —
+   the whole history then reads straight down. */
+#cu-profile .data-table{ table-layout:fixed; width:100%; }
+#cu-profile .data-table th, #cu-profile .data-table td{ vertical-align:top; }
+#cu-profile .data-table .col-when{ width:150px; }
+#cu-profile .data-table .col-agent{ width:130px; }
+#cu-profile .data-table .col-phone{ width:130px; }
+#cu-profile .data-table .col-billed{ width:70px; text-align:right; }
+#cu-profile .data-table .col-rec{ width:88px; }
+#cu-profile .data-table td.note-cell{
+  white-space:normal; word-break:break-word; overflow-wrap:anywhere;
+  line-height:1.65; padding-top:10px; padding-bottom:10px;
+}
+#cu-profile .data-table td.note-cell a{ line-height:1.9; }
+@media (max-width:1100px){
+  #cu-profile .data-table .col-agent,
+  #cu-profile .data-table .col-phone{ width:110px; }
 }
 </style>
 </head>
@@ -1387,7 +1412,8 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
           <h2 class="payh" style="margin:0;">QA reviewers</h2>
           <button class="cn-chip" style="margin-left:auto;" onclick="qaAddReviewer()">+ Add</button>
         </div>
-        <div class="payhint">Carrying the QA flag on their CMS record.</div>
+        <div class="payhint">The QA people already set up here, plus anyone
+          carrying the QA flag on their CMS record.</div>
         <div id="qa-reviewers"></div>
       </div>
       <div class="card" style="padding:16px 20px;">
@@ -2729,6 +2755,47 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
   </div>
 </div>
 
+<div class="modal" id="refund-modal">
+  <div class="modal-box" style="width:460px;max-width:94vw;">
+    <div style="font-size:18px;font-weight:660;margin-bottom:5px;">Refund a payment</div>
+    <div style="font-size:12.5px;color:var(--text3);margin-bottom:18px;" id="rf-sub"></div>
+    <div class="cn-lab">How much to refund</div>
+    <input id="rf-amount" class="cms-in" style="width:100%" placeholder="e.g. 189.00">
+    <div class="cn-lab" style="margin-top:14px;">Reason *</div>
+    <input id="rf-reason" class="cms-in" style="width:100%" maxlength="200"
+           placeholder="Kept with the refund on the account">
+    <div id="rf-warn" style="font-size:11.5px;color:var(--yellow);margin-top:12px;"></div>
+    <pre id="rf-out" style="white-space:pre-wrap;font-size:11.5px;color:var(--text3);margin:8px 0 0;"></pre>
+    <div style="display:flex;gap:10px;margin-top:18px;">
+      <button class="btn btn-outline" onclick="hideModal('refund-modal')" style="flex:1">Cancel</button>
+      <button class="btn btn-primary" onclick="cuRefund()" style="flex:1" id="rf-go">Refund</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="buy-modal">
+  <div class="modal-box" style="width:520px;max-width:94vw;">
+    <div style="font-size:18px;font-weight:660;margin-bottom:5px;">Sell a package</div>
+    <div style="font-size:12.5px;color:var(--text3);margin-bottom:18px;" id="buy-sub"></div>
+
+    <div class="cn-lab">Package</div>
+    <div id="buy-packages" style="max-height:34vh;overflow:auto;margin-bottom:14px;"></div>
+
+    <div class="cn-lab" id="buy-card-label">Card to charge</div>
+    <div id="buy-cards"></div>
+
+    <div id="buy-summary" style="font-size:13px;color:var(--text2);margin-top:14px;
+         padding:11px 14px;background:var(--surface2);border-radius:10px;display:none;"></div>
+    <pre id="buy-out" style="white-space:pre-wrap;font-size:11.5px;color:var(--text3);
+         margin:10px 0 0;line-height:1.7;"></pre>
+
+    <div style="display:flex;gap:10px;margin-top:18px;">
+      <button class="btn btn-outline" onclick="hideModal('buy-modal')" style="flex:1">Cancel</button>
+      <button class="btn btn-primary" onclick="cuBuy()" style="flex:1" id="buy-go">Purchase</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal" id="minutes-modal">
   <div class="modal-box" style="width:460px;max-width:94vw;">
     <div style="font-size:18px;font-weight:660;margin-bottom:5px;">Adjust minutes</div>
@@ -3961,9 +4028,14 @@ async function loadQaAssign(){
 
 function qaRenderReviewers(){
   document.getElementById('qa-reviewers').innerHTML = qaData.reviewers.map(v=>`
-    <div class="payrow ${qaReviewer===v.id?'sel':''}" onclick="qaPick(${v.id})">
-      <div class="nm">${esc(v.name)}
-        <div class="mt">ext ${esc(v.extension)||'—'} · ${v.agent_count} agent${v.agent_count===1?'':'s'}</div></div>
+    <div class="payrow ${qaReviewer===v.id?'sel':''}"
+         ${v.id ? `onclick="qaPick(${v.id})"` : 'style="cursor:default;opacity:.65"'}>
+      <div class="nm">${esc(v.name)}${v.inactive?' <span style="color:var(--text3);font-size:10px">inactive</span>':''}
+        <div class="mt">ext ${esc(v.extension)||'—'} · ${v.agent_count} agent${v.agent_count===1?'':'s'}
+          ${v.source==='both' ? ' · <span style="color:var(--green)">QA dashboard + CMS</span>'
+            : v.source==='QA dashboard' ? ' · <span style="color:var(--text3)">from the QA dashboard</span>'
+            : ' · <span style="color:var(--text3)">CMS flag</span>'}
+          ${v.needs_linking ? ' · <span style="color:var(--yellow)">no matching CMS employee</span>' : ''}</div></div>
       <div class="paynum" style="font-size:15px;color:${v.agent_count?'var(--accent)':'var(--text3)'}">${v.agent_count}</div>
     </div>`).join('')
     || `<div style="color:var(--text3);font-size:12.5px;">
@@ -6595,6 +6667,180 @@ async function wbEndSave(confirm){
 /* ---------------- adjusting the balance ----------------
    Uses the same path the CMS uses, so the change appears in the account's
    balance history with a reason attached. */
+
+/* ---------------- selling a package ----------------
+   Pick the package, pick the card, press Purchase. The card is one the
+   customer already has on file — a token, never a card number, so no card
+   details pass through this system at all. */
+let buyPackages = [], buyPackageId = null, buyCardId = null, buyBusy = false;
+
+
+/* ---------------- refunding ----------------
+   Worth knowing before pressing it: the CMS removes the WHOLE package's
+   minutes even on a part refund, and this follows the CMS rather than
+   inventing different behaviour. The warning below says so plainly, because
+   an agent refunding half the money would reasonably expect half the minutes
+   back. */
+let rfPaymentId = null, rfPaid = 0, rfCurrency = 'USD', rfBusy = false;
+
+function cuRefundOpen(paymentId, amountCents, currency){
+  rfPaymentId = paymentId; rfPaid = amountCents; rfCurrency = currency || 'USD';
+  rfBusy = false;
+  document.getElementById('rf-sub').textContent =
+    'Payment of ' + cuMoney(amountCents) + ' on ' + (cuData ? cuData.account.name : '');
+  document.getElementById('rf-amount').value = (amountCents / 100).toFixed(2);
+  document.getElementById('rf-reason').value = '';
+  document.getElementById('rf-out').textContent = '';
+  document.getElementById('rf-warn').textContent =
+    'The whole package\'s minutes come off the account, even on a part refund — '
+    + 'that is how the CMS does it.';
+  showModal('refund-modal');
+}
+
+async function cuRefund(){
+  if(rfBusy) return;
+  const out = document.getElementById('rf-out');
+  const reason = document.getElementById('rf-reason').value.trim();
+  const dollars = parseFloat(document.getElementById('rf-amount').value || '0');
+  if(!reason){ out.textContent = 'Give a reason first.'; return; }
+  if(!(dollars > 0)){ out.textContent = 'Enter how much to refund.'; return; }
+  const cents = Math.round(dollars * 100);
+  if(cents > rfPaid){
+    out.textContent = 'That is more than the ' + cuMoney(rfPaid) + ' that was paid.';
+    return;
+  }
+  rfBusy = true;
+  const btn = document.getElementById('rf-go');
+  btn.disabled = true; btn.textContent = 'Refunding…';
+  out.textContent = '';
+  try{
+    const r = await API.post('/api/payments/' + rfPaymentId + '/refund',
+                             {reason, amount_cents: cents});
+    if(r.error || r.ok === false){
+      out.textContent = '❌ ' + r.error;
+      if(r.refunded) out.textContent += '\n\nThe money WAS returned. Do not try again.';
+      return;
+    }
+    out.textContent = '✅ ' + r.meaning;
+    setTimeout(()=>{ hideModal('refund-modal'); cuOpen(cuData.account.id); }, 1500);
+  }catch(e){
+    out.textContent = 'Failed: ' + e.message
+      + '\n\nCheck the payment before trying again — the money may already be back.';
+  }finally{
+    rfBusy = false;
+    btn.disabled = false; btn.textContent = 'Refund';
+  }
+}
+
+async function cuBuyOpen(){
+  if(!cuData) return;
+  const a = cuData.account;
+  buyPackageId = null; buyCardId = null;
+  document.getElementById('buy-sub').textContent =
+    a.name + ' · ' + (a.minutes_left || 0) + ' minutes left';
+  document.getElementById('buy-out').textContent = '';
+  document.getElementById('buy-summary').style.display = 'none';
+  document.getElementById('buy-packages').innerHTML =
+    '<div style="color:var(--text3);font-size:12.5px;">Loading…</div>';
+  document.getElementById('buy-cards').innerHTML = '';
+  showModal('buy-modal');
+  try{
+    const [p, c] = await Promise.all([
+      API.get('/api/packages'),
+      API.get(`/api/customers/${a.id}/cards`)]);
+    buyPackages = p.packages || [];
+    const money = v => '$' + (Math.round(v||0)/100).toFixed(2);
+    document.getElementById('buy-packages').innerHTML = buyPackages.map(pk=>`
+      <div class="payrow" onclick="cuBuyPick(${pk.id})" id="buy-pk-${pk.id}">
+        <div class="nm">${esc(pk.name)}
+          <div class="mt">${(pk.minutes||0).toLocaleString()} minutes
+            ${pk.per_minute_cents ? ' · ' + (pk.per_minute_cents/100).toFixed(3).replace(/0+$/,'') + ' a minute' : ''}</div></div>
+        <div class="paynum" style="font-size:15px;">${pk.price_cents ? money(pk.price_cents)
+          : '<span style="color:var(--yellow)">free</span>'}</div>
+      </div>`).join('');
+
+    const cards = c.cards || [];
+    document.getElementById('buy-cards').innerHTML = cards.length
+      ? cards.map(cd=>`
+        <div class="payrow" onclick="cuBuyCard(${cd.id})" id="buy-card-${cd.id}">
+          <div class="nm">${esc(cd.brand||'Card')} ending ${esc(cd.last4||'????')}
+            <div class="mt">${cd.last_used ? 'last used ' + new Date(cd.last_used).toLocaleDateString() : 'not used yet'}</div></div>
+        </div>`).join('')
+      : `<div style="color:var(--yellow);font-size:12.5px;">
+           No card on file. A new card has to be taken in the CMS for now.</div>`;
+    if(cards.length === 1) cuBuyCard(cards[0].id);
+  }catch(e){
+    document.getElementById('buy-out').textContent = 'Could not load: ' + e.message;
+  }
+}
+
+function cuBuyPick(id){
+  buyPackageId = id;
+  buyPackages.forEach(p=>{
+    const el = document.getElementById('buy-pk-' + p.id);
+    if(el) el.classList.toggle('sel', p.id === id);
+  });
+  cuBuySummary();
+}
+
+function cuBuyCard(id){
+  buyCardId = id;
+  document.querySelectorAll('[id^="buy-card-"]').forEach(el=>
+    el.classList.toggle('sel', el.id === 'buy-card-' + id));
+  cuBuySummary();
+}
+
+function cuBuySummary(){
+  const pk = buyPackages.find(p=>p.id === buyPackageId);
+  const box = document.getElementById('buy-summary');
+  const free = pk && !pk.price_cents;
+  // a free package needs no card, so stop asking for one
+  document.getElementById('buy-card-label').style.display = free ? 'none' : '';
+  document.getElementById('buy-cards').style.display = free ? 'none' : '';
+  if(!pk){ box.style.display = 'none'; return; }
+  const now = (cuData.account.minutes_left || 0);
+  box.style.display = 'block';
+  box.innerHTML = free
+    ? `<b>${esc(pk.name)}</b> — ${pk.minutes} free minutes. Nothing will be charged.<br>
+       Balance ${now} → <b>${now + pk.minutes}</b>.`
+    : `<b>${esc(pk.name)}</b> — charge
+       <b>$${(pk.price_cents/100).toFixed(2)}</b> to the selected card.<br>
+       Balance ${now} → <b>${now + pk.minutes}</b> minutes.`;
+}
+
+async function cuBuy(){
+  if(buyBusy) return;
+  const out = document.getElementById('buy-out');
+  const pk = buyPackages.find(p=>p.id === buyPackageId);
+  if(!pk){ out.textContent = 'Choose a package first.'; return; }
+  if(pk.price_cents && !buyCardId){ out.textContent = 'Choose a card to charge.'; return; }
+
+  buyBusy = true;                       // a second press must not charge twice
+  const btn = document.getElementById('buy-go');
+  btn.disabled = true; btn.textContent = pk.price_cents ? 'Charging…' : 'Applying…';
+  out.textContent = '';
+  try{
+    const r = await API.post(`/api/customers/${cuData.account.id}/buy`,
+                             {package_id: buyPackageId, card_id: buyCardId});
+    if(r.error || r.ok === false){
+      out.textContent = '❌ ' + (r.error || 'Could not complete the purchase.');
+      if(r.charged){
+        out.textContent += '\n\nThe card WAS charged. Do not try again — '
+          + 'check the account and tell David.';
+      }
+      return;
+    }
+    out.textContent = '✅ ' + r.meaning;
+    setTimeout(()=>{ hideModal('buy-modal'); cuOpen(cuData.account.id); }, 1400);
+  }catch(e){
+    out.textContent = 'Failed: ' + e.message
+      + '\n\nCheck the account before trying again — the card may have been charged.';
+  }finally{
+    buyBusy = false;
+    btn.disabled = false; btn.textContent = 'Purchase';
+  }
+}
+
 function cuMinutesOpen(){
   if(!cuData) return;
   document.getElementById('mn-sub').textContent =
@@ -6801,48 +7047,63 @@ async function cuSendText(){
   const out = document.getElementById('sms-out');
   const message = (box.value || '').trim();
   if(!message && !cuMedia){ return; }
-  out.textContent = 'Sending…';
-  box.disabled = true;
+
+  // Show it immediately, greyed, rather than freezing the box while the
+  // texting service thinks about it. Waiting twenty seconds with nothing
+  // happening looks like the application has hung.
+  const media = cuMedia;
+  const pending = cuAddBubble(message, media, true);
+  box.value = '';
+  cuUnattach();
+  out.textContent = '';
   try{
     const r = await API.post(`/api/customers/${cuData.account.id}/texts`,
                              {message, media_url: cuMedia});
     if(r.error || r.ok === false){
+      // put the words back so nothing is lost, and mark the attempt failed
+      if(pending) pending.remove();
+      box.value = message;
       out.textContent = '❌ ' + (r.error || 'Could not send.')
         + (r.raw_error && r.raw_error !== r.error ? ' — ' + r.raw_error : '');
-      box.disabled = false;
       return;
     }
-    // Add it to the thread rather than reloading the account. Reloading threw
-    // away the tab, the scroll position and anything half-typed — a texting
-    // panel that jumps back to the top after every message is not usable.
-    box.value = '';
-    out.textContent = '';
-    box.disabled = false;
-    const thread = document.getElementById('sms-thread');
-    if(thread){
-      const empty = thread.querySelector('.payhint');
-      if(empty) empty.remove();
-      const bubble = document.createElement('div');
-      bubble.style.cssText = 'display:flex;justify-content:flex-end;margin-bottom:8px;';
-      bubble.innerHTML = `<div style="max-width:72%;background:var(--accent);color:#fff;
-           padding:9px 13px;border-radius:14px;font-size:12.5px;word-break:break-word;">
-           ${esc(message)}
-           ${cuMedia ? `<div style="margin-top:6px;"><img src="${esc(cuMedia)}"
-                style="max-width:100%;max-height:220px;border-radius:9px;display:block;"></div>` : ''}
-           <div style="font-size:10px;opacity:.6;margin-top:4px;">just now</div></div>`;
-      thread.appendChild(bubble);
-      thread.scrollTop = thread.scrollHeight;
+    if(pending) pending.style.opacity = '';
+    if(r.unconfirmed && pending){
+      const stamp = pending.querySelector('.sms-time');
+      if(stamp) stamp.textContent = 'sent · not confirmed';
     }
     if(cuData && cuData.sms){
       cuData.sms.unshift({when: new Date().toISOString(), direction: 'Out',
-                          message, media: cuMedia, is_picture: !!cuMedia});
+                          message, media, is_picture: !!media});
     }
-    cuUnattach();
     box.focus();
   }catch(e){
+    if(pending) pending.remove();
+    box.value = message;
     out.textContent = 'Failed: ' + e.message;
-    box.disabled = false;
   }
+}
+
+/* Puts a sent message into the thread. Greyed while it is on its way, solid
+   once the service confirms it. */
+function cuAddBubble(message, media, pending){
+  const thread = document.getElementById('sms-thread');
+  if(!thread) return null;
+  const empty = thread.querySelector('.payhint');
+  if(empty) empty.remove();
+  const wrap = document.createElement('div');
+  wrap.style.cssText = 'display:flex;justify-content:flex-end;margin-bottom:8px;'
+    + (pending ? 'opacity:.55;' : '');
+  wrap.innerHTML = `<div style="max-width:72%;background:var(--accent);color:#fff;
+       padding:9px 13px;border-radius:14px;font-size:12.5px;word-break:break-word;">
+       ${esc(message)}
+       ${media ? `<div style="margin-top:6px;"><img src="${esc(media)}"
+            style="max-width:100%;max-height:220px;border-radius:9px;display:block;"></div>` : ''}
+       <div class="sms-time" style="font-size:10px;opacity:.6;margin-top:4px;">
+         ${pending ? 'sending…' : 'just now'}</div></div>`;
+  thread.appendChild(wrap);
+  thread.scrollTop = thread.scrollHeight;
+  return wrap;
 }
 
 async function cuOpen(id){
@@ -6874,6 +7135,7 @@ async function cuOpen(id){
         <span style="margin-left:auto;display:flex;gap:8px;">
           <button class="btn btn-outline" style="font-size:12px;" onclick="cuNoteOpen()"
                   title="A note about the account itself. For what happened on a call, use the work history.">+ Account note</button>
+          <button class="btn btn-primary" style="font-size:12px;" onclick="cuBuyOpen()">💳 Sell a package</button>
           <button class="btn btn-outline" style="font-size:12px;" onclick="cuMinutesOpen()">Minutes</button>
           <button class="btn btn-primary" style="font-size:12px;" onclick="cuStartWork()">Start work</button>
           <button class="btn btn-outline" style="font-size:12px;" onclick="cuEditOpen()">Edit</button>
@@ -6912,6 +7174,54 @@ async function cuOpen(id){
   }catch(e){ box.innerHTML = `<div style="color:var(--red)">${e.message}</div>`; }
 }
 
+
+/* ---------------- how a note is shown ----------------
+   Notes are written in the CMS and carry real HTML line breaks, and agents
+   paste long shopping links into them. Escaping the lot showed "<br>" as
+   words and left a wall of unbroken text. This keeps them safe — the note is
+   escaped first, so nothing in it can act as markup — then restores the line
+   breaks and makes the links usable.
+
+   A pasted Amazon link can be four hundred characters. Showing it in full
+   pushes every other column off the screen, so the link is displayed as its
+   site name and still goes where it should. */
+function fmtNote(text){
+  if(!text) return '';
+  let s = esc(String(text));
+
+  // the CMS stores line breaks as <br>, which escaping turned into words
+  s = s.replace(/&lt;br\s*\/?&gt;/gi, '\n')
+       .replace(/&lt;\/?p&gt;/gi, '\n')
+       .replace(/&lt;\/?div&gt;/gi, '\n');
+
+  // make links clickable, shown by site rather than in full
+  s = s.replace(/(https?:\/\/[^\s<]+)/g, (url) => {
+    let label = url;
+    try{
+      const u = new URL(url);
+      const site = u.hostname.replace(/^www\./, '');
+      // pick the part of the path that reads like a product name rather than
+      // the last segment, which on most shops is a size or an id
+      const parts = (u.pathname || '').split('/').filter(Boolean)
+        .filter(p => !/^\d+$/.test(p) && p.length > 3 && !/^(us|en|p|dp|ip|gp|product)$/i.test(p));
+      const best = parts.sort((a, b) => b.length - a.length)[0] || '';
+      const words = decodeURIComponent(best).replace(/[-_+]/g, ' ').replace(/\.\w+$/, '');
+      label = site + (words && words.length > 4 ? ' · ' + words : '');
+      if(label.length > 56) label = label.slice(0, 54) + '…';
+    }catch(e){
+      if(label.length > 52) label = label.slice(0, 50) + '…';
+    }
+    return `<a href="${url}" target="_blank" rel="noopener"
+       title="${url}"
+       onclick="event.stopPropagation()"
+       style="color:var(--accent);text-decoration:underline;word-break:break-all;">${esc(label)}</a>`;
+  });
+
+  // tidy up the blank lines the conversions leave behind
+  s = s.replace(/\n{3,}/g, '\n\n').trim();
+  return s.replace(/\n/g, '<br>');
+}
+
 function cuTab(which){
   document.querySelectorAll('[data-cutab]').forEach(b=>b.classList.toggle('on', b.dataset.cutab===which));
   const r = cuData, body = document.getElementById('cu-tab-body');
@@ -6921,19 +7231,20 @@ function cuTab(which){
   if(which === 'work'){
     body.innerHTML = !r.work.length ? '<div class="payhint">No calls worked for this account.</div>' :
       card(`<table class="data-table"><thead><tr>
-        <th>When</th><th>Agent</th><th>Phone</th><th>What was done</th>
-        <th class="n">Billed</th><th>Recording</th></tr></thead><tbody>` +
+        <th class="col-when">When</th><th class="col-agent">Agent</th>
+        <th class="col-phone">Phone</th><th>What was done</th>
+        <th class="n col-billed">Billed</th><th class="col-rec">Recording</th></tr></thead><tbody>` +
       r.work.map(w=>`<tr>
         <td style="white-space:nowrap;font-size:11.5px;">${cuWhen(w.start)}
           ${w.missed?'<span style="color:var(--red);font-size:10px;display:block">missed</span>':''}</td>
         <td style="white-space:nowrap;">${esc(w.agent)||'—'}</td>
         <td style="font-size:11.5px;white-space:nowrap;">${esc(w.phone)||''}
           <span style="color:var(--text3);font-size:10px;display:block">${w.direction}</span></td>
-        <td style="font-size:12px;color:var(--text2);max-width:420px;cursor:text;"
+        <td class="note-cell" style="font-size:12.5px;color:var(--text);cursor:text;"
             onclick="cuWorkEdit(${w.id}, ${JSON.stringify(w.note||'').replace(/"/g,'&quot;')}, ${JSON.stringify(w.task||'').replace(/"/g,'&quot;')})"
             title="Click to write or change the note">
-          ${esc(w.note)||'<span style="color:var(--accent)">+ add a note</span>'}
-          ${w.task?`<div style="color:var(--text3);font-size:11px;">${esc(w.task)}</div>`:''}</td>
+          ${fmtNote(w.note)||'<span style="color:var(--accent)">+ add a note</span>'}
+          ${w.task?`<div style="color:var(--text3);font-size:11px;margin-top:3px;">${esc(w.task)}</div>`:''}</td>
         <td class="n">${w.minutes_billed||0}</td>
         <td>${w.recording?`<button class="cn-chip" onclick="cuPlay('${w.recording}')">▶ listen</button>`:'<span style="color:var(--text3);font-size:11px">—</span>'}</td>
       </tr>`).join('') + '</tbody></table>');
@@ -6941,7 +7252,8 @@ function cuTab(which){
   else if(which === 'payments'){
     body.innerHTML = !r.payments.length ? '<div class="payhint">No payments recorded.</div>' :
       card(`<table class="data-table"><thead><tr><th>When</th><th class="n">Amount</th>
-        <th class="n">Minutes</th><th>Card</th><th>Agent</th><th>Note / refund</th></tr></thead><tbody>` +
+        <th class="n">Minutes</th><th>Card</th><th>Agent</th><th>Note / refund</th>
+        <th></th></tr></thead><tbody>` +
       r.payments.map(p=>`<tr>
         <td style="white-space:nowrap;font-size:11.5px;">${cuWhen(p.when)}</td>
         <td class="n ${p.amount_cents?'pos':'warn'}">${p.amount_cents?cuMoney(p.amount_cents):'free'}</td>
@@ -6950,13 +7262,16 @@ function cuTab(which){
         <td style="font-size:12px;">${esc(p.agent)}</td>
         <td style="font-size:11.5px;color:var(--text3);">
           ${p.refunded?`<span class="neg">refunded ${cuMoney(p.refund_amount_cents||p.amount_cents)}</span> ${esc(p.refund_reason)||''}`:esc(p.note)||''}</td>
-      </tr>`).join('') + '</tbody></table>');
+      <td style="text-align:right;">
+          ${p.can_refund ? `<button class="cn-chip"
+              onclick="cuRefundOpen(${p.id}, ${p.amount_cents}, '${esc(p.currency||'USD')}')"
+              >Refund</button>` : ''}</td></tr>`).join('') + '</tbody></table>');
   }
   else if(which === 'notes'){
     body.innerHTML = !r.notes.length ? '<div class="payhint">No account notes.</div>' :
       r.notes.map(n=>`<div class="card" style="padding:12px 16px;margin-bottom:8px;">
         <div style="font-size:11.5px;color:var(--text3);">${cuWhen(n.when)} · ${esc(n.by)}</div>
-        <div style="font-size:13px;margin-top:4px;white-space:pre-wrap;">${esc(n.note)}</div></div>`).join('');
+        <div style="font-size:13px;margin-top:4px;line-height:1.65;">${fmtNote(n.note)}</div></div>`).join('');
   }
   else if(which === 'sms'){
     const a = r.account;
@@ -7223,7 +7538,7 @@ async function acOpen(id){
              style="color:var(--accent)">${esc(w.account)||'—'}</a></td>
           <td style="font-size:11.5px;white-space:nowrap;">${esc(w.phone)||''}</td>
           <td style="font-size:12px;color:var(--text2);max-width:420px;">
-            ${esc(w.note)||'<span style="color:var(--text3)">no note</span>'}</td>
+            ${fmtNote(w.note)||'<span style="color:var(--text3)">no note</span>'}</td>
           <td class="n">${w.minutes_billed||0}</td>
           <td>${w.recording?`<button class="cn-chip" onclick="cuPlay('${w.recording}')">▶</button>`:''}</td>
         </tr>`).join('') || '<tr><td colspan="6" style="padding:20px;text-align:center;color:var(--text3)">No calls in the last 7 days.</td></tr>'}

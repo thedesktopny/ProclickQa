@@ -5161,10 +5161,13 @@ def employee_set_qa(employee_id):
 @app.route('/api/qa-assignments', methods=['GET'])
 @portal_manager_only
 def qa_assignments_get():
-    """Who reviews whom, using the people already in the CMS.
+    """Who reviews whom.
 
-    Reviewers carry the QA flag. Everyone else needs a reviewer — except
-    admins, managers and the reviewers themselves, who are not reviewed.
+    Reviewers exist in two places, so both are read: the QA users already set
+    up in this system from the original QA dashboard, and anyone carrying the
+    QA flag on their CMS record. They are matched by name where they are the
+    same person, so nobody has to be created twice and someone who has been
+    reviewing for months does not appear as a missing reviewer.
     """
     import cms_db
     people = cms_db.agent_list(include_left=False)['agents']
@@ -5172,15 +5175,49 @@ def qa_assignments_get():
     def role_text(p):
         return ' '.join(p.get('roles') or []).lower()
 
-    reviewers = [p for p in people if p.get('qa')]
+    reviewers = []
+    for p in people:
+        if p.get('qa'):
+            reviewers.append({'id': p['id'], 'name': p['name'],
+                              'extension': p['extension'], 'source': 'CMS QA flag'})
+
+    by_name = {r['name'].strip().lower(): r for r in reviewers}
+    try:
+        conn = get_db(); c = conn.cursor(cursor_factory=RealDictCursor)
+        c.execute("""SELECT id, username, full_name, status FROM users
+                     WHERE role IN ('qa_user', 'reviewer')
+                     ORDER BY full_name, username""")
+        for u in c.fetchall():
+            u = dict(u)
+            name = (u.get('full_name') or u.get('username') or '').strip()
+            match = by_name.get(name.lower())
+            if match:
+                match['voiceguard_user_id'] = u['id']
+                match['source'] = 'both'
+                continue
+            emp = next((p for p in people
+                        if p['name'].strip().lower() == name.lower()), None)
+            reviewers.append({
+                'id': (emp['id'] if emp else None),
+                'voiceguard_user_id': u['id'],
+                'name': name or u['username'],
+                'extension': (emp['extension'] if emp else None),
+                'source': 'QA dashboard',
+                'needs_linking': emp is None,
+                'inactive': (u.get('status') or 'active') != 'active'})
+        conn.close()
+    except Exception as e:
+        print('[qa] could not read the QA users: ' + str(e)[:140])
+
     others = []
     for p in people:
         if p.get('qa'):
             continue
+        if any(r.get('id') == p['id'] for r in reviewers):
+            continue
         r = role_text(p)
         p['is_admin'] = 'admin' in r or 'owner' in r
         p['is_manager'] = 'manager' in r or 'supervisor' in r
-        # somebody running the place is not reviewed by an agent
         p['needs_reviewer'] = not (p['is_admin'] or p['is_manager'])
         others.append(p)
 
@@ -5200,7 +5237,7 @@ def qa_assignments_get():
         if rid:
             by_reviewer.setdefault(rid, []).append(a['id'])
     for r in reviewers:
-        r['agent_ids'] = by_reviewer.get(r['id'], [])
+        r['agent_ids'] = by_reviewer.get(r.get('id'), [])
         r['agent_count'] = len(r['agent_ids'])
 
     uncovered = [a for a in others if a['needs_reviewer'] and not a['reviewer_id']]
@@ -5300,6 +5337,52 @@ def customer_update(account_id):
         # never let a failure come back as a bare 500 — the form has nothing to
         # show for that, which is how a broken save looks like nothing happening
         return jsonify({'ok': False, 'error': 'The change could not be made.',
+                        'raw_error': str(e)[:300]}), 400
+    return jsonify(out), (200 if out.get('ok') else 400)
+
+
+@app.route('/api/customers/<int:account_id>/cards', methods=['GET'])
+@portal_or_manager
+def customer_cards(account_id):
+    """The cards this customer has on file. Tokens only — no card numbers."""
+    import cms_write
+    try:
+        return jsonify({'cards': cms_write.saved_cards(account_id)})
+    except Exception as e:
+        return jsonify({'cards': [], 'error': str(e)[:200]}), 400
+
+
+@app.route('/api/payments/<int:payment_id>/refund', methods=['POST'])
+@portal_or_manager
+def payment_refund(payment_id):
+    """Refund a package sale and take the minutes back."""
+    import cms_write
+    d = request.json or {}
+    amount = d.get('amount_cents')
+    try:
+        out = cms_write.refund_payment(payment_id, d.get('reason'), _who(),
+                                       amount_cents=(int(amount) if amount else None))
+    except cms_write.WriteRefused as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'The refund could not be completed.',
+                        'raw_error': str(e)[:300]}), 400
+    return jsonify(out), (200 if out.get('ok') else 400)
+
+
+@app.route('/api/customers/<int:account_id>/buy', methods=['POST'])
+@portal_or_manager
+def customer_buy_package(account_id):
+    """Sell a package: charge a saved card and add the minutes."""
+    import cms_write
+    d = request.json or {}
+    try:
+        out = cms_write.buy_package(account_id, d.get('package_id'),
+                                    d.get('card_id'), _who(), note=d.get('note'))
+    except cms_write.WriteRefused as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'The purchase could not be completed.',
                         'raw_error': str(e)[:300]}), 400
     return jsonify(out), (200 if out.get('ok') else 400)
 

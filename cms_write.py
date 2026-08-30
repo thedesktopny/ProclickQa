@@ -17,6 +17,7 @@ only records that stand alone. Payments, minute balances and logins are not
 here: those touch several tables at once and belong to the CMS.
 """
 import os
+import socket
 import cms_db
 
 
@@ -684,13 +685,26 @@ def send_text(account_id, message, who, media_url=None):
     out = {'table': 'SMSLog', 'action': 'send_text', 'account_id': account_id,
            'to': their_number, 'from': our_number, 'dry_run': False,
            'values': {'message': message[:120]}}
+    timed_out = False
     try:
         req = _u.Request(BULKVS_SEND_URL,
                          data=_json.dumps(body).encode(),
                          headers={'Authorization': 'Basic ' + auth,
                                   'Content-Type': 'application/json'})
-        with _u.urlopen(req, timeout=20) as resp:
-            answer = _json.loads(resp.read().decode() or '{}')
+        try:
+            with _u.urlopen(req, timeout=45) as resp:
+                answer = _json.loads(resp.read().decode() or '{}')
+        except Exception as e:
+            # A timeout means we stopped waiting, not that nothing happened.
+            # The message has almost always gone by this point — the service
+            # is simply slow to confirm. Losing it from the history is worse
+            # than showing it with a note: the customer has it either way, and
+            # an agent who cannot see what they sent will send it again.
+            if 'timed out' in str(e).lower() or isinstance(e, socket.timeout):
+                timed_out = True
+                answer = {}
+            else:
+                raise
         # BulkVS returns RefId; the CMS's C# reads RefID. Accept either, and
         # judge on the per-recipient Status rather than the reference alone —
         # a reply can carry a reference and still have failed for the person
@@ -702,13 +716,14 @@ def send_text(account_id, message, who, media_url=None):
                     if isinstance(x, dict)]
         delivered = any(s in ('SUCCESS', 'OK', 'QUEUED', 'ACCEPTED') for s in statuses)
 
-        if statuses and not delivered:
-            raise RuntimeError('refused for %s: %s'
-                               % (', '.join(str(x.get('To', '?')) for x in results),
-                                  ', '.join(statuses)))
-        if not ref and not delivered:
-            raise RuntimeError('the texting service did not accept it: %s'
-                               % str(answer)[:180])
+        if not timed_out:
+            if statuses and not delivered:
+                raise RuntimeError('refused for %s: %s'
+                                   % (', '.join(str(x.get('To', '?')) for x in results),
+                                      ', '.join(statuses)))
+            if not ref and not delivered:
+                raise RuntimeError('the texting service did not accept it: %s'
+                                   % str(answer)[:180])
 
         # only now is it real, so only now is it written down
         cu2 = conn.cursor()
@@ -720,7 +735,10 @@ def send_text(account_id, message, who, media_url=None):
                     (account_id, our_number, their_number, message, media_url))
         conn.commit()
         out.update({'ok': True, 'committed': True, 'ref': ref,
-                    'meaning': 'Sent to %s.' % their_number})
+                    'meaning': ('Sent to %s.' % their_number) if not timed_out else
+                               ('Sent to %s — the texting service was slow to confirm, '
+                                'so this is recorded but unconfirmed.' % their_number),
+                    'unconfirmed': timed_out})
     except WriteRefused:
         raise
     except Exception as e:
@@ -758,6 +776,454 @@ def mark_texts_read(account_id):
         except Exception:
             pass
         return {'ok': False, 'error': str(e)[:200]}
+
+
+CARDKNOX_URL = 'https://x1.cardknox.com/gateway'
+
+
+def saved_cards(account_id):
+    """The cards this customer already has on file, most recently used first.
+
+    Only ever tokens — the card number itself is not in the database and never
+    passes through here.
+    """
+    conn = cms_db._connect(); cu = conn.cursor()
+    cu.execute("""SELECT TOP 20 Id, StripeCustomer, Brand, Last4, Created, LastUsed
+                  FROM StripeCustomers WHERE AccountId = %s
+                  ORDER BY ISNULL(LastUsed, Created) DESC""", (int(account_id),))
+    out = []
+    while True:
+        r = cu.fetchone()
+        if not r:
+            break
+        out.append({'id': int(r[0]), 'token': bool(r[1]), 'brand': r[2],
+                    'last4': r[3], 'added': cms_db._plain(r[4]),
+                    'last_used': cms_db._plain(r[5])})
+    conn.close()
+    return out
+
+
+# The gateway is told which currency an amount is in; nothing is converted.
+# The CMS has an ExchangeCurrency method that returns the amount unchanged, so
+# a package priced at 18900 in EUR is charged as €189.00, not a dollar
+# equivalent. Copied deliberately — changing it would silently reprice things.
+CARDKNOX_CURRENCIES = ('USD', 'EUR', 'GBP', 'ILS', 'CAD', 'MXN')
+
+
+def _currency(code):
+    c = str(code or 'USD').strip().upper()
+    return c if c in CARDKNOX_CURRENCIES else 'USD'
+
+
+def _cardknox_sale(token, amount_cents, description, currency='USD'):
+    """Charges a saved card. Returns the reference, or raises with the reason.
+
+    Cardknox is the live gateway despite the columns still being named after
+    Stripe. Only a token is sent — no card number exists on this side to send.
+    """
+    import urllib.parse as _p
+    import urllib.request as _u
+    key = os.getenv('CARDKNOX_KEY', '')
+    if not key:
+        raise WriteRefused('Card payments are not set up here yet (CARDKNOX_KEY). '
+                           'Ask David to add it.')
+    body = _p.urlencode({
+        'xKey': key,
+        'xVersion': '5.0.0',
+        'xSoftwareName': 'ProClick Portal',
+        'xSoftwareVersion': '1.0',
+        'xCommand': 'cc:Sale',
+        'xToken': token,
+        'xAmount': '%.2f' % (int(amount_cents) / 100.0),
+        'xCurrency': _currency(currency),
+        'xDescription': (description or '')[:255],
+    }).encode()
+    req = _u.Request(CARDKNOX_URL, data=body,
+                     headers={'Content-Type': 'application/x-www-form-urlencoded'})
+    with _u.urlopen(req, timeout=45) as resp:
+        raw = resp.read().decode('utf-8', 'replace')
+    answer = dict(_p.parse_qsl(raw))
+    status = (answer.get('xStatus') or answer.get('xResult') or '').strip()
+    if status.lower().startswith('appro') or status.upper() == 'A':
+        return {'ref': answer.get('xRefNum'), 'auth': answer.get('xAuthCode'),
+                'status': status, 'raw': answer}
+    raise RuntimeError(answer.get('xError') or ('the card was declined (%s)' % status))
+
+
+def buy_package(account_id, package_id, card_id, who, note=None):
+    """Sell a package: charge the card, record the sale, add the minutes.
+
+    Follows PurchaseHelper.BuyPackage — charge first, then write PackageSold and
+    the balance change together. The order matters: a card charged with no
+    minutes applied is recoverable because the sale is recorded either way, but
+    minutes given without a charge are not.
+
+    A package priced at zero is free minutes and skips the card entirely.
+    """
+    account_id, package_id = int(account_id), int(package_id)
+    conn = cms_db._connect(); cu = conn.cursor()
+
+    cu.execute("""SELECT FirstName, LastName, Phone, ISNULL(MinutesLeft,0)
+                  FROM Account WHERE Id = %s""", (account_id,))
+    a = cu.fetchone()
+    if not a:
+        conn.close()
+        raise WriteRefused('There is no account with id %d.' % account_id)
+    customer = ('%s %s' % (a[0] or '', a[1] or '')).strip()
+    balance_before = int(a[3] or 0)
+
+    cu.execute("""SELECT Name, Minutes, Price, Currency FROM Packages
+                  WHERE Id = %s""", (package_id,))
+    p = cu.fetchone()
+    if not p:
+        conn.close()
+        raise WriteRefused('There is no package with id %d.' % package_id)
+    pkg_name, minutes, price, currency = (p[0] or '').strip(), int(p[1] or 0), int(p[2] or 0), p[3]
+
+    # the same discount the CMS applies to everything
+    try:
+        cu.execute("""SELECT SettingValue FROM AdminSettings
+                      WHERE Name = 'UniversalTemporaryDiscountPercent'""")
+        d = cu.fetchone()
+        pct = int(str((d[0] if d else '0') or '0').strip() or 0)
+        if pct > 0:
+            price -= price * pct // 100
+    except Exception:
+        pct = 0
+
+    card = None
+    if price > 0:
+        if not card_id:
+            conn.close()
+            raise WriteRefused('Choose a card to charge.')
+        cu.execute("""SELECT Id, AccountId, StripeCustomer, Brand, Last4
+                      FROM StripeCustomers WHERE Id = %s""", (int(card_id),))
+        card = cu.fetchone()
+        if not card:
+            conn.close()
+            raise WriteRefused('That card is not on file.')
+        if int(card[1]) != account_id:
+            # the CMS refuses this too, and it is worth refusing loudly
+            conn.close()
+            raise WriteRefused('That card belongs to a different account.')
+        if not card[2]:
+            conn.close()
+            raise WriteRefused('That card has nothing stored to charge.')
+
+    # A double press must not charge twice. The CMS has no guard against this;
+    # a repeat of the same sale within a minute is refused here.
+    cu.execute("""SELECT TOP 1 Id, Created FROM PackageSold
+                  WHERE AccountId = %s AND PackageId = %s AND AmountPaid = %s
+                    AND Created >= DATEADD(minute, -1, GETDATE())""",
+               (account_id, package_id, price))
+    recent = cu.fetchone()
+    if recent:
+        conn.close()
+        raise WriteRefused('That exact purchase was just recorded a moment ago. '
+                           'Check the account before trying again.')
+
+    out = {'table': 'PackageSold', 'action': 'buy_package', 'account_id': account_id,
+           'dry_run': False,
+           'values': {'package': pkg_name, 'minutes': minutes, 'price_cents': price,
+                      'card': ('%s ending %s' % (card[3], card[4])) if card else None}}
+
+    charge_ref = None
+    if price > 0:
+        description = '%s %s package: %s by: %s' % (
+            customer, a[2] or '', pkg_name, (who or {}).get('name') or '')
+        try:
+            paid = _cardknox_sale(card[2], price, description, currency)
+            charge_ref = paid['ref']
+            out['charge_ref'] = charge_ref
+        except WriteRefused:
+            conn.close()
+            raise
+        except Exception as e:
+            conn.close()
+            out.update({'ok': False, 'committed': False, 'charged': False,
+                        'error': 'The card was not charged: ' + str(e)[:200]})
+            _log(who, out)
+            return out
+
+    # from here the card has been charged, so nothing may be left unrecorded
+    try:
+        cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        cu.execute("""SELECT TOP 1 Id FROM AccountWork
+                      WHERE AccountId = %s AND EndTime IS NULL
+                      ORDER BY StartTime DESC""", (account_id,))
+        open_work = cu.fetchone()
+
+        sale_note = note or ('Package - ' + pkg_name)
+        if pct > 0:
+            sale_note += ' Discount applied: %%%d' % pct
+
+        cu.execute("""INSERT INTO [PackageSold]
+                      (AccountId, Created, Note, PackageId, StripeChargeId,
+                       AmountPaid, AccountWorkId, EmployeId, Last4, PackageMinutes)
+                      OUTPUT INSERTED.Id
+                      VALUES (%s, GETDATE(), %s, %s, %s, %s, %s, %s, %s, %s)""",
+                   (account_id, sale_note[:200], package_id, charge_ref, price,
+                    (int(open_work[0]) if open_work else None),
+                    (who or {}).get('employee_id'),
+                    (card[4] if card else None), minutes))
+        sold = cu.fetchone()
+        sold_id = int(sold[0]) if sold else None
+        out['package_sold_id'] = sold_id
+
+        new_balance = balance_before + minutes
+        cu.execute("""INSERT INTO [BalanceChangeLog]
+                      (Created, AccountId, PreviousBalance, NewBalance,
+                       PackageSoldId, AccountWorkId, AdjustmentReason)
+                      VALUES (GETDATE(), %s, %s, %s, %s, %s, %s)""",
+                   (account_id, balance_before, new_balance, sold_id,
+                    (int(open_work[0]) if open_work else None), None))
+        cu.execute("""UPDATE [Account] SET MinutesLeft = %s, Modified = GETDATE()
+                      WHERE Id = %s""", (new_balance, account_id))
+        if card:
+            cu.execute('UPDATE [StripeCustomers] SET LastUsed = GETDATE() WHERE Id = %s',
+                       (int(card[0]),))
+        conn.commit()
+
+        out.update({'ok': True, 'committed': True, 'charged': price > 0,
+                    'previous_balance': balance_before, 'new_balance': new_balance,
+                    'meaning': ('%s applied — %d minutes added, balance now %d.%s'
+                                % (pkg_name, minutes, new_balance,
+                                   (' Charged %s.' % _money(price, currency)) if price else
+                                   ' Nothing was charged.'))})
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        # the worst case, and the one an owner must hear about
+        out.update({'ok': False, 'committed': False, 'charged': price > 0,
+                    'error': (('THE CARD WAS CHARGED %s BUT THE PACKAGE WAS NOT APPLIED. '
+                               'Reference %s. ' % (_money(price, currency), charge_ref))
+                              if price > 0 else '') + _explain(e),
+                    'raw_error': str(e)[:300]})
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    _log(who, out)
+    _watch_for_trouble(account_id, customer, price, minutes, who, out)
+    return out
+
+
+def _watch_for_trouble(account_id, customer, price, minutes, who, out):
+    """The checks the CMS emails an owner about, recorded here instead.
+
+    Free minutes given by anyone, and more than one paid package on the same
+    account in a day. Both are worth an owner seeing; the point is that they
+    are recorded rather than lost.
+    """
+    if not out.get('committed'):
+        return
+    try:
+        import json
+        alerts = []
+        if price == 0 and minutes > 0:
+            alerts.append(('free_minutes',
+                           '%d free minutes given to %s' % (minutes, customer or account_id)))
+        conn = cms_db._connect(); cu = conn.cursor()
+        cu.execute("""SELECT COUNT(*) FROM PackageSold
+                      WHERE AccountId = %s AND AmountPaid > 0
+                        AND Created >= CAST(GETDATE() AS date)""", (int(account_id),))
+        same_day = int((cu.fetchone() or [0])[0] or 0)
+        conn.close()
+        if price > 0 and same_day > 1:
+            alerts.append(('same_day_payments',
+                           '%d paid packages on %s today' % (same_day, customer or account_id)))
+
+        if alerts:
+            from server import get_db
+            conn = get_db(); c = conn.cursor()
+            for kind, message in alerts:
+                c.execute("""INSERT INTO cms_audit
+                             (who, employee_id, action, table_name, row_id, after_json, committed)
+                             VALUES (%s, %s, %s, 'PackageSold', %s, %s, TRUE)""",
+                          ((who or {}).get('name'), (who or {}).get('employee_id'),
+                           kind, account_id,
+                           json.dumps({'message': message, 'price_cents': price,
+                                       'minutes': minutes})))
+            conn.commit(); conn.close()
+    except Exception as e:
+        print('[purchase] could not record the alert: ' + str(e)[:140])
+
+
+def _money(cents, currency='USD'):
+    symbol = {'USD': '$', 'EUR': '€', 'GBP': '£', 'ILS': '₪',
+              'CAD': 'CA$', 'MXN': 'MX$'}.get(_currency(currency), '')
+    return '%s%.2f' % (symbol, int(cents or 0) / 100.0)
+
+
+def _cardknox_refund(ref_num, amount_cents, currency='USD'):
+    """Refunds a charge, or voids it when the gateway says to.
+
+    A payment taken today has not settled yet, and Cardknox refuses to refund
+    it — it has to be voided instead. The CMS handles this by catching the
+    specific message and retrying as a void, which is copied here: without it
+    every same-day refund fails with a message an agent cannot act on.
+    """
+    import urllib.parse as _p
+    import urllib.request as _u
+    key = os.getenv('CARDKNOX_KEY', '')
+    if not key:
+        raise WriteRefused('Card payments are not set up here yet (CARDKNOX_KEY).')
+
+    def send(command):
+        body = _p.urlencode({
+            'xKey': key, 'xVersion': '5.0.0',
+            'xSoftwareName': 'ProClick Portal', 'xSoftwareVersion': '1.0',
+            'xCommand': command,
+            'xRefNum': ref_num,
+            'xAmount': '%.2f' % (int(amount_cents) / 100.0),
+            'xCurrency': _currency(currency),
+        }).encode()
+        req = _u.Request(CARDKNOX_URL, data=body,
+                         headers={'Content-Type': 'application/x-www-form-urlencoded'})
+        with _u.urlopen(req, timeout=45) as resp:
+            return dict(_p.parse_qsl(resp.read().decode('utf-8', 'replace')))
+
+    answer = send('cc:Refund')
+    status = (answer.get('xStatus') or answer.get('xResult') or '').strip()
+    ok = status.lower().startswith('appro') or status.upper() == 'A'
+    if not ok:
+        why = answer.get('xError') or status
+        if 'refund not allowed' in why.lower() or 'void' in why.lower():
+            answer = send('cc:Void')
+            status = (answer.get('xStatus') or answer.get('xResult') or '').strip()
+            ok = status.lower().startswith('appro') or status.upper() == 'A'
+            if ok:
+                return {'ref': answer.get('xRefNum'), 'voided': True}
+            raise RuntimeError(answer.get('xError') or ('the void was refused (%s)' % status))
+        raise RuntimeError(why)
+    return {'ref': answer.get('xRefNum'), 'voided': False}
+
+
+def refund_payment(payment_id, reason, who, amount_cents=None):
+    """Refund a package sale and take the minutes back.
+
+    Follows the CMS: refund at the gateway, mark the sale refunded with who and
+    why, then remove the package's minutes through the balance log so the
+    account history shows it.
+
+    One thing worth knowing, copied from the CMS rather than improved: a part
+    refund still removes the WHOLE package's minutes. Refunding half the money
+    does not leave half the minutes.
+    """
+    payment_id = int(payment_id)
+    reason = (reason or '').strip()
+    if not reason:
+        raise WriteRefused('Give a reason — it is kept with the refund.')
+
+    conn = cms_db._connect(); cu = conn.cursor()
+    cu.execute("""SELECT ps.Id, ps.AccountId, ps.AmountPaid, ps.StripeChargeId,
+                         ISNULL(ps.Refunded, 0), ps.PackageId, ps.Created, ps.Note,
+                         p.Minutes, p.Currency, p.Name,
+                         ISNULL(a.MinutesLeft, 0), a.FirstName, a.LastName
+                  FROM PackageSold ps
+                  LEFT JOIN Packages p ON p.Id = ps.PackageId
+                  LEFT JOIN Account a ON a.Id = ps.AccountId
+                  WHERE ps.Id = %s""", (payment_id,))
+    r = cu.fetchone()
+    if not r:
+        conn.close()
+        raise WriteRefused('There is no payment with id %d.' % payment_id)
+    account_id = int(r[1] or 0)
+    paid = int(r[2] or 0)
+    charge_ref = r[3]
+    already = bool(r[4])
+    minutes = int(r[8] or 0)
+    currency = r[9] or 'USD'
+    pkg_name = r[10] or 'package'
+    balance = int(r[11] or 0)
+    customer = ('%s %s' % (r[12] or '', r[13] or '')).strip()
+
+    if already:
+        conn.close()
+        raise WriteRefused('That payment has already been refunded.')
+    if paid <= 0:
+        conn.close()
+        raise WriteRefused('There is nothing to refund — that was a free package.')
+    if not charge_ref:
+        conn.close()
+        raise WriteRefused('That payment has no card reference, so it cannot be '
+                           'refunded here. It may have been taken another way.')
+
+    amount = int(amount_cents) if amount_cents else paid
+    if amount <= 0:
+        conn.close()
+        raise WriteRefused('The refund has to be more than nothing.')
+    if amount > paid:
+        conn.close()
+        raise WriteRefused('That is more than the %s that was paid.' % _money(paid, currency))
+
+    out = {'table': 'PackageSold', 'action': 'refund', 'row_id': payment_id,
+           'account_id': account_id, 'dry_run': False,
+           'values': {'amount_cents': amount, 'reason': reason,
+                      'of_payment': paid, 'currency': currency}}
+    try:
+        result = _cardknox_refund(charge_ref, amount, currency)
+        out['refund_ref'] = result['ref']
+        out['voided'] = result['voided']
+    except WriteRefused:
+        conn.close()
+        raise
+    except Exception as e:
+        conn.close()
+        out.update({'ok': False, 'committed': False, 'refunded': False,
+                    'error': 'The card was not refunded: ' + str(e)[:200]})
+        _log(who, out)
+        return out
+
+    # the money is back; the record must follow
+    try:
+        new_balance = balance - minutes
+        cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        cu.execute("""UPDATE [PackageSold]
+                      SET Refunded = 1, RefundedAt = GETDATE(), RefundedBy = %s,
+                          RefundId = %s, RefundAmount = %s, RefundReason = %s
+                      WHERE Id = %s""",
+                   ((who or {}).get('employee_id'), result['ref'], amount,
+                    ('Previous Minutes:%d - New Minutes :%d \n %s'
+                     % (balance, new_balance, reason))[:500],
+                    payment_id))
+        cu.execute("""INSERT INTO [BalanceChangeLog]
+                      (Created, AccountId, PreviousBalance, NewBalance,
+                       PackageSoldId, AccountWorkId, AdjustmentReason)
+                      VALUES (GETDATE(), %s, %s, %s, %s, NULL, %s)""",
+                   (account_id, balance, new_balance, payment_id,
+                    ('Refund %s %s' % (pkg_name, _money(amount, currency)))[:100]))
+        cu.execute("""UPDATE [Account] SET MinutesLeft = %s, Modified = GETDATE()
+                      WHERE Id = %s""", (new_balance, account_id))
+        conn.commit()
+        out.update({'ok': True, 'committed': True, 'refunded': True,
+                    'previous_balance': balance, 'new_balance': new_balance,
+                    'meaning': ('%s %s to %s. %d minutes taken back, balance now %d.'
+                                % ('Voided' if result['voided'] else 'Refunded',
+                                   _money(amount, currency), customer or 'the customer',
+                                   minutes, new_balance))})
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        out.update({'ok': False, 'committed': False, 'refunded': True,
+                    'error': ('THE MONEY WAS REFUNDED (%s, reference %s) BUT THE RECORD '
+                              'WAS NOT UPDATED. ' % (_money(amount, currency), result['ref']))
+                             + _explain(e),
+                    'raw_error': str(e)[:300]})
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    _log(who, out)
+    return out
 
 
 def _log(who, result, before=None):
