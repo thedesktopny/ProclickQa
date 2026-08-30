@@ -5475,10 +5475,40 @@ def card_fields_config():
     Only the public iFields key — the one designed to sit in a web page. The
     real gateway key stays on the server and never goes near a browser.
     """
+    def describe(name):
+        """Says whether a setting is really there, without revealing it.
+
+        'Not set up' can mean four different things — missing, misspelt, still
+        holding a placeholder, or set but the app not restarted — and they need
+        different fixes.
+        """
+        raw = os.environ.get(name)
+        if raw is None:
+            return {'set': False, 'why': 'not present at all'}
+        v = raw.strip()
+        if not v:
+            return {'set': False, 'why': 'present but empty'}
+        if raw != v:
+            return {'set': True, 'length': len(v),
+                    'why': 'has spaces or a line break around it — that will be sent too'}
+        if v.lower().startswith(('replace', 'your_', 'xxx', '<')):
+            return {'set': False, 'why': 'still holding the placeholder text'}
+        return {'set': True, 'length': len(v),
+                'starts': v[:4] + '…', 'why': 'looks fine'}
+
+    gateway = describe('CARDKNOX_KEY')
+    fields = describe('CARDKNOX_IFIELDS_KEY')
+    # anything named nearly right — a common cause of "but I added it"
+    similar = sorted(k for k in os.environ
+                     if 'CARD' in k.upper() and k not in ('CARDKNOX_KEY', 'CARDKNOX_IFIELDS_KEY'))
     return jsonify({
-        'ifields_key': os.getenv('CARDKNOX_IFIELDS_KEY', ''),
+        'ifields_key': os.getenv('CARDKNOX_IFIELDS_KEY', '').strip(),
         'version': os.getenv('CARDKNOX_IFIELDS_VERSION', '2.15.2503.2601'),
-        'ready': bool(os.getenv('CARDKNOX_IFIELDS_KEY')) and bool(os.getenv('CARDKNOX_KEY')),
+        'ready': bool(fields['set']) and bool(gateway['set']),
+        'gateway_key': gateway,
+        'fields_key': fields,
+        'similar_names_found': similar,
+        'app_started': _APP_STARTED,
     })
 
 

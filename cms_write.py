@@ -823,7 +823,7 @@ def _cardknox_sale(token, amount_cents, description, currency='USD', extra=None)
     """
     import urllib.parse as _p
     import urllib.request as _u
-    key = os.getenv('CARDKNOX_KEY', '')
+    key = os.getenv('CARDKNOX_KEY', '').strip()
     if not key:
         raise WriteRefused('Card payments are not set up here yet (CARDKNOX_KEY). '
                            'Ask David to add it.')
@@ -890,7 +890,7 @@ def save_card(account_id, card_token, exp_month, exp_year, who,
     if yy < now.year or (yy == now.year and mm < now.month):
         raise WriteRefused('That card has already expired.')
 
-    key = os.getenv('CARDKNOX_KEY', '')
+    key = os.getenv('CARDKNOX_KEY', '').strip()
     if not key:
         raise WriteRefused('Card payments are not set up here yet (CARDKNOX_KEY).')
 
@@ -1280,7 +1280,7 @@ def _cardknox_refund(ref_num, amount_cents, currency='USD', extra=None):
     """
     import urllib.parse as _p
     import urllib.request as _u
-    key = os.getenv('CARDKNOX_KEY', '')
+    key = os.getenv('CARDKNOX_KEY', '').strip()
     if not key:
         raise WriteRefused('Card payments are not set up here yet (CARDKNOX_KEY).')
 

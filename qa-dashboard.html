@@ -1316,6 +1316,15 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
     </div>
 
     <div class="card" style="padding:16px 20px;margin-top:14px;">
+      <h2 class="payh">Card payments</h2>
+      <div class="payhint">Whether the two Cardknox keys have actually reached the running
+        app. A setting saved in Azure does not take effect until the app restarts.</div>
+      <button onclick="checkCardKeys()" class="btn btn-outline" style="font-size:12px;">Check</button>
+      <pre id="ck-status" style="white-space:pre-wrap;font-size:11.5px;color:var(--text2);
+           margin:12px 0 0;line-height:1.8;"></pre>
+    </div>
+
+    <div class="card" style="padding:16px 20px;margin-top:14px;">
       <h2 class="payh">Skin Block speed</h2>
       <div class="payhint">The tool runs the detector in the browser when it can, which is
         fast, and falls back to this server when it cannot, which is slow. This says which.</div>
@@ -5658,6 +5667,38 @@ function cmsDbSelect(db){
    or as the carrier's layout file rather than the picture. */
 
 /* Why Skin Block is slow, answered from the cache rather than guessed at. */
+
+/* Says whether the payment keys reached the running app, and if not, which of
+   the several possible reasons it is. */
+async function checkCardKeys(){
+  const out = document.getElementById('ck-status');
+  out.textContent = 'Checking…';
+  try{
+    const r = await API.get('/api/card-fields');
+    const line = (label, k) =>
+      `${k.set ? '✓' : '✗'}  ${label}\n     ${k.why}`
+      + (k.length ? `  ·  ${k.length} characters, starts ${k.starts || ''}` : '');
+    const lines = [
+      line('CARDKNOX_KEY (charging)', r.gateway_key),
+      '',
+      line('CARDKNOX_IFIELDS_KEY (card entry)', r.fields_key),
+      '',
+    ];
+    if((r.similar_names_found || []).length){
+      lines.push('Settings with similar names — check the spelling:');
+      r.similar_names_found.forEach(n => lines.push('     ' + n));
+      lines.push('');
+    }
+    lines.push('this app started ' + new Date(r.app_started).toLocaleString());
+    if(!r.gateway_key.set || !r.fields_key.set){
+      lines.push('');
+      lines.push('If you saved the setting after that time, restart the app in Azure — '
+        + 'settings only reach a running app on restart.');
+    }
+    out.textContent = lines.join('\n');
+  }catch(e){ out.textContent = 'Failed: ' + e.message; }
+}
+
 async function checkSkinblock(){
   const out = document.getElementById('sb-status');
   out.textContent = 'Checking…';
