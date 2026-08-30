@@ -611,6 +611,80 @@ td.agent{color:var(--text);font-weight:500;}
 .srch.big > input{ padding:13px 34px 13px 38px; font-size:15px; border-radius:13px; }
 .srch.big > svg{ left:14px; width:16px; height:16px; }
 @media (max-width:820px){ .srch > input{ font-size:16px; } }
+
+/* ---------- form fields ----------
+   There was no style for these at all, so they fell back to the browser's
+   defaults — which is what made every form look dated next to the rest of the
+   interface. One rule, applied everywhere. */
+.cms-in,
+input[type="text"].cms-in, input[type="password"].cms-in, input[type="date"].cms-in,
+input[type="number"].cms-in, input[type="email"].cms-in, input[type="tel"].cms-in,
+select.cms-in, textarea.cms-in{
+  background:var(--surface2);
+  border:1px solid var(--border);
+  color:var(--text);
+  border-radius:10px;
+  padding:10px 12px;
+  font-size:13.5px;
+  font-family:inherit;
+  line-height:1.4;
+  transition:border-color .15s, box-shadow .15s, background .15s;
+  -webkit-appearance:none; appearance:none;
+}
+.cms-in::placeholder{ color:var(--text3); }
+.cms-in:hover:not(:focus){ border-color:var(--text3); }
+.cms-in:focus{
+  outline:none;
+  background:var(--surface);
+  border-color:var(--accent);
+  box-shadow:0 0 0 3px rgba(123,108,246,.16);
+}
+.cms-in:disabled{ opacity:.5; cursor:not-allowed; }
+textarea.cms-in{ resize:vertical; min-height:84px; line-height:1.6; }
+select.cms-in{
+  padding-right:32px; cursor:pointer;
+  background-image:linear-gradient(45deg,transparent 50%,var(--text3) 50%),
+                   linear-gradient(135deg,var(--text3) 50%,transparent 50%);
+  background-position:calc(100% - 17px) 52%, calc(100% - 12px) 52%;
+  background-size:5px 5px, 5px 5px;
+  background-repeat:no-repeat;
+}
+input[type="date"].cms-in::-webkit-calendar-picker-indicator{
+  filter:invert(.6); cursor:pointer;
+}
+
+/* labels: quieter, closer to the field they belong to */
+.cn-lab{
+  font-size:11px; letter-spacing:.01em; text-transform:none;
+  color:var(--text3); margin-bottom:6px; font-weight:500;
+}
+
+/* checkboxes that match everything else */
+input[type="checkbox"]{
+  appearance:none; -webkit-appearance:none;
+  width:16px; height:16px; border-radius:5px; vertical-align:-3px;
+  border:1px solid var(--border); background:var(--surface2);
+  cursor:pointer; transition:background .12s, border-color .12s;
+}
+input[type="checkbox"]:checked{
+  background:var(--accent); border-color:var(--accent);
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M3.5 8.5l3 3 6-7' fill='none' stroke='white' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  background-size:14px; background-position:center; background-repeat:no-repeat;
+}
+input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2); outline:none; }
+
+/* dialogs: a softer sheet, and the page behind it pushed back */
+.modal{ backdrop-filter:blur(3px); }
+.modal-box{
+  border-radius:18px; padding:26px 28px;
+  box-shadow:0 24px 60px rgba(0,0,0,.5);
+}
+.modal-box .cn-lab{ margin-top:2px; }
+
+@media (max-width:820px){
+  .cms-in{ font-size:16px; padding:12px 13px; }   /* 16px stops iOS zooming */
+  .modal-box{ padding:22px 20px; border-radius:16px; }
+}
 </style>
 </head>
 <body>
@@ -623,14 +697,12 @@ td.agent{color:var(--text);font-weight:500;}
     <div style="font-size:19px;font-weight:660;letter-spacing:-.01em;">ProClick</div>
     <div style="font-size:12.5px;color:var(--text3);margin:4px 0 22px;">
       Sign in with the same user name and password you use for the CMS.</div>
-    <input id="portal-user" placeholder="User name or email" autocomplete="username"
+    <input id="portal-user" class="cms-in" placeholder="User name or email" autocomplete="username"
            onkeydown="if(event.key==='Enter')document.getElementById('portal-pass').focus()"
-           style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);
-                  border-radius:11px;padding:12px 14px;font-size:15px;margin-bottom:10px;">
-    <input id="portal-pass" type="password" placeholder="Password" autocomplete="current-password"
-           onkeydown="if(event.key==='Enter')portalLogin()"
-           style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);
-                  border-radius:11px;padding:12px 14px;font-size:15px;">
+           style="width:100%;font-size:15px;padding:12px 14px;margin-bottom:10px;">
+    <input id="portal-pass" class="cms-in" type="password" placeholder="Password"
+           autocomplete="current-password" onkeydown="if(event.key==='Enter')portalLogin()"
+           style="width:100%;font-size:15px;padding:12px 14px;">
     <div id="portal-err" style="color:var(--red);font-size:12.5px;min-height:20px;margin:8px 0 2px;"></div>
     <button onclick="portalLogin()" class="btn btn-primary" style="width:100%;padding:11px;">Sign in</button>
   </div>
@@ -1128,6 +1200,23 @@ td.agent{color:var(--text);font-weight:500;}
     </div>
     <div id="cx-body"><div style="color:var(--text3);font-size:13px;">Press “Test everything”.</div></div>
     <div id="cx-facts" style="margin-top:18px;"></div>
+    <div class="card" style="padding:16px 20px;margin-top:14px;
+         border-left:3px solid var(--yellow);">
+      <h2 class="payh">Credentials worth rotating</h2>
+      <div class="payhint">These appear in the CMS source and in the CSV export that is
+        emailed out, so anyone who has ever had either also has these.</div>
+      <div style="font-size:12.5px;color:var(--text2);line-height:2;">
+        <div>• <b>Cardknox</b> — the live payment gateway (the settings still call it Stripe)</div>
+        <div>• <b>BulkVS</b> — can order and delete your phone numbers</div>
+        <div>• <b>Asterisk database</b> — the phone system's own MySQL login</div>
+        <div>• <b>Stripe</b> — in AdminSettings, possibly unused now, rotate anyway</div>
+      </div>
+      <div style="font-size:11.5px;color:var(--yellow);margin-top:10px;">
+        Also check Jobs/jobconfig.json on the CMS server — a scheduled export of whole tables
+        (customers, personal info, payments, settings) is emailed to an outside address.
+      </div>
+    </div>
+
     <div class="card" style="padding:16px 20px;margin-top:14px;">
       <h2 class="payh">Find the recording address</h2>
       <div class="payhint">Looks through the CMS for it, then proves it by trying a real
@@ -1351,10 +1440,9 @@ td.agent{color:var(--text);font-weight:500;}
       <div style="font-size:30px;margin-bottom:8px;">🔒</div>
       <div style="font-size:17px;font-weight:650;margin-bottom:4px;">Payments</div>
       <div style="font-size:12.5px;color:var(--text3);margin-bottom:20px;">Enter the code to open this page.</div>
-      <input id="pay-code" type="password" inputmode="numeric" maxlength="8" autocomplete="off"
-             placeholder="••••" onkeydown="if(event.key==='Enter')payUnlock()"
-             style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);
-                    border-radius:10px;padding:12px;font-size:22px;letter-spacing:.5em;text-align:center;">
+      <input id="pay-code" class="cms-in" type="password" inputmode="numeric" maxlength="8"
+             autocomplete="off" placeholder="••••" onkeydown="if(event.key==='Enter')payUnlock()"
+             style="width:100%;padding:13px;font-size:22px;letter-spacing:.5em;text-align:center;">
       <div id="pay-code-err" style="color:var(--red);font-size:12px;min-height:18px;margin-top:10px;"></div>
       <button onclick="payUnlock()" class="btn btn-primary" style="width:100%;margin-top:6px;">Open</button>
     </div>
@@ -2435,35 +2523,113 @@ td.agent{color:var(--text);font-weight:500;}
 <!-- LOGIN MODAL -->
 <div class="modal" id="cu-form-modal">
   <div class="modal-box" style="width:520px;max-width:94vw;">
-    <div style="font-size:16px;font-weight:650;margin-bottom:4px;" id="cu-form-title">New customer</div>
-    <div style="font-size:12px;color:var(--text3);margin-bottom:18px;" id="cu-form-sub">
+    <div style="font-size:18px;font-weight:660;letter-spacing:-.01em;margin-bottom:5px;" id="cu-form-title">New customer</div>
+    <div style="font-size:12.5px;color:var(--text3);margin-bottom:22px;" id="cu-form-sub">
       This creates a real account in the CMS.</div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-      <div><div class="cn-lab">First name *</div>
-        <input id="cf-first" class="cms-in" style="width:100%"></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px 16px;">
+      <div><div class="cn-lab">First name</div>
+        <input id="cf-first" class="cms-in" style="width:100%" oninput="cuFormHint()"></div>
       <div><div class="cn-lab">Last name</div>
-        <input id="cf-last" class="cms-in" style="width:100%"></div>
+        <input id="cf-last" class="cms-in" style="width:100%" oninput="cuFormHint()"></div>
       <div><div class="cn-lab">Phone</div>
-        <input id="cf-phone" class="cms-in" style="width:100%"></div>
+        <input id="cf-phone" class="cms-in" style="width:100%" oninput="cuFormHint()"></div>
       <div><div class="cn-lab">Mobile</div>
-        <input id="cf-mobile" class="cms-in" style="width:100%"></div>
+        <input id="cf-mobile" class="cms-in" style="width:100%" oninput="cuFormHint()"></div>
       <div style="grid-column:1/-1;"><div class="cn-lab">Email</div>
         <input id="cf-email" class="cms-in" style="width:100%"></div>
       <div><div class="cn-lab">Home phone</div>
-        <input id="cf-home" class="cms-in" style="width:100%"></div>
+        <input id="cf-home" class="cms-in" style="width:100%" oninput="cuFormHint()"></div>
       <div><div class="cn-lab">Other phone</div>
-        <input id="cf-other" class="cms-in" style="width:100%"></div>
+        <input id="cf-other" class="cms-in" style="width:100%" oninput="cuFormHint()"></div>
       <div style="grid-column:1/-1;display:flex;gap:18px;align-items:center;">
         <label style="font-size:12.5px;display:flex;gap:7px;align-items:center;">
           <input type="checkbox" id="cf-business"> a business</label>
       </div>
     </div>
+    <div id="cu-form-need" style="font-size:11.5px;color:var(--yellow);margin-top:12px;"></div>
     <pre id="cu-form-out" style="white-space:pre-wrap;font-size:11.5px;color:var(--text3);
-         margin:14px 0 0;line-height:1.7;"></pre>
-    <div style="display:flex;gap:10px;margin-top:16px;">
+         margin:8px 0 0;line-height:1.7;"></pre>
+    <div style="display:flex;gap:10px;margin-top:20px;">
       <button class="btn btn-outline" onclick="hideModal('cu-form-modal')" style="flex:1">Cancel</button>
       <button class="btn btn-outline" onclick="cuFormSubmit(false)" style="flex:1">Check first</button>
       <button class="btn btn-primary" onclick="cuFormSubmit(true)" style="flex:1" id="cf-save">Save</button>
+    </div>
+  </div>
+</div>
+
+<div id="work-bar" style="display:none;position:fixed;bottom:0;left:0;right:0;z-index:120;
+     background:var(--surface);border-top:2px solid var(--green);padding:11px 20px;
+     box-shadow:0 -8px 30px rgba(0,0,0,.4);">
+  <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;max-width:1300px;margin:0 auto;">
+    <span style="width:9px;height:9px;border-radius:50%;background:var(--green);flex:none;"></span>
+    <div style="min-width:0;">
+      <div style="font-size:13px;font-weight:600;" id="wb-account">—</div>
+      <div style="font-size:11px;color:var(--text3);" id="wb-meta"></div>
+    </div>
+    <span style="margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+      <button class="btn btn-outline" style="font-size:12px;" onclick="wbOpenAccount()">Open account</button>
+      <button class="btn btn-primary" style="font-size:12px;" onclick="wbEndOpen()">Finish work</button>
+    </span>
+  </div>
+</div>
+
+<div class="modal" id="work-end-modal">
+  <div class="modal-box" style="width:520px;max-width:94vw;">
+    <div style="font-size:18px;font-weight:660;margin-bottom:5px;">Finish work</div>
+    <div style="font-size:12.5px;color:var(--text3);margin-bottom:20px;" id="we-sub"></div>
+    <div class="cn-lab">What was done *</div>
+    <textarea id="we-note" rows="5" class="cms-in" style="width:100%;"
+              placeholder="What the customer wanted and what you did…"></textarea>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px 16px;margin-top:14px;">
+      <div><div class="cn-lab">Minutes to bill</div>
+        <input id="we-minutes" type="number" min="0" max="1440" class="cms-in" style="width:100%"
+               value="0" oninput="wbPreview()"></div>
+      <div><div class="cn-lab">Task (optional)</div>
+        <input id="we-task" class="cms-in" style="width:100%" placeholder="e.g. Travel"></div>
+    </div>
+    <div id="we-preview" style="font-size:12px;color:var(--text3);margin-top:12px;"></div>
+    <pre id="we-out" style="white-space:pre-wrap;font-size:11.5px;color:var(--text3);margin:8px 0 0;"></pre>
+    <div style="display:flex;gap:10px;margin-top:18px;">
+      <button class="btn btn-outline" onclick="hideModal('work-end-modal')" style="flex:1">Cancel</button>
+      <button class="btn btn-outline" onclick="wbEndSave(false)" style="flex:1">Check first</button>
+      <button class="btn btn-primary" onclick="wbEndSave(true)" style="flex:1">Finish</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="minutes-modal">
+  <div class="modal-box" style="width:460px;max-width:94vw;">
+    <div style="font-size:18px;font-weight:660;margin-bottom:5px;">Adjust minutes</div>
+    <div style="font-size:12.5px;color:var(--text3);margin-bottom:20px;" id="mn-sub"></div>
+    <div class="cn-lab">Minutes to add (use a minus sign to take away)</div>
+    <input id="mn-minutes" type="number" class="cms-in" style="width:100%" placeholder="e.g. 400 or -30"
+           oninput="mnPreview()">
+    <div class="cn-lab" style="margin-top:14px;">Reason *</div>
+    <input id="mn-reason" class="cms-in" style="width:100%" maxlength="100"
+           placeholder="Written into the account history">
+    <div id="mn-preview" style="font-size:12px;color:var(--text3);margin-top:12px;"></div>
+    <pre id="mn-out" style="white-space:pre-wrap;font-size:11.5px;color:var(--text3);margin:8px 0 0;"></pre>
+    <div style="display:flex;gap:10px;margin-top:18px;">
+      <button class="btn btn-outline" onclick="hideModal('minutes-modal')" style="flex:1">Cancel</button>
+      <button class="btn btn-outline" onclick="mnSave(false)" style="flex:1">Check first</button>
+      <button class="btn btn-primary" onclick="mnSave(true)" style="flex:1">Save</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="work-note-modal">
+  <div class="modal-box" style="width:520px;max-width:94vw;">
+    <div style="font-size:16px;font-weight:650;margin-bottom:4px;">Note for this call</div>
+    <div style="font-size:12px;color:var(--text3);margin-bottom:14px;" id="wn-sub"></div>
+    <div class="cn-lab">What happened</div>
+    <textarea id="wn-note" rows="6" class="cms-in" style="width:100%;resize:vertical;"
+              placeholder="What the customer wanted and what was done…"></textarea>
+    <div class="cn-lab" style="margin-top:10px;">Task (optional)</div>
+    <input id="wn-task" class="cms-in" style="width:100%;" placeholder="e.g. Travel, Billing">
+    <pre id="wn-out" style="white-space:pre-wrap;font-size:11.5px;color:var(--text3);margin:12px 0 0;"></pre>
+    <div style="display:flex;gap:10px;margin-top:14px;">
+      <button class="btn btn-outline" onclick="hideModal('work-note-modal')" style="flex:1">Cancel</button>
+      <button class="btn btn-primary" onclick="cuWorkSave()" style="flex:1">Save note</button>
     </div>
   </div>
 </div>
@@ -2489,8 +2655,8 @@ td.agent{color:var(--text);font-weight:500;}
       <div style="font-family:'Space Grotesk',sans-serif;font-size:20px;font-weight:800;color:var(--text);">VoiceGuard</div>
       <div style="font-size:12px;color:var(--text3);margin-top:4px;">QA Intelligence Platform</div>
     </div>
-    <div style="margin-bottom:12px;"><label class="form-label">Username</label><input id="login-user" class="form-input" placeholder="Enter username" autocomplete="username"/></div>
-    <div style="margin-bottom:16px;"><label class="form-label">Password</label><input id="login-pass" type="password" class="form-input" placeholder="Enter password" onkeydown="if(event.key==='Enter')doLogin()" autocomplete="current-password"/></div>
+    <div style="margin-bottom:12px;"><label class="form-label">Username</label><input class="cms-in" id="login-user" class="form-input" placeholder="Enter username" autocomplete="username"/></div>
+    <div style="margin-bottom:16px;"><label class="form-label">Password</label><input class="cms-in" id="login-pass" type="password" class="form-input" placeholder="Enter password" onkeydown="if(event.key==='Enter')doLogin()" autocomplete="current-password"/></div>
     <div id="login-err" style="color:var(--red);font-size:12px;margin-bottom:12px;min-height:16px;"></div>
     <button class="btn btn-primary" onclick="doLogin()" style="width:100%;padding:12px;">Login →</button>
   </div>
@@ -3765,6 +3931,7 @@ async function portalBoot(){
   setTimeout(()=>document.getElementById('portal-user').focus(), 80);
 }
 document.addEventListener('DOMContentLoaded', portalBoot);
+document.addEventListener('DOMContentLoaded', ()=>{ wbRefresh(); setInterval(wbRefresh, 60000); });
 
 
 /* Decides which way an agent's detail panel opens, at the moment it opens.
@@ -3842,6 +4009,7 @@ function showPage(id){
   if(id==='cms-settings') loadCmsSettings();
   if(id==='connections') loadConnections();
   if(id==='customers') cuLoadRecent();
+  wbRefresh();
   if(id==='agent-list') loadAgentList();
   if(id==='packages') loadPackages();
   if(id==='company-info') loadCompanyInfo();
@@ -5437,17 +5605,19 @@ function lvRenderFloor(){
     a.name.localeCompare(b.name));
   const onCall = list.filter(a=>(a.phone||'').toUpperCase()==='IN_USE').length;
   const onShift = list.filter(a=>a.clocked_in).length;
-  const onBreak = list.filter(a=>a.clocked_in && a.break_minutes > 0).length;
+  const onBreak = list.filter(a=>a.clocked_in && a.on_break).length;
   const onDnd = list.filter(a=>a.clocked_in && a.dnd && (a.phone||'').toUpperCase()!=='IN_USE').length;
   document.getElementById('lv-floor-counts').textContent =
-    `${onShift} on shift · ${onCall} on a call · ${onShift-onCall-onDnd} free`
+    `${onShift} on shift · ${onCall} on a call · ${onShift-onCall-onDnd-onBreak} free`
     + `${onDnd?` · ${onDnd} on do not disturb`:''}${onBreak?` · ${onBreak} on break`:''}`
     + ` · ${list.length} agents in total`;
 
   document.getElementById('lv-floor').innerHTML = list.map(a=>{
     const busy = (a.phone||'').toUpperCase()==='IN_USE';
     const dnd = !!a.dnd && !busy;                 // a call in progress outranks DND
-    const brk = a.clocked_in && a.break_minutes > 0 && !busy && !dnd;
+    // on_break comes from the clocker status, so it means "on a break now"
+    // rather than "took one earlier today", which break_minutes counts
+    const brk = a.clocked_in && !!a.on_break && !busy && !dnd;
     const cls = !a.clocked_in ? 'off' : busy ? 'on-call' : dnd ? 'dnd' : brk ? 'brk' : 'free';
     const state = !a.clocked_in ? 'off shift' : busy ? 'on a call'
                 : dnd ? 'do not disturb' : brk ? 'on break' : 'free';
@@ -5465,11 +5635,13 @@ function lvRenderFloor(){
         ${a.clocked_in&&a.clocker_since?`<div><span class="k">clocked in:</span> ${lvTime(a.clocker_since)} (${lvAgo(a.clocker_since).replace(' ago','')})</div>`:''}
         ${a.dnd?`<div style="color:#F2585F;"><span class="k" style="color:#F2585F;opacity:.7">do not disturb:</span>
            ${a.dnd_note?esc(a.dnd_note):'no reason given'}${a.dnd_since?' · since '+lvTime(a.dnd_since):''}</div>`:''}
-        ${a.break_minutes?`<div><span class="k">break so far:</span> ${a.break_minutes} min</div>`:''}
+        ${a.on_break?`<div style="color:#7B6CF6;"><span class="k" style="color:#7B6CF6;opacity:.7">on a break</span>${a.clocker_since?' since '+lvTime(a.clocker_since):''}</div>`:''}
+        ${a.break_minutes?`<div><span class="k">break time today:</span> ${a.break_minutes} min</div>`:''}
         <div><span class="k">calls today:</span> ${a.calls_in} in · ${a.calls_out} out</div>
         ${a.minutes_on_call?`<div><span class="k">time on calls:</span> ${a.minutes_on_call} min</div>`:''}
         ${a.last_call_at?`<div><span class="k">last call:</span> ${lvAgo(a.last_call_at)}${a.last_call_phone?' · '+a.last_call_phone:''}</div>`:'<div class="k">no calls yet today</div>'}
         <div style="margin-top:6px;color:var(--accent);">click for their full day →</div>
+
       </div>
     </div>`;
   }).join('');
@@ -5619,6 +5791,30 @@ const esc = s => String(s==null?'':s).replace(/</g,'&lt;');
    before anything is kept. Every real change is recorded in the audit log. */
 let cuEditingId = null;
 
+
+/* A name of some kind and one way to reach them. Which field carries it does
+   not matter — insisting on "first name" pushes people into typing a surname
+   into the wrong box. The same rule is enforced on the server. */
+function cuFormHint(){
+  const v = id => (document.getElementById(id).value || '').trim();
+  const hasName  = v('cf-first') || v('cf-last');
+  const hasPhone = v('cf-phone') || v('cf-mobile') || v('cf-home') || v('cf-other');
+  const need = [];
+  if(!hasName)  need.push('a first or last name');
+  if(!hasPhone) need.push('at least one phone number');
+  const el = document.getElementById('cu-form-need');
+  const save = document.getElementById('cf-save');
+  const editing = !!cuEditingId;
+  if(el) el.textContent = (need.length && !editing) ? 'Still needed: ' + need.join(' · ') : '';
+  if(save){
+    const blocked = need.length > 0 && !editing;
+    save.disabled = blocked;
+    save.style.opacity = blocked ? '.45' : '';
+    save.style.cursor = blocked ? 'not-allowed' : '';
+  }
+  return need;
+}
+
 function cuNewOpen(){
   cuEditingId = null;
   document.getElementById('cu-form-title').textContent = 'New customer';
@@ -5627,6 +5823,7 @@ function cuNewOpen(){
     .forEach(id => document.getElementById(id).value = '');
   document.getElementById('cf-business').checked = false;
   document.getElementById('cu-form-out').textContent = '';
+  cuFormHint();
   showModal('cu-form-modal');
   setTimeout(()=>document.getElementById('cf-first').focus(), 80);
 }
@@ -5646,6 +5843,7 @@ function cuEditOpen(){
   document.getElementById('cf-other').value  = a.other_phone || '';
   document.getElementById('cf-business').checked = !!a.business;
   document.getElementById('cu-form-out').textContent = '';
+  cuFormHint();
   showModal('cu-form-modal');
 }
 
@@ -5663,6 +5861,11 @@ function cuFormValues(){
 
 async function cuFormSubmit(confirm){
   const out = document.getElementById('cu-form-out');
+  const need = cuFormHint();
+  if(need.length && !cuEditingId){
+    out.textContent = 'Still needed: ' + need.join(' · ');
+    return;
+  }
   const body = cuFormValues();
   body.confirm = !!confirm;
   out.textContent = confirm ? 'Saving…' : 'Checking what would happen…';
@@ -5687,6 +5890,166 @@ async function cuFormSubmit(confirm){
       else if(r.new_id) cuOpen(r.new_id);
       cuLoadRecent();
     }, 700);
+  }catch(e){ out.textContent = 'Failed: ' + e.message; }
+}
+
+
+/* The note an agent writes after a call belongs to the work record, which is
+   tied to that call — so it is edited from the work history rather than as a
+   loose note on the account. */
+
+/* ---------------- working on an account ----------------
+   Start work → write the note → finish, charging the minutes. This mirrors
+   what the CMS does, including the rule that an agent cannot have work open on
+   two accounts at once. */
+let openWork = null;
+
+async function wbRefresh(){
+  try{
+    const r = await API.get('/api/work/open');
+    openWork = r.work || null;
+    const bar = document.getElementById('work-bar');
+    if(!bar) return;
+    if(!openWork){ bar.style.display = 'none'; document.body.style.paddingBottom = ''; return; }
+    document.getElementById('wb-account').textContent = openWork.account || ('Account ' + openWork.account_id);
+    const mins = openWork.started
+      ? Math.max(0, Math.round((Date.now() - new Date(openWork.started).getTime())/60000)) : 0;
+    document.getElementById('wb-meta').textContent =
+      `open ${mins} min${openWork.phone ? ' · ' + openWork.phone : ''} · ${openWork.minutes_left} minutes left on the account`;
+    bar.style.display = '';
+    document.body.style.paddingBottom = '64px';
+  }catch(e){}
+}
+
+function wbOpenAccount(){ if(openWork){ showPage('customers'); cuOpen(openWork.account_id); } }
+
+async function cuStartWork(){
+  if(!cuData) return;
+  try{
+    const r = await API.post('/api/work/start', {account_id: cuData.account.id});
+    if(r.error || r.ok === false){ showToast(r.error || 'Could not start work', true); return; }
+    showToast(r.meaning || 'Work started');
+    wbRefresh();
+  }catch(e){ showToast(e.message, true); }
+}
+
+function wbEndOpen(){
+  if(!openWork) return;
+  document.getElementById('we-sub').textContent = 'On ' + (openWork.account || '') +
+    ' · they have ' + openWork.minutes_left + ' minutes left';
+  document.getElementById('we-note').value = '';
+  document.getElementById('we-minutes').value = '0';
+  document.getElementById('we-task').value = '';
+  document.getElementById('we-out').textContent = '';
+  wbPreview();
+  showModal('work-end-modal');
+  setTimeout(()=>document.getElementById('we-note').focus(), 80);
+}
+
+function wbPreview(){
+  if(!openWork) return;
+  const m = parseInt(document.getElementById('we-minutes').value || '0', 10) || 0;
+  document.getElementById('we-preview').textContent = m > 0
+    ? `Charging ${m} minutes takes them from ${openWork.minutes_left} to ${openWork.minutes_left - m}.`
+    : 'Nothing will be charged.';
+}
+
+async function wbEndSave(confirm){
+  const out = document.getElementById('we-out');
+  const note = document.getElementById('we-note').value.trim();
+  if(!note){ out.textContent = 'Write what was done first.'; return; }
+  out.textContent = confirm ? 'Finishing…' : 'Checking…';
+  try{
+    const r = await API.post('/api/work/' + openWork.id + '/end', {
+      minutes_billed: parseInt(document.getElementById('we-minutes').value || '0', 10) || 0,
+      note, task: document.getElementById('we-task').value.trim(), confirm: !!confirm});
+    if(r.error || r.ok === false){
+      out.textContent = '❌ ' + (r.error || 'Could not finish.')
+        + (r.raw_error && r.raw_error !== r.error ? '\n\n' + r.raw_error : '');
+      return;
+    }
+    out.textContent = (confirm ? '✅ ' : '') + (r.meaning || '');
+    if(confirm) setTimeout(()=>{
+      hideModal('work-end-modal');
+      const id = openWork.account_id;
+      openWork = null; wbRefresh();
+      if(cuData && cuData.account.id === id) cuOpen(id);
+    }, 800);
+  }catch(e){ out.textContent = 'Failed: ' + e.message; }
+}
+
+/* ---------------- adjusting the balance ----------------
+   Uses the same path the CMS uses, so the change appears in the account's
+   balance history with a reason attached. */
+function cuMinutesOpen(){
+  if(!cuData) return;
+  document.getElementById('mn-sub').textContent =
+    cuData.account.name + ' has ' + (cuData.account.minutes_left || 0) + ' minutes';
+  document.getElementById('mn-minutes').value = '';
+  document.getElementById('mn-reason').value = '';
+  document.getElementById('mn-out').textContent = '';
+  mnPreview();
+  showModal('minutes-modal');
+  setTimeout(()=>document.getElementById('mn-minutes').focus(), 80);
+}
+
+function mnPreview(){
+  if(!cuData) return;
+  const now = cuData.account.minutes_left || 0;
+  const m = parseInt(document.getElementById('mn-minutes').value || '0', 10) || 0;
+  document.getElementById('mn-preview').textContent = m
+    ? `${now} ${m > 0 ? '+' : '−'} ${Math.abs(m)} = ${now + m} minutes`
+    : '';
+}
+
+async function mnSave(confirm){
+  const out = document.getElementById('mn-out');
+  const minutes = parseInt(document.getElementById('mn-minutes').value || '0', 10) || 0;
+  const reason = document.getElementById('mn-reason').value.trim();
+  if(!minutes){ out.textContent = 'Enter how many minutes.'; return; }
+  if(!reason){ out.textContent = 'Give a reason — it goes into the account history.'; return; }
+  out.textContent = confirm ? 'Saving…' : 'Checking…';
+  try{
+    const r = await API.post('/api/customers/' + cuData.account.id + '/minutes',
+                             {minutes, reason, confirm: !!confirm});
+    if(r.error || r.ok === false){
+      out.textContent = '❌ ' + (r.error || 'Could not change the balance.')
+        + (r.raw_error && r.raw_error !== r.error ? '\n\n' + r.raw_error : '');
+      return;
+    }
+    out.textContent = (confirm ? '✅ ' : '') + (r.meaning || '');
+    if(confirm) setTimeout(()=>{ hideModal('minutes-modal'); cuOpen(cuData.account.id); }, 800);
+  }catch(e){ out.textContent = 'Failed: ' + e.message; }
+}
+
+let cuWorkId = null;
+
+function cuWorkEdit(workId, note, task){
+  cuWorkId = workId;
+  document.getElementById('wn-note').value = note || '';
+  document.getElementById('wn-task').value = task || '';
+  document.getElementById('wn-out').textContent = '';
+  document.getElementById('wn-sub').textContent =
+    (note ? 'Changing the note' : 'Adding a note') + ' on work record #' + workId;
+  showModal('work-note-modal');
+  setTimeout(()=>document.getElementById('wn-note').focus(), 80);
+}
+
+async function cuWorkSave(){
+  const out = document.getElementById('wn-out');
+  const note = document.getElementById('wn-note').value.trim();
+  if(!note){ out.textContent = 'Write something first.'; return; }
+  out.textContent = 'Saving…';
+  try{
+    const r = await API.patch('/api/work/' + cuWorkId, {
+      note, task: document.getElementById('wn-task').value.trim(), confirm: true});
+    if(r.error || r.ok === false){
+      out.textContent = '❌ ' + (r.error || 'Could not save.')
+        + (r.raw_error && r.raw_error !== r.error ? '\n\n' + r.raw_error : '');
+      return;
+    }
+    out.textContent = '✅ ' + (r.meaning || 'Saved.');
+    setTimeout(()=>{ hideModal('work-note-modal'); if(cuData) cuOpen(cuData.account.id); }, 600);
   }catch(e){ out.textContent = 'Failed: ' + e.message; }
 }
 
@@ -5740,7 +6103,10 @@ async function cuOpen(id){
         ${a.deleted?'<span class="pill" style="color:var(--red)">deleted</span>':''}
         ${a.is_free?'<span class="pill" style="color:var(--yellow)">free account</span>':''}
         <span style="margin-left:auto;display:flex;gap:8px;">
-          <button class="btn btn-outline" style="font-size:12px;" onclick="cuNoteOpen()">+ Note</button>
+          <button class="btn btn-outline" style="font-size:12px;" onclick="cuNoteOpen()"
+                  title="A note about the account itself. For what happened on a call, use the work history.">+ Account note</button>
+          <button class="btn btn-outline" style="font-size:12px;" onclick="cuMinutesOpen()">Minutes</button>
+          <button class="btn btn-primary" style="font-size:12px;" onclick="cuStartWork()">Start work</button>
           <button class="btn btn-outline" style="font-size:12px;" onclick="cuEditOpen()">Edit</button>
         </span>
       </div>
@@ -5794,8 +6160,10 @@ function cuTab(which){
         <td style="white-space:nowrap;">${esc(w.agent)||'—'}</td>
         <td style="font-size:11.5px;white-space:nowrap;">${esc(w.phone)||''}
           <span style="color:var(--text3);font-size:10px;display:block">${w.direction}</span></td>
-        <td style="font-size:12px;color:var(--text2);max-width:420px;">
-          ${esc(w.note)||'<span style="color:var(--text3)">no note</span>'}
+        <td style="font-size:12px;color:var(--text2);max-width:420px;cursor:text;"
+            onclick="cuWorkEdit(${w.id}, ${JSON.stringify(w.note||'').replace(/"/g,'&quot;')}, ${JSON.stringify(w.task||'').replace(/"/g,'&quot;')})"
+            title="Click to write or change the note">
+          ${esc(w.note)||'<span style="color:var(--accent)">+ add a note</span>'}
           ${w.task?`<div style="color:var(--text3);font-size:11px;">${esc(w.task)}</div>`:''}</td>
         <td class="n">${w.minutes_billed||0}</td>
         <td>${w.recording?`<button class="cn-chip" onclick="cuPlay('${w.recording}')">▶ listen</button>`:'<span style="color:var(--text3);font-size:11px">—</span>'}</td>
@@ -5939,7 +6307,7 @@ async function acLoadLive(){
 
     const onShift = list.filter(a=>a.clocked_in);
     const onCall = list.filter(a=>(a.phone||'').toUpperCase()==='IN_USE');
-    const idle = onShift.filter(a=>(a.phone||'').toUpperCase()!=='IN_USE' && !a.dnd);
+    const idle = onShift.filter(a=>(a.phone||'').toUpperCase()!=='IN_USE' && !a.dnd && !a.on_break);
   const dndCount = onShift.filter(a=>a.dnd && (a.phone||'').toUpperCase()!=='IN_USE').length;
     const calls = list.reduce((s,a)=>s+a.calls_in+a.calls_out,0);
     const stat = (lab,val,sub,cls) => `<div class="paycard"><div class="lab">${lab}</div>
@@ -5965,9 +6333,10 @@ async function acLoadLive(){
         const busy = (a.phone||'').toUpperCase()==='IN_USE';
         const dnd = !!a.dnd && !busy;
         const dot = !a.clocked_in ? 'var(--text3)' : busy ? 'var(--green)'
-                  : dnd ? '#F2585F' : 'var(--yellow)';
+                  : dnd ? '#F2585F' : a.on_break ? '#7B6CF6' : 'var(--yellow)';
         const state = !a.clocked_in ? 'off shift' : busy ? 'on a call'
-                    : dnd ? 'do not disturb' + (a.dnd_note ? ' — ' + esc(a.dnd_note) : '') : 'free';
+                    : dnd ? 'do not disturb' + (a.dnd_note ? ' — ' + esc(a.dnd_note) : '')
+                    : a.on_break ? 'on a break' : 'free';
         return `<div class="payrow ${acSelected===a.employee_id?'sel':''}" onclick="acOpen(${a.employee_id})">
           <span style="width:9px;height:9px;border-radius:50%;background:${dot};flex:none;"></span>
           <div class="nm">${esc(a.name)} <span style="color:var(--text3);font-size:11px;">ext ${a.extension||'—'}</span>

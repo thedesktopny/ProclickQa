@@ -26,11 +26,18 @@ WRITABLE = {
         {'FirstName', 'LastName', 'Email', 'Phone', 'HomePhone', 'OtherPhone',
          'Mobile', 'Category', 'isBusiness', 'IsFree', 'ReviewStatus',
          'smsActivate', 'smsNumber', 'lastAgent'},
-        {'FirstName'},
+        set(),                      # nothing is required on its own — see below
     ),
     'AccountNotes': (
         {'AccountId', 'Note', 'CreatedBy'},
         {'AccountId', 'Note'},
+    ),
+    # The note an agent writes after a call lives on the work record, tied to
+    # the call itself. Only the words are writable — the minutes billed and the
+    # times belong to the phone system and to billing.
+    'AccountWork': (
+        {'Note', 'TaskDescription'},
+        {'Note'},
     ),
 }
 
@@ -38,9 +45,22 @@ WRITABLE = {
 SERVER_SET = {
     'Account': {'CreatedTime': 'GETDATE()', 'Modified': 'GETDATE()'},
     'AccountNotes': {'Created': 'GETDATE()'},
+    'AccountWork': {},
 }
 
 MAX_TEXT = 400
+MAX_NOTE = 2000
+
+# Some things are only required as a group. A customer needs a name of some
+# kind and at least one way to reach them; which field carries it does not
+# matter, and insisting on a first name specifically would push people into
+# typing a surname into the wrong box.
+REQUIRED_ANY = {
+    'Account': [
+        (('FirstName', 'LastName'), 'a first or last name'),
+        (('Phone', 'Mobile', 'HomePhone', 'OtherPhone'), 'at least one phone number'),
+    ],
+}
 
 
 def _explain(e):
@@ -79,11 +99,16 @@ def _check(table, values, creating):
             raise WriteRefused('%s cannot be changed here.' % k)
         if isinstance(v, str):
             v = v.strip()
-            if len(v) > MAX_TEXT:
-                raise WriteRefused('%s is too long (%d characters).' % (k, len(v)))
+            limit = MAX_NOTE if k in ('Note', 'TaskDescription') else MAX_TEXT
+            if len(v) > limit:
+                raise WriteRefused('%s is too long (%d characters, limit %d).'
+                                   % (k, len(v), limit))
         clean[k] = v
     if creating:
         missing = [r for r in required if not str(clean.get(r, '')).strip()]
+        for fields, label in REQUIRED_ANY.get(table, []):
+            if not any(str(clean.get(f, '') or '').strip() for f in fields):
+                missing.append(label)
         if missing:
             raise WriteRefused('Still needed: ' + ', '.join(missing))
     if not clean:
@@ -228,6 +253,261 @@ def update(table, row_id, values, who, dry_run=True):
         except Exception:
             pass
     _log(who, out, before=out.get('before'))
+    return out
+
+
+def adjust_minutes(account_id, minutes_added, reason, who, minutes_charged=0,
+                   package_sold_id=None, account_work_id=None, dry_run=True):
+    """Change an account's minute balance the way the CMS does it.
+
+    Copied from Repository.SaveNewBalance rather than invented: read the current
+    balance, write a BalanceChangeLog row recording what it was, apply the
+    change, record what it became, and touch Account.Modified. The admin screen
+    in the CMS has a shortcut that skips the log entirely — this deliberately
+    does not, because a balance that moved with no record is the thing nobody
+    can explain later.
+
+    Unlike the original, all of it happens in ONE transaction, so a failure
+    halfway cannot leave the balance changed with no log or the reverse.
+    """
+    account_id = int(account_id)
+    minutes_added = int(minutes_added or 0)
+    minutes_charged = int(minutes_charged or 0)
+    reason = (reason or '').strip()
+    if not reason:
+        raise WriteRefused('Give a reason — it is written into the account history.')
+    if len(reason) > 100:
+        raise WriteRefused('The reason must be 100 characters or fewer (%d given).' % len(reason))
+    if minutes_added == 0 and minutes_charged == 0:
+        raise WriteRefused('Nothing to change.')
+    if abs(minutes_added) > 100000 or abs(minutes_charged) > 100000:
+        raise WriteRefused('That is far more than any real adjustment — check the number.')
+
+    conn = cms_db._connect()
+    out = {'table': 'Account+BalanceChangeLog', 'action': 'adjust_minutes',
+           'account_id': account_id, 'dry_run': dry_run,
+           'values': {'minutes_added': minutes_added, 'minutes_charged': minutes_charged,
+                      'reason': reason}}
+    try:
+        cu = conn.cursor()
+        cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        cu.execute('SELECT ISNULL(MinutesLeft, 0) FROM [Account] WHERE Id = %s', (account_id,))
+        row = cu.fetchone()
+        if row is None:
+            raise WriteRefused('There is no account with id %d.' % account_id)
+        previous = int(row[0] or 0)
+        new_balance = previous - minutes_charged + minutes_added
+        out['previous_balance'] = previous
+        out['new_balance'] = new_balance
+
+        cu.execute("""INSERT INTO [BalanceChangeLog]
+                      (Created, AccountId, PreviousBalance, NewBalance,
+                       PackageSoldId, AccountWorkId, AdjustmentReason)
+                      VALUES (GETDATE(), %s, %s, %s, %s, %s, %s)""",
+                   (account_id, previous, new_balance,
+                    int(package_sold_id) if package_sold_id else None,
+                    int(account_work_id) if account_work_id else None,
+                    reason))
+        cu.execute("""UPDATE [Account] SET MinutesLeft = %s, Modified = GETDATE()
+                      WHERE Id = %s""", (new_balance, account_id))
+
+        if dry_run:
+            conn.rollback()
+            out.update({'ok': True, 'committed': False,
+                        'meaning': 'This would take the balance from %d to %d minutes. '
+                                   'Nothing has been saved.' % (previous, new_balance)})
+        else:
+            conn.commit()
+            cu2 = conn.cursor()
+            cu2.execute('SELECT ISNULL(MinutesLeft, 0) FROM [Account] WHERE Id = %s', (account_id,))
+            actual = int((cu2.fetchone() or [None])[0] or 0)
+            if actual != new_balance:
+                out.update({'ok': False, 'committed': False,
+                            'error': 'The balance still reads %d, not %d. The login may not '
+                                     'have permission to write.' % (actual, new_balance)})
+            else:
+                out.update({'ok': True, 'committed': True,
+                            'meaning': 'Balance changed from %d to %d minutes.'
+                                       % (previous, new_balance)})
+    except WriteRefused:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        conn.close()
+        raise
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        out.update({'ok': False, 'committed': False,
+                    'error': _explain(e), 'raw_error': str(e)[:300]})
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    _log(who, out, before={'MinutesLeft': out.get('previous_balance')})
+    return out
+
+
+def start_work(account_id, employee_id, call_id=None, dry_run=False):
+    """Begin working on an account.
+
+    The CMS refuses if the agent already has work open on a different account,
+    and so does this — an agent is on one call at a time, and two open work
+    records would bill the wrong one.
+    """
+    account_id, employee_id = int(account_id), int(employee_id)
+    conn = cms_db._connect()
+    out = {'table': 'AccountWork', 'action': 'start_work',
+           'account_id': account_id, 'dry_run': dry_run}
+    try:
+        cu = conn.cursor()
+        cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        cu.execute("""SELECT TOP 1 w.Id, w.AccountId, a.FirstName, a.LastName
+                      FROM AccountWork w LEFT JOIN Account a ON a.Id = w.AccountId
+                      WHERE w.EmployeeId = %s AND w.EndTime IS NULL
+                      ORDER BY w.StartTime DESC""", (employee_id,))
+        open_work = cu.fetchone()
+        if open_work and int(open_work[1]) != account_id:
+            name = ('%s %s' % (open_work[2] or '', open_work[3] or '')).strip() or ('account %s' % open_work[1])
+            raise WriteRefused('You already have work open on %s. Finish that first.' % name)
+        if open_work:
+            out.update({'ok': True, 'committed': False, 'work_id': int(open_work[0]),
+                        'meaning': 'Work on this account is already open.'})
+            conn.rollback(); conn.close()
+            return out
+
+        # PhoneCallId is required by the table, so an untied piece of work uses 0
+        cu.execute("""INSERT INTO [AccountWork]
+                      (AccountId, EmployeeId, PhoneCallId, StartTime, Modified)
+                      OUTPUT INSERTED.Id
+                      VALUES (%s, %s, %s, GETDATE(), GETDATE())""",
+                   (account_id, employee_id, int(call_id) if call_id else 0))
+        r = cu.fetchone()
+        out['work_id'] = int(r[0]) if r else None
+        if dry_run:
+            conn.rollback()
+            out.update({'ok': True, 'committed': False,
+                        'meaning': 'This would start work. Nothing has been saved.'})
+        else:
+            conn.commit()
+            out.update({'ok': True, 'committed': True, 'meaning': 'Work started.'})
+    except WriteRefused:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        conn.close()
+        raise
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        out.update({'ok': False, 'committed': False,
+                    'error': _explain(e), 'raw_error': str(e)[:300]})
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    _log(who={'name': None}, result=out, before=None)
+    return out
+
+
+def end_work(work_id, minutes_billed, note, who, task=None, dry_run=False):
+    """Finish a piece of work, and charge for it if minutes were billed.
+
+    This follows EndWorkOnAccount exactly: set the end time, minutes and note,
+    then — only when minutes were actually billed — record the charge against
+    this work record so the balance history shows which call it came from.
+    Both parts share one transaction, so the account can never be charged for
+    work that did not close.
+    """
+    work_id = int(work_id)
+    minutes_billed = int(minutes_billed or 0)
+    note = (note or '').strip()
+    if minutes_billed < 0:
+        raise WriteRefused('Minutes billed cannot be negative.')
+    if minutes_billed > 1440:
+        raise WriteRefused('That is more than a day of minutes — check the number.')
+
+    conn = cms_db._connect()
+    out = {'table': 'AccountWork', 'action': 'end_work', 'work_id': work_id,
+           'dry_run': dry_run,
+           'values': {'minutes_billed': minutes_billed, 'note': note[:120]}}
+    try:
+        cu = conn.cursor()
+        cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        cu.execute("""SELECT AccountId, EmployeeId, EndTime FROM [AccountWork]
+                      WHERE Id = %s""", (work_id,))
+        row = cu.fetchone()
+        if row is None:
+            raise WriteRefused('There is no work record with id %d.' % work_id)
+        if row[2] is not None:
+            raise WriteRefused('That work was already finished.')
+        account_id, employee_id = int(row[0]), int(row[1])
+        out['account_id'] = account_id
+
+        cu.execute("""UPDATE [AccountWork]
+                      SET EndTime = GETDATE(), MinutesBilled = %s, Note = %s,
+                          TaskDescription = %s, Modified = GETDATE()
+                      WHERE Id = %s""",
+                   (minutes_billed, note, (task or '').strip() or None, work_id))
+
+        if minutes_billed > 0:
+            cu.execute('SELECT ISNULL(MinutesLeft, 0) FROM [Account] WHERE Id = %s', (account_id,))
+            previous = int((cu.fetchone() or [0])[0] or 0)
+            new_balance = previous - minutes_billed
+            cu.execute("""INSERT INTO [BalanceChangeLog]
+                          (Created, AccountId, PreviousBalance, NewBalance,
+                           PackageSoldId, AccountWorkId, AdjustmentReason)
+                          VALUES (GETDATE(), %s, %s, %s, NULL, %s, NULL)""",
+                       (account_id, previous, new_balance, work_id))
+            cu.execute("""UPDATE [Account] SET MinutesLeft = %s, Modified = GETDATE()
+                          WHERE Id = %s""", (new_balance, account_id))
+            out['previous_balance'] = previous
+            out['new_balance'] = new_balance
+
+        if dry_run:
+            conn.rollback()
+            out.update({'ok': True, 'committed': False,
+                        'meaning': ('This would finish the work'
+                                    + (' and charge %d minutes (balance %d to %d).'
+                                       % (minutes_billed, out.get('previous_balance', 0),
+                                          out.get('new_balance', 0))
+                                       if minutes_billed else ' with nothing billed.')
+                                    + ' Nothing has been saved.')})
+        else:
+            conn.commit()
+            out.update({'ok': True, 'committed': True,
+                        'meaning': ('Work finished'
+                                    + (' · %d minutes charged, balance now %d.'
+                                       % (minutes_billed, out.get('new_balance', 0))
+                                       if minutes_billed else ', nothing billed.'))})
+    except WriteRefused:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        conn.close()
+        raise
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        out.update({'ok': False, 'committed': False,
+                    'error': _explain(e), 'raw_error': str(e)[:300]})
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    _log(who, out, before=None)
     return out
 
 

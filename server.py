@@ -5042,6 +5042,28 @@ def credential_reveal(credential_id):
         # no record, no reveal
         return jsonify({'error': 'Could not record who is looking, so the login '
                                  'was not shown. ' + str(e)[:120]}), 500
+
+    # The CMS keeps its own access record (PersonalInfoMetadata, which its
+    # "who viewed personal info" report reads). Writing there too means both
+    # systems show the same history instead of each holding half of it.
+    try:
+        if who.get('employee_id'):
+            import cms_db
+            conn2 = cms_db._connect(); cu2 = conn2.cursor()
+            cu2.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+            cu2.execute("""INSERT INTO [PersonalInfoMetadata]
+                           (PersonalInfoId, Created, AccessedBy, Reason, AccountWorkId)
+                           VALUES (%s, GETDATE(), %s, %s,
+                                   (SELECT TOP 1 Id FROM AccountWork
+                                    WHERE EmployeeId = %s AND EndTime IS NULL
+                                    ORDER BY StartTime DESC))""",
+                        (credential_id, int(who['employee_id']),
+                         (reason or 'Viewed in ProClick portal')[:800],
+                         int(who['employee_id'])))
+            conn2.commit(); conn2.close()
+    except Exception as e:
+        print('[credentials] could not write the CMS access record: ' + str(e)[:140])
+
     return jsonify({**info, 'logged_as': who.get('name')})
 
 
@@ -5146,6 +5168,122 @@ def customer_update(account_id):
         # never let a failure come back as a bare 500 — the form has nothing to
         # show for that, which is how a broken save looks like nothing happening
         return jsonify({'ok': False, 'error': 'The change could not be made.',
+                        'raw_error': str(e)[:300]}), 400
+    return jsonify(out), (200 if out.get('ok') else 400)
+
+
+@app.route('/api/customers/<int:account_id>/minutes', methods=['POST'])
+@portal_manager_only
+def customer_adjust_minutes(account_id):
+    """Change an account's minute balance, the way the CMS does — with a proper
+    entry in the balance history. Managers and admins only."""
+    import cms_write
+    d = request.json or {}
+    confirm = bool(d.get('confirm', False))
+    try:
+        out = cms_write.adjust_minutes(
+            account_id,
+            minutes_added=int(d.get('minutes') or 0),
+            reason=d.get('reason'),
+            who=_who(),
+            dry_run=not confirm)
+    except cms_write.WriteRefused as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'The balance could not be changed.',
+                        'raw_error': str(e)[:300]}), 400
+    return jsonify(out), (200 if out.get('ok') else 400)
+
+
+@app.route('/api/work/start', methods=['POST'])
+@portal_or_manager
+def work_start():
+    """Begin working on an account."""
+    import cms_write
+    d = request.json or {}
+    who = _who()
+    if not who.get('employee_id'):
+        return jsonify({'ok': False,
+                        'error': 'Starting work needs a CMS sign-in, so the work is '
+                                 'recorded against the right person.'}), 400
+    try:
+        out = cms_write.start_work(d.get('account_id'), who['employee_id'],
+                                   call_id=d.get('call_id'))
+    except cms_write.WriteRefused as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'Work could not be started.',
+                        'raw_error': str(e)[:300]}), 400
+    return jsonify(out), (200 if out.get('ok') else 400)
+
+
+@app.route('/api/work/<int:work_id>/end', methods=['POST'])
+@portal_or_manager
+def work_end(work_id):
+    """Finish a piece of work and charge the minutes."""
+    import cms_write
+    d = request.json or {}
+    confirm = bool(d.get('confirm', False))
+    try:
+        out = cms_write.end_work(work_id, d.get('minutes_billed'), d.get('note'),
+                                 _who(), task=d.get('task'), dry_run=not confirm)
+    except cms_write.WriteRefused as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'The work could not be finished.',
+                        'raw_error': str(e)[:300]}), 400
+    return jsonify(out), (200 if out.get('ok') else 400)
+
+
+@app.route('/api/work/open', methods=['GET'])
+@portal_or_manager
+def work_open():
+    """Whatever the signed-in person currently has open."""
+    import cms_db
+    who = _who()
+    if not who.get('employee_id'):
+        return jsonify({'work': None})
+    try:
+        conn = cms_db._connect(); cu = conn.cursor()
+        cu.execute("""SELECT TOP 1 w.Id, w.AccountId, w.StartTime, w.PhoneCallId,
+                             a.FirstName, a.LastName, a.Phone, ISNULL(a.MinutesLeft,0)
+                      FROM AccountWork w LEFT JOIN Account a ON a.Id = w.AccountId
+                      WHERE w.EmployeeId = %s AND w.EndTime IS NULL
+                      ORDER BY w.StartTime DESC""", (int(who['employee_id']),))
+        r = cu.fetchone(); conn.close()
+        if not r:
+            return jsonify({'work': None})
+        return jsonify({'work': {
+            'id': int(r[0]), 'account_id': int(r[1]),
+            'started': cms_db._plain(r[2]), 'call_id': int(r[3] or 0),
+            'account': ('%s %s' % (r[4] or '', r[5] or '')).strip(),
+            'phone': r[6], 'minutes_left': int(r[7] or 0)}})
+    except Exception as e:
+        return jsonify({'work': None, 'error': str(e)[:200]})
+
+
+@app.route('/api/work/<int:work_id>', methods=['PATCH'])
+@portal_or_manager
+def work_note_update(work_id):
+    """Write or change the note on a piece of work — what happened on that call.
+
+    This is the note agents write after a call; it belongs to the work record,
+    which is tied to the call itself. The minutes billed are not touched.
+    """
+    import cms_write
+    d = request.json or {}
+    confirm = bool(d.pop('confirm', True))
+    values = {}
+    if 'note' in d:
+        values['Note'] = (d.get('note') or '').strip()
+    if 'task' in d:
+        values['TaskDescription'] = (d.get('task') or '').strip()
+    try:
+        out = cms_write.update('AccountWork', work_id, values, _who(), dry_run=not confirm)
+    except cms_write.WriteRefused as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'The note could not be saved.',
                         'raw_error': str(e)[:300]}), 400
     return jsonify(out), (200 if out.get('ok') else 400)
 
@@ -6907,7 +7045,8 @@ PORTAL_ALLOWED_PREFIXES = (
     '/api/whoami', '/api/portal/', '/api/live', '/api/customers',
     '/api/agents', '/api/agent-list', '/api/packages', '/api/company-info',
     '/api/recording-link', '/api/payments/', '/api/cms-settings',
-    '/api/qa-users', '/api/credentials', '/api/credential-access',
+    '/api/qa-users', '/api/credentials', '/api/credential-access', '/api/work',
+    '/api/customers/',
     '/api/cms-db/', '/api/connections', '/static/', '/favicon',
 )
 
