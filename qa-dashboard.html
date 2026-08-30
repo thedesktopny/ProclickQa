@@ -5641,7 +5641,11 @@ async function cuFormSubmit(confirm){
     const r = cuEditingId
       ? await API.patch('/api/customers/' + cuEditingId, body)
       : await API.post('/api/customers', body);
-    if(r.error || r.ok === false){ out.textContent = '❌ ' + (r.error || 'Could not save.'); return; }
+    if(r.error || r.ok === false){
+      out.textContent = '❌ ' + (r.error || 'Could not save.')
+        + (r.raw_error && r.raw_error !== r.error ? '\n\n' + r.raw_error : '');
+      return;
+    }
     if(!confirm){
       out.textContent = (r.meaning || 'This would work.') +
         '\nNothing has been saved — press Save to keep it.';

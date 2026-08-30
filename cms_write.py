@@ -43,6 +43,28 @@ SERVER_SET = {
 MAX_TEXT = 400
 
 
+def _explain(e):
+    """Turns a database complaint into something a person can act on."""
+    m = str(e)
+    low = m.lower()
+    if 'permission' in low or 'denied' in low:
+        return ('The database refused the change — this login may only be able to read. '
+                'Original message: ' + m[:200])
+    if 'foreign key' in low or 'reference' in low:
+        return ('That points at a record which does not exist. ' + m[:200])
+    if 'truncat' in low or 'too long' in low:
+        return ('One of the values is longer than the column allows. ' + m[:200])
+    if 'cannot insert the value null' in low or 'does not allow nulls' in low:
+        return ('A field the CMS requires was left empty. ' + m[:200])
+    if 'conversion' in low or 'converting' in low:
+        return ('A value is the wrong type for its column. ' + m[:200])
+    if 'deadlock' in low or '1205' in m:
+        return 'The phone system was writing at the same moment. Try again.'
+    if 'identity_insert' in low:
+        return 'The Id column cannot be set by hand.'
+    return m[:280]
+
+
 class WriteRefused(Exception):
     """The change was not allowed. The message says why, in plain terms."""
 
@@ -118,7 +140,8 @@ def create(table, values, who, dry_run=True):
             conn.cursor().execute('ROLLBACK TRANSACTION')
         except Exception:
             pass
-        out.update({'ok': False, 'committed': False, 'error': str(e)[:300]})
+        out.update({'ok': False, 'committed': False,
+                    'error': _explain(e), 'raw_error': str(e)[:300]})
     finally:
         conn.close()
     _log(who, out, before=None)
@@ -149,11 +172,14 @@ def update(table, row_id, values, who, dry_run=True):
         cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
         cu.execute('BEGIN TRANSACTION')
         cu.execute(sql, tuple(params))
-        out['rows_affected'] = cu.rowcount
+        affected = cu.rowcount
+        out['rows_affected'] = None if affected is None or affected < 0 else affected
         if dry_run:
             cu.execute('ROLLBACK TRANSACTION')
             out['committed'] = False
-            out['meaning'] = 'This would change %d row. Nothing has been saved.' % (cu.rowcount or 0)
+            n = out['rows_affected']
+            out['meaning'] = ('This would change %s. Nothing has been saved.'
+                              % ('1 row' if n in (None, 1) else '%d rows' % n))
         else:
             cu.execute('COMMIT TRANSACTION')
             out['committed'] = True
@@ -167,7 +193,8 @@ def update(table, row_id, values, who, dry_run=True):
             conn.cursor().execute('ROLLBACK TRANSACTION')
         except Exception:
             pass
-        out.update({'ok': False, 'committed': False, 'error': str(e)[:300]})
+        out.update({'ok': False, 'committed': False,
+                    'error': _explain(e), 'raw_error': str(e)[:300]})
     finally:
         try:
             conn.close()

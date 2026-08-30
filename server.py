@@ -4753,7 +4753,7 @@ def portal_login_route():
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)[:160]}), 403
     pages = list(PORTAL_PAGES)
-    if user.get('is_qa'):
+    if user.get('is_qa') or user.get('is_admin'):
         pages += PORTAL_QA_PAGES
     if user['is_manager']:
         pages += PORTAL_MANAGER_PAGES
@@ -4765,7 +4765,7 @@ def portal_login_route():
     # one here means the existing pages work untouched rather than every one of
     # them learning about CMS sign-ins.
     vg_token = None
-    if user.get('is_qa'):
+    if user.get('is_qa') or user.get('is_admin'):
         try:
             vg_token = create_token({
                 'id': 'cms-%s' % (user.get('employee_id') or user.get('user_id')),
@@ -4789,7 +4789,7 @@ def portal_me():
     if not p:
         return jsonify({'signed_in': False}), 401
     pages = list(PORTAL_PAGES)
-    if p.get('q'):
+    if p.get('q') or p.get('a'):
         pages += PORTAL_QA_PAGES
     if p.get('m'):
         pages += PORTAL_MANAGER_PAGES
@@ -5063,6 +5063,11 @@ def customer_create():
         out = cms_write.create('Account', d, _who(), dry_run=not confirm)
     except cms_write.WriteRefused as e:
         return jsonify({'ok': False, 'error': str(e)}), 400
+    except Exception as e:
+        # never let a failure come back as a bare 500 — the form has nothing to
+        # show for that, which is how a broken save looks like nothing happening
+        return jsonify({'ok': False, 'error': 'The change could not be made.',
+                        'raw_error': str(e)[:300]}), 400
     return jsonify(out), (200 if out.get('ok') else 400)
 
 
@@ -5077,6 +5082,11 @@ def customer_update(account_id):
         out = cms_write.update('Account', account_id, d, _who(), dry_run=not confirm)
     except cms_write.WriteRefused as e:
         return jsonify({'ok': False, 'error': str(e)}), 400
+    except Exception as e:
+        # never let a failure come back as a bare 500 — the form has nothing to
+        # show for that, which is how a broken save looks like nothing happening
+        return jsonify({'ok': False, 'error': 'The change could not be made.',
+                        'raw_error': str(e)[:300]}), 400
     return jsonify(out), (200 if out.get('ok') else 400)
 
 
@@ -5095,6 +5105,11 @@ def customer_add_note(account_id):
         out = cms_write.create('AccountNotes', values, who, dry_run=not confirm)
     except cms_write.WriteRefused as e:
         return jsonify({'ok': False, 'error': str(e)}), 400
+    except Exception as e:
+        # never let a failure come back as a bare 500 — the form has nothing to
+        # show for that, which is how a broken save looks like nothing happening
+        return jsonify({'ok': False, 'error': 'The change could not be made.',
+                        'raw_error': str(e)[:300]}), 400
     return jsonify(out), (200 if out.get('ok') else 400)
 
 
@@ -6811,7 +6826,7 @@ def _portal_host_guard():
     # a QA reviewer signed in here is doing QA work, so the review tools travel
     # with them — everyone else still cannot reach them from this address
     who = _portal_user(request.headers.get('X-Portal-Ticket', ''))
-    if who and who.get('q'):
+    if who and (who.get('q') or who.get('a')):
         return None
     # not part of this system
     return jsonify({'error': 'Not available on this address'}), 404
