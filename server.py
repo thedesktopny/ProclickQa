@@ -5470,6 +5470,10 @@ def phone_event():
 
     now = datetime.now().isoformat()
     calls = _LIVE_CALLS.setdefault('by_uniq', {})
+    # count each kind as it arrives, so it is obvious at a glance when the
+    # phone system is sending some events but not others
+    _seen = _LIVE_CALLS.setdefault('events_seen', {})
+    _seen[event] = _seen.get(event, 0) + 1
 
     if event == 'end':
         import cms_db as _c
@@ -5580,8 +5584,15 @@ def phone_event_check():
         return jsonify({'error': 'bad key'}), 403
     calls = list(_LIVE_CALLS.get('by_uniq', {}).values())
     missed = _LIVE_CALLS.get('missed', [])
+    seen = _LIVE_CALLS.setdefault('events_seen', {})
     return jsonify({
         'received_anything': bool(calls or missed or _LIVE_CALLS.get('ended')),
+        # which kinds have ever arrived — the quickest way to see that the
+        # phone system is sending some events but not others
+        'events_seen': seen,
+        'missing_events': [e for e in ('start', 'queue', 'pickup', 'end')
+                           if not seen.get(e)],
+        'agents_showing_a_caller': len(_LIVE_CALLS['by_ext']),
         'calls_being_tracked': len(calls),
         'recent': [{'uniq': c.get('uniq'), 'phone': c.get('phone'),
                     'ringing_at': c.get('ringing_at'),
