@@ -1012,6 +1012,85 @@ def buy_package(account_id, package_id, card_id, who, note=None):
     return out
 
 
+def give_free_minutes(account_id, minutes, reason, who):
+    """Give minutes without charging for them.
+
+    Recorded as a sale of nothing — PackageSold with no amount and a note
+    saying why — which is how the CMS does it, so these show up in the same
+    reports as everything else rather than being invisible.
+    """
+    account_id = int(account_id)
+    minutes = int(minutes or 0)
+    reason = (reason or '').strip()
+    if minutes <= 0:
+        raise WriteRefused('How many minutes?')
+    if minutes > 10000:
+        raise WriteRefused('That is far more than any real gift — check the number.')
+    if not reason:
+        raise WriteRefused('Give a reason — free minutes are looked at afterwards.')
+
+    conn = cms_db._connect(); cu = conn.cursor()
+    cu.execute("""SELECT FirstName, LastName, ISNULL(MinutesLeft,0)
+                  FROM Account WHERE Id = %s""", (account_id,))
+    a = cu.fetchone()
+    if not a:
+        conn.close()
+        raise WriteRefused('There is no account with id %d.' % account_id)
+    customer = ('%s %s' % (a[0] or '', a[1] or '')).strip()
+    balance = int(a[2] or 0)
+
+    out = {'table': 'PackageSold', 'action': 'free_minutes', 'account_id': account_id,
+           'dry_run': False, 'values': {'minutes': minutes, 'reason': reason}}
+    try:
+        cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        cu.execute("""SELECT TOP 1 Id FROM AccountWork
+                      WHERE AccountId = %s AND EndTime IS NULL
+                      ORDER BY StartTime DESC""", (account_id,))
+        open_work = cu.fetchone()
+
+        cu.execute("""INSERT INTO [PackageSold]
+                      (AccountId, Created, Note, PackageId, AmountPaid,
+                       AccountWorkId, EmployeId, PackageMinutes)
+                      OUTPUT INSERTED.Id
+                      VALUES (%s, GETDATE(), %s, 0, 0, %s, %s, %s)""",
+                   (account_id, ('Free Minutes - ' + reason)[:200],
+                    (int(open_work[0]) if open_work else None),
+                    (who or {}).get('employee_id'), minutes))
+        sold = cu.fetchone()
+        sold_id = int(sold[0]) if sold else None
+
+        new_balance = balance + minutes
+        cu.execute("""INSERT INTO [BalanceChangeLog]
+                      (Created, AccountId, PreviousBalance, NewBalance,
+                       PackageSoldId, AccountWorkId, AdjustmentReason)
+                      VALUES (GETDATE(), %s, %s, %s, %s, %s, %s)""",
+                   (account_id, balance, new_balance, sold_id,
+                    (int(open_work[0]) if open_work else None),
+                    ('Free minutes - ' + reason)[:100]))
+        cu.execute("""UPDATE [Account] SET MinutesLeft = %s, Modified = GETDATE()
+                      WHERE Id = %s""", (new_balance, account_id))
+        conn.commit()
+        out.update({'ok': True, 'committed': True, 'package_sold_id': sold_id,
+                    'previous_balance': balance, 'new_balance': new_balance,
+                    'meaning': '%d free minutes given — balance now %d.'
+                               % (minutes, new_balance)})
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        out.update({'ok': False, 'committed': False,
+                    'error': _explain(e), 'raw_error': str(e)[:300]})
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    _log(who, out)
+    _watch_for_trouble(account_id, customer, 0, minutes, who, out)
+    return out
+
+
 def _watch_for_trouble(account_id, customer, price, minutes, who, out):
     """The checks the CMS emails an owner about, recorded here instead.
 

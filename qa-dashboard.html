@@ -714,6 +714,46 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
   #cu-profile .data-table .col-agent,
   #cu-profile .data-table .col-phone{ width:110px; }
 }
+
+/* ---------- choosing a package ----------
+   The selected row used a colour that only exists on the Payments page, so
+   nothing looked selected at all. And with thirteen packages the list has to
+   scroll, which meant scrolling away from your own choice — so what you have
+   picked is pinned where it stays visible. */
+.pick-row{
+  display:flex; align-items:center; gap:12px; padding:10px 12px; cursor:pointer;
+  border:1px solid transparent; border-radius:10px; margin-bottom:3px;
+  transition:background .12s, border-color .12s;
+}
+.pick-row:hover{ background:var(--surface2); }
+.pick-row.sel{
+  background:rgba(79,110,247,.14); border-color:var(--accent);
+}
+.pick-row.sel .nm{ font-weight:600; }
+.pick-row .nm{ flex:1; font-size:13px; min-width:0; }
+.pick-row .mt{ font-size:11px; color:var(--text3); font-weight:400; }
+.pick-row .amt{ font-size:14px; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.pick-row.sel .amt{ color:var(--accent); font-weight:650; }
+
+.pick-group{ margin-bottom:14px; }
+.pick-group h4{
+  font-size:10.5px; letter-spacing:.09em; text-transform:uppercase;
+  color:var(--text3); margin:0 0 6px 2px; font-weight:600;
+}
+
+/* what you have chosen, kept in view however far the list scrolls */
+.pick-chosen{
+  position:sticky; bottom:0; z-index:2;
+  background:linear-gradient(180deg, rgba(19,23,41,.6), var(--surface) 40%);
+  padding:12px 0 0; margin-top:4px;
+}
+.pick-chosen .inner{
+  background:var(--surface2); border:1px solid var(--accent);
+  border-radius:11px; padding:12px 14px; font-size:13px; line-height:1.6;
+}
+.pick-scroll{ max-height:38vh; overflow:auto; padding-right:4px; }
+.pick-scroll::-webkit-scrollbar{ width:8px; }
+.pick-scroll::-webkit-scrollbar-thumb{ background:var(--border); border-radius:4px; }
 </style>
 </head>
 <body>
@@ -2774,24 +2814,28 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
 </div>
 
 <div class="modal" id="buy-modal">
-  <div class="modal-box" style="width:520px;max-width:94vw;">
-    <div style="font-size:18px;font-weight:660;margin-bottom:5px;">Sell a package</div>
-    <div style="font-size:12.5px;color:var(--text3);margin-bottom:18px;" id="buy-sub"></div>
+  <div class="modal-box" style="width:560px;max-width:94vw;display:flex;flex-direction:column;
+       max-height:90vh;">
+    <div style="font-size:18px;font-weight:660;margin-bottom:4px;">Sell a package</div>
+    <div style="font-size:12.5px;color:var(--text3);margin-bottom:16px;" id="buy-sub"></div>
 
-    <div class="cn-lab">Package</div>
-    <div id="buy-packages" style="max-height:34vh;overflow:auto;margin-bottom:14px;"></div>
+    <div class="pick-scroll" id="buy-packages"></div>
 
-    <div class="cn-lab" id="buy-card-label">Card to charge</div>
-    <div id="buy-cards"></div>
+    <div id="buy-card-block" style="margin-top:14px;">
+      <div class="cn-lab" id="buy-card-label">Card to charge</div>
+      <div id="buy-cards"></div>
+    </div>
 
-    <div id="buy-summary" style="font-size:13px;color:var(--text2);margin-top:14px;
-         padding:11px 14px;background:var(--surface2);border-radius:10px;display:none;"></div>
+    <div class="pick-chosen" id="buy-chosen" style="display:none;">
+      <div class="inner" id="buy-summary"></div>
+    </div>
     <pre id="buy-out" style="white-space:pre-wrap;font-size:11.5px;color:var(--text3);
          margin:10px 0 0;line-height:1.7;"></pre>
 
-    <div style="display:flex;gap:10px;margin-top:18px;">
+    <div style="display:flex;gap:10px;margin-top:16px;">
       <button class="btn btn-outline" onclick="hideModal('buy-modal')" style="flex:1">Cancel</button>
-      <button class="btn btn-primary" onclick="cuBuy()" style="flex:1" id="buy-go">Purchase</button>
+      <button class="btn btn-primary" onclick="cuBuy()" style="flex:1;opacity:.5;"
+              id="buy-go" disabled>Choose a package</button>
     </div>
   </div>
 </div>
@@ -6672,7 +6716,7 @@ async function wbEndSave(confirm){
    Pick the package, pick the card, press Purchase. The card is one the
    customer already has on file — a token, never a card number, so no card
    details pass through this system at all. */
-let buyPackages = [], buyPackageId = null, buyCardId = null, buyBusy = false;
+let buyPackages = [], buyGroups = [], buyPackageId = null, buyCardId = null, buyBusy = false;
 
 
 /* ---------------- refunding ----------------
@@ -6749,22 +6793,39 @@ async function cuBuyOpen(){
       API.get('/api/packages'),
       API.get(`/api/customers/${a.id}/cards`)]);
     buyPackages = p.packages || [];
-    const money = v => '$' + (Math.round(v||0)/100).toFixed(2);
-    document.getElementById('buy-packages').innerHTML = buyPackages.map(pk=>`
-      <div class="payrow" onclick="cuBuyPick(${pk.id})" id="buy-pk-${pk.id}">
-        <div class="nm">${esc(pk.name)}
-          <div class="mt">${(pk.minutes||0).toLocaleString()} minutes
-            ${pk.per_minute_cents ? ' · ' + (pk.per_minute_cents/100).toFixed(3).replace(/0+$/,'') + ' a minute' : ''}</div></div>
-        <div class="paynum" style="font-size:15px;">${pk.price_cents ? money(pk.price_cents)
-          : '<span style="color:var(--yellow)">free</span>'}</div>
-      </div>`).join('');
+    buyGroups = p.groups || [{title: '', currency: 'USD', packages: buyPackages}];
+
+    // grouped by currency, the way the CMS lists them — a euro package next to
+    // a dollar one with no heading is how the wrong thing gets sold
+    document.getElementById('buy-packages').innerHTML = buyGroups.map(g=>`
+      <div class="pick-group">
+        <h4>${esc(g.title)}</h4>
+        ${g.packages.map(pk=>`
+          <div class="pick-row" onclick="cuBuyPick(${pk.id})" id="buy-pk-${pk.id}">
+            <div class="nm">${esc(pk.name)}
+              <div class="mt">${(pk.minutes||0).toLocaleString()} minutes
+                ${pk.per_minute_cents ? ' · ' + cuCur(pk.per_minute_cents/100, g.currency, 3) + ' a minute' : ''}</div></div>
+            <div class="amt">${pk.price_cents
+              ? cuCur(pk.price_cents/100, g.currency)
+              : '<span style="color:var(--yellow)">free</span>'}</div>
+          </div>`).join('')}
+      </div>`).join('')
+      + `<div class="pick-group">
+           <h4>Other</h4>
+           <div class="pick-row" onclick="cuBuyFree()" id="buy-pk-free">
+             <div class="nm">Free minutes
+               <div class="mt">given without charging, with a reason</div></div>
+             <div class="amt" style="color:var(--yellow);font-size:13px;">free</div>
+           </div>
+         </div>`;
 
     const cards = c.cards || [];
     document.getElementById('buy-cards').innerHTML = cards.length
       ? cards.map(cd=>`
-        <div class="payrow" onclick="cuBuyCard(${cd.id})" id="buy-card-${cd.id}">
+        <div class="pick-row" onclick="cuBuyCard(${cd.id})" id="buy-card-${cd.id}">
           <div class="nm">${esc(cd.brand||'Card')} ending ${esc(cd.last4||'????')}
             <div class="mt">${cd.last_used ? 'last used ' + new Date(cd.last_used).toLocaleDateString() : 'not used yet'}</div></div>
+          <div class="amt" style="font-size:12px;color:var(--text3);">select</div>
         </div>`).join('')
       : `<div style="color:var(--yellow);font-size:12.5px;">
            No card on file. A new card has to be taken in the CMS for now.</div>`;
@@ -6772,6 +6833,49 @@ async function cuBuyOpen(){
   }catch(e){
     document.getElementById('buy-out').textContent = 'Could not load: ' + e.message;
   }
+}
+
+
+/* Money in the currency the package is actually priced in. A package with no
+   currency set is shown as a bare number, because that is what it is — calling
+   it dollars would be a guess. */
+function cuCur(amount, currency, dp){
+  const symbol = {USD:'$', EUR:'€', GBP:'£', ILS:'₪', CAD:'CA$', MXN:'MX$'}[currency] || '';
+  // a price always shows both decimals — $9 instead of $9.00 reads like a
+  // rounding rather than a price. Only per-minute rates are trimmed, since
+  // 0.472 is clearer than 0.4725.
+  if(dp === undefined) return symbol + amount.toFixed(2);
+  return symbol + amount.toFixed(dp).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
+}
+
+/* Free minutes: not a package, so it has its own small form rather than
+   pretending to be one. */
+function cuBuyFree(){
+  buyPackageId = 'free';
+  document.querySelectorAll('[id^="buy-pk-"]').forEach(el=>
+    el.classList.toggle('sel', el.id === 'buy-pk-free'));
+  document.getElementById('buy-card-block').style.display = 'none';
+  document.getElementById('buy-chosen').style.display = 'block';
+  const btn = document.getElementById('buy-go');
+  btn.disabled = false; btn.style.opacity = ''; btn.textContent = 'Add free minutes';
+  const box = document.getElementById('buy-summary');
+  box.innerHTML = `
+    <div style="display:grid;grid-template-columns:110px 1fr;gap:10px;align-items:center;">
+      <div class="cn-lab" style="margin:0;">Minutes</div>
+      <input id="buy-free-minutes" class="cms-in" type="number" min="1" placeholder="e.g. 30"
+             oninput="cuBuyFreePreview()">
+      <div class="cn-lab" style="margin:0;">Reason</div>
+      <input id="buy-free-reason" class="cms-in" maxlength="150"
+             placeholder="Why they are being given">
+    </div>
+    <div id="buy-free-preview" style="font-size:12px;color:var(--text3);margin-top:9px;"></div>`;
+}
+
+function cuBuyFreePreview(){
+  const m = parseInt((document.getElementById('buy-free-minutes')||{}).value || '0', 10) || 0;
+  const now = cuData.account.minutes_left || 0;
+  const el = document.getElementById('buy-free-preview');
+  if(el) el.textContent = m ? `Balance ${now} → ${now + m} minutes. Nothing will be charged.` : '';
 }
 
 function cuBuyPick(id){
@@ -6791,26 +6895,67 @@ function cuBuyCard(id){
 }
 
 function cuBuySummary(){
+  if(buyPackageId === 'free'){ cuBuyFree(); return; }
   const pk = buyPackages.find(p=>p.id === buyPackageId);
   const box = document.getElementById('buy-summary');
+  const chosen = document.getElementById('buy-chosen');
+  const btn = document.getElementById('buy-go');
   const free = pk && !pk.price_cents;
   // a free package needs no card, so stop asking for one
-  document.getElementById('buy-card-label').style.display = free ? 'none' : '';
-  document.getElementById('buy-cards').style.display = free ? 'none' : '';
-  if(!pk){ box.style.display = 'none'; return; }
+  document.getElementById('buy-card-block').style.display = free ? 'none' : '';
+  if(!pk){
+    chosen.style.display = 'none';
+    btn.disabled = true; btn.style.opacity = '.5'; btn.textContent = 'Choose a package';
+    return;
+  }
+  const needsCard = !free && !buyCardId;
+  btn.disabled = needsCard;
+  btn.style.opacity = needsCard ? '.5' : '';
+  btn.textContent = needsCard ? 'Choose a card'
+    : free ? 'Add ' + pk.minutes + ' minutes'
+    : 'Charge ' + cuCur(pk.price_cents/100, pk.currency);
   const now = (cuData.account.minutes_left || 0);
-  box.style.display = 'block';
+  chosen.style.display = 'block';
   box.innerHTML = free
     ? `<b>${esc(pk.name)}</b> — ${pk.minutes} free minutes. Nothing will be charged.<br>
        Balance ${now} → <b>${now + pk.minutes}</b>.`
     : `<b>${esc(pk.name)}</b> — charge
-       <b>$${(pk.price_cents/100).toFixed(2)}</b> to the selected card.<br>
+       <b>${cuCur(pk.price_cents/100, pk.currency)}</b>${cuBuyCardLabel()}.<br>
        Balance ${now} → <b>${now + pk.minutes}</b> minutes.`;
+}
+
+function cuBuyCardLabel(){
+  if(!buyCardId) return ' — <span style="color:var(--yellow)">choose a card below</span>';
+  const el = document.getElementById('buy-card-' + buyCardId);
+  if(!el) return ' — <span style="color:var(--yellow)">choose a card below</span>';
+  const name = (el.querySelector('.nm') || {}).textContent || '';
+  return ' to ' + name.split('\n')[0].trim();
+}
+
+
+async function cuBuyFreeGo(){
+  const out = document.getElementById('buy-out');
+  const minutes = parseInt((document.getElementById('buy-free-minutes')||{}).value || '0', 10) || 0;
+  const reason = ((document.getElementById('buy-free-reason')||{}).value || '').trim();
+  if(!minutes){ out.textContent = 'How many minutes?'; return; }
+  if(!reason){ out.textContent = 'Give a reason — free minutes get looked at afterwards.'; return; }
+  buyBusy = true;
+  const btn = document.getElementById('buy-go');
+  btn.disabled = true; btn.textContent = 'Adding…';
+  try{
+    const r = await API.post(`/api/customers/${cuData.account.id}/free-minutes`,
+                             {minutes, reason});
+    if(r.error || r.ok === false){ out.textContent = '❌ ' + r.error; return; }
+    out.textContent = '✅ ' + r.meaning;
+    setTimeout(()=>{ hideModal('buy-modal'); cuOpen(cuData.account.id); }, 1300);
+  }catch(e){ out.textContent = 'Failed: ' + e.message; }
+  finally{ buyBusy = false; btn.disabled = false; btn.textContent = 'Purchase'; }
 }
 
 async function cuBuy(){
   if(buyBusy) return;
   const out = document.getElementById('buy-out');
+  if(buyPackageId === 'free') return cuBuyFreeGo();
   const pk = buyPackages.find(p=>p.id === buyPackageId);
   if(!pk){ out.textContent = 'Choose a package first.'; return; }
   if(pk.price_cents && !buyCardId){ out.textContent = 'Choose a card to charge.'; return; }

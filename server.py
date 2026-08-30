@@ -5352,6 +5352,24 @@ def customer_cards(account_id):
         return jsonify({'cards': [], 'error': str(e)[:200]}), 400
 
 
+@app.route('/api/customers/<int:account_id>/free-minutes', methods=['POST'])
+@portal_or_manager
+def customer_free_minutes(account_id):
+    """Give minutes without charging. Recorded like any other sale, so it
+    shows up wherever payments are reviewed."""
+    import cms_write
+    d = request.json or {}
+    try:
+        out = cms_write.give_free_minutes(account_id, d.get('minutes'),
+                                          d.get('reason'), _who())
+    except cms_write.WriteRefused as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'The minutes could not be added.',
+                        'raw_error': str(e)[:300]}), 400
+    return jsonify(out), (200 if out.get('ok') else 400)
+
+
 @app.route('/api/payments/<int:payment_id>/refund', methods=['POST'])
 @portal_or_manager
 def payment_refund(payment_id):
@@ -5958,6 +5976,18 @@ def customer_texts_read(account_id):
         return jsonify(cms_write.mark_texts_read(account_id))
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)[:200]}), 400
+
+
+@app.route('/api/texts/recent', methods=['GET'])
+@portal_or_manager
+def texts_recent():
+    """Everything that has arrived lately, unfiltered — for working out why a
+    message someone sent is not showing where they expect."""
+    import cms_db
+    try:
+        return jsonify(cms_db.recent_texts(int(request.args.get('minutes') or 180)))
+    except Exception as e:
+        return jsonify({'error': str(e)[:200], 'messages': []}), 400
 
 
 @app.route('/api/texts/unread', methods=['GET'])

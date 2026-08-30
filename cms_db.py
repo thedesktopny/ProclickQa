@@ -1099,6 +1099,42 @@ def missed_by_hour(days=7):
     return {'by_hour': out, 'days': days}
 
 
+def recent_texts(minutes=180, limit=30):
+    """The last messages in and out across every account.
+
+    For checking that incoming texts are arriving at all. Deliberately
+    unfiltered — it shows the layout files and messages with no account
+    attached too, because those are exactly the cases that look like a message
+    never arriving when in fact it landed somewhere unexpected.
+    """
+    conn = _connect(); cu = conn.cursor()
+    cu.execute("""SELECT TOP %d s.Id, s.AccountId, s.AccountSMSNumber, s.ContactNumber,
+                         s.smsDate, s.InOut, s.message, s.MediaURL,
+                         ISNULL(s.smsNotRead, 0),
+                         a.FirstName, a.LastName
+                  FROM SMSLog s LEFT JOIN Account a ON a.Id = s.AccountId
+                  WHERE s.smsDate >= DATEADD(minute, -%d, GETDATE())
+                  ORDER BY s.smsDate DESC""" % (int(limit), int(minutes)))
+    out = []
+    while True:
+        r = cu.fetchone()
+        if not r:
+            break
+        media = r[7]
+        out.append({'id': int(r[0]), 'account_id': (int(r[1]) if r[1] else None),
+                    'our_number': r[2], 'their_number': r[3],
+                    'when': _plain(r[4]), 'direction': r[5],
+                    'message': (r[6] or '')[:120], 'media': media,
+                    'unread': bool(r[8]),
+                    'account': (('%s %s' % (r[9] or '', r[10] or '')).strip() or None),
+                    'is_layout_file': bool(media and str(media).lower().split('?')[0]
+                                           .endswith(('.smil', '.xml')))})
+    conn.close()
+    return {'messages': out, 'minutes': minutes,
+            'incoming': len([m for m in out if m['direction'] == 'In']),
+            'unattached': len([m for m in out if not m['account_id']])}
+
+
 def unread_texts(hours=72, limit=60):
     """Customers who texted and have not been answered.
 
@@ -1348,7 +1384,7 @@ def packages():
     """What a customer can buy, with the price per minute worked out."""
     conn = _connect(); cu = conn.cursor()
     cu.execute("""SELECT Id, Name, Minutes, Price, Currency, Commission, PhoneSystemOption
-                  FROM Packages ORDER BY Price""")
+                  FROM Packages ORDER BY ISNULL(Currency, ''), Price""")
     out = []
     while True:
         r = cu.fetchone()
@@ -1358,11 +1394,35 @@ def packages():
         cents = int(r[3] or 0)
         out.append({'id': int(r[0]), 'name': (r[1] or '').strip() or '(unnamed)',
                     'minutes': mins, 'price_cents': cents,
-                    'currency': (r[4] or 'usd').upper(),
+                    # kept as it is stored: a package with no currency set is
+                    # not the same as one priced in dollars, and the CMS lists
+                    # those separately
+                    'currency': (r[4] or '').strip().upper(),
                     'per_minute_cents': round(cents / mins, 2) if mins else None,
                     'commission': int(r[5] or 0), 'phone_option': r[6]})
     conn.close()
-    return {'packages': out}
+
+    # Grouped by currency, the way the CMS lists them. A package with no
+    # currency set is its own group rather than being quietly called dollars —
+    # the Bobov ones are priced without a currency and guessing would be wrong.
+    names = {'USD': 'US Dollar', 'ILS': 'Israeli New Sheqel', 'EUR': 'Euro',
+             'GBP': 'British Pound Sterling', 'CAD': 'Canadian Dollar',
+             'MXN': 'Mexican Peso'}
+    groups = {}
+    for p in out:
+        code = (p.get('currency') or '').strip().upper()
+        groups.setdefault(code, []).append(p)
+    ordered = []
+    for code in ['USD', 'ILS', 'EUR', 'GBP', 'CAD', 'MXN']:
+        if code in groups:
+            ordered.append({'currency': code, 'title': names[code] + ' - packages',
+                            'packages': groups.pop(code)})
+    for code, items in groups.items():
+        ordered.append({'currency': code,
+                        'title': (names.get(code, code) + ' - packages') if code
+                                 else 'No currency set - packages',
+                        'packages': items})
+    return {'packages': out, 'groups': ordered}
 
 
 def agent_list(include_left=False):
