@@ -5484,6 +5484,31 @@ def missed_calls_pattern():
         return jsonify({'error': str(e)[:200], 'by_hour': []}), 400
 
 
+@app.route('/api/phone-event/check', methods=['GET'])
+def phone_event_check():
+    """Lets whoever wired up the phone system confirm events are arriving.
+
+    Guarded by the same key they already have, so they can check their own
+    work without needing an account here.
+    """
+    key = os.getenv('PHONE_EVENT_KEY', '')
+    if key and request.args.get('key') != key and request.headers.get('X-Event-Key') != key:
+        return jsonify({'error': 'bad key'}), 403
+    calls = list(_LIVE_CALLS.get('by_uniq', {}).values())
+    missed = _LIVE_CALLS.get('missed', [])
+    return jsonify({
+        'received_anything': bool(calls or missed or _LIVE_CALLS.get('ended')),
+        'calls_being_tracked': len(calls),
+        'recent': [{'uniq': c.get('uniq'), 'phone': c.get('phone'),
+                    'ringing_at': c.get('ringing_at'),
+                    'answered_by': c.get('answered_by')} for c in calls[-10:]],
+        'last_ended': _LIVE_CALLS.get('ended'),
+        'recent_missed': [{'phone': m.get('phone'), 'status': m.get('status'),
+                           'ended': m.get('ended')} for m in missed[:5]],
+        'now': datetime.now().isoformat(),
+    })
+
+
 @app.route('/api/phone-event/recent', methods=['GET'])
 @portal_or_manager
 def phone_event_recent():
@@ -7429,7 +7454,8 @@ PORTAL_ALLOWED_PREFIXES = (
     '/api/recording-link', '/api/payments/', '/api/cms-settings',
     '/api/qa-users', '/api/credentials', '/api/credential-access', '/api/work',
     '/api/customers/', '/api/calls/', '/api/my-call', '/api/phone-event',
-    '/api/phone-event/recent', '/api/missed-calls', '/api/texts/',
+    '/api/phone-event/recent', '/api/phone-event/check',
+    '/api/missed-calls', '/api/texts/',
     '/api/cms-db/', '/api/connections', '/static/', '/favicon',
 )
 
