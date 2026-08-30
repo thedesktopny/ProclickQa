@@ -4,6 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<!-- Cardknox iFields: the card number and security code are typed into frames
+     served by Cardknox, so those values go straight to them and never reach
+     this server. -->
+<script src="https://cdn.cardknox.com/ifields/2.15.2503.2601/ifields.min.js"></script>
 <link rel="alternate icon" type="image/png" href="/favicon.png">
 <link rel="apple-touch-icon" href="/favicon.png">
 <meta name="theme-color" content="#6C5CE7">
@@ -757,6 +761,18 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
 
 .buy-dot{ width:7px; height:7px; border-radius:50%; background:var(--border); }
 .buy-dot.on{ background:var(--accent); }
+
+/* the card fields sit in frames we cannot style from here, so the frame
+   itself is styled to match everything around it */
+.ck-field{
+  background:var(--surface2); border:1px solid var(--border); border-radius:10px;
+  padding:2px 10px; transition:border-color .15s, box-shadow .15s;
+}
+.ck-field:focus-within{
+  border-color:var(--accent); box-shadow:0 0 0 3px rgba(79,110,247,.16);
+  background:var(--surface);
+}
+.ck-field iframe{ width:100%; height:38px; border:0; display:block; }
 </style>
 </head>
 <body>
@@ -2821,6 +2837,56 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
     <div style="display:flex;gap:10px;margin-top:18px;">
       <button class="btn btn-outline" onclick="hideModal('refund-modal')" style="flex:1">Cancel</button>
       <button class="btn btn-primary" onclick="cuRefund()" style="flex:1" id="rf-go">Refund</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="newcard-modal">
+  <div class="modal-box" style="width:440px;max-width:94vw;">
+    <div style="font-size:18px;font-weight:660;margin-bottom:5px;">Add a card</div>
+    <div style="font-size:12.5px;color:var(--text3);margin-bottom:18px;" id="nc-sub"></div>
+
+    <div class="cn-lab">Card number</div>
+    <div class="ck-field">
+      <iframe data-ifields-id="card-number" data-ifields-placeholder="1234 5678 9012 3456"
+              src="https://cdn.cardknox.com/ifields/2.15.2503.2601/ifield.htm"></iframe>
+    </div>
+    <input data-ifields-id="card-number-token" type="hidden">
+
+    <div style="display:grid;grid-template-columns:1fr 1fr 1.2fr;gap:12px;margin-top:14px;">
+      <div><div class="cn-lab">Month</div>
+        <input id="nc-month" class="cms-in" style="width:100%" inputmode="numeric"
+               maxlength="2" placeholder="MM"></div>
+      <div><div class="cn-lab">Year</div>
+        <input id="nc-year" class="cms-in" style="width:100%" inputmode="numeric"
+               maxlength="4" placeholder="YYYY"></div>
+      <div><div class="cn-lab">Security code <span style="color:var(--text3)">optional</span></div>
+        <div class="ck-field">
+          <iframe data-ifields-id="cvv" data-ifields-placeholder="CVV"
+                  src="https://cdn.cardknox.com/ifields/2.15.2503.2601/ifield.htm"></iframe>
+        </div>
+        <input data-ifields-id="cvv-token" type="hidden"></div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1.4fr 1fr;gap:12px;margin-top:14px;">
+      <div><div class="cn-lab">Name on the card</div>
+        <input id="nc-name" class="cms-in" style="width:100%" autocomplete="off"></div>
+      <div><div class="cn-lab">Billing zip</div>
+        <input id="nc-zip" class="cms-in" style="width:100%" inputmode="numeric"
+               maxlength="10"></div>
+    </div>
+
+    <div style="font-size:11px;color:var(--text3);margin-top:14px;line-height:1.6;">
+      The card number goes from this page straight to the card service. It is not
+      sent to us, not stored here, and not written to any log — only a reference
+      to it comes back.
+    </div>
+    <pre id="nc-out" style="white-space:pre-wrap;font-size:11.5px;color:var(--text3);
+         margin:10px 0 0;line-height:1.7;"></pre>
+
+    <div style="display:flex;gap:10px;margin-top:16px;">
+      <button class="btn btn-outline" onclick="hideModal('newcard-modal')" style="flex:1">Cancel</button>
+      <button class="btn btn-primary" onclick="cuNewCardSave()" style="flex:1" id="nc-go">Save card</button>
     </div>
   </div>
 </div>
@@ -6853,6 +6919,107 @@ function cuCur(amount, currency, dp){
   return symbol + amount.toFixed(dp).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
 }
 
+
+/* ---------------- adding a card ----------------
+   The number and security code are typed into frames served by the card
+   service, so those values travel from the customer's browser to them and
+   never pass through this system. What comes back is a one-time reference,
+   which the server exchanges for a lasting one. No card number is stored,
+   logged, or seen here at any point. */
+let ckReady = false;
+
+async function cuNewCard(){
+  const out = document.getElementById('nc-out');
+  document.getElementById('nc-sub').textContent =
+    'For ' + (cuData ? cuData.account.name : '');
+  ['nc-month','nc-year','nc-name','nc-zip'].forEach(id=>{
+    const el = document.getElementById(id); if(el) el.value = '';
+  });
+  document.getElementById('nc-name').value = (cuData ? cuData.account.name : '') || '';
+  out.textContent = '';
+  showModal('newcard-modal');
+
+  if(ckReady) return;
+  try{
+    const cfg = await API.get('/api/card-fields');
+    if(!cfg.ifields_key){
+      out.textContent = 'Card entry is not set up yet — the card service key is missing '
+        + '(CARDKNOX_IFIELDS_KEY). Ask David to add it.';
+      return;
+    }
+    if(typeof setAccount !== 'function'){
+      out.textContent = 'The card fields could not load. Check the connection and reopen this.';
+      return;
+    }
+    setAccount(cfg.ifields_key, 'ProClick Portal', '1.0');
+    enableAutoFormatting();
+    ckReady = true;
+  }catch(e){ out.textContent = 'Could not set up the card fields: ' + e.message; }
+}
+
+function cuNewCardSave(){
+  const out = document.getElementById('nc-out');
+  const month = (document.getElementById('nc-month').value || '').trim();
+  const year = (document.getElementById('nc-year').value || '').trim();
+  if(!month || !year){ out.textContent = 'Enter the expiry month and year.'; return; }
+  if(!ckReady){ out.textContent = 'The card fields are not ready yet.'; return; }
+
+  const btn = document.getElementById('nc-go');
+  btn.disabled = true; btn.textContent = 'Checking the card…';
+  out.textContent = '';
+
+  // asks the card service to turn what was typed into a one-time reference
+  getTokens(async ()=>{
+    try{
+      const cardToken = (document.querySelector('[data-ifields-id="card-number-token"]')||{}).value;
+      const cvvToken = (document.querySelector('[data-ifields-id="cvv-token"]')||{}).value;
+      if(!cardToken){
+        out.textContent = 'The card number did not go through. Check it and try again.';
+        btn.disabled = false; btn.textContent = 'Save card';
+        return;
+      }
+      btn.textContent = 'Saving…';
+      const r = await API.post(`/api/customers/${cuData.account.id}/cards`, {
+        card_token: cardToken, cvv_token: cvvToken || null,
+        exp_month: month, exp_year: year,
+        name: document.getElementById('nc-name').value.trim(),
+        zip: document.getElementById('nc-zip').value.trim()});
+      if(r.error || r.ok === false){
+        out.textContent = '❌ ' + (r.error || 'The card was not saved.');
+        return;
+      }
+      out.textContent = '✅ ' + r.meaning;
+      // put it into the list and choose it, so the sale can carry on
+      if(r.card){
+        buyCards.unshift({id: r.card.id, brand: r.card.brand, last4: r.card.last4,
+                          last_used: null});
+        setTimeout(()=>{
+          hideModal('newcard-modal');
+          if(buyStep === 2) cuBuyNextRedrawCards(r.card.id);
+        }, 900);
+      }
+    }catch(e){ out.textContent = 'Failed: ' + e.message; }
+    finally{ btn.disabled = false; btn.textContent = 'Save card'; }
+  }, () => {
+    out.textContent = 'The card service could not read that card. Check the number.';
+    btn.disabled = false; btn.textContent = 'Save card';
+  });
+}
+
+/* redraws the card list after a new one is added, and selects it */
+function cuBuyNextRedrawCards(selectId){
+  document.getElementById('buy-cards').innerHTML = buyCards.map(cd=>`
+    <div class="pick-row" onclick="cuBuyCard(${cd.id})" id="buy-card-${cd.id}">
+      <div class="nm">${esc(cd.brand||'Card')} ending ${esc(cd.last4||'????')}
+        <div class="mt">${cd.last_used
+          ? 'last used ' + new Date(cd.last_used).toLocaleDateString()
+          : 'just added'}</div></div>
+    </div>`).join('')
+    + `<div class="pick-row" onclick="cuNewCard()" id="buy-card-new" style="border-style:dashed;">
+         <div class="nm" style="color:var(--accent);">+ Add a new card</div></div>`;
+  if(selectId) cuBuyCard(selectId);
+}
+
 async function cuBuyOpen(){
   if(!cuData) return;
   const a = cuData.account;
@@ -6992,8 +7159,17 @@ function cuBuyNext(){
               ? 'last used ' + new Date(cd.last_used).toLocaleDateString()
               : 'not used yet'}</div></div>
         </div>`).join('')
-      : `<div style="color:var(--yellow);font-size:12.5px;padding:8px 0;">
-           No card on file for this customer. A new card has to be taken in the CMS.</div>`;
+        + `<div class="pick-row" onclick="cuNewCard()" id="buy-card-new"
+                style="border-style:dashed;">
+             <div class="nm" style="color:var(--accent);">+ Add a new card</div></div>`
+      : `<div style="color:var(--text3);font-size:12.5px;padding:6px 0 10px;">
+           No card on file for this customer yet.</div>`;
+    document.getElementById('buy-cards').innerHTML +=
+      `<div class="pick-row" onclick="cuNewCard()" id="buy-card-new"
+            style="border-style:dashed;">
+         <div class="nm" style="color:var(--accent);">+ Add a new card
+           <div class="mt">typed straight into the card service, not stored here</div></div>
+       </div>`;
     if(buyCards.length === 1) buyCardId = buyCards[0].id;
     cuBuyStep(2);
     if(buyCardId) cuBuyCard(buyCardId);

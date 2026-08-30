@@ -850,6 +850,118 @@ def _cardknox_sale(token, amount_cents, description, currency='USD'):
     raise RuntimeError(answer.get('xError') or ('the card was declined (%s)' % status))
 
 
+def save_card(account_id, card_token, exp_month, exp_year, who,
+              cvv_token=None, cardholder=None, zip_code=None):
+    """Keep a new card on file for a customer.
+
+    The card number never reaches this server. The browser sends it straight to
+    Cardknox, which hands back a single-use token; that token is what arrives
+    here and is exchanged for a lasting one. So no card number is stored,
+    logged, or passes through Azure at any point — which keeps this system out
+    of the scope that handling card data would bring.
+
+    The security code is optional, as asked. Some cards on file are taken
+    without one.
+    """
+    import urllib.parse as _p
+    import urllib.request as _u
+
+    account_id = int(account_id)
+    card_token = (card_token or '').strip()
+    if not card_token:
+        raise WriteRefused('The card details did not come through. Try again.')
+    try:
+        mm = int(str(exp_month).strip())
+        yy = int(str(exp_year).strip())
+    except Exception:
+        raise WriteRefused('Enter the expiry month and year.')
+    if not (1 <= mm <= 12):
+        raise WriteRefused('The expiry month should be 1 to 12.')
+    if yy < 100:
+        yy += 2000
+    import datetime as _dt
+    now = _dt.date.today()
+    if yy < now.year or (yy == now.year and mm < now.month):
+        raise WriteRefused('That card has already expired.')
+
+    key = os.getenv('CARDKNOX_KEY', '')
+    if not key:
+        raise WriteRefused('Card payments are not set up here yet (CARDKNOX_KEY).')
+
+    conn = cms_db._connect(); cu = conn.cursor()
+    cu.execute("""SELECT FirstName, LastName, Phone FROM Account WHERE Id = %s""",
+               (account_id,))
+    a = cu.fetchone()
+    if not a:
+        conn.close()
+        raise WriteRefused('There is no account with id %d.' % account_id)
+    customer = ('%s %s' % (a[0] or '', a[1] or '')).strip()
+
+    fields = {
+        'xKey': key, 'xVersion': '5.0.0',
+        'xSoftwareName': 'ProClick Portal', 'xSoftwareVersion': '1.0',
+        'xCommand': 'cc:Save',
+        'xCardNum': card_token,
+        'xExp': '%02d%02d' % (mm, yy % 100),
+        'xName': (cardholder or customer or '')[:80],
+        'xDescription': ('ProClick customer - %s %s created by %s'
+                         % (customer, a[2] or '', (who or {}).get('name') or ''))[:200],
+    }
+    if cvv_token:
+        fields['xCVV'] = cvv_token
+    if zip_code:
+        fields['xZip'] = str(zip_code)[:10]
+
+    out = {'table': 'StripeCustomers', 'action': 'save_card',
+           'account_id': account_id, 'dry_run': False,
+           'values': {'expiry': '%02d/%d' % (mm, yy)}}
+    try:
+        req = _u.Request(CARDKNOX_URL, data=_p.urlencode(fields).encode(),
+                         headers={'Content-Type': 'application/x-www-form-urlencoded'})
+        with _u.urlopen(req, timeout=45) as resp:
+            answer = dict(_p.parse_qsl(resp.read().decode('utf-8', 'replace')))
+        status = (answer.get('xStatus') or answer.get('xResult') or '').strip()
+        if not (status.lower().startswith('appro') or status.upper() == 'A'):
+            raise RuntimeError(answer.get('xError') or ('the card was not accepted (%s)' % status))
+        token = answer.get('xToken')
+        if not token:
+            raise RuntimeError('no token came back from the card service')
+
+        masked = answer.get('xMaskedCardNumber') or ''
+        last4 = (masked[-4:] if len(masked) >= 4 else '') or (answer.get('xCardLast4') or '')
+        brand = (answer.get('xCardType') or answer.get('xCardBrand') or 'Card').strip()
+
+        cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        cu.execute("""INSERT INTO [StripeCustomers]
+                      (AccountId, Created, CreatedBy, StripeCustomer, Brand, Last4, LastUsed)
+                      OUTPUT INSERTED.Id
+                      VALUES (%s, GETDATE(), %s, %s, %s, %s, NULL)""",
+                   (account_id, (who or {}).get('employee_id') or 0,
+                    token, brand[:50], last4[:4]))
+        row = cu.fetchone()
+        conn.commit()
+        out.update({'ok': True, 'committed': True,
+                    'card': {'id': int(row[0]) if row else None,
+                             'brand': brand, 'last4': last4},
+                    'meaning': '%s ending %s saved.' % (brand, last4 or '????')})
+    except WriteRefused:
+        raise
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        out.update({'ok': False, 'committed': False,
+                    'error': _explain(e), 'raw_error': str(e)[:300]})
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    _log(who, out)
+    return out
+
+
 def buy_package(account_id, package_id, card_id, who, note=None):
     """Sell a package: charge the card, record the sale, add the minutes.
 

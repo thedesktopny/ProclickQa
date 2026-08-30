@@ -5388,6 +5388,49 @@ def payment_refund(payment_id):
     return jsonify(out), (200 if out.get('ok') else 400)
 
 
+@app.route('/api/card-fields', methods=['GET'])
+@portal_or_manager
+def card_fields_config():
+    """What the browser needs to show the card fields.
+
+    Only the public iFields key — the one designed to sit in a web page. The
+    real gateway key stays on the server and never goes near a browser.
+    """
+    return jsonify({
+        'ifields_key': os.getenv('CARDKNOX_IFIELDS_KEY', ''),
+        'version': os.getenv('CARDKNOX_IFIELDS_VERSION', '2.15.2503.2601'),
+        'ready': bool(os.getenv('CARDKNOX_IFIELDS_KEY')) and bool(os.getenv('CARDKNOX_KEY')),
+    })
+
+
+@app.route('/api/customers/<int:account_id>/cards', methods=['POST'])
+@portal_or_manager
+def customer_add_card(account_id):
+    """Keep a new card on file.
+
+    Receives a single-use token from Cardknox, not a card number — the number
+    went from the customer's browser straight to Cardknox and never came here.
+    """
+    import cms_write
+    d = request.json or {}
+    try:
+        out = cms_write.save_card(
+            account_id,
+            card_token=d.get('card_token'),
+            exp_month=d.get('exp_month'),
+            exp_year=d.get('exp_year'),
+            who=_who(),
+            cvv_token=d.get('cvv_token'),
+            cardholder=d.get('name'),
+            zip_code=d.get('zip'))
+    except cms_write.WriteRefused as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'The card could not be saved.',
+                        'raw_error': str(e)[:300]}), 400
+    return jsonify(out), (200 if out.get('ok') else 400)
+
+
 @app.route('/api/customers/<int:account_id>/buy', methods=['POST'])
 @portal_or_manager
 def customer_buy_package(account_id):
@@ -7826,7 +7869,7 @@ PORTAL_ALLOWED_PREFIXES = (
     '/api/recording-link', '/api/payments/', '/api/cms-settings',
     '/api/qa-users', '/api/qa-assignments', '/api/employees/',
     '/api/credentials', '/api/credential-access', '/api/work',
-    '/api/customers/', '/api/calls/', '/api/my-call', '/api/phone-event',
+    '/api/customers/', '/api/card-fields', '/api/calls/', '/api/my-call', '/api/phone-event',
     '/api/media/', '/media/',
     '/api/phone-event/recent', '/api/phone-event/check',
     '/api/missed-calls', '/api/texts/',
@@ -7897,6 +7940,46 @@ def favicon():
         return resp
     except Exception:
         return '', 404
+
+
+@app.route('/api/skinblock/status')
+@require_manager
+def skinblock_status():
+    """Why Skin Block is slow, in one place.
+
+    The tool runs the detector in the browser when it can, and falls back to
+    this server when it cannot — the server path is many times slower. This
+    says which of the six files are cached, so "still slow" can be answered
+    rather than guessed at.
+    """
+    import os as _os
+    wanted = ['lib_ort.min.js',
+              'lib_ort-wasm-simd-threaded.jsep.mjs',
+              'lib_ort-wasm-simd-threaded.jsep.wasm',
+              'lib_ort-wasm-simd-threaded.mjs',
+              'lib_ort-wasm-simd-threaded.wasm',
+              'hf_Xenova/segformer_b2_clothes/resolve/main/onnx/model_quantized.onnx']
+    files, total = [], 0
+    for name in wanted:
+        safe = name.replace('/', '_')
+        path = _os.path.join(SB_CACHE, safe)
+        size = _os.path.getsize(path) if _os.path.exists(path) else 0
+        total += size
+        files.append({'file': name.split('/')[-1],
+                      'cached': size > 0,
+                      'mb': round(size / 1048576.0, 1)})
+    have = len([f for f in files if f['cached']])
+    return jsonify({
+        'cache_dir': SB_CACHE,
+        'files_cached': have, 'files_needed': len(wanted),
+        'total_mb': round(total / 1048576.0, 1),
+        'ready': have == len(wanted),
+        'meaning': ('Everything is cached — the browser should run the detector '
+                    'itself, which is the fast path.' if have == len(wanted) else
+                    'Only %d of %d files are cached, so every photo falls back to '
+                    'the slow path on this server. Open /sbassets/warmup to fetch '
+                    'the rest.' % (have, len(wanted))),
+    })
 
 
 @app.route('/api/ping')
