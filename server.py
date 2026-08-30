@@ -4653,6 +4653,11 @@ def require_payments_code(f):
     return decorated
 
 
+# Where call recordings are served from. Confirmed against a real file rather
+# than guessed; the app_settings value still overrides it if it ever moves.
+RECORDING_BASE_DEFAULT = 'https://getremail.com'
+
+
 def _setting(key, default=''):
     try:
         conn = get_db(); c = conn.cursor()
@@ -4822,6 +4827,79 @@ def portal_me():
                     'is_admin': bool(p.get('a')), 'is_qa': bool(p.get('q')), 'pages': pages})
 
 
+@app.route('/api/recordings/test', methods=['GET'])
+@portal_or_manager
+def recordings_test():
+    """Takes recent recordings and tries to actually fetch them.
+
+    The phone system may already store a full address, or a path that needs a
+    base putting in front. This looks at what is really in the last few calls
+    and tries each one, so "recordings do not work" becomes a specific answer.
+    """
+    import cms_db
+    out = {'samples': [], 'base_setting': ''}
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute("SELECT value FROM app_settings WHERE key = 'recording_base_url'")
+        r = c.fetchone(); conn.close()
+        out['base_setting'] = (r[0] if r and r[0] else '') or os.getenv('RECORDING_BASE_URL', '')
+    except Exception:
+        pass
+
+    try:
+        conn = cms_db._connect(); cu = conn.cursor()
+        cu.execute("""SELECT TOP 5 Id, Started, RecordingFileUrl
+                      FROM PhoneCallsLog
+                      WHERE RecordingFileUrl IS NOT NULL AND RecordingFileUrl <> ''
+                      ORDER BY Started DESC""")
+        rows = []
+        while True:
+            rr = cu.fetchone()
+            if not rr:
+                break
+            rows.append((int(rr[0]), cms_db._plain(rr[1]), rr[2]))
+        conn.close()
+    except Exception as e:
+        return jsonify({'error': str(e)[:200], 'samples': []}), 400
+
+    for call_id, started, stored in rows:
+        item = {'call_id': call_id, 'when': started, 'stored': stored,
+                'absolute': str(stored).lower().startswith(('http://', 'https://'))}
+        url = stored if item['absolute'] else (
+            (out['base_setting'].rstrip('/') + '/' + str(stored).lstrip('/'))
+            if out['base_setting'] else None)
+        item['url'] = url
+        if not url:
+            item['result'] = 'no base address set, and the stored value is a path'
+        else:
+            try:
+                req = urllib.request.Request(url, method='HEAD',
+                                             headers={'User-Agent': 'VoiceGuard/1.0'})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    ctype = resp.headers.get('Content-Type', '')
+                    size = resp.headers.get('Content-Length', '')
+                    item['status'] = resp.status
+                    item['type'] = ctype
+                    item['works'] = resp.status < 400 and 'html' not in ctype.lower()
+                    item['result'] = ('plays — %s%s' % (ctype, (', %s bytes' % size) if size else '')
+                                      if item['works'] else
+                                      'answered with a web page, not audio — probably a login')
+            except Exception as e:
+                item['status'] = None
+                item['works'] = False
+                item['result'] = str(e)[:120]
+        out['samples'].append(item)
+
+    working = [s for s in out['samples'] if s.get('works')]
+    out['working'] = len(working)
+    out['meaning'] = (('Recordings play — %d of %d tried.' % (len(working), len(out['samples'])))
+                      if working else
+                      ('The stored values are full addresses but none could be fetched.'
+                       if any(s['absolute'] for s in out['samples']) else
+                       'The stored values are paths and no base address is set.'))
+    return jsonify(out)
+
+
 @app.route('/api/recording-base/find', methods=['GET', 'POST'])
 @require_manager
 def recording_base_find():
@@ -4950,7 +5028,8 @@ def connections_check():
             'Set the CMS_DB_* settings on the App Service.')
 
     # 4 — recordings
-    base = _setting('recording_base_url', os.getenv('RECORDING_BASE_URL', ''))
+    base = _setting('recording_base_url',
+                    os.getenv('RECORDING_BASE_URL', RECORDING_BASE_DEFAULT))
     if not base:
         add('Call recordings', 'Turns a stored path into a link that opens', False,
             'No address is set, so recording links cannot be built.',
@@ -6232,9 +6311,10 @@ def recording_link():
         conn = get_db(); c = conn.cursor()
         c.execute("SELECT value FROM app_settings WHERE key = 'recording_base_url'")
         r = c.fetchone(); conn.close()
-        base = (r[0] if r and r[0] else '') or os.getenv('RECORDING_BASE_URL', '')
+        base = ((r[0] if r and r[0] else '')
+                or os.getenv('RECORDING_BASE_URL', '') or RECORDING_BASE_DEFAULT)
     except Exception:
-        base = os.getenv('RECORDING_BASE_URL', '')
+        base = os.getenv('RECORDING_BASE_URL', '') or RECORDING_BASE_DEFAULT
     if path.lower().startswith(('http://', 'https://')):
         return jsonify({'url': path})          # already a full address
 
@@ -6242,12 +6322,13 @@ def recording_link():
         # Nobody set it, so work it out rather than refusing. The candidates are
         # tried against this very recording, and the one that answers is saved.
         tried = []
-        for cand in ('https://panel.myhellodesk.com',
+        # getremail.com is where recordings are actually served from — Igor
+        # confirmed it with a working file. The rest are kept as fallbacks in
+        # case an older recording lives somewhere else.
+        for cand in ('https://getremail.com',
+                     'https://panel.myhellodesk.com',
                      'https://cms.myhellodesk.com',
-                     'https://myhellodesk.com',
-                     'https://panel.myhellodesk.com/media',
-                     'https://panel.myhellodesk.com/files',
-                     'https://panel.myhellodesk.com/recordings'):
+                     'https://myhellodesk.com'):
             url = cand.rstrip('/') + '/' + path.lstrip('/')
             try:
                 req = urllib.request.Request(url, method='HEAD',
@@ -7866,7 +7947,7 @@ def _is_portal_host():
 PORTAL_ALLOWED_PREFIXES = (
     '/api/whoami', '/api/portal/', '/api/live', '/api/customers',
     '/api/agents', '/api/agent-list', '/api/packages', '/api/company-info',
-    '/api/recording-link', '/api/payments/', '/api/cms-settings',
+    '/api/recording-link', '/api/recordings/', '/api/payments/', '/api/cms-settings',
     '/api/qa-users', '/api/qa-assignments', '/api/employees/',
     '/api/credentials', '/api/credential-access', '/api/work',
     '/api/customers/', '/api/card-fields', '/api/calls/', '/api/my-call', '/api/phone-event',
