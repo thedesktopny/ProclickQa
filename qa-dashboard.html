@@ -2557,6 +2557,22 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
   </div>
 </div>
 
+<div id="incoming" style="display:none;position:fixed;right:18px;bottom:80px;z-index:130;
+     width:min(380px,92vw);background:var(--surface);border:1px solid var(--accent);
+     border-radius:16px;box-shadow:0 18px 50px rgba(0,0,0,.55);overflow:hidden;">
+  <div style="background:rgba(123,108,246,.14);padding:12px 16px;display:flex;
+       align-items:center;gap:10px;">
+    <span style="width:9px;height:9px;border-radius:50%;background:var(--green);flex:none;"
+          id="in-dot"></span>
+    <div style="min-width:0;flex:1;">
+      <div style="font-size:14px;font-weight:660;" id="in-phone">—</div>
+      <div style="font-size:11px;color:var(--text3);" id="in-meta"></div>
+    </div>
+    <button class="cn-chip" onclick="inDismiss()" title="Hide until the next call">✕</button>
+  </div>
+  <div id="in-body" style="padding:12px 16px;max-height:46vh;overflow:auto;"></div>
+</div>
+
 <div id="work-bar" style="display:none;position:fixed;bottom:0;left:0;right:0;z-index:120;
      background:var(--surface);border-top:2px solid var(--green);padding:11px 20px;
      box-shadow:0 -8px 30px rgba(0,0,0,.4);">
@@ -2570,6 +2586,23 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
       <button class="btn btn-outline" style="font-size:12px;" onclick="wbOpenAccount()">Open account</button>
       <button class="btn btn-primary" style="font-size:12px;" onclick="wbEndOpen()">Finish work</button>
     </span>
+  </div>
+</div>
+
+<div class="modal" id="call-work-modal">
+  <div class="modal-box" style="width:520px;max-width:94vw;">
+    <div style="font-size:18px;font-weight:660;margin-bottom:5px;">Start work on this call</div>
+    <div style="font-size:12.5px;color:var(--text3);margin-bottom:18px;" id="cw-sub"></div>
+    <div id="cw-body"></div>
+    <div style="margin-top:16px;">
+      <div class="cn-lab">Not the right person? Search for the account</div>
+      <input id="cw-search" class="cms-in" style="width:100%" placeholder="Name or phone…"
+             oninput="cwSearch()">
+      <div id="cw-results" style="margin-top:8px;"></div>
+    </div>
+    <div style="display:flex;gap:10px;margin-top:18px;">
+      <button class="btn btn-outline" onclick="hideModal('call-work-modal')" style="flex:1">Cancel</button>
+    </div>
   </div>
 </div>
 
@@ -3597,6 +3630,7 @@ const SEARCH_FIELDS = [
   ['cs-search', 'csFilter', false],
   ['al-search', 'alRender', false],
   ['ci-search', 'ciRender', false],
+  ['cw-search', 'cwSearch', false],
 ];
 
 function enhanceSearchFields(){
@@ -3931,7 +3965,10 @@ async function portalBoot(){
   setTimeout(()=>document.getElementById('portal-user').focus(), 80);
 }
 document.addEventListener('DOMContentLoaded', portalBoot);
-document.addEventListener('DOMContentLoaded', ()=>{ wbRefresh(); setInterval(wbRefresh, 60000); });
+document.addEventListener('DOMContentLoaded', ()=>{
+  wbRefresh(); setInterval(wbRefresh, 60000);
+  inPoll(); inTimer = setInterval(inPoll, 8000);     // often enough to catch a ringing call
+});
 
 
 /* Decides which way an agent's detail panel opens, at the moment it opens.
@@ -5683,9 +5720,12 @@ function lvRenderFeed(){
             free && x.note ? '“' + esc(x.note) + '”' : ''].filter(Boolean).join(' · ');
     }
     const click = x.account_id ? ` onclick="showPage('customers');cuOpen(${x.account_id})" style="cursor:pointer"` : '';
+    const startBtn = (x.kind === 'call' && !x.missed && x.call_id)
+      ? `<button class="cn-chip" style="margin-left:8px;"
+           onclick="event.stopPropagation();cwOpen(${x.call_id}, '${(x.phone||'').replace(/'/g,'')}')">work</button>` : '';
     return `<div class="lvitem ${isNew?'lvnew':''}"${click}>
       <div class="ic">${ic}</div>
-      <div class="bd"><div class="ln1">${l1}<span class="tm">${lvTime(x.when)} · ${lvAgo(x.when)}</span></div>
+      <div class="bd"><div class="ln1">${l1}${startBtn}<span class="tm">${lvTime(x.when)} · ${lvAgo(x.when)}</span></div>
         <div class="ln2">${l2}</div></div></div>`;
   }).join('');
 }
@@ -5702,6 +5742,8 @@ function lvRenderInProgress(){
       <div class="nm">${esc(c.phone)||'unknown'}
         <div class="mt">${c.outbound?'outbound':'inbound'}${c.agent_ext?' · '+(byExt[String(c.agent_ext)]||('ext '+c.agent_ext)):''}
           ${c.picked_up?' · answered '+lvAgo(c.picked_up):' · ringing'}</div></div>
+      <button class="cn-chip" onclick="cwOpen(${c.call_id}, '${(c.phone||'').replace(/'/g,"")}')"
+              title="Find whose account this is and start work">Start work</button>
       <div style="font-size:11.5px;color:var(--text3);">${lvTime(c.started)}</div>
     </div>`).join('') || '';
 }
@@ -5902,6 +5944,183 @@ async function cuFormSubmit(confirm){
    Start work → write the note → finish, charging the minutes. This mirrors
    what the CMS does, including the rule that an agent cannot have work open on
    two accounts at once. */
+
+/* ---------------- starting work from a live call ----------------
+   Work started from the customer page has no call attached, and the CMS warns
+   an admin about long calls with no work recorded against them. Starting from
+   the call itself ties the two together, which is how it happens in practice. */
+
+/* ---------------- the caller appears by itself ----------------
+   The CMS pops the caller up on the agent's own screen the moment a call
+   arrives on their extension. Hunting through a list of everyone's calls is
+   not how this is used, so this watches only the signed-in person's extension.
+
+   The three groups from FindAccountByPhone stay separate: a primary match is
+   the account whose main number this is, the others matched on a second
+   number, and associated ones were linked by hand before. Flattening them
+   would present a weak match as a certain one. */
+let inCallId = null, inDismissed = null, inTimer = null;
+
+async function inPoll(){
+  if(!IS_PORTAL && !portalTicket) return;
+  try{
+    const r = await API.get('/api/my-call');
+    const call = r.call;
+    const box = document.getElementById('incoming');
+    if(!box) return;
+    if(!call || !call.live || call.call_id === inDismissed){
+      if(!call || !call.live) box.style.display = 'none';
+      return;
+    }
+    if(call.call_id === inCallId && box.style.display !== 'none') return;   // already showing
+    inCallId = call.call_id;
+
+    document.getElementById('in-phone').textContent = call.phone || 'Unknown number';
+    document.getElementById('in-meta').textContent =
+      (call.outbound ? 'outbound' : 'incoming')
+      + (call.picked_up ? ' · answered ' + lvAgo(call.picked_up) : ' · ringing')
+      + (call.called ? ' · to ' + call.called : '');
+
+    const who = r.who || {};
+    const group = (title, list, note) => list.length ? `
+      <div style="margin-bottom:10px;">
+        <div style="font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;
+             color:var(--text3);margin-bottom:5px;">${title}</div>
+        ${note ? `<div style="font-size:11px;color:var(--text3);margin-bottom:5px;">${note}</div>` : ''}
+        ${list.map(a=>`<div class="payrow" style="cursor:pointer" onclick="inPick(${a.id})">
+          <div class="nm">${esc(a.name)}
+            <div class="mt">${esc(a.phone)||''} · ${a.minutes_left} minutes left</div></div>
+          <button class="cn-chip">Start work</button></div>`).join('')}
+      </div>` : '';
+
+    const body = document.getElementById('in-body');
+    body.innerHTML =
+      group('This is their number', who.primary ? [who.primary] : [])
+      + group('Matched on another number', who.others || [],
+              'This number is a mobile or second number on these accounts.')
+      + group('Linked to this number before', who.associated || [],
+              'Someone connected this number to these accounts previously.')
+      + (!who.any ? `
+        <div style="font-size:12.5px;color:var(--text3);margin-bottom:10px;">
+          No account has this number.</div>
+        <div style="position:relative;">
+          <input id="in-search" class="cms-in" style="width:100%" placeholder="Search for the account…"
+                 oninput="inSearch()">
+          <div id="in-results" style="margin-top:8px;"></div>
+        </div>
+        <div style="font-size:11px;color:var(--text3);margin-top:8px;">
+          Choosing an account also links this number to it, so the next call is recognised.</div>
+        <button class="btn btn-outline" style="width:100%;margin-top:8px;font-size:12px;"
+                onclick="inNewCustomer()">Create a new customer</button>` : '');
+    box.style.display = '';
+  }catch(e){}
+}
+
+let inSearchTimer = null;
+function inSearch(){
+  clearTimeout(inSearchTimer);
+  const q = (document.getElementById('in-search')||{}).value || '';
+  const box = document.getElementById('in-results');
+  if(q.trim().length < 2){ box.innerHTML = ''; return; }
+  inSearchTimer = setTimeout(async ()=>{
+    try{
+      const r = await API.get('/api/customers/search?q=' + encodeURIComponent(q.trim()));
+      box.innerHTML = (r.items||[]).slice(0,5).map(a=>`
+        <div class="payrow" style="cursor:pointer" onclick="inPick(${a.id}, true)">
+          <div class="nm">${esc(a.name)}<div class="mt">${esc(a.phone)||''}</div></div>
+          <button class="cn-chip">Start work</button></div>`).join('')
+        || '<div style="color:var(--text3);font-size:12px;">Nothing matches.</div>';
+    }catch(e){}
+  }, 250);
+}
+
+async function inPick(accountId, linkNumber){
+  try{
+    if(linkNumber){
+      // the CMS links an unrecognised number to whatever account the agent
+      // opens during the call, which is how callers get recognised over time
+      const phone = document.getElementById('in-phone').textContent;
+      try{ await API.post('/api/calls/associate', {account_id: accountId, phone}); }catch(e){}
+    }
+    const r = await API.post('/api/work/start', {account_id: accountId, call_id: inCallId});
+    if(r.error || r.ok === false){ showToast(r.error || 'Could not start work', true); return; }
+    document.getElementById('incoming').style.display = 'none';
+    showToast(r.meaning || 'Work started');
+    wbRefresh();
+    showPage('customers'); cuOpen(accountId);
+  }catch(e){ showToast(e.message, true); }
+}
+
+function inNewCustomer(){
+  const phone = document.getElementById('in-phone').textContent;
+  document.getElementById('incoming').style.display = 'none';
+  showPage('customers');
+  setTimeout(()=>{ cuNewOpen(); const f = document.getElementById('cf-phone'); if(f) f.value = phone; cuFormHint(); }, 200);
+}
+
+function inDismiss(){
+  inDismissed = inCallId;
+  document.getElementById('incoming').style.display = 'none';
+}
+
+let cwCallId = null, cwPhone = '';
+
+async function cwOpen(callId, phone){
+  cwCallId = callId; cwPhone = phone || '';
+  document.getElementById('cw-sub').textContent = 'Call from ' + (phone || 'an unknown number');
+  document.getElementById('cw-search').value = '';
+  document.getElementById('cw-results').innerHTML = '';
+  const body = document.getElementById('cw-body');
+  body.innerHTML = '<div style="color:var(--text3);font-size:12.5px;">Looking up whose number this is…</div>';
+  showModal('call-work-modal');
+  try{
+    const r = await API.get('/api/calls/account?call_id=' + encodeURIComponent(callId)
+      + (phone ? '&phone=' + encodeURIComponent(phone) : ''));
+    const list = r.matches || [];
+    body.innerHTML = list.length
+      ? list.map(a=>cwRow(a)).join('')
+      : `<div style="color:var(--text3);font-size:12.5px;">
+           No account has that number. Search below, or
+           <a href="#" onclick="hideModal('call-work-modal');showPage('customers');cuNewOpen();return false;"
+              style="color:var(--accent)">create the customer</a> first.</div>`;
+  }catch(e){ body.innerHTML = `<div style="color:var(--red);font-size:12.5px;">${e.message}</div>`; }
+}
+
+function cwRow(a){
+  return `<div class="payrow" style="cursor:pointer" onclick="cwStart(${a.id})">
+    <div class="nm">${esc(a.name)}
+      <div class="mt">${esc(a.phone)||''} · ${a.minutes_left} minutes left${a.via?' · matched by '+a.via:''}</div></div>
+    <button class="cn-chip">Start</button>
+  </div>`;
+}
+
+let cwTimer = null;
+function cwSearch(){
+  clearTimeout(cwTimer);
+  const q = document.getElementById('cw-search').value.trim();
+  const box = document.getElementById('cw-results');
+  if(q.length < 2){ box.innerHTML = ''; return; }
+  cwTimer = setTimeout(async ()=>{
+    try{
+      const r = await API.get('/api/customers/search?q=' + encodeURIComponent(q));
+      box.innerHTML = (r.items||[]).slice(0,6).map(a=>cwRow({
+        id:a.id, name:a.name, phone:a.phone, minutes_left:a.minutes_left, via:''})).join('')
+        || '<div style="color:var(--text3);font-size:12px;">Nothing matches.</div>';
+    }catch(e){}
+  }, 250);
+}
+
+async function cwStart(accountId){
+  try{
+    const r = await API.post('/api/work/start', {account_id: accountId, call_id: cwCallId});
+    if(r.error || r.ok === false){ showToast(r.error || 'Could not start work', true); return; }
+    hideModal('call-work-modal');
+    showToast(r.meaning || 'Work started');
+    wbRefresh();
+    showPage('customers'); cuOpen(accountId);
+  }catch(e){ showToast(e.message, true); }
+}
+
 let openWork = null;
 
 async function wbRefresh(){

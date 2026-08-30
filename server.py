@@ -5195,6 +5195,66 @@ def customer_adjust_minutes(account_id):
     return jsonify(out), (200 if out.get('ok') else 400)
 
 
+@app.route('/api/calls/account', methods=['GET'])
+@portal_or_manager
+def call_account_lookup():
+    """Whose account is this number — in the CMS's three groups."""
+    import cms_db
+    phone = request.args.get('phone')
+    try:
+        if not phone and request.args.get('call_id'):
+            conn = cms_db._connect(); cu = conn.cursor()
+            cu.execute('SELECT Phone FROM PhoneCallsLog WHERE Id = %s',
+                       (int(request.args['call_id']),))
+            r = cu.fetchone(); conn.close()
+            phone = r[0] if r else None
+        return jsonify(cms_db.find_account_by_phone(phone))
+    except Exception as e:
+        return jsonify({'error': str(e)[:200], 'primary': None,
+                        'others': [], 'associated': []}), 400
+
+
+@app.route('/api/my-call', methods=['GET'])
+@portal_or_manager
+def my_current_call():
+    """The call the signed-in agent is on, and who it appears to be.
+
+    This is what lets the caller appear on their screen by itself, rather than
+    the agent hunting through a list of everyone's calls.
+    """
+    import cms_db
+    p = _portal_user(request.headers.get('X-Portal-Ticket', ''))
+    ext = None
+    try:
+        if p and p.get('e'):
+            conn = cms_db._connect(); cu = conn.cursor()
+            cu.execute('SELECT Extension FROM Employee WHERE Id = %s', (int(p['e']),))
+            r = cu.fetchone(); conn.close()
+            ext = (r[0] or '').strip() if r else None
+        if not ext:
+            return jsonify({'call': None, 'reason': 'no extension for this sign-in'})
+        call = cms_db.active_call_for_extension(ext)
+        if not call:
+            return jsonify({'call': None})
+        who = cms_db.find_account_by_phone(call.get('phone'))
+        return jsonify({'call': call, 'who': who, 'extension': ext})
+    except Exception as e:
+        return jsonify({'call': None, 'error': str(e)[:200]})
+
+
+@app.route('/api/calls/associate', methods=['POST'])
+@portal_or_manager
+def associate_caller_number():
+    """Link a number to an account so the caller is recognised next time."""
+    import cms_db
+    d = request.json or {}
+    try:
+        added = cms_db.associate_number(d.get('account_id'), d.get('phone'))
+        return jsonify({'ok': True, 'linked': added})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)[:200]}), 400
+
+
 @app.route('/api/work/start', methods=['POST'])
 @portal_or_manager
 def work_start():
@@ -7046,7 +7106,7 @@ PORTAL_ALLOWED_PREFIXES = (
     '/api/agents', '/api/agent-list', '/api/packages', '/api/company-info',
     '/api/recording-link', '/api/payments/', '/api/cms-settings',
     '/api/qa-users', '/api/credentials', '/api/credential-access', '/api/work',
-    '/api/customers/',
+    '/api/customers/', '/api/calls/', '/api/my-call',
     '/api/cms-db/', '/api/connections', '/static/', '/favicon',
 )
 

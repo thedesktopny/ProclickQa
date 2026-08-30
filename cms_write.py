@@ -276,6 +276,15 @@ def adjust_minutes(account_id, minutes_added, reason, who, minutes_charged=0,
     reason = (reason or '').strip()
     if not reason:
         raise WriteRefused('Give a reason — it is written into the account history.')
+    # BalanceChangeLog has no column for who made the change — the CMS passes an
+    # employee id to SaveNewBalance and then never stores it, which is why the
+    # old screens cannot show it either. The reason text is the only place a
+    # name can live, so it goes there.
+    name = (who or {}).get('name')
+    if name and name not in reason:
+        suffix = ' — ' + name
+        reason = (reason[:100 - len(suffix)] + suffix) if len(reason) + len(suffix) > 100 \
+                 else reason + suffix
     if len(reason) > 100:
         raise WriteRefused('The reason must be 100 characters or fewer (%d given).' % len(reason))
     if minutes_added == 0 and minutes_charged == 0:

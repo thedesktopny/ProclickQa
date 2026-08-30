@@ -962,6 +962,127 @@ def settings_all():
             'database': NAME}
 
 
+def find_account_by_phone(phone):
+    """Who is calling — kept in the CMS's three groups, not flattened into one.
+
+    Primary is an account whose main number this is: a confident match. Others
+    matched on a mobile, home or other number. Associated are accounts this
+    number has been linked to before. The CMS shows them separately so the
+    agent can judge, and collapsing them would present a weak match as a
+    certain one.
+    """
+    digits = ''.join(ch for ch in str(phone or '') if ch.isdigit())
+    if len(digits) < 7:
+        return {'phone': phone, 'primary': None, 'others': [], 'associated': []}
+    last10 = digits[-10:]
+    conn = _connect()
+
+    def rows(sql, prm):
+        cu = conn.cursor()
+        cu.execute(sql, prm)
+        out = []
+        while True:
+            r = cu.fetchone()
+            if not r:
+                break
+            out.append({'id': int(r[0]),
+                        'name': ('%s %s' % (r[1] or '', r[2] or '')).strip() or '(no name)',
+                        'phone': r[3], 'minutes_left': int(r[4] or 0),
+                        'business': bool(r[5]) if len(r) > 5 else False})
+        return out
+
+    CLEAN = "REPLACE(REPLACE(REPLACE(REPLACE(ISNULL(%s,''),'-',''),' ',''),'(',''),')','')"
+    base = """SELECT TOP 10 a.Id, a.FirstName, a.LastName, a.Phone,
+                     ISNULL(a.MinutesLeft,0), a.isBusiness
+              FROM Account a WHERE ISNULL(a.Deleted,0) = 0 AND """
+
+    primary = rows(base + 'RIGHT(%s, 10) = %%s' % (CLEAN % 'a.Phone'), (last10,))
+    others = rows(base + '(RIGHT(%s, 10) = %%s OR RIGHT(%s, 10) = %%s OR RIGHT(%s, 10) = %%s)'
+                  % (CLEAN % 'a.Mobile', CLEAN % 'a.HomePhone', CLEAN % 'a.OtherPhone'),
+                  (last10, last10, last10))
+    associated = []
+    try:
+        associated = rows("""SELECT TOP 10 a.Id, a.FirstName, a.LastName, a.Phone,
+                                    ISNULL(a.MinutesLeft,0), a.isBusiness
+                             FROM AccountAssociatedPhoneNumber p
+                             JOIN Account a ON a.Id = p.AccountId
+                             WHERE RIGHT(%s, 10) = %%s""" % (CLEAN % 'p.Phone'),
+                          (last10,))
+    except Exception:
+        pass
+
+    seen = {a['id'] for a in primary}
+    others = [a for a in others if a['id'] not in seen]
+    seen |= {a['id'] for a in others}
+    associated = [a for a in associated if a['id'] not in seen]
+
+    conn.close()
+    return {'phone': phone, 'last10': last10,
+            'primary': (primary[0] if primary else None),
+            'others': others, 'associated': associated,
+            'any': bool(primary or others or associated)}
+
+
+def active_call_for_extension(extension):
+    """The call this agent is on right now, if any.
+
+    Matches their extension as the ringing agent, the person who picked up, or
+    a transfer target — the same three ways the CMS looks.
+    """
+    ext = str(extension or '').strip()
+    if not ext:
+        return None
+    conn = _connect(); cu = conn.cursor()
+    cu.execute("""SELECT TOP 1 c.Id, c.Phone, c.Started, c.PickedUpTime, c.Ended,
+                         c.IsOutbound, c.DialStatus, c.CalledExtension
+                  FROM PhoneCallsLog c
+                  WHERE (c.Agent = %s OR c.PickedUpBy = %s)
+                    AND c.Started >= DATEADD(hour, -4, GETDATE())
+                  ORDER BY c.Id DESC""", (ext, ext))
+    r = cu.fetchone()
+    conn.close()
+    if not r:
+        return None
+    return {'call_id': int(r[0]), 'phone': r[1], 'started': _plain(r[2]),
+            'picked_up': _plain(r[3]), 'ended': _plain(r[4]),
+            'outbound': bool(r[5]), 'status': r[6], 'called': r[7],
+            'live': r[4] is None}
+
+
+def associate_number(account_id, phone):
+    """Remember that this number belongs to this account.
+
+    The CMS does this when an agent opens an account while on a call from a
+    number that matched nothing — which is how a caller from a second phone is
+    recognised next time. Without it, the same call is a mystery every time.
+    """
+    digits = ''.join(ch for ch in str(phone or '') if ch.isdigit())
+    if len(digits) < 7:
+        return False
+    conn = _connect()
+    try:
+        cu = conn.cursor()
+        cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        cu.execute("""SELECT COUNT(*) FROM AccountAssociatedPhoneNumber
+                      WHERE AccountId = %s AND RIGHT(REPLACE(REPLACE(ISNULL(Phone,''),'-',''),' ',''), 10) = %s""",
+                   (int(account_id), digits[-10:]))
+        if int((cu.fetchone() or [0])[0] or 0) > 0:
+            conn.close()
+            return False
+        cu.execute("""INSERT INTO AccountAssociatedPhoneNumber (AccountId, Phone, Created)
+                      VALUES (%s, %s, GETDATE())""", (int(account_id), digits[-10:]))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        try:
+            conn.rollback(); conn.close()
+        except Exception:
+            pass
+        print('[cms] could not link the number: ' + str(e)[:140])
+        return False
+
+
 def customer_search(q, limit=40):
     """Find an account by name, phone or email."""
     q = (q or '').strip()
