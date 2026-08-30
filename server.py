@@ -7943,7 +7943,7 @@ def favicon():
 
 
 @app.route('/api/skinblock/status')
-@require_manager
+@portal_or_manager
 def skinblock_status():
     """Why Skin Block is slow, in one place.
 
@@ -7971,6 +7971,7 @@ def skinblock_status():
     have = len([f for f in files if f['cached']])
     return jsonify({
         'cache_dir': SB_CACHE,
+        'files': files,
         'files_cached': have, 'files_needed': len(wanted),
         'total_mb': round(total / 1048576.0, 1),
         'ready': have == len(wanted),

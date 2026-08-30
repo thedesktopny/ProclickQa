@@ -1306,6 +1306,15 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
     </div>
 
     <div class="card" style="padding:16px 20px;margin-top:14px;">
+      <h2 class="payh">Skin Block speed</h2>
+      <div class="payhint">The tool runs the detector in the browser when it can, which is
+        fast, and falls back to this server when it cannot, which is slow. This says which.</div>
+      <button onclick="checkSkinblock()" class="btn btn-outline" style="font-size:12px;">Check</button>
+      <pre id="sb-status" style="white-space:pre-wrap;font-size:11.5px;color:var(--text2);
+           margin:12px 0 0;line-height:1.8;"></pre>
+    </div>
+
+    <div class="card" style="padding:16px 20px;margin-top:14px;">
       <h2 class="payh">Texts arriving</h2>
       <div class="payhint">Everything received or sent in the last few hours, exactly as
         stored — including messages attached to no account, which is the usual reason
@@ -5631,6 +5640,27 @@ function cmsDbSelect(db){
 /* Shows what has actually landed in SMSLog, unfiltered. A message that "never
    arrived" has usually arrived somewhere unexpected — attached to no account,
    or as the carrier's layout file rather than the picture. */
+
+/* Why Skin Block is slow, answered from the cache rather than guessed at. */
+async function checkSkinblock(){
+  const out = document.getElementById('sb-status');
+  out.textContent = 'Checking…';
+  try{
+    const r = await API.get('/api/skinblock/status');
+    if(r.error){ out.textContent = '❌ ' + r.error; return; }
+    const lines = [
+      `${r.files_cached} of ${r.files_needed} files cached · ${r.total_mb} MB`,
+      `kept in ${r.cache_dir}`,
+      '',
+    ];
+    (r.files || []).forEach(f=>lines.push(
+      `   ${f.cached ? '✓' : '✗'}  ${f.file}${f.mb ? '  ' + f.mb + ' MB' : ''}`));
+    lines.push('', r.meaning);
+    if(!r.ready) lines.push('', 'Fetch them now: open /sbassets/warmup in a new tab.');
+    out.textContent = lines.join('\n');
+  }catch(e){ out.textContent = 'Failed: ' + e.message; }
+}
+
 async function loadRecentTexts(){
   const box = document.getElementById('rt-out');
   box.innerHTML = '<div style="color:var(--text3);font-size:12.5px;">Looking…</div>';

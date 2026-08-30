@@ -815,7 +815,7 @@ def _currency(code):
     return c if c in CARDKNOX_CURRENCIES else 'USD'
 
 
-def _cardknox_sale(token, amount_cents, description, currency='USD'):
+def _cardknox_sale(token, amount_cents, description, currency='USD', extra=None):
     """Charges a saved card. Returns the reference, or raises with the reason.
 
     Cardknox is the live gateway despite the columns still being named after
@@ -827,7 +827,7 @@ def _cardknox_sale(token, amount_cents, description, currency='USD'):
     if not key:
         raise WriteRefused('Card payments are not set up here yet (CARDKNOX_KEY). '
                            'Ask David to add it.')
-    body = _p.urlencode({
+    fields = {
         'xKey': key,
         'xVersion': '5.0.0',
         'xSoftwareName': 'ProClick Portal',
@@ -837,7 +837,13 @@ def _cardknox_sale(token, amount_cents, description, currency='USD'):
         'xAmount': '%.2f' % (int(amount_cents) / 100.0),
         'xCurrency': _currency(currency),
         'xDescription': (description or '')[:255],
-    }).encode()
+    }
+    # Cardknox shows these as their own columns, so a transaction can be found
+    # by customer or invoice rather than only by reading the description.
+    for k, v in (extra or {}).items():
+        if v not in (None, ''):
+            fields[k] = str(v)[:100]
+    body = _p.urlencode(fields).encode()
     req = _u.Request(CARDKNOX_URL, data=body,
                      headers={'Content-Type': 'application/x-www-form-urlencoded'})
     with _u.urlopen(req, timeout=45) as resp:
@@ -906,6 +912,9 @@ def save_card(account_id, card_token, exp_month, exp_year, who,
         'xName': (cardholder or customer or '')[:80],
         'xDescription': ('ProClick customer - %s %s created by %s'
                          % (customer, a[2] or '', (who or {}).get('name') or ''))[:200],
+        'xInvoice': 'ACC%d' % account_id,
+        'xCustom01': (a[2] or ''),
+        'xCustom02': (who or {}).get('name') or '',
     }
     if cvv_token:
         fields['xCVV'] = cvv_token
@@ -1041,10 +1050,21 @@ def buy_package(account_id, package_id, card_id, who, note=None):
 
     charge_ref = None
     if price > 0:
+        # the same wording the CMS sends, so the two systems' transactions read
+        # alike in the Cardknox portal
+        agent_name = (who or {}).get('name') or ''
         description = '%s %s package: %s by: %s' % (
-            customer, a[2] or '', pkg_name, (who or {}).get('name') or '')
+            customer, a[2] or '', pkg_name, agent_name)
+        extra = {
+            'xName': customer,                  # who it was for
+            'xInvoice': 'ACC%d' % account_id,   # findable by account
+            'xCustom01': pkg_name,              # what was sold
+            'xCustom02': agent_name,            # who sold it
+            'xCustom03': '%d minutes' % minutes,
+            'xCustom04': (a[2] or ''),          # their phone number
+        }
         try:
-            paid = _cardknox_sale(card[2], price, description, currency)
+            paid = _cardknox_sale(card[2], price, description, currency, extra)
             charge_ref = paid['ref']
             out['charge_ref'] = charge_ref
         except WriteRefused:
@@ -1250,7 +1270,7 @@ def _money(cents, currency='USD'):
     return '%s%.2f' % (symbol, int(cents or 0) / 100.0)
 
 
-def _cardknox_refund(ref_num, amount_cents, currency='USD'):
+def _cardknox_refund(ref_num, amount_cents, currency='USD', extra=None):
     """Refunds a charge, or voids it when the gateway says to.
 
     A payment taken today has not settled yet, and Cardknox refuses to refund
@@ -1265,14 +1285,18 @@ def _cardknox_refund(ref_num, amount_cents, currency='USD'):
         raise WriteRefused('Card payments are not set up here yet (CARDKNOX_KEY).')
 
     def send(command):
-        body = _p.urlencode({
+        fields = {
             'xKey': key, 'xVersion': '5.0.0',
             'xSoftwareName': 'ProClick Portal', 'xSoftwareVersion': '1.0',
             'xCommand': command,
             'xRefNum': ref_num,
             'xAmount': '%.2f' % (int(amount_cents) / 100.0),
             'xCurrency': _currency(currency),
-        }).encode()
+        }
+        for k, v in (extra or {}).items():
+            if v not in (None, ''):
+                fields[k] = str(v)[:100]
+        body = _p.urlencode(fields).encode()
         req = _u.Request(CARDKNOX_URL, data=body,
                          headers={'Content-Type': 'application/x-www-form-urlencoded'})
         with _u.urlopen(req, timeout=45) as resp:
@@ -1357,7 +1381,15 @@ def refund_payment(payment_id, reason, who, amount_cents=None):
            'values': {'amount_cents': amount, 'reason': reason,
                       'of_payment': paid, 'currency': currency}}
     try:
-        result = _cardknox_refund(charge_ref, amount, currency)
+        result = _cardknox_refund(charge_ref, amount, currency, {
+            'xName': customer,
+            'xInvoice': 'ACC%d' % account_id,
+            'xDescription': ('Refund %s for %s by: %s'
+                             % (pkg_name, customer, (who or {}).get('name') or ''))[:255],
+            'xCustom01': pkg_name,
+            'xCustom02': (who or {}).get('name') or '',
+            'xCustom03': reason[:100],
+        })
         out['refund_ref'] = result['ref']
         out['voided'] = result['voided']
     except WriteRefused:
