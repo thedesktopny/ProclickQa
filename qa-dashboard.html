@@ -754,6 +754,9 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
 .pick-scroll{ max-height:38vh; overflow:auto; padding-right:4px; }
 .pick-scroll::-webkit-scrollbar{ width:8px; }
 .pick-scroll::-webkit-scrollbar-thumb{ background:var(--border); border-radius:4px; }
+
+.buy-dot{ width:7px; height:7px; border-radius:50%; background:var(--border); }
+.buy-dot.on{ background:var(--accent); }
 </style>
 </head>
 <body>
@@ -1284,6 +1287,15 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
         Also check Jobs/jobconfig.json on the CMS server — a scheduled export of whole tables
         (customers, personal info, payments, settings) is emailed to an outside address.
       </div>
+    </div>
+
+    <div class="card" style="padding:16px 20px;margin-top:14px;">
+      <h2 class="payh">Texts arriving</h2>
+      <div class="payhint">Everything received or sent in the last few hours, exactly as
+        stored — including messages attached to no account, which is the usual reason
+        one seems not to have arrived.</div>
+      <button onclick="loadRecentTexts()" class="btn btn-outline" style="font-size:12px;">Check</button>
+      <div id="rt-out" style="margin-top:12px;"></div>
     </div>
 
     <div class="card" style="padding:16px 20px;margin-top:14px;">
@@ -2814,28 +2826,45 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
 </div>
 
 <div class="modal" id="buy-modal">
-  <div class="modal-box" style="width:560px;max-width:94vw;display:flex;flex-direction:column;
-       max-height:90vh;">
-    <div style="font-size:18px;font-weight:660;margin-bottom:4px;">Sell a package</div>
-    <div style="font-size:12.5px;color:var(--text3);margin-bottom:16px;" id="buy-sub"></div>
+  <div class="modal-box" style="width:560px;max-width:94vw;display:flex;
+       flex-direction:column;max-height:88vh;padding:0;overflow:hidden;">
 
-    <div class="pick-scroll" id="buy-packages"></div>
-
-    <div id="buy-card-block" style="margin-top:14px;">
-      <div class="cn-lab" id="buy-card-label">Card to charge</div>
-      <div id="buy-cards"></div>
+    <div style="padding:22px 26px 0;">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <button class="cn-chip" id="buy-back" onclick="cuBuyStep(1)"
+                style="display:none;">← Back</button>
+        <div>
+          <div style="font-size:18px;font-weight:660;" id="buy-title">Choose a package</div>
+          <div style="font-size:12.5px;color:var(--text3);margin-top:2px;" id="buy-sub"></div>
+        </div>
+        <div style="margin-left:auto;display:flex;gap:6px;align-items:center;">
+          <span class="buy-dot on" id="buy-dot-1"></span>
+          <span class="buy-dot" id="buy-dot-2"></span>
+        </div>
+      </div>
     </div>
 
-    <div class="pick-chosen" id="buy-chosen" style="display:none;">
-      <div class="inner" id="buy-summary"></div>
+    <div style="flex:1;overflow:auto;padding:16px 26px 8px;" id="buy-body">
+      <div id="buy-step-1"><div id="buy-packages"></div></div>
+      <div id="buy-step-2" style="display:none;">
+        <div id="buy-chosen-line" style="background:var(--surface2);border:1px solid var(--border);
+             border-radius:10px;padding:11px 14px;font-size:13px;margin-bottom:16px;"></div>
+        <div class="cn-lab">Card to charge</div>
+        <div id="buy-cards"></div>
+      </div>
     </div>
-    <pre id="buy-out" style="white-space:pre-wrap;font-size:11.5px;color:var(--text3);
-         margin:10px 0 0;line-height:1.7;"></pre>
 
-    <div style="display:flex;gap:10px;margin-top:16px;">
-      <button class="btn btn-outline" onclick="hideModal('buy-modal')" style="flex:1">Cancel</button>
-      <button class="btn btn-primary" onclick="cuBuy()" style="flex:1;opacity:.5;"
-              id="buy-go" disabled>Choose a package</button>
+    <div style="padding:14px 26px 20px;border-top:1px solid var(--border);
+         background:var(--surface);">
+      <div id="buy-summary" style="font-size:12.5px;color:var(--text2);
+           margin-bottom:12px;min-height:18px;"></div>
+      <pre id="buy-out" style="white-space:pre-wrap;font-size:11.5px;color:var(--text3);
+           margin:0 0 10px;line-height:1.7;"></pre>
+      <div style="display:flex;gap:10px;">
+        <button class="btn btn-outline" onclick="hideModal('buy-modal')" style="flex:1">Cancel</button>
+        <button class="btn btn-primary" onclick="cuBuyNext()" style="flex:2;opacity:.5;"
+                id="buy-go" disabled>Choose a package</button>
+      </div>
     </div>
   </div>
 </div>
@@ -5532,6 +5561,45 @@ function cmsDbSelect(db){
    it use, and what happens when the password is actually tried. */
 
 /* Hunts for the address recordings live at, and proves it by fetching one. */
+
+/* Shows what has actually landed in SMSLog, unfiltered. A message that "never
+   arrived" has usually arrived somewhere unexpected — attached to no account,
+   or as the carrier's layout file rather than the picture. */
+async function loadRecentTexts(){
+  const box = document.getElementById('rt-out');
+  box.innerHTML = '<div style="color:var(--text3);font-size:12.5px;">Looking…</div>';
+  try{
+    const r = await API.get('/api/texts/recent?minutes=240');
+    if(r.error){ box.innerHTML = `<div style="color:var(--red)">${r.error}</div>`; return; }
+    if(!r.messages.length){
+      box.innerHTML = `<div style="color:var(--yellow);font-size:12.5px;">
+        Nothing at all in the last four hours. If a message was sent to one of our
+        numbers, it never reached the CMS — that is a question for Igor, since the
+        texting service posts incoming messages there.</div>`;
+      return;
+    }
+    box.innerHTML = `
+      <div style="font-size:12px;color:var(--text3);margin-bottom:8px;">
+        ${r.messages.length} messages · ${r.incoming} incoming
+        ${r.unattached ? ` · <span style="color:var(--yellow)">${r.unattached} attached to no account</span>` : ''}
+      </div>` +
+      r.messages.map(m=>`
+        <div class="payrow" style="cursor:${m.account_id?'pointer':'default'}"
+             ${m.account_id?`onclick="showPage('customers');cuOpen(${m.account_id})"`:''}>
+          <span style="font-size:13px;">${m.direction==='In'?'⬅':'➡'}</span>
+          <div class="nm">${esc(m.account || m.their_number || 'unknown')}
+            <div class="mt">${esc((m.message||'').slice(0,70)) || '(no words)'}
+              ${m.media ? (m.is_layout_file
+                ? ' · <span style="color:var(--text3)">carrier layout file, hidden</span>'
+                : ' · <span style="color:var(--green)">has a picture</span>') : ''}
+              ${!m.account_id ? ' · <span style="color:var(--yellow)">no account — will not show anywhere</span>' : ''}</div></div>
+          <div style="font-size:11px;color:var(--text3);white-space:nowrap;">
+            ${new Date(m.when).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}
+            <div>to ${esc(m.our_number||'?')}</div></div>
+        </div>`).join('');
+  }catch(e){ box.innerHTML = `<div style="color:var(--red)">${e.message}</div>`; }
+}
+
 async function findRecordingBase(){
   const out = document.getElementById('rb-out');
   out.textContent = 'Looking through the CMS, then trying each address…';
@@ -6712,31 +6780,24 @@ async function wbEndSave(confirm){
    Uses the same path the CMS uses, so the change appears in the account's
    balance history with a reason attached. */
 
-/* ---------------- selling a package ----------------
-   Pick the package, pick the card, press Purchase. The card is one the
-   customer already has on file — a token, never a card number, so no card
-   details pass through this system at all. */
-let buyPackages = [], buyGroups = [], buyPackageId = null, buyCardId = null, buyBusy = false;
-
-
 /* ---------------- refunding ----------------
    Worth knowing before pressing it: the CMS removes the WHOLE package's
    minutes even on a part refund, and this follows the CMS rather than
-   inventing different behaviour. The warning below says so plainly, because
-   an agent refunding half the money would reasonably expect half the minutes
-   back. */
+   inventing different behaviour. The warning says so plainly, because an
+   agent refunding half the money would reasonably expect half the minutes. */
 let rfPaymentId = null, rfPaid = 0, rfCurrency = 'USD', rfBusy = false;
 
 function cuRefundOpen(paymentId, amountCents, currency){
   rfPaymentId = paymentId; rfPaid = amountCents; rfCurrency = currency || 'USD';
   rfBusy = false;
   document.getElementById('rf-sub').textContent =
-    'Payment of ' + cuMoney(amountCents) + ' on ' + (cuData ? cuData.account.name : '');
+    'Payment of ' + cuCur(amountCents / 100, rfCurrency)
+    + ' on ' + (cuData ? cuData.account.name : '');
   document.getElementById('rf-amount').value = (amountCents / 100).toFixed(2);
   document.getElementById('rf-reason').value = '';
   document.getElementById('rf-out').textContent = '';
   document.getElementById('rf-warn').textContent =
-    'The whole package\'s minutes come off the account, even on a part refund — '
+    "The whole package's minutes come off the account, even on a part refund — "
     + 'that is how the CMS does it.';
   showModal('refund-modal');
 }
@@ -6745,12 +6806,13 @@ async function cuRefund(){
   if(rfBusy) return;
   const out = document.getElementById('rf-out');
   const reason = document.getElementById('rf-reason').value.trim();
-  const dollars = parseFloat(document.getElementById('rf-amount').value || '0');
+  const amount = parseFloat(document.getElementById('rf-amount').value || '0');
   if(!reason){ out.textContent = 'Give a reason first.'; return; }
-  if(!(dollars > 0)){ out.textContent = 'Enter how much to refund.'; return; }
-  const cents = Math.round(dollars * 100);
+  if(!(amount > 0)){ out.textContent = 'Enter how much to refund.'; return; }
+  const cents = Math.round(amount * 100);
   if(cents > rfPaid){
-    out.textContent = 'That is more than the ' + cuMoney(rfPaid) + ' that was paid.';
+    out.textContent = 'That is more than the ' + cuCur(rfPaid / 100, rfCurrency)
+      + ' that was paid.';
     return;
   }
   rfBusy = true;
@@ -6776,162 +6838,196 @@ async function cuRefund(){
   }
 }
 
+/* ---------------- selling a package ----------------
+   Two steps rather than one long list. With thirteen packages and nine saved
+   cards on screen at once, an agent had to scroll past everything to find
+   either, and could not see what they had picked. Package first, then card,
+   with the choice carried forward so it is always visible. */
+let buyPackages = [], buyGroups = [], buyPackageId = null, buyCardId = null;
+let buyCards = [], buyStep = 1, buyBusy = false;
+
+function cuCur(amount, currency, dp){
+  const symbol = {USD:'$', EUR:'€', GBP:'£', ILS:'₪', CAD:'CA$', MXN:'MX$'}[currency] || '';
+  // a price always shows both decimals; only per-minute rates are trimmed
+  if(dp === undefined) return symbol + amount.toFixed(2);
+  return symbol + amount.toFixed(dp).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
+}
+
 async function cuBuyOpen(){
   if(!cuData) return;
   const a = cuData.account;
-  buyPackageId = null; buyCardId = null;
+  buyPackageId = null; buyCardId = null; buyStep = 1; buyBusy = false;
   document.getElementById('buy-sub').textContent =
     a.name + ' · ' + (a.minutes_left || 0) + ' minutes left';
   document.getElementById('buy-out').textContent = '';
-  document.getElementById('buy-summary').style.display = 'none';
   document.getElementById('buy-packages').innerHTML =
     '<div style="color:var(--text3);font-size:12.5px;">Loading…</div>';
-  document.getElementById('buy-cards').innerHTML = '';
+  cuBuyStep(1);
   showModal('buy-modal');
   try{
     const [p, c] = await Promise.all([
       API.get('/api/packages'),
       API.get(`/api/customers/${a.id}/cards`)]);
     buyPackages = p.packages || [];
-    buyGroups = p.groups || [{title: '', currency: 'USD', packages: buyPackages}];
-
-    // grouped by currency, the way the CMS lists them — a euro package next to
-    // a dollar one with no heading is how the wrong thing gets sold
-    document.getElementById('buy-packages').innerHTML = buyGroups.map(g=>`
-      <div class="pick-group">
-        <h4>${esc(g.title)}</h4>
-        ${g.packages.map(pk=>`
-          <div class="pick-row" onclick="cuBuyPick(${pk.id})" id="buy-pk-${pk.id}">
-            <div class="nm">${esc(pk.name)}
-              <div class="mt">${(pk.minutes||0).toLocaleString()} minutes
-                ${pk.per_minute_cents ? ' · ' + cuCur(pk.per_minute_cents/100, g.currency, 3) + ' a minute' : ''}</div></div>
-            <div class="amt">${pk.price_cents
-              ? cuCur(pk.price_cents/100, g.currency)
-              : '<span style="color:var(--yellow)">free</span>'}</div>
-          </div>`).join('')}
-      </div>`).join('')
-      + `<div class="pick-group">
-           <h4>Other</h4>
-           <div class="pick-row" onclick="cuBuyFree()" id="buy-pk-free">
-             <div class="nm">Free minutes
-               <div class="mt">given without charging, with a reason</div></div>
-             <div class="amt" style="color:var(--yellow);font-size:13px;">free</div>
-           </div>
-         </div>`;
-
-    const cards = c.cards || [];
-    document.getElementById('buy-cards').innerHTML = cards.length
-      ? cards.map(cd=>`
-        <div class="pick-row" onclick="cuBuyCard(${cd.id})" id="buy-card-${cd.id}">
-          <div class="nm">${esc(cd.brand||'Card')} ending ${esc(cd.last4||'????')}
-            <div class="mt">${cd.last_used ? 'last used ' + new Date(cd.last_used).toLocaleDateString() : 'not used yet'}</div></div>
-          <div class="amt" style="font-size:12px;color:var(--text3);">select</div>
-        </div>`).join('')
-      : `<div style="color:var(--yellow);font-size:12.5px;">
-           No card on file. A new card has to be taken in the CMS for now.</div>`;
-    if(cards.length === 1) cuBuyCard(cards[0].id);
+    buyGroups = p.groups && p.groups.length ? p.groups
+      : [{title: 'Packages', currency: '', packages: buyPackages}];
+    buyCards = c.cards || [];
+    cuBuyRenderPackages();
   }catch(e){
-    document.getElementById('buy-out').textContent = 'Could not load: ' + e.message;
+    document.getElementById('buy-packages').innerHTML =
+      `<div style="color:var(--red);font-size:12.5px;">Could not load: ${e.message}</div>`;
   }
 }
 
-
-/* Money in the currency the package is actually priced in. A package with no
-   currency set is shown as a bare number, because that is what it is — calling
-   it dollars would be a guess. */
-function cuCur(amount, currency, dp){
-  const symbol = {USD:'$', EUR:'€', GBP:'£', ILS:'₪', CAD:'CA$', MXN:'MX$'}[currency] || '';
-  // a price always shows both decimals — $9 instead of $9.00 reads like a
-  // rounding rather than a price. Only per-minute rates are trimmed, since
-  // 0.472 is clearer than 0.4725.
-  if(dp === undefined) return symbol + amount.toFixed(2);
-  return symbol + amount.toFixed(dp).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
+function cuBuyRenderPackages(){
+  document.getElementById('buy-packages').innerHTML = buyGroups.map(g=>`
+    <div class="pick-group">
+      <h4>${esc(g.title)}</h4>
+      ${g.packages.map(pk=>`
+        <div class="pick-row" onclick="cuBuyPick(${pk.id})" id="buy-pk-${pk.id}">
+          <div class="nm">${esc(pk.name)}
+            <div class="mt">${(pk.minutes||0).toLocaleString()} minutes
+              ${pk.per_minute_cents ? ' · ' + cuCur(pk.per_minute_cents/100, pk.currency, 3) + ' each' : ''}</div></div>
+          <div class="amt">${pk.price_cents
+            ? cuCur(pk.price_cents/100, pk.currency)
+            : '<span style="color:var(--yellow)">free</span>'}</div>
+        </div>`).join('')}
+    </div>`).join('')
+    + `<div class="pick-group">
+         <h4>Other</h4>
+         <div class="pick-row" onclick="cuBuyFree()" id="buy-pk-free">
+           <div class="nm">Free minutes
+             <div class="mt">given without charging, with a reason</div></div>
+           <div class="amt" style="color:var(--yellow);font-size:13px;">free</div>
+         </div>
+       </div>`;
 }
 
-/* Free minutes: not a package, so it has its own small form rather than
-   pretending to be one. */
-function cuBuyFree(){
-  buyPackageId = 'free';
-  document.querySelectorAll('[id^="buy-pk-"]').forEach(el=>
-    el.classList.toggle('sel', el.id === 'buy-pk-free'));
-  document.getElementById('buy-card-block').style.display = 'none';
-  document.getElementById('buy-chosen').style.display = 'block';
-  const btn = document.getElementById('buy-go');
-  btn.disabled = false; btn.style.opacity = ''; btn.textContent = 'Add free minutes';
-  const box = document.getElementById('buy-summary');
-  box.innerHTML = `
-    <div style="display:grid;grid-template-columns:110px 1fr;gap:10px;align-items:center;">
-      <div class="cn-lab" style="margin:0;">Minutes</div>
-      <input id="buy-free-minutes" class="cms-in" type="number" min="1" placeholder="e.g. 30"
-             oninput="cuBuyFreePreview()">
-      <div class="cn-lab" style="margin:0;">Reason</div>
-      <input id="buy-free-reason" class="cms-in" maxlength="150"
-             placeholder="Why they are being given">
-    </div>
-    <div id="buy-free-preview" style="font-size:12px;color:var(--text3);margin-top:9px;"></div>`;
-}
-
-function cuBuyFreePreview(){
-  const m = parseInt((document.getElementById('buy-free-minutes')||{}).value || '0', 10) || 0;
-  const now = cuData.account.minutes_left || 0;
-  const el = document.getElementById('buy-free-preview');
-  if(el) el.textContent = m ? `Balance ${now} → ${now + m} minutes. Nothing will be charged.` : '';
+function cuBuyStep(step){
+  buyStep = step;
+  document.getElementById('buy-step-1').style.display = step === 1 ? '' : 'none';
+  document.getElementById('buy-step-2').style.display = step === 2 ? '' : 'none';
+  document.getElementById('buy-back').style.display = step === 2 ? '' : 'none';
+  document.getElementById('buy-dot-1').classList.toggle('on', true);
+  document.getElementById('buy-dot-2').classList.toggle('on', step === 2);
+  document.getElementById('buy-title').textContent =
+    step === 1 ? 'Choose a package' : 'Choose a card';
+  document.getElementById('buy-body').scrollTop = 0;
+  cuBuyButton();
 }
 
 function cuBuyPick(id){
   buyPackageId = id;
-  buyPackages.forEach(p=>{
-    const el = document.getElementById('buy-pk-' + p.id);
-    if(el) el.classList.toggle('sel', p.id === id);
-  });
-  cuBuySummary();
+  document.querySelectorAll('[id^="buy-pk-"]').forEach(el=>
+    el.classList.toggle('sel', el.id === 'buy-pk-' + id));
+  cuBuyButton();
+}
+
+function cuBuyFree(){
+  buyPackageId = 'free';
+  document.querySelectorAll('[id^="buy-pk-"]').forEach(el=>
+    el.classList.toggle('sel', el.id === 'buy-pk-free'));
+  cuBuyButton();
+}
+
+function cuBuyChosen(){
+  if(buyPackageId === 'free') return null;
+  return buyPackages.find(p=>p.id === buyPackageId) || null;
+}
+
+/* One button that moves things along: choose, then continue, then charge. */
+function cuBuyButton(){
+  const btn = document.getElementById('buy-go');
+  const sum = document.getElementById('buy-summary');
+  const pk = cuBuyChosen();
+  const free = buyPackageId === 'free' || (pk && !pk.price_cents);
+  let label = 'Choose a package', on = false, text = '';
+
+  if(buyStep === 1){
+    if(buyPackageId){
+      on = true;
+      label = free ? 'Continue' : 'Choose a card →';
+      // several packages are named after their size, so repeating the minutes
+      // reads as "400 minutes · $189.00 · 400 minutes"
+      const sameName = pk.name.replace(/[^0-9]/g, '') === String(pk.minutes);
+      text = free ? 'Free minutes — nothing will be charged.'
+        : `${pk.name}${sameName ? '' : ' · ' + pk.minutes + ' minutes'}`
+          + ` · ${cuCur(pk.price_cents/100, pk.currency)}`;
+    }
+  }else{
+    const now = cuData.account.minutes_left || 0;
+    if(buyPackageId === 'free'){
+      on = true; label = 'Add free minutes';
+    }else if(!buyCardId){
+      label = 'Choose a card';
+      text = `${pk.name} · ${cuCur(pk.price_cents/100, pk.currency)}`;
+    }else{
+      on = true;
+      label = 'Charge ' + cuCur(pk.price_cents/100, pk.currency);
+      const card = buyCards.find(c=>c.id === buyCardId);
+      text = `${pk.name} → ${card ? card.brand + ' ending ' + card.last4 : 'card'} · `
+           + `balance ${now} → ${now + pk.minutes} minutes`;
+    }
+  }
+  btn.textContent = label;
+  btn.disabled = !on;
+  btn.style.opacity = on ? '' : '.5';
+  sum.innerHTML = text;
+}
+
+function cuBuyNext(){
+  if(buyBusy) return;
+  const pk = cuBuyChosen();
+  if(buyStep === 1){
+    if(buyPackageId === 'free'){ cuBuyFreeForm(); return; }
+    if(!pk) return;
+    document.getElementById('buy-chosen-line').innerHTML =
+      `<b>${esc(pk.name)}</b> · ${pk.minutes} minutes ·
+       <b>${cuCur(pk.price_cents/100, pk.currency)}</b>`;
+    document.getElementById('buy-cards').innerHTML = buyCards.length
+      ? buyCards.map(cd=>`
+        <div class="pick-row" onclick="cuBuyCard(${cd.id})" id="buy-card-${cd.id}">
+          <div class="nm">${esc(cd.brand||'Card')} ending ${esc(cd.last4||'????')}
+            <div class="mt">${cd.last_used
+              ? 'last used ' + new Date(cd.last_used).toLocaleDateString()
+              : 'not used yet'}</div></div>
+        </div>`).join('')
+      : `<div style="color:var(--yellow);font-size:12.5px;padding:8px 0;">
+           No card on file for this customer. A new card has to be taken in the CMS.</div>`;
+    if(buyCards.length === 1) buyCardId = buyCards[0].id;
+    cuBuyStep(2);
+    if(buyCardId) cuBuyCard(buyCardId);
+    return;
+  }
+  if(buyPackageId === 'free'){ cuBuyFreeGo(); return; }
+  cuBuy();
 }
 
 function cuBuyCard(id){
   buyCardId = id;
   document.querySelectorAll('[id^="buy-card-"]').forEach(el=>
     el.classList.toggle('sel', el.id === 'buy-card-' + id));
-  cuBuySummary();
+  cuBuyButton();
 }
 
-function cuBuySummary(){
-  if(buyPackageId === 'free'){ cuBuyFree(); return; }
-  const pk = buyPackages.find(p=>p.id === buyPackageId);
-  const box = document.getElementById('buy-summary');
-  const chosen = document.getElementById('buy-chosen');
-  const btn = document.getElementById('buy-go');
-  const free = pk && !pk.price_cents;
-  // a free package needs no card, so stop asking for one
-  document.getElementById('buy-card-block').style.display = free ? 'none' : '';
-  if(!pk){
-    chosen.style.display = 'none';
-    btn.disabled = true; btn.style.opacity = '.5'; btn.textContent = 'Choose a package';
-    return;
-  }
-  const needsCard = !free && !buyCardId;
-  btn.disabled = needsCard;
-  btn.style.opacity = needsCard ? '.5' : '';
-  btn.textContent = needsCard ? 'Choose a card'
-    : free ? 'Add ' + pk.minutes + ' minutes'
-    : 'Charge ' + cuCur(pk.price_cents/100, pk.currency);
-  const now = (cuData.account.minutes_left || 0);
-  chosen.style.display = 'block';
-  box.innerHTML = free
-    ? `<b>${esc(pk.name)}</b> — ${pk.minutes} free minutes. Nothing will be charged.<br>
-       Balance ${now} → <b>${now + pk.minutes}</b>.`
-    : `<b>${esc(pk.name)}</b> — charge
-       <b>${cuCur(pk.price_cents/100, pk.currency)}</b>${cuBuyCardLabel()}.<br>
-       Balance ${now} → <b>${now + pk.minutes}</b> minutes.`;
+/* Free minutes are not a package, so they get their own small form on the
+   second step rather than being squeezed into the card list. */
+function cuBuyFreeForm(){
+  document.getElementById('buy-chosen-line').innerHTML =
+    '<b>Free minutes</b> · nothing will be charged';
+  document.getElementById('buy-cards').innerHTML = `
+    <div style="display:grid;grid-template-columns:110px 1fr;gap:12px;align-items:center;">
+      <div class="cn-lab" style="margin:0;">Minutes</div>
+      <input id="buy-free-minutes" class="cms-in" type="number" min="1" placeholder="e.g. 30"
+             oninput="cuBuyButton()">
+      <div class="cn-lab" style="margin:0;">Reason</div>
+      <input id="buy-free-reason" class="cms-in" maxlength="150"
+             placeholder="Why they are being given">
+    </div>`;
+  cuBuyStep(2);
+  document.getElementById('buy-title').textContent = 'Free minutes';
+  setTimeout(()=>{ const f = document.getElementById('buy-free-minutes'); if(f) f.focus(); }, 60);
 }
-
-function cuBuyCardLabel(){
-  if(!buyCardId) return ' — <span style="color:var(--yellow)">choose a card below</span>';
-  const el = document.getElementById('buy-card-' + buyCardId);
-  if(!el) return ' — <span style="color:var(--yellow)">choose a card below</span>';
-  const name = (el.querySelector('.nm') || {}).textContent || '';
-  return ' to ' + name.split('\n')[0].trim();
-}
-
 
 async function cuBuyFreeGo(){
   const out = document.getElementById('buy-out');
@@ -6949,20 +7045,19 @@ async function cuBuyFreeGo(){
     out.textContent = '✅ ' + r.meaning;
     setTimeout(()=>{ hideModal('buy-modal'); cuOpen(cuData.account.id); }, 1300);
   }catch(e){ out.textContent = 'Failed: ' + e.message; }
-  finally{ buyBusy = false; btn.disabled = false; btn.textContent = 'Purchase'; }
+  finally{ buyBusy = false; btn.disabled = false; cuBuyButton(); }
 }
 
 async function cuBuy(){
   if(buyBusy) return;
   const out = document.getElementById('buy-out');
-  if(buyPackageId === 'free') return cuBuyFreeGo();
-  const pk = buyPackages.find(p=>p.id === buyPackageId);
-  if(!pk){ out.textContent = 'Choose a package first.'; return; }
+  const pk = cuBuyChosen();
+  if(!pk) return;
   if(pk.price_cents && !buyCardId){ out.textContent = 'Choose a card to charge.'; return; }
 
   buyBusy = true;                       // a second press must not charge twice
   const btn = document.getElementById('buy-go');
-  btn.disabled = true; btn.textContent = pk.price_cents ? 'Charging…' : 'Applying…';
+  btn.disabled = true; btn.textContent = 'Charging…';
   out.textContent = '';
   try{
     const r = await API.post(`/api/customers/${cuData.account.id}/buy`,
@@ -6981,8 +7076,7 @@ async function cuBuy(){
     out.textContent = 'Failed: ' + e.message
       + '\n\nCheck the account before trying again — the card may have been charged.';
   }finally{
-    buyBusy = false;
-    btn.disabled = false; btn.textContent = 'Purchase';
+    buyBusy = false; btn.disabled = false; cuBuyButton();
   }
 }
 
@@ -7184,6 +7278,43 @@ function cuPaste(ev){
       return;
     }
   }
+}
+
+
+/* Pulls the conversation again and adds anything new, without disturbing
+   whatever is half-typed in the box. */
+let smsTimer = null;
+async function cuRefreshTexts(accountId){
+  try{
+    const r = await API.get('/api/customers/' + accountId);
+    if(!r || !r.sms || !cuData || cuData.account.id !== accountId) return;
+    const seen = new Set((cuData.sms || []).map(m => m.when + '|' + (m.message || '')));
+    const fresh = r.sms.filter(m => !seen.has(m.when + '|' + (m.message || '')));
+    if(!fresh.length) return;
+    cuData.sms = r.sms;
+    const thread = document.getElementById('sms-thread');
+    if(!thread) return;
+    const atBottom = thread.scrollHeight - thread.scrollTop - thread.clientHeight < 60;
+    fresh.reverse().forEach(m=>{
+      const wrap = document.createElement('div');
+      wrap.style.cssText = 'display:flex;margin-bottom:8px;justify-content:'
+        + (m.direction === 'In' ? 'flex-start' : 'flex-end') + ';';
+      wrap.innerHTML = `<div style="max-width:72%;background:${m.direction==='In'?'var(--surface2)':'var(--accent)'};
+           color:${m.direction==='In'?'var(--text)':'#fff'};padding:9px 13px;border-radius:14px;
+           font-size:12.5px;word-break:break-word;">
+           ${esc(m.message)}
+           ${m.media && m.is_picture ? `<div style="margin-top:6px;"><img src="${esc(m.media)}"
+                style="max-width:100%;max-height:220px;border-radius:9px;display:block;"></div>` : ''}
+           ${m.media && !m.is_picture ? `<div><a href="${esc(m.media)}" target="_blank"
+                style="color:inherit;text-decoration:underline;font-size:11px;">attachment</a></div>` : ''}
+           <div style="font-size:10px;opacity:.6;margin-top:4px;">${cuWhen(m.when)}</div></div>`;
+      thread.appendChild(wrap);
+    });
+    if(atBottom) thread.scrollTop = thread.scrollHeight;
+    if(fresh.some(m => m.direction === 'In')){
+      API.post(`/api/customers/${accountId}/texts/read`, {}).catch(()=>{});
+    }
+  }catch(e){}
 }
 
 async function cuSendText(){
@@ -7481,6 +7612,16 @@ function cuTab(which){
     if(r.sms.some(m=>m.direction==='In')){
       API.post(`/api/customers/${a.id}/texts/read`, {}).catch(()=>{});
     }
+
+    // Keep the conversation current while it is open. Without this an
+    // incoming reply does not appear until the account is reopened, which
+    // reads as the message never arriving.
+    clearInterval(smsTimer);
+    smsTimer = setInterval(()=>{
+      const still = document.getElementById('sms-thread');
+      if(!still || !cuData || cuData.account.id !== a.id){ clearInterval(smsTimer); return; }
+      cuRefreshTexts(a.id);
+    }, 10000);
   }
   else if(which === 'balance'){
     body.innerHTML = !r.balance.length ? '<div class="payhint">No balance changes.</div>' :

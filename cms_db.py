@@ -1392,7 +1392,12 @@ def packages():
             break
         mins = int(r[2] or 0)
         cents = int(r[3] or 0)
-        out.append({'id': int(r[0]), 'name': (r[1] or '').strip() or '(unnamed)',
+        # several packages have no name in the CMS; it lists those by their
+        # size instead, so '(unnamed)' is wrong — '35 minutes' is what an agent
+        # is actually looking for
+        out.append({'id': int(r[0]),
+                    'name': ((r[1] or '').strip()
+                             or ('%d minutes' % mins if mins else 'Package %d' % int(r[0]))),
                     'minutes': mins, 'price_cents': cents,
                     # kept as it is stored: a package with no currency set is
                     # not the same as one priced in dollars, and the CMS lists
