@@ -6203,24 +6203,16 @@ let inCallId = null, inDismissed = null, inTimer = null;
    asking every few seconds and finding out late. If the connection drops it
    reconnects on its own, and if it cannot be held at all we fall back to
    asking — slower, but never nothing. */
+/* The caller is fetched every couple of seconds rather than pushed.
+   A held-open connection was nicer to watch but consumed one server worker per
+   open browser tab, and there are only a few — so a handful of agents with the
+   portal open took the whole application down. Polling costs nothing here
+   because the phone system posts events straight into memory. */
 function inConnect(){
   if(!IS_PORTAL && !portalTicket) return;
-  if(typeof EventSource === 'undefined'){ inTimer = setInterval(inPoll, 2000); return; }
-  try{
-    // the sign-in has to travel in the URL: a held-open connection cannot
-    // carry custom headers
-    const url = '/api/my-call/stream?t=' + encodeURIComponent(portalTicket || '');
-    const es = new EventSource(url);
-    es.onmessage = ev => {
-      try{ inShow(JSON.parse(ev.data)); }catch(e){}
-    };
-    es.onerror = () => {
-      es.close();
-      setTimeout(inConnect, 4000);          // it will come back
-    };
-  }catch(e){
-    inTimer = setInterval(inPoll, 2000);
-  }
+  inPoll();
+  clearInterval(inTimer);
+  inTimer = setInterval(inPoll, 2500);
 }
 
 async function inPoll(){

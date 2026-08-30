@@ -5358,60 +5358,21 @@ def _live_calls_reader():
             except Exception as e:
                 _LIVE_CALLS['error'] = str(e)[:200]
                 _time.sleep(3)          # back off when the database is unhappy
-            _time.sleep(0.7)
+            # every worker runs this, so keep it gentle on the CMS
+            _time.sleep(2.0)
 
     _t.Thread(target=run, daemon=True).start()
 
 
-@app.route('/api/my-call/stream')
-@portal_or_manager
-def my_call_stream():
-    """Pushes this agent's current call the moment it appears.
-
-    The browser holds this open and is told about a call as it happens, rather
-    than asking repeatedly and finding out late.
-    """
-    import cms_db, json as _json, time as _time
-    p = _portal_user(_portal_ticket_from_request())
-    ext = None
-    try:
-        if p and p.get('e'):
-            conn = cms_db._connect(); cu = conn.cursor()
-            cu.execute('SELECT Extension FROM Employee WHERE Id = %s', (int(p['e']),))
-            r = cu.fetchone(); conn.close()
-            ext = (r[0] or '').strip() if r else None
-    except Exception:
-        pass
-
-    def events():
-        last = None
-        idle = 0
-        while True:
-            call = _LIVE_CALLS['by_ext'].get(ext) if ext else None
-            key = None if not call else '%s|%s' % (call['call_id'], bool(call.get('picked_up')))
-            if key != last:
-                last = key
-                payload = {'call': call}
-                if call:
-                    try:
-                        payload['who'] = cms_db.find_account_by_phone(call.get('phone'))
-                    except Exception:
-                        payload['who'] = None
-                yield 'data: %s\n\n' % _json.dumps(payload, default=str)
-                idle = 0
-            else:
-                idle += 1
-                if idle >= 20:           # a heartbeat, so nothing between us hangs up
-                    yield ': keep-alive\n\n'
-                    idle = 0
-            _time.sleep(0.5)
-
-    from flask import Response
-    resp = Response(events(), mimetype='text/event-stream')
-    resp.headers['Cache-Control'] = 'no-cache'
-    resp.headers['X-Accel-Buffering'] = 'no'      # do not let anything buffer this
-    resp.headers['Connection'] = 'keep-alive'
-    return resp
+# NOTE: there was a Server-Sent Events stream here that pushed the caller to
+# the agent as it happened. It held one worker per connected browser, and this
+# app runs a small number of workers — so a few open tabs consumed all of them
+# and the whole app stopped responding. Removed deliberately.
+#
+# Polling /api/my-call every couple of seconds costs almost nothing now that
+# the phone system posts events straight into memory: the answer is a
+# dictionary lookup, not a database query. The delay is a second or two rather
+# than instant, which is the right trade for an app that stays up.
 
 
 @app.route('/api/phone-event', methods=['POST'])
