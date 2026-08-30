@@ -5494,10 +5494,30 @@ def card_fields_config():
         if v.lower().startswith(('replace', 'your_', 'xxx', '<')):
             return {'set': False, 'why': 'still holding the placeholder text'}
         return {'set': True, 'length': len(v),
-                'starts': v[:4] + '…', 'why': 'looks fine'}
+                'starts': v[:4] + '…', 'why': 'looks fine',
+                'value_shape': v}
 
     gateway = describe('CARDKNOX_KEY')
     fields = describe('CARDKNOX_IFIELDS_KEY')
+
+    # The two keys look nothing alike, and putting the gateway key in the
+    # browser-facing setting would both fail and expose the real key in a web
+    # page — so it is worth saying so rather than only reporting "not working".
+    warnings = []
+    fv = (fields.pop('value_shape', '') or '')
+    gv = (gateway.pop('value_shape', '') or '')
+    if fv and fv.lower().startswith('proc') and len(fv) < 60:
+        warnings.append('The value in CARDKNOX_IFIELDS_KEY looks like the GATEWAY key '
+                        '(it starts "proc"). The iFields key is a different, longer value '
+                        'from the Cardknox portal. Putting the gateway key here would also '
+                        'send it to the browser, which it must never be.')
+    if gv and not gv.lower().startswith('proc'):
+        warnings.append('CARDKNOX_KEY does not start the way the gateway key does — '
+                        'worth checking the two were not swapped.')
+    if any(k.startswith('APPSETTING_') for k in os.environ
+           if 'CARDKNOX' in k.upper()):
+        warnings.append('Azure also exposes each setting as APPSETTING_<name>; that is '
+                        'normal and not a duplicate.')
     # anything named nearly right — a common cause of "but I added it"
     similar = sorted(k for k in os.environ
                      if 'CARD' in k.upper() and k not in ('CARDKNOX_KEY', 'CARDKNOX_IFIELDS_KEY'))
@@ -5508,7 +5528,9 @@ def card_fields_config():
         'gateway_key': gateway,
         'fields_key': fields,
         'similar_names_found': similar,
+        'warnings': warnings,
         'app_started': _APP_STARTED,
+        'app_started_note': 'server time (UTC) — Azure does not run on your clock',
     })
 
 
@@ -5523,15 +5545,19 @@ def customer_add_card(account_id):
     import cms_write
     d = request.json or {}
     try:
+        # A card number arrives only when hosted fields are not configured.
+        # It is passed straight through and never held anywhere.
+        typed = (d.get('card_number') or '').replace(' ', '').replace('-', '')
         out = cms_write.save_card(
             account_id,
-            card_token=d.get('card_token'),
+            card_token=(d.get('card_token') or typed),
             exp_month=d.get('exp_month'),
             exp_year=d.get('exp_year'),
             who=_who(),
-            cvv_token=d.get('cvv_token'),
+            cvv_token=(d.get('cvv_token') or d.get('cvv') or None),
             cardholder=d.get('name'),
-            zip_code=d.get('zip'))
+            zip_code=d.get('zip'),
+            direct=bool(typed and not d.get('card_token')))
     except cms_write.WriteRefused as e:
         return jsonify({'ok': False, 'error': str(e)}), 400
     except Exception as e:

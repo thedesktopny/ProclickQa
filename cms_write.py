@@ -857,17 +857,22 @@ def _cardknox_sale(token, amount_cents, description, currency='USD', extra=None)
 
 
 def save_card(account_id, card_token, exp_month, exp_year, who,
-              cvv_token=None, cardholder=None, zip_code=None):
+              cvv_token=None, cardholder=None, zip_code=None, direct=False):
     """Keep a new card on file for a customer.
 
-    The card number never reaches this server. The browser sends it straight to
-    Cardknox, which hands back a single-use token; that token is what arrives
-    here and is exchanged for a lasting one. So no card number is stored,
-    logged, or passes through Azure at any point — which keeps this system out
-    of the scope that handling card data would bring.
+    Two ways in, and the first is preferred:
 
-    The security code is optional, as asked. Some cards on file are taken
-    without one.
+      * a single-use token from Cardknox's hosted fields, where the number went
+        from the browser straight to them and never reached this server;
+      * the number itself, which is how the CMS has always done it, used when
+        no hosted-fields key is configured.
+
+    On the second path the number is used once and discarded — never written to
+    the database, never put in a log, never included in an error message, and
+    never kept in memory beyond the request. That is the least this can do; it
+    is still handling card data, which the first path avoids entirely.
+
+    The security code is optional either way.
     """
     import urllib.parse as _p
     import urllib.request as _u
@@ -907,6 +912,8 @@ def save_card(account_id, card_token, exp_month, exp_year, who,
         'xKey': key, 'xVersion': '5.0.0',
         'xSoftwareName': 'ProClick Portal', 'xSoftwareVersion': '1.0',
         'xCommand': 'cc:Save',
+        # either a single-use token or, on the direct path, the number itself —
+        # Cardknox takes both in this field
         'xCardNum': card_token,
         'xExp': '%02d%02d' % (mm, yy % 100),
         'xName': (cardholder or customer or '')[:80],
@@ -923,7 +930,10 @@ def save_card(account_id, card_token, exp_month, exp_year, who,
 
     out = {'table': 'StripeCustomers', 'action': 'save_card',
            'account_id': account_id, 'dry_run': False,
-           'values': {'expiry': '%02d/%d' % (mm, yy)}}
+           # deliberately no card details of any kind — this is written to the
+           # audit log, so only the expiry and how it was taken go in
+           'values': {'expiry': '%02d/%d' % (mm, yy),
+                      'entry': 'typed' if direct else 'hosted fields'}}
     try:
         req = _u.Request(CARDKNOX_URL, data=_p.urlencode(fields).encode(),
                          headers={'Content-Type': 'application/x-www-form-urlencoded'})
@@ -960,8 +970,14 @@ def save_card(account_id, card_token, exp_month, exp_year, who,
             conn.rollback()
         except Exception:
             pass
+        # a gateway error can quote back what was sent, so strip anything
+        # resembling a card number before it is logged or shown
+        import re as _re
+        safe = _re.sub(r'\b\d{12,19}\b', '[card number removed]', str(e))[:300]
         out.update({'ok': False, 'committed': False,
-                    'error': _explain(e), 'raw_error': str(e)[:300]})
+                    'error': _re.sub(r'\b\d{12,19}\b', '[card number removed]',
+                                     _explain(e)),
+                    'raw_error': safe})
     finally:
         try:
             conn.close()
