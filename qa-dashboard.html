@@ -458,7 +458,9 @@ td.agent{color:var(--text);font-weight:500;}
   border-left:3px solid var(--text3); border-radius:9px; padding:8px 10px; cursor:pointer;
   transition:transform .12s, border-color .12s;
 }
-.lvtile:hover{ transform:translateY(-1px); border-color:var(--accent); }
+/* the hovered tile has to rise above its neighbours, or its panel is painted
+   behind the tiles that come after it in the grid */
+.lvtile:hover, .lvtile.tapped{ transform:translateY(-1px); border-color:var(--accent); z-index:80; }
 .lvtile .nm{ font-size:12px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .lvtile .ex{ font-size:10.5px; color:var(--text3); margin-top:1px; }
 .lvtile .st{ font-size:10px; margin-top:4px; font-weight:600; letter-spacing:.02em; }
@@ -470,12 +472,16 @@ td.agent{color:var(--text);font-weight:500;}
 .lvtile.dim{ opacity:.2; }
 /* the detail on hover — status alone never says enough */
 .lvpop{
-  display:none; position:absolute; z-index:60; left:0; top:calc(100% + 6px); width:240px;
+  display:none; position:absolute; z-index:90; left:0; top:calc(100% + 6px); width:240px;
   background:var(--surface); border:1px solid var(--accent); border-radius:10px;
-  padding:11px 13px; box-shadow:0 12px 30px rgba(0,0,0,.45); font-size:11.5px; line-height:1.6;
+  padding:11px 13px; box-shadow:0 12px 30px rgba(0,0,0,.5); font-size:11.5px; line-height:1.6;
 }
 .lvtile:hover .lvpop{ display:block; }
-.lvtile:nth-child(n+5) .lvpop{ left:auto; right:0; }
+/* for tiles near the bottom or the right edge the panel opens the other way,
+   decided when it is shown rather than by counting columns — the grid reflows
+   with the window, so counting was always going to be wrong somewhere */
+.lvpop.up{ top:auto; bottom:calc(100% + 6px); }
+.lvpop.toleft{ left:auto; right:0; }
 .lvpop b{ font-size:12.5px; }
 .lvpop .k{ color:var(--text3); }
 
@@ -3759,6 +3765,28 @@ async function portalBoot(){
 }
 document.addEventListener('DOMContentLoaded', portalBoot);
 
+
+/* Decides which way an agent's detail panel opens, at the moment it opens.
+   Counting columns in CSS cannot work — the grid reflows with the window — so
+   the panel is measured against the actual space around it. */
+function lvPlacePopup(tile){
+  const pop = tile.querySelector('.lvpop');
+  if(!pop) return;
+  pop.classList.remove('up', 'toleft');
+  const box = tile.getBoundingClientRect();
+  const h = pop.offsetHeight || 190;
+  const w = pop.offsetWidth || 240;
+  // not enough room below, but room above → open upwards
+  if(box.bottom + h + 14 > window.innerHeight && box.top - h - 14 > 0) pop.classList.add('up');
+  // would run off the right edge → align to the tile's right instead
+  if(box.left + w + 14 > window.innerWidth) pop.classList.add('toleft');
+}
+
+document.addEventListener('mouseover', e => {
+  const tile = e.target.closest && e.target.closest('.lvtile');
+  if(tile) lvPlacePopup(tile);
+}, true);
+
 function toggleNav(force){
   const sb = document.querySelector('.sidebar');
   const scrim = document.getElementById('nav-scrim');
@@ -3772,7 +3800,7 @@ document.addEventListener('click', e => {
   const tile = e.target.closest && e.target.closest('.lvtile');
   if(window.innerWidth > 820) return;
   document.querySelectorAll('.lvtile.tapped').forEach(t => { if(t !== tile) t.classList.remove('tapped'); });
-  if(tile) tile.classList.toggle('tapped');
+  if(tile){ tile.classList.toggle('tapped'); if(tile.classList.contains('tapped')) lvPlacePopup(tile); }
 }, true);
 
 function showPage(id){
