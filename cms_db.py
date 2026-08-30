@@ -980,6 +980,76 @@ def is_missed_status(dial_status):
     return any(m in s for m in MISSED_STATUSES)
 
 
+def work_pause_state(work_id):
+    """Whether this work is paused, and how long has been paused in total."""
+    conn = _connect(); cu = conn.cursor()
+    cu.execute("""SELECT SUM(DATEDIFF(second, StartTime, ISNULL(EndTime, GETDATE()))),
+                         SUM(CASE WHEN EndTime IS NULL THEN 1 ELSE 0 END),
+                         MAX(CASE WHEN EndTime IS NULL THEN StartTime END)
+                  FROM WorkPauses WHERE AccountWorkId = %s""", (int(work_id),))
+    r = cu.fetchone() or (0, 0, None)
+    conn.close()
+    return {'paused_seconds': int(r[0] or 0),
+            'paused_now': bool(int(r[1] or 0)),
+            'paused_since': _plain(r[2])}
+
+
+def unread_texts(hours=72, limit=100):
+    """Customers who texted and have not been answered.
+
+    smsNotRead is set when a message arrives (the SMS webhook writes it), so
+    this is a real signal rather than a stale flag. A conversation counts as
+    waiting when the newest message in it came from the customer.
+    """
+    conn = _connect(); cu = conn.cursor()
+    cu.execute("""SELECT TOP %d s.AccountId, MAX(s.smsDate) AS newest,
+                         COUNT(*) AS unread,
+                         MAX(a.FirstName), MAX(a.LastName), MAX(a.Phone),
+                         MAX(a.smsNumber)
+                  FROM SMSLog s
+                  LEFT JOIN Account a ON a.Id = s.AccountId
+                  WHERE s.InOut = 'In' AND ISNULL(s.smsNotRead, 0) = 1
+                    AND s.smsDate >= DATEADD(hour, -%d, GETDATE())
+                  GROUP BY s.AccountId
+                  ORDER BY MAX(s.smsDate) DESC""" % (int(limit), int(hours)))
+    rows = []
+    while True:
+        r = cu.fetchone()
+        if not r:
+            break
+        rows.append({'account_id': int(r[0] or 0), 'newest': _plain(r[1]),
+                     'unread': int(r[2] or 0),
+                     'account': ('%s %s' % (r[3] or '', r[4] or '')).strip() or '(unknown)',
+                     'phone': r[5], 'our_number': r[6]})
+
+    # the last message on each side, so it is clear who is waiting for whom
+    for row in rows[:40]:
+        try:
+            cu2 = conn.cursor()
+            cu2.execute("""SELECT TOP 1 message, smsDate FROM SMSLog
+                           WHERE AccountId = %s AND InOut = 'In'
+                           ORDER BY smsDate DESC""", (row['account_id'],))
+            m = cu2.fetchone()
+            row['last_message'] = (m[0] if m else None)
+            cu2.execute("""SELECT TOP 1 smsDate FROM SMSLog
+                           WHERE AccountId = %s AND InOut <> 'In'
+                           ORDER BY smsDate DESC""", (row['account_id'],))
+            o = cu2.fetchone()
+            row['last_reply'] = _plain(o[0]) if o else None
+            row['answered_since'] = bool(o and m and o[0] and m[1] and o[0] > m[1])
+        except Exception:
+            pass
+
+    cu.execute("""SELECT COUNT(*) FROM SMSLog
+                  WHERE InOut = 'In' AND ISNULL(smsNotRead,0) = 1
+                    AND smsDate >= DATEADD(hour, -%d, GETDATE())""" % int(hours))
+    total = int((cu.fetchone() or [0])[0] or 0)
+    conn.close()
+    waiting = [r for r in rows if not r.get('answered_since')]
+    return {'conversations': waiting, 'all': rows,
+            'unread_messages': total, 'waiting': len(waiting), 'hours': hours}
+
+
 def missed_calls(hours=48, include_resolved=False, limit=200):
     """Calls nobody answered, newest first.
 

@@ -427,6 +427,69 @@ def start_work(account_id, employee_id, call_id=None, dry_run=False):
     return out
 
 
+def pause_resume_work(work_id, pause, who):
+    """Stop or restart the clock on a piece of work.
+
+    Copied from PauseResumeAccountWork: pausing adds a WorkPauses row with no
+    end time, resuming closes the open one. The CMS refuses to pause twice or
+    resume when nothing is paused, and so does this — two open pauses would
+    make the paused time impossible to add up.
+    """
+    work_id = int(work_id)
+    conn = cms_db._connect()
+    out = {'table': 'WorkPauses', 'action': ('pause' if pause else 'resume'),
+           'work_id': work_id, 'dry_run': False}
+    try:
+        cu = conn.cursor()
+        cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        cu.execute('SELECT EndTime FROM [AccountWork] WHERE Id = %s', (work_id,))
+        row = cu.fetchone()
+        if row is None:
+            raise WriteRefused('There is no work record with id %d.' % work_id)
+        if row[0] is not None:
+            raise WriteRefused('That work is already finished.')
+
+        cu.execute("""SELECT TOP 1 Id, StartTime FROM [WorkPauses]
+                      WHERE AccountWorkId = %s AND EndTime IS NULL
+                      ORDER BY Id DESC""", (work_id,))
+        open_pause = cu.fetchone()
+
+        if pause:
+            if open_pause:
+                raise WriteRefused('This work is already paused.')
+            cu.execute("""INSERT INTO [WorkPauses] (AccountWorkId, StartTime)
+                          VALUES (%s, GETDATE())""", (work_id,))
+            out['meaning'] = 'Paused.'
+        else:
+            if not open_pause:
+                raise WriteRefused('This work is not paused.')
+            cu.execute('UPDATE [WorkPauses] SET EndTime = GETDATE() WHERE Id = %s',
+                       (int(open_pause[0]),))
+            out['meaning'] = 'Back on the clock.'
+        conn.commit()
+        out.update({'ok': True, 'committed': True})
+    except WriteRefused:
+        try:
+            conn.rollback(); conn.close()
+        except Exception:
+            pass
+        raise
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        out.update({'ok': False, 'committed': False,
+                    'error': _explain(e), 'raw_error': str(e)[:300]})
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    _log(who, out, before=None)
+    return out
+
+
 def end_work(work_id, minutes_billed, note, who, task=None, dry_run=False):
     """Finish a piece of work, and charge for it if minutes were billed.
 
@@ -454,6 +517,12 @@ def end_work(work_id, minutes_billed, note, who, task=None, dry_run=False):
         cu.execute("""SELECT AccountId, EmployeeId, EndTime FROM [AccountWork]
                       WHERE Id = %s""", (work_id,))
         row = cu.fetchone()
+        # close any pause still open, or the work would end mid-pause
+        try:
+            cu.execute("""UPDATE [WorkPauses] SET EndTime = GETDATE()
+                          WHERE AccountWorkId = %s AND EndTime IS NULL""", (work_id,))
+        except Exception:
+            pass
         if row is None:
             raise WriteRefused('There is no work record with id %d.' % work_id)
         if row[2] is not None:

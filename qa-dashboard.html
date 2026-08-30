@@ -1268,6 +1268,29 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
   </div>
 </div>
 
+<div class="page" id="page-texts">
+  <div class="topbar">
+    <button class="navtoggle" onclick="toggleNav()" aria-label="Menu">☰</button>
+    <div class="page-title">💬 Unanswered Texts</div>
+    <div class="topbar-right">
+      <select id="tx-hours" class="cms-in" style="width:auto;" onchange="loadTexts()">
+        <option value="24">Last day</option>
+        <option value="72" selected>Last 3 days</option>
+        <option value="168">Last week</option>
+      </select>
+      <span id="tx-count" style="font-size:11.5px;color:var(--text3);"></span>
+      <button class="btn btn-outline" onclick="loadTexts()">Refresh</button>
+    </div>
+  </div>
+  <div style="padding:18px 28px 44px;">
+    <div class="payhint" style="margin-bottom:14px;">
+      Customers who texted and have had no reply since. Click one to open their
+      account, where the whole conversation is under Texts.
+    </div>
+    <div id="tx-list"></div>
+  </div>
+</div>
+
 <div class="page" id="page-missed">
   <div class="topbar">
     <button class="navtoggle" onclick="toggleNav()" aria-label="Menu">☰</button>
@@ -2620,6 +2643,7 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
     </div>
     <span style="margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
       <button class="btn btn-outline" style="font-size:12px;" onclick="wbOpenAccount()">Open account</button>
+      <button class="btn btn-outline" style="font-size:12px;" id="wb-pause" onclick="wbPause()">Pause</button>
       <button class="btn btn-primary" style="font-size:12px;" onclick="wbEndOpen()">Finish work</button>
     </span>
   </div>
@@ -3926,6 +3950,7 @@ function portalApply(name, isManager){
     'customers':    ['👤', 'Customers'],
     'agent-calls':  ['🎧', 'Agents & Calls'],
     'missed':       ['📵', 'Missed Calls'],
+    'texts':        ['💬', 'Texts'],
     'agent-list':   ['📇', 'Agents'],
     'packages':     ['📦', 'Packages'],
     'company-info': ['🔑', 'Info & Logins'],
@@ -4081,6 +4106,7 @@ function showPage(id){
   if(id==='agent-calls'){ acLoadLive(); acAutoToggle(); }
   if(id==='live'){ loadLive(); lvAutoToggle(); }
   if(id==='missed') loadMissed();
+  if(id==='texts') loadTexts();
   if(id==='cms-settings') loadCmsSettings();
   if(id==='connections') loadConnections();
   if(id==='customers') cuLoadRecent();
@@ -6262,6 +6288,56 @@ async function cwStart(accountId){
 
 let openWork = null;
 
+
+/* ---------------- pausing work ----------------
+   A call interrupted halfway should not bill the whole stretch. The CMS keeps
+   pauses as their own rows, opened on pause and closed on resume, and refuses
+   to open two — so the paused time can always be added up. */
+async function wbPause(){
+  if(!openWork) return;
+  const goingToPause = !openWork.paused_now;
+  try{
+    const r = await API.post('/api/work/' + openWork.id + '/pause', {pause: goingToPause});
+    if(r.error || r.ok === false){ showToast(r.error || 'Could not change the pause', true); return; }
+    showToast(r.meaning || (goingToPause ? 'Paused' : 'Back on the clock'));
+    wbRefresh();
+  }catch(e){ showToast(e.message, true); }
+}
+
+/* ---------------- unanswered texts ----------------
+   660,000 messages are logged and nothing was watching for a customer who
+   wrote and got no reply. The unread flag is set as each message arrives, so
+   this is a live signal rather than a stale column. */
+async function loadTexts(){
+  const box = document.getElementById('tx-list');
+  box.innerHTML = '<div style="color:var(--text3);font-size:12.5px;">Loading…</div>';
+  try{
+    const r = await API.get('/api/texts/unread?hours=' + document.getElementById('tx-hours').value);
+    if(r.error){ box.innerHTML = `<div style="color:var(--red)">${r.error}</div>`; return; }
+    document.getElementById('tx-count').textContent =
+      r.waiting ? `${r.waiting} waiting · ${r.unread_messages} unread messages` : 'nobody waiting';
+    const ago = d => {
+      if(!d) return '';
+      const m = Math.round((Date.now() - new Date(d).getTime())/60000);
+      if(m < 60) return m + ' min ago';
+      if(m < 1440) return Math.floor(m/60) + 'h ago';
+      return Math.floor(m/1440) + 'd ago';
+    };
+    box.innerHTML = (r.conversations||[]).map(t=>{
+      const waited = t.newest ? (Date.now() - new Date(t.newest).getTime())/3600000 : 0;
+      const colour = waited > 24 ? 'var(--red)' : waited > 4 ? 'var(--yellow)' : 'var(--green)';
+      return `<div class="payrow" onclick="showPage('customers');cuOpen(${t.account_id});setTimeout(()=>cuTab('sms'),400)">
+        <span style="width:8px;height:8px;border-radius:50%;background:${colour};flex:none;"></span>
+        <div class="nm">${esc(t.account)}
+          <div class="mt">${esc(t.phone)||''}${t.our_number?' · to '+esc(t.our_number):''}
+            ${t.last_message ? ' · “' + esc(String(t.last_message).slice(0,70)) + '”' : ''}</div></div>
+        <div style="text-align:right;font-size:11.5px;color:var(--text3);white-space:nowrap;">
+          ${ago(t.newest)}${t.unread > 1 ? `<div>${t.unread} messages</div>` : ''}</div>
+      </div>`;
+    }).join('') || '<div style="color:var(--text3);font-size:12.5px;">Everyone has been answered.</div>';
+  }catch(e){ box.innerHTML = `<div style="color:var(--red)">${e.message}</div>`; }
+}
+
 async function wbRefresh(){
   try{
     const r = await API.get('/api/work/open');
@@ -6272,8 +6348,18 @@ async function wbRefresh(){
     document.getElementById('wb-account').textContent = openWork.account || ('Account ' + openWork.account_id);
     const mins = openWork.started
       ? Math.max(0, Math.round((Date.now() - new Date(openWork.started).getTime())/60000)) : 0;
+    const paused = !!openWork.paused_now;
+    const pausedMin = Math.round((openWork.paused_seconds || 0) / 60);
     document.getElementById('wb-meta').textContent =
-      `open ${mins} min${openWork.phone ? ' · ' + openWork.phone : ''} · ${openWork.minutes_left} minutes left on the account`;
+      (paused ? 'PAUSED · ' : '') + `open ${mins} min`
+      + (pausedMin ? ` (${pausedMin} paused)` : '')
+      + (openWork.phone ? ' · ' + openWork.phone : '')
+      + ` · ${openWork.minutes_left} minutes left on the account`;
+    const pb = document.getElementById('wb-pause');
+    if(pb) pb.textContent = paused ? 'Resume' : 'Pause';
+    bar.style.borderTopColor = paused ? 'var(--yellow)' : 'var(--green)';
+    const dot = bar.querySelector('span');
+    if(dot) dot.style.background = paused ? 'var(--yellow)' : 'var(--green)';
     bar.style.display = '';
     document.body.style.paddingBottom = '64px';
   }catch(e){}
@@ -6293,10 +6379,16 @@ async function cuStartWork(){
 
 function wbEndOpen(){
   if(!openWork) return;
+  const pausedMin = Math.round((openWork.paused_seconds || 0)/60);
   document.getElementById('we-sub').textContent = 'On ' + (openWork.account || '') +
-    ' · they have ' + openWork.minutes_left + ' minutes left';
+    ' · they have ' + openWork.minutes_left + ' minutes left'
+    + (pausedMin ? ' · ' + pausedMin + ' minutes were paused and are not suggested' : '');
   document.getElementById('we-note').value = '';
-  document.getElementById('we-minutes').value = '0';
+  // suggest the time on the call, less anything paused
+  const openMin = openWork.started
+    ? Math.max(0, Math.round((Date.now() - new Date(openWork.started).getTime())/60000)) : 0;
+  const suggest = Math.max(0, openMin - Math.round((openWork.paused_seconds || 0)/60));
+  document.getElementById('we-minutes').value = String(suggest);
   document.getElementById('we-task').value = '';
   document.getElementById('we-out').textContent = '';
   wbPreview();

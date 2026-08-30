@@ -4653,7 +4653,7 @@ def _setting(key, default=''):
 # A second way in, for the people who already have CMS accounts. It serves the
 # same pages but only the ones built on the CMS, and it signs people in with
 # their existing user name and password rather than a second set of logins.
-PORTAL_PAGES = ['live', 'missed', 'customers', 'agent-calls',
+PORTAL_PAGES = ['live', 'missed', 'texts', 'customers', 'agent-calls',
                 'agent-list', 'packages', 'company-info']   # everyone
 PORTAL_MANAGER_PAGES = ['cms-settings', 'qa-users']           # managers and admins
 PORTAL_ADMIN_PAGES = ['payments']                            # admins only — real money
@@ -5581,6 +5581,38 @@ def work_end(work_id):
     return jsonify(out), (200 if out.get('ok') else 400)
 
 
+@app.route('/api/work/<int:work_id>/pause', methods=['POST'])
+@portal_or_manager
+def work_pause(work_id):
+    """Stop or restart the clock on a piece of work."""
+    import cms_write
+    d = request.json or {}
+    try:
+        out = cms_write.pause_resume_work(work_id, bool(d.get('pause', True)), _who())
+    except cms_write.WriteRefused as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'Could not change the pause.',
+                        'raw_error': str(e)[:300]}), 400
+    return jsonify(out), (200 if out.get('ok') else 400)
+
+
+@app.route('/api/texts/unread', methods=['GET'])
+@portal_or_manager
+def texts_unread():
+    """Customers who texted and have not been answered."""
+    import cms_db
+    try:
+        hours = min(720, max(1, int(request.args.get('hours') or 72)))
+    except Exception:
+        hours = 72
+    try:
+        return jsonify(cms_db.unread_texts(hours))
+    except Exception as e:
+        return jsonify({'error': str(e)[:200], 'conversations': [],
+                        'waiting': 0, 'unread_messages': 0}), 400
+
+
 @app.route('/api/work/open', methods=['GET'])
 @portal_or_manager
 def work_open():
@@ -5599,11 +5631,15 @@ def work_open():
         r = cu.fetchone(); conn.close()
         if not r:
             return jsonify({'work': None})
-        return jsonify({'work': {
-            'id': int(r[0]), 'account_id': int(r[1]),
-            'started': cms_db._plain(r[2]), 'call_id': int(r[3] or 0),
-            'account': ('%s %s' % (r[4] or '', r[5] or '')).strip(),
-            'phone': r[6], 'minutes_left': int(r[7] or 0)}})
+        work = {'id': int(r[0]), 'account_id': int(r[1]),
+                'started': cms_db._plain(r[2]), 'call_id': int(r[3] or 0),
+                'account': ('%s %s' % (r[4] or '', r[5] or '')).strip(),
+                'phone': r[6], 'minutes_left': int(r[7] or 0)}
+        try:
+            work.update(cms_db.work_pause_state(work['id']))
+        except Exception:
+            pass
+        return jsonify({'work': work})
     except Exception as e:
         return jsonify({'work': None, 'error': str(e)[:200]})
 
@@ -7393,7 +7429,7 @@ PORTAL_ALLOWED_PREFIXES = (
     '/api/recording-link', '/api/payments/', '/api/cms-settings',
     '/api/qa-users', '/api/credentials', '/api/credential-access', '/api/work',
     '/api/customers/', '/api/calls/', '/api/my-call', '/api/phone-event',
-    '/api/phone-event/recent', '/api/missed-calls',
+    '/api/phone-event/recent', '/api/missed-calls', '/api/texts/',
     '/api/cms-db/', '/api/connections', '/static/', '/favicon',
 )
 
