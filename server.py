@@ -5569,32 +5569,76 @@ def phone_event_recent():
     })
 
 
+# Small caches so a poll costs nothing. Without these, every agent asking
+# "am I on a call?" opened a CMS connection and ran five queries — thirty
+# agents once a second would be a hundred and fifty queries a second against
+# the phone system's database, which is why polling felt expensive.
+_EXT_CACHE = {}          # employee id -> (extension, when we looked)
+_WHO_CACHE = {}          # phone number -> (accounts, when we looked)
+
+
+def _extension_for(employee_id, max_age=600):
+    """An agent's extension. Looked up once and kept — it does not change
+    during a shift, and re-reading it every second is pure waste."""
+    import time as _t
+    import cms_db
+    key = int(employee_id)
+    hit = _EXT_CACHE.get(key)
+    if hit and (_t.time() - hit[1]) < max_age:
+        return hit[0]
+    try:
+        conn = cms_db._connect(); cu = conn.cursor()
+        cu.execute('SELECT Extension FROM Employee WHERE Id = %s', (key,))
+        r = cu.fetchone(); conn.close()
+        ext = (r[0] or '').strip() if r else None
+    except Exception:
+        return hit[0] if hit else None       # keep using the old one
+    _EXT_CACHE[key] = (ext, _t.time())
+    return ext
+
+
+def _who_is_calling(phone, max_age=120):
+    """Who a number belongs to. Cached briefly, because the answer cannot
+    change during one call and this is three queries each time."""
+    import time as _t
+    import cms_db
+    key = str(phone or '')
+    hit = _WHO_CACHE.get(key)
+    if hit and (_t.time() - hit[1]) < max_age:
+        return hit[0]
+    try:
+        who = cms_db.find_account_by_phone(phone)
+    except Exception:
+        return hit[0] if hit else None
+    _WHO_CACHE[key] = (who, _t.time())
+    if len(_WHO_CACHE) > 500:
+        for k in list(_WHO_CACHE)[:200]:
+            _WHO_CACHE.pop(k, None)
+    return who
+
+
 @app.route('/api/my-call', methods=['GET'])
 @portal_or_manager
 def my_current_call():
-    """The call the signed-in agent is on, and who it appears to be.
+    """The call this agent is on, and who it appears to be.
 
-    This is what lets the caller appear on their screen by itself, rather than
-    the agent hunting through a list of everyone's calls.
+    Answered from memory: the phone system posts events straight in, and a
+    background reader keeps the same map current from the call log. So the
+    usual case — no call, or the same call as a moment ago — touches no
+    database at all, which is what makes asking every second reasonable.
     """
-    import cms_db
     p = _portal_user(request.headers.get('X-Portal-Ticket', ''))
-    ext = None
-    try:
-        if p and p.get('e'):
-            conn = cms_db._connect(); cu = conn.cursor()
-            cu.execute('SELECT Extension FROM Employee WHERE Id = %s', (int(p['e']),))
-            r = cu.fetchone(); conn.close()
-            ext = (r[0] or '').strip() if r else None
-        if not ext:
-            return jsonify({'call': None, 'reason': 'no extension for this sign-in'})
-        call = cms_db.active_call_for_extension(ext)
-        if not call:
-            return jsonify({'call': None})
-        who = cms_db.find_account_by_phone(call.get('phone'))
-        return jsonify({'call': call, 'who': who, 'extension': ext})
-    except Exception as e:
-        return jsonify({'call': None, 'error': str(e)[:200]})
+    if not (p and p.get('e')):
+        return jsonify({'call': None, 'reason': 'no CMS sign-in'})
+    ext = _extension_for(p['e'])
+    if not ext:
+        return jsonify({'call': None, 'reason': 'no extension on this employee record'})
+
+    call = _LIVE_CALLS['by_ext'].get(ext)
+    if not call:
+        return jsonify({'call': None, 'extension': ext})
+    return jsonify({'call': call, 'who': _who_is_calling(call.get('phone')),
+                    'extension': ext})
 
 
 @app.route('/api/calls/associate', methods=['POST'])

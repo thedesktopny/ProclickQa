@@ -68,7 +68,11 @@ def _open(k):
         import pymssql
         return pymssql.connect(server=HOST, port=str(PORT), database=NAME,
                                user=USER, password=PASSWORD,
-                               login_timeout=CONNECT_TIMEOUT, timeout=30)
+                               login_timeout=CONNECT_TIMEOUT,
+                               # a query that cannot finish in 12 seconds is not
+                               # going to help anyone — better to fail than to
+                               # hold a worker while the page waits
+                               timeout=12)
     if k == 'postgres':
         import psycopg2
         return psycopg2.connect(host=HOST, port=PORT, dbname=NAME, user=USER,
@@ -962,6 +966,299 @@ def settings_all():
             'database': NAME}
 
 
+MISSED_STATUSES = ('NOANSWER', 'NO ANSWER', 'BUSY', 'CANCEL', 'CONGESTION',
+                   'CHANUNAVAIL', 'AFTER HOURS', 'FAILED', 'ABANDON')
+
+
+def is_missed_status(dial_status):
+    """Whether this dial status means the caller did not reach anyone.
+
+    The CMS decides the same way, from the status Asterisk reports when the
+    call ends. Outbound calls are never counted as missed.
+    """
+    s = str(dial_status or '').strip().upper()
+    if not s or s.startswith('OUTBOUND'):
+        return False
+    if s in ('ANSWER', 'ANSWERED'):
+        return False
+    return any(m in s for m in MISSED_STATUSES)
+
+
+def work_pause_state(work_id):
+    """Whether this work is paused, and how long has been paused in total."""
+    conn = _connect(); cu = conn.cursor()
+    cu.execute("""SELECT SUM(DATEDIFF(second, StartTime, ISNULL(EndTime, GETDATE()))),
+                         SUM(CASE WHEN EndTime IS NULL THEN 1 ELSE 0 END),
+                         MAX(CASE WHEN EndTime IS NULL THEN StartTime END)
+                  FROM WorkPauses WHERE AccountWorkId = %s""", (int(work_id),))
+    r = cu.fetchone() or (0, 0, None)
+    conn.close()
+    return {'paused_seconds': int(r[0] or 0),
+            'paused_now': bool(int(r[1] or 0)),
+            'paused_since': _plain(r[2])}
+
+
+def missed_calls(hours=48, include_resolved=False, limit=200):
+    """Calls nobody answered, newest first.
+
+    A missed call is 'resolved' once the same person gets through afterwards.
+    What matters operationally is the unresolved ones: somebody rang, nobody
+    picked up, and nobody has spoken to them since.
+
+    Written in two steps on purpose. Joining accounts to calls on the phone
+    number means comparing RIGHT(REPLACE(...)) on both sides, which no index
+    can help with — on two million calls that is a full scan, and it was slow
+    enough to hold a worker until it timed out. So: take the calls first, which
+    the date index makes fast, then look up the handful of numbers that came
+    back.
+    """
+    conn = _connect()
+    cu = conn.cursor()
+    where = """(ISNULL(c.IsMissed,0) = 1 OR c.DialStatus = 'AFTER HOURS')
+               AND c.Started >= DATEADD(hour, -%d, GETDATE())""" % int(hours)
+    if not include_resolved:
+        where += ' AND ISNULL(c.MissedResolvedId, 0) = 0'
+
+    cu.execute("""SELECT TOP %d c.Id, c.Phone, c.CallersName, c.Started, c.DialStatus,
+                         c.CalledExtension, c.MissedResolvedId, c.RequestedCallBack,
+                         c.SpecificExten
+                  FROM PhoneCallsLog c WHERE %s
+                  ORDER BY c.Started DESC""" % (int(limit), where))
+    n = lambda v: int(v or 0)
+    out = []
+    while True:
+        r = cu.fetchone()
+        if not r:
+            break
+        out.append({'call_id': n(r[0]), 'phone': r[1], 'caller_name': r[2],
+                    'when': _plain(r[3]), 'status': r[4], 'called': r[5],
+                    'resolved_by': n(r[6]) or None,
+                    'requested_callback': bool(r[7]), 'asked_for': r[8],
+                    'account_id': None, 'account': None, 'minutes_left': 0})
+
+    last10 = {}
+    for row in out:
+        d = ''.join(ch for ch in str(row['phone'] or '') if ch.isdigit())
+        if len(d) >= 10:
+            last10.setdefault(d[-10:], []).append(row)
+    if last10:
+        keys = list(last10.keys())[:200]
+        marks = ', '.join(['%s'] * len(keys))
+        try:
+            cu.execute("""SELECT Id, FirstName, LastName, ISNULL(MinutesLeft,0),
+                                 RIGHT(REPLACE(REPLACE(ISNULL(Phone,''),'-',''),' ',''), 10)
+                          FROM Account
+                          WHERE ISNULL(Deleted,0) = 0
+                            AND RIGHT(REPLACE(REPLACE(ISNULL(Phone,''),'-',''),' ',''), 10)
+                                IN (%s)""" % marks, tuple(keys))
+            while True:
+                a = cu.fetchone()
+                if not a:
+                    break
+                for row in last10.get(a[4], []):
+                    row['account_id'] = int(a[0])
+                    row['account'] = ('%s %s' % (a[1] or '', a[2] or '')).strip()
+                    row['minutes_left'] = int(a[3] or 0)
+        except Exception as e:
+            print('[cms] missed-call account lookup: ' + str(e)[:120])
+
+    cu.execute("""SELECT COUNT(*),
+                         SUM(CASE WHEN ISNULL(IsMissed,0) = 1 THEN 1 ELSE 0 END),
+                         SUM(CASE WHEN ISNULL(IsMissed,0) = 1
+                                   AND ISNULL(MissedResolvedId,0) = 0 THEN 1 ELSE 0 END)
+                  FROM PhoneCallsLog
+                  WHERE Started >= DATEADD(hour, -%d, GETDATE())
+                    AND ISNULL(IsOutbound, 0) = 0""" % int(hours))
+    t = cu.fetchone() or (0, 0, 0)
+    conn.close()
+    total, missed, unresolved = n(t[0]), n(t[1]), n(t[2])
+    return {'calls': out, 'hours': hours,
+            'total_inbound': total, 'missed': missed, 'unresolved': unresolved,
+            'missed_rate': (round(missed / total * 100, 1) if total else 0)}
+
+
+def missed_by_hour(days=7):
+    """Which hours of the day calls go unanswered — the pattern says why."""
+    conn = _connect(); cu = conn.cursor()
+    cu.execute("""SELECT DATEPART(hour, Started), COUNT(*),
+                         SUM(CASE WHEN ISNULL(IsMissed,0) = 1 THEN 1 ELSE 0 END)
+                  FROM PhoneCallsLog
+                  WHERE Started >= DATEADD(day, -%d, GETDATE())
+                    AND ISNULL(IsOutbound,0) = 0
+                  GROUP BY DATEPART(hour, Started)
+                  ORDER BY DATEPART(hour, Started)""" % int(days))
+    out = []
+    while True:
+        r = cu.fetchone()
+        if not r:
+            break
+        total, missed = int(r[1] or 0), int(r[2] or 0)
+        out.append({'hour': int(r[0] or 0), 'calls': total, 'missed': missed,
+                    'rate': round(missed / total * 100, 1) if total else 0})
+    conn.close()
+    return {'by_hour': out, 'days': days}
+
+
+def unread_texts(hours=72, limit=60):
+    """Customers who texted and have not been answered.
+
+    One query rather than one per conversation. The earlier version ran two
+    extra lookups for each of forty conversations — eighty round trips for a
+    single page, which is what made it slow enough to time out.
+    """
+    conn = _connect(); cu = conn.cursor()
+    cu.execute("""SELECT TOP %d s.AccountId, MAX(s.smsDate), COUNT(*),
+                         MAX(a.FirstName), MAX(a.LastName), MAX(a.Phone),
+                         MAX(a.smsNumber),
+                         (SELECT MAX(o.smsDate) FROM SMSLog o
+                          WHERE o.AccountId = s.AccountId AND o.InOut <> 'In')
+                  FROM SMSLog s
+                  LEFT JOIN Account a ON a.Id = s.AccountId
+                  WHERE s.InOut = 'In' AND ISNULL(s.smsNotRead, 0) = 1
+                    AND s.smsDate >= DATEADD(hour, -%d, GETDATE())
+                  GROUP BY s.AccountId
+                  ORDER BY MAX(s.smsDate) DESC""" % (int(limit), int(hours)))
+    rows = []
+    while True:
+        r = cu.fetchone()
+        if not r:
+            break
+        newest = r[1]
+        replied = r[7]
+        rows.append({'account_id': int(r[0] or 0), 'newest': _plain(newest),
+                     'unread': int(r[2] or 0),
+                     'account': ('%s %s' % (r[3] or '', r[4] or '')).strip() or '(unknown)',
+                     'phone': r[5], 'our_number': r[6],
+                     'last_reply': _plain(replied),
+                     'answered_since': bool(replied and newest and replied > newest)})
+    conn.close()
+    waiting = [r for r in rows if not r['answered_since']]
+    return {'conversations': waiting, 'all': rows,
+            'unread_messages': sum(r['unread'] for r in rows),
+            'waiting': len(waiting), 'hours': hours}
+
+
+def find_account_by_phone(phone):
+    """Who is calling — kept in the CMS's three groups, not flattened into one.
+
+    Primary is an account whose main number this is: a confident match. Others
+    matched on a mobile, home or other number. Associated are accounts this
+    number has been linked to before. The CMS shows them separately so the
+    agent can judge, and collapsing them would present a weak match as a
+    certain one.
+    """
+    digits = ''.join(ch for ch in str(phone or '') if ch.isdigit())
+    if len(digits) < 7:
+        return {'phone': phone, 'primary': None, 'others': [], 'associated': []}
+    last10 = digits[-10:]
+    conn = _connect()
+
+    def rows(sql, prm):
+        cu = conn.cursor()
+        cu.execute(sql, prm)
+        out = []
+        while True:
+            r = cu.fetchone()
+            if not r:
+                break
+            out.append({'id': int(r[0]),
+                        'name': ('%s %s' % (r[1] or '', r[2] or '')).strip() or '(no name)',
+                        'phone': r[3], 'minutes_left': int(r[4] or 0),
+                        'business': bool(r[5]) if len(r) > 5 else False})
+        return out
+
+    CLEAN = "REPLACE(REPLACE(REPLACE(REPLACE(ISNULL(%s,''),'-',''),' ',''),'(',''),')','')"
+    base = """SELECT TOP 10 a.Id, a.FirstName, a.LastName, a.Phone,
+                     ISNULL(a.MinutesLeft,0), a.isBusiness
+              FROM Account a WHERE ISNULL(a.Deleted,0) = 0 AND """
+
+    primary = rows(base + 'RIGHT(%s, 10) = %%s' % (CLEAN % 'a.Phone'), (last10,))
+    others = rows(base + '(RIGHT(%s, 10) = %%s OR RIGHT(%s, 10) = %%s OR RIGHT(%s, 10) = %%s)'
+                  % (CLEAN % 'a.Mobile', CLEAN % 'a.HomePhone', CLEAN % 'a.OtherPhone'),
+                  (last10, last10, last10))
+    associated = []
+    try:
+        associated = rows("""SELECT TOP 10 a.Id, a.FirstName, a.LastName, a.Phone,
+                                    ISNULL(a.MinutesLeft,0), a.isBusiness
+                             FROM AccountAssociatedPhoneNumber p
+                             JOIN Account a ON a.Id = p.AccountId
+                             WHERE RIGHT(%s, 10) = %%s""" % (CLEAN % 'p.Phone'),
+                          (last10,))
+    except Exception:
+        pass
+
+    seen = {a['id'] for a in primary}
+    others = [a for a in others if a['id'] not in seen]
+    seen |= {a['id'] for a in others}
+    associated = [a for a in associated if a['id'] not in seen]
+
+    conn.close()
+    return {'phone': phone, 'last10': last10,
+            'primary': (primary[0] if primary else None),
+            'others': others, 'associated': associated,
+            'any': bool(primary or others or associated)}
+
+
+def active_call_for_extension(extension):
+    """The call this agent is on right now, if any.
+
+    Matches their extension as the ringing agent, the person who picked up, or
+    a transfer target — the same three ways the CMS looks.
+    """
+    ext = str(extension or '').strip()
+    if not ext:
+        return None
+    conn = _connect(); cu = conn.cursor()
+    cu.execute("""SELECT TOP 1 c.Id, c.Phone, c.Started, c.PickedUpTime, c.Ended,
+                         c.IsOutbound, c.DialStatus, c.CalledExtension
+                  FROM PhoneCallsLog c
+                  WHERE (c.Agent = %s OR c.PickedUpBy = %s)
+                    AND c.Started >= DATEADD(hour, -4, GETDATE())
+                  ORDER BY c.Id DESC""", (ext, ext))
+    r = cu.fetchone()
+    conn.close()
+    if not r:
+        return None
+    return {'call_id': int(r[0]), 'phone': r[1], 'started': _plain(r[2]),
+            'picked_up': _plain(r[3]), 'ended': _plain(r[4]),
+            'outbound': bool(r[5]), 'status': r[6], 'called': r[7],
+            'live': r[4] is None}
+
+
+def associate_number(account_id, phone):
+    """Remember that this number belongs to this account.
+
+    The CMS does this when an agent opens an account while on a call from a
+    number that matched nothing — which is how a caller from a second phone is
+    recognised next time. Without it, the same call is a mystery every time.
+    """
+    digits = ''.join(ch for ch in str(phone or '') if ch.isdigit())
+    if len(digits) < 7:
+        return False
+    conn = _connect()
+    try:
+        cu = conn.cursor()
+        cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        cu.execute("""SELECT COUNT(*) FROM AccountAssociatedPhoneNumber
+                      WHERE AccountId = %s AND RIGHT(REPLACE(REPLACE(ISNULL(Phone,''),'-',''),' ',''), 10) = %s""",
+                   (int(account_id), digits[-10:]))
+        if int((cu.fetchone() or [0])[0] or 0) > 0:
+            conn.close()
+            return False
+        cu.execute("""INSERT INTO AccountAssociatedPhoneNumber (AccountId, Phone, Created)
+                      VALUES (%s, %s, GETDATE())""", (int(account_id), digits[-10:]))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        try:
+            conn.rollback(); conn.close()
+        except Exception:
+            pass
+        print('[cms] could not link the number: ' + str(e)[:140])
+        return False
+
+
 def customer_search(q, limit=40):
     """Find an account by name, phone or email."""
     q = (q or '').strip()
@@ -1332,7 +1629,17 @@ def _live_snapshot(feed_limit=70, hours=6):
 
     agents = [{
         'employee_id': n(r[0]), 'name': (r[1] or '').strip(), 'extension': r[2],
-        'clocked_in': n(r[3]) == 1, 'clocker_since': _plain(r[4]), 'break_minutes': n(r[5]),
+        # EmployeeClockerStatus in the CMS source is Out = 0, In = 1,
+        # OnBreak = 2 — there is no 3 here. (The CMS turns 1 into 3 only when
+        # it writes cms_status into the phone system's own table, for an agent
+        # on Do Not Disturb.) So 1 and 2 both mean on shift; 3 is accepted in
+        # case this column ever carries the phone system's value instead.
+        # DND itself is read from the NotDistrubStatus log below.
+        'clocker_status': n(r[3]),
+        'clocked_in': n(r[3]) in (1, 2, 3),
+        'on_break': n(r[3]) == 2,
+        'cms_dnd': n(r[3]) == 3,
+        'clocker_since': _plain(r[4]), 'break_minutes': n(r[5]),
         'phone': (r[6] or ''), 'phone_since': _plain(r[7]), 'minutes_on_call': n(r[8]),
         'calls_in': n(r[9]), 'calls_out': n(r[10]),
         'last_call_phone': r[11], 'last_call_at': _plain(r[12]),
@@ -1344,8 +1651,8 @@ def _live_snapshot(feed_limit=70, hours=6):
     dnd = _dnd_now(conn)
     for a in agents:
         d = dnd.get(a['employee_id'])
-        a['dnd'] = bool(d)
-        a['dnd_since'] = d['since'] if d else None
+        a['dnd'] = bool(d) or a.get('cms_dnd', False)
+        a['dnd_since'] = d['since'] if d else (a.get('clocker_since') if a.get('cms_dnd') else None)
         a['dnd_note'] = (d.get('note') if d else None)
         a['dnd_type'] = (d.get('type') if d else None)
 
@@ -1431,7 +1738,11 @@ def agents_live():
         n = lambda v: int(v or 0)
         out.append({
             'employee_id': n(r[0]), 'name': (r[1] or '').strip(), 'extension': r[2],
-            'clocked_in': n(r[3]) == 1, 'clocker_since': _plain(r[4]),
+            'clocker_status': n(r[3]),
+            'clocked_in': n(r[3]) in (1, 2, 3),
+            'on_break': n(r[3]) == 2,
+            'cms_dnd': n(r[3]) == 3,
+            'clocker_since': _plain(r[4]),
             'break_minutes': n(r[5]), 'phone': (r[6] or ''), 'phone_since': _plain(r[7]),
             'minutes_on_call': n(r[8]), 'calls_in': n(r[9]), 'calls_out': n(r[10]),
             'last_call_phone': r[11], 'last_call_at': _plain(r[12]),
@@ -1439,7 +1750,7 @@ def agents_live():
     dnd = _dnd_now(conn)
     for a in out:
         d = dnd.get(a['employee_id'])
-        a['dnd'] = bool(d)
+        a['dnd'] = bool(d) or a.get('cms_dnd', False)
         a['dnd_since'] = d['since'] if d else None
         a['dnd_note'] = (d.get('note') if d else None)
     conn.close()

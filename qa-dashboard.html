@@ -6203,16 +6203,26 @@ let inCallId = null, inDismissed = null, inTimer = null;
    asking every few seconds and finding out late. If the connection drops it
    reconnects on its own, and if it cannot be held at all we fall back to
    asking — slower, but never nothing. */
-/* The caller is fetched every couple of seconds rather than pushed.
-   A held-open connection was nicer to watch but consumed one server worker per
-   open browser tab, and there are only a few — so a handful of agents with the
-   portal open took the whole application down. Polling costs nothing here
-   because the phone system posts events straight into memory. */
+/* The caller is fetched once a second.
+   A held-open connection was nicer to watch but consumed one server worker
+   per open browser tab, and there are only a few — so a handful of agents
+   with the portal open took the whole application down.
+
+   Once a second is affordable because the answer comes from memory: the
+   phone system posts events straight in, the agent's extension is looked up
+   once and kept, and the caller lookup is cached for the duration of a call.
+   A poll with no call in progress touches no database at all. */
 function inConnect(){
   if(!IS_PORTAL && !portalTicket) return;
   inPoll();
   clearInterval(inTimer);
-  inTimer = setInterval(inPoll, 2500);
+  inTimer = setInterval(inPoll, 1000);
+  // stop asking when the tab is in the background — nobody is looking, and
+  // thirty idle tabs asking every second is thirty requests a second for nothing
+  document.addEventListener('visibilitychange', ()=>{
+    clearInterval(inTimer);
+    if(!document.hidden){ inPoll(); inTimer = setInterval(inPoll, 1000); }
+  });
 }
 
 async function inPoll(){
