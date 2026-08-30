@@ -40,6 +40,12 @@ WRITABLE = {
         {'Note', 'TaskDescription'},
         {'Note'},
     ),
+    # Only the QA flag. Not the extension, not the pay rate, not whether they
+    # have left — those carry consequences in the phone system and in payroll.
+    'Employee': (
+        {'QA'},
+        set(),
+    ),
 }
 
 # columns the database fills in itself — never sent from a form
@@ -47,6 +53,7 @@ SERVER_SET = {
     'Account': {'CreatedTime': 'GETDATE()', 'Modified': 'GETDATE()'},
     'AccountNotes': {'Created': 'GETDATE()'},
     'AccountWork': {},
+    'Employee': {},
 }
 
 MAX_TEXT = 400

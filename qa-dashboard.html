@@ -3,6 +3,10 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="alternate icon" type="image/png" href="/favicon.png">
+<link rel="apple-touch-icon" href="/favicon.png">
+<meta name="theme-color" content="#6C5CE7">
 <title>VoiceGuard QA</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap');
@@ -1371,14 +1375,19 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
     </div>
   </div>
   <div style="padding:18px 28px 44px;">
-    <div class="payhint" style="margin-bottom:14px;">
-      Everyone here already exists in the CMS — reviewers are the people carrying the
-      QA flag. Pick a reviewer, then tick the agents they are responsible for.
+    <div class="payhint" style="margin-bottom:12px;">
+      Everyone here already exists in the CMS. Pick a reviewer, then tick the agents
+      they are responsible for. Every agent should have one — admins, managers and the
+      reviewers themselves are not reviewed.
     </div>
+    <div id="qa-cover" style="margin-bottom:14px;"></div>
     <div class="paygrid" style="grid-template-columns:1fr 1.4fr;">
       <div class="card" style="padding:16px 20px;">
-        <h2 class="payh">QA reviewers</h2>
-        <div class="payhint">From the QA flag on their CMS record.</div>
+        <div style="display:flex;align-items:baseline;gap:8px;">
+          <h2 class="payh" style="margin:0;">QA reviewers</h2>
+          <button class="cn-chip" style="margin-left:auto;" onclick="qaAddReviewer()">+ Add</button>
+        </div>
+        <div class="payhint">Carrying the QA flag on their CMS record.</div>
         <div id="qa-reviewers"></div>
       </div>
       <div class="card" style="padding:16px 20px;">
@@ -2665,6 +2674,20 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
   </div>
 </div>
 
+<div class="modal" id="qa-add-modal">
+  <div class="modal-box" style="width:460px;max-width:94vw;">
+    <div style="font-size:18px;font-weight:660;margin-bottom:5px;">Make somebody a QA reviewer</div>
+    <div style="font-size:12.5px;color:var(--text3);margin-bottom:18px;">
+      This sets the QA flag on their CMS record — the same flag the CMS reads.</div>
+    <input id="qa-add-search" class="cms-in" style="width:100%" placeholder="Find a person…"
+           oninput="qaAddRender()">
+    <div id="qa-add-list" style="margin-top:10px;max-height:46vh;overflow:auto;"></div>
+    <div style="display:flex;gap:10px;margin-top:16px;">
+      <button class="btn btn-outline" onclick="hideModal('qa-add-modal')" style="flex:1">Close</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal" id="call-work-modal">
   <div class="modal-box" style="width:520px;max-width:94vw;">
     <div style="font-size:18px;font-weight:660;margin-bottom:5px;">Start work on this call</div>
@@ -3708,6 +3731,7 @@ const SEARCH_FIELDS = [
   ['ci-search', 'ciRender', false],
   ['cw-search', 'cwSearch', false],
   ['qa-search', 'qaRenderAgents', false],
+  ['qa-add-search', 'qaAddRender', false],
 ];
 
 function enhanceSearchFields(){
@@ -3861,6 +3885,63 @@ let alData = null, ciData = null;
    takes them off whoever had them before. */
 let qaData = null, qaReviewer = null, qaPicked = new Set();
 
+
+/* Coverage: every agent should be reviewed by somebody. Admins, managers and
+   the reviewers themselves are not — nobody reviews the person running the
+   place, and a reviewer reviewing themselves is not a check. */
+function qaRenderCover(){
+  const el = document.getElementById('qa-cover');
+  if(!el || !qaData) return;
+  const n = qaData.uncovered_count || 0;
+  if(!n){
+    el.innerHTML = `<div class="alert-bar" style="background:rgba(45,190,120,.08);
+         border-color:rgba(45,190,120,.3);">
+      <span style="font-size:15px;">✅</span>
+      <span style="font-size:12.5px;color:var(--text2);">Every agent has a reviewer.
+        ${qaData.exempt} admins and managers are not reviewed.</span></div>`;
+    return;
+  }
+  el.innerHTML = `<div class="alert-bar" style="background:rgba(242,88,95,.08);
+       border-color:rgba(242,88,95,.3);">
+    <span style="font-size:15px;">⚠️</span>
+    <span style="font-size:12.5px;color:var(--text2);flex:1;">
+      <b>${n} agent${n===1?'':'s'} nobody reviews:</b>
+      ${qaData.uncovered.map(a=>esc(a.name) + (a.extension?` (${esc(a.extension)})`:'')).join(', ')}
+    </span></div>`;
+}
+
+function qaAddReviewer(){
+  document.getElementById('qa-add-search').value = '';
+  qaAddRender();
+  showModal('qa-add-modal');
+}
+
+function qaAddRender(){
+  if(!qaData) return;
+  const q = (document.getElementById('qa-add-search').value||'').toLowerCase().trim();
+  const all = [...qaData.reviewers.map(r=>({...r, qa:true})), ...qaData.agents];
+  const list = all.filter(p => !q || p.name.toLowerCase().includes(q)
+                               || String(p.extension||'').includes(q));
+  document.getElementById('qa-add-list').innerHTML = list.map(p=>`
+    <div class="payrow" style="cursor:default">
+      <div class="nm">${esc(p.name)}
+        <div class="mt">ext ${esc(p.extension)||'—'}
+          ${(p.roles&&p.roles.length)?' · '+esc(p.roles.join(', ')):''}</div></div>
+      <button class="cn-chip" onclick="qaSetFlag(${p.id}, ${p.qa?'false':'true'})">
+        ${p.qa ? 'Remove' : 'Make reviewer'}</button>
+    </div>`).join('') || '<div style="color:var(--text3);font-size:12.5px;">Nobody matches.</div>';
+}
+
+async function qaSetFlag(employeeId, makeQa){
+  try{
+    const r = await API.post('/api/employees/' + employeeId + '/qa', {qa: makeQa});
+    if(r.error || r.ok === false){ showToast(r.error || 'Could not change it', true); return; }
+    showToast(makeQa ? 'They are now a QA reviewer' : 'No longer a reviewer');
+    await loadQaAssign();
+    qaAddRender();
+  }catch(e){ showToast(e.message, true); }
+}
+
 async function loadQaAssign(){
   const box = document.getElementById('qa-reviewers');
   box.innerHTML = '<div style="color:var(--text3);font-size:12.5px;">Loading…</div>';
@@ -3869,8 +3950,10 @@ async function loadQaAssign(){
     if(r.error){ box.innerHTML = `<div style="color:var(--red)">${r.error}</div>`; return; }
     qaData = r;
     document.getElementById('qa-summary').textContent =
-      `${r.reviewers.length} reviewers · ${r.agents.length} agents · ${r.unassigned} unassigned`;
+      `${r.reviewers.length} reviewers · ${r.agents.length} agents`
+      + (r.uncovered_count ? ` · ${r.uncovered_count} uncovered` : ' · all covered');
     qaRenderReviewers();
+    qaRenderCover();
     if(!qaReviewer && r.reviewers.length) qaPick(r.reviewers[0].id);
     else qaRenderAgents();
   }catch(e){ box.innerHTML = `<div style="color:var(--red)">${e.message}</div>`; }
@@ -3884,8 +3967,9 @@ function qaRenderReviewers(){
       <div class="paynum" style="font-size:15px;color:${v.agent_count?'var(--accent)':'var(--text3)'}">${v.agent_count}</div>
     </div>`).join('')
     || `<div style="color:var(--text3);font-size:12.5px;">
-          Nobody has the QA flag in the CMS yet. Set it on their employee record and they
-          will appear here.</div>`;
+          Nobody is a QA reviewer yet.
+          <a href="#" onclick="qaAddReviewer();return false;" style="color:var(--accent)">
+            Choose someone</a> — it sets the QA flag on their CMS record.</div>`;
 }
 
 function qaPick(reviewerId){

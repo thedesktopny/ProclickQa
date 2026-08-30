@@ -1370,7 +1370,12 @@ def agent_list(include_left=False):
     conn = _connect(); cu = conn.cursor()
     cu.execute("""SELECT e.Id, e.FirstName, e.LastName, e.Extension, e.PhoneName,
                          e.LeftFirm, e.Created, e.QA, e.WithCamera, e.Gender,
-                         e.ExperienceLevel, e.notLogIn, e.ScheduleId
+                         e.ExperienceLevel, e.notLogIn, e.ScheduleId,
+                         STUFF((SELECT ', ' + r.Name
+                                FROM AspNetUserRoles ur
+                                JOIN AspNetRoles r ON r.Id = ur.RoleId
+                                WHERE ur.UserId = e.AspNetUserId
+                                FOR XML PATH('')), 1, 2, '') AS Roles
                   FROM Employee e
                   WHERE %s ORDER BY e.LeftFirm, e.FirstName, e.LastName"""
                % ('1=1' if include_left else 'ISNULL(e.LeftFirm,0) = 0'))
@@ -1386,7 +1391,8 @@ def agent_list(include_left=False):
                     'phone_name': r[4], 'left_firm': bool(r[5]),
                     'since': _plain(r[6]), 'qa': bool(r[7]), 'camera': bool(r[8]),
                     'experience': (int(r[10]) if r[10] is not None else None),
-                    'cannot_log_in': bool(r[11]), 'schedule_id': r[12]})
+                    'cannot_log_in': bool(r[11]), 'schedule_id': r[12],
+                    'roles': [x.strip() for x in str(r[13] or '').split(',') if x.strip()]})
     conn.close()
     return {'agents': out, 'includes_former': include_left}
 

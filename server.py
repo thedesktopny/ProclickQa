@@ -5135,18 +5135,54 @@ def packages_route():
         return jsonify({'error': str(e)[:240]}), 400
 
 
+@app.route('/api/employees/<int:employee_id>/qa', methods=['POST'])
+@portal_manager_only
+def employee_set_qa(employee_id):
+    """Mark someone as a QA reviewer, or stop.
+
+    This is the QA flag on their CMS employee record — the same one the CMS
+    itself reads — so the two systems agree about who reviews calls. Only that
+    flag is writable; nothing else about an employee can be changed here.
+    """
+    import cms_write
+    d = request.json or {}
+    is_qa = bool(d.get('qa'))
+    try:
+        out = cms_write.update('Employee', employee_id, {'QA': is_qa}, _who(),
+                               dry_run=False)
+    except cms_write.WriteRefused as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'Could not change the QA flag.',
+                        'raw_error': str(e)[:300]}), 400
+    return jsonify(out), (200 if out.get('ok') else 400)
+
+
 @app.route('/api/qa-assignments', methods=['GET'])
 @portal_manager_only
 def qa_assignments_get():
     """Who reviews whom, using the people already in the CMS.
 
-    Reviewers are employees carrying the QA flag; agents are everyone else.
-    No accounts are created here — the pairing is the only new information.
+    Reviewers carry the QA flag. Everyone else needs a reviewer — except
+    admins, managers and the reviewers themselves, who are not reviewed.
     """
     import cms_db
     people = cms_db.agent_list(include_left=False)['agents']
+
+    def role_text(p):
+        return ' '.join(p.get('roles') or []).lower()
+
     reviewers = [p for p in people if p.get('qa')]
-    agents = [p for p in people if not p.get('qa')]
+    others = []
+    for p in people:
+        if p.get('qa'):
+            continue
+        r = role_text(p)
+        p['is_admin'] = 'admin' in r or 'owner' in r
+        p['is_manager'] = 'manager' in r or 'supervisor' in r
+        # somebody running the place is not reviewed by an agent
+        p['needs_reviewer'] = not (p['is_admin'] or p['is_manager'])
+        others.append(p)
 
     pairs = {}
     try:
@@ -5158,7 +5194,7 @@ def qa_assignments_get():
         print('[qa] could not read assignments: ' + str(e)[:120])
 
     by_reviewer = {}
-    for a in agents:
+    for a in others:
         rid = pairs.get(a['id'])
         a['reviewer_id'] = rid
         if rid:
@@ -5167,8 +5203,12 @@ def qa_assignments_get():
         r['agent_ids'] = by_reviewer.get(r['id'], [])
         r['agent_count'] = len(r['agent_ids'])
 
-    return jsonify({'reviewers': reviewers, 'agents': agents,
-                    'unassigned': len([a for a in agents if not a['reviewer_id']])})
+    uncovered = [a for a in others if a['needs_reviewer'] and not a['reviewer_id']]
+    return jsonify({'reviewers': reviewers, 'agents': others,
+                    'uncovered': [{'id': a['id'], 'name': a['name'],
+                                   'extension': a['extension']} for a in uncovered],
+                    'uncovered_count': len(uncovered),
+                    'exempt': len([a for a in others if not a['needs_reviewer']])})
 
 
 @app.route('/api/qa-assignments', methods=['POST'])
@@ -7552,7 +7592,11 @@ def skinblock_page():
 # Hostnames that serve ONLY the CMS side. Anything else on these addresses is
 # refused, so this stays a separate system from the QA dashboard even though
 # one application serves both.
-SERVER_BUILD = 'portal-hosts-2'      # bump when you need to confirm a deploy landed
+import time as _time_at_start
+_APP_STARTED_AT = _time_at_start.time()
+_APP_STARTED = datetime.now().isoformat()
+
+SERVER_BUILD = 'no-stream-1'      # bump when you need to confirm a deploy landed
 
 PORTAL_HOSTS = [hh.strip().lower() for hh in
                 os.getenv('PORTAL_HOSTS',
@@ -7572,7 +7616,8 @@ PORTAL_ALLOWED_PREFIXES = (
     '/api/whoami', '/api/portal/', '/api/live', '/api/customers',
     '/api/agents', '/api/agent-list', '/api/packages', '/api/company-info',
     '/api/recording-link', '/api/payments/', '/api/cms-settings',
-    '/api/qa-users', '/api/qa-assignments', '/api/credentials', '/api/credential-access', '/api/work',
+    '/api/qa-users', '/api/qa-assignments', '/api/employees/',
+    '/api/credentials', '/api/credential-access', '/api/work',
     '/api/customers/', '/api/calls/', '/api/my-call', '/api/phone-event',
     '/api/phone-event/recent', '/api/phone-event/check',
     '/api/missed-calls', '/api/texts/',
@@ -7626,6 +7671,42 @@ def _serve_page(path_, transform=None):
     resp.headers['Cache-Control'] = 'no-cache, must-revalidate'   # check, don't blindly reuse
     resp.headers['X-Build'] = SERVER_BUILD
     return resp
+
+
+@app.route('/favicon.ico')
+@app.route('/favicon.png')
+@app.route('/favicon.svg')
+def favicon():
+    """The little icon in the browser tab. Chrome asks for this on every page
+    and was getting a 404, which is noise in the log and a blank tab."""
+    name = request.path.lstrip('/')
+    kind = {'favicon.svg': 'image/svg+xml', 'favicon.png': 'image/png',
+            'favicon.ico': 'image/x-icon'}.get(name, 'image/png')
+    try:
+        resp = make_response(send_from_directory('.', name, mimetype=kind))
+        resp.headers['Cache-Control'] = 'public, max-age=86400'
+        return resp
+    except Exception:
+        return '', 404
+
+
+@app.route('/api/ping')
+def ping():
+    """Is the application alive at all.
+
+    Touches nothing — no database, no CMS, no phone system. If this answers,
+    the app is running and any other failure is a slow query or a busy worker.
+    If it does not, the app itself is down. Telling those two apart takes
+    minutes off every investigation.
+    """
+    import time as _t
+    return jsonify({
+        'alive': True,
+        'build': SERVER_BUILD,
+        'started': _APP_STARTED,
+        'up_seconds': int(_t.time() - _APP_STARTED_AT),
+        'now': datetime.now().isoformat(),
+    })
 
 
 @app.route('/api/whoami')
