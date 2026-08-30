@@ -5761,6 +5761,90 @@ def work_pause(work_id):
     return jsonify(out), (200 if out.get('ok') else 400)
 
 
+# Pictures sent by text have to live somewhere the texting service can fetch
+# them from — it takes a URL, not an upload — so they are kept here and served
+# without a login. Nothing else about them is public: the names are random, so
+# a link cannot be guessed.
+def _media_dir():
+    for path in (os.getenv('MEDIA_DIR'), '/home/text_media',
+                 os.path.join(os.getenv('HOME', '.'), 'text_media')):
+        if not path:
+            continue
+        try:
+            os.makedirs(path, exist_ok=True)
+            probe = os.path.join(path, '.writable')
+            with open(probe, 'w') as fh:
+                fh.write('x')
+            os.remove(probe)
+            return path
+        except Exception:
+            continue
+    return os.path.join('.', 'text_media')
+
+
+MEDIA_DIR = _media_dir()
+# 500 KB is what carriers reliably deliver; beyond about a megabyte many drop
+# the message silently, which is worse than refusing it here.
+MEDIA_MAX_BYTES = 900 * 1024
+MEDIA_TYPES = {
+    'image/jpeg': '.jpg', 'image/jpg': '.jpg', 'image/png': '.png',
+    'image/gif': '.gif', 'image/bmp': '.bmp', 'application/pdf': '.pdf',
+    'text/vcard': '.vcf', 'video/mp4': '.mp4', 'audio/mpeg': '.mp3',
+}
+
+
+@app.route('/api/media/upload', methods=['POST'])
+@portal_or_manager
+def media_upload():
+    """Takes a picture for a text message and gives back a link to it."""
+    import secrets
+    f = request.files.get('file')
+    if not f:
+        return jsonify({'ok': False, 'error': 'No file arrived.'}), 400
+
+    kind = (f.mimetype or '').lower().split(';')[0]
+    if kind not in MEDIA_TYPES:
+        return jsonify({'ok': False,
+                        'error': 'Texts cannot carry that kind of file (%s). '
+                                 'Pictures, PDFs and contact cards work.' % (kind or 'unknown')}), 400
+
+    data = f.read()
+    if not data:
+        return jsonify({'ok': False, 'error': 'That file is empty.'}), 400
+    if len(data) > MEDIA_MAX_BYTES:
+        return jsonify({'ok': False,
+                        'error': 'That is %.1f MB. Texts cannot carry more than about '
+                                 '900 KB, and under 500 KB is safest.'
+                                 % (len(data) / 1048576.0)}), 400
+
+    name = secrets.token_urlsafe(16) + MEDIA_TYPES[kind]
+    try:
+        with open(os.path.join(MEDIA_DIR, name), 'wb') as out:
+            out.write(data)
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'Could not keep the file: ' + str(e)[:120]}), 400
+
+    base = os.getenv('PUBLIC_BASE_URL') or request.url_root.rstrip('/')
+    return jsonify({'ok': True, 'url': base + '/media/' + name,
+                    'bytes': len(data), 'type': kind,
+                    'warn': ('Over 500 KB — some carriers may not deliver it.'
+                             if len(data) > 500 * 1024 else None)})
+
+
+@app.route('/media/<path:name>')
+def media_serve(name):
+    """Serves a picture so the texting service can fetch it. Deliberately open
+    — it has to be — but the names are random and unguessable."""
+    if '/' in name or '\\' in name or '..' in name:
+        return '', 404
+    try:
+        resp = make_response(send_from_directory(MEDIA_DIR, name))
+        resp.headers['Cache-Control'] = 'public, max-age=604800'
+        return resp
+    except Exception:
+        return '', 404
+
+
 @app.route('/api/customers/<int:account_id>/texts', methods=['POST'])
 @portal_or_manager
 def customer_send_text(account_id):
@@ -7630,6 +7714,7 @@ PORTAL_ALLOWED_PREFIXES = (
     '/api/qa-users', '/api/qa-assignments', '/api/employees/',
     '/api/credentials', '/api/credential-access', '/api/work',
     '/api/customers/', '/api/calls/', '/api/my-call', '/api/phone-event',
+    '/api/media/', '/media/',
     '/api/phone-event/recent', '/api/phone-event/check',
     '/api/missed-calls', '/api/texts/',
     '/api/cms-db/', '/api/connections', '/static/', '/favicon',

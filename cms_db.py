@@ -1551,10 +1551,27 @@ def customer_profile(account_id, limit=120):
         SELECT TOP 100 Created, PreviousBalance, NewBalance, AdjustmentReason
         FROM BalanceChangeLog WHERE AccountId = %s ORDER BY Created DESC""", (aid,))]
 
-    sms = [{'when': _plain(d), 'direction': io, 'from_to': cn, 'message': msg, 'media': media}
-           for d, io, cn, msg, media in rows("""
+    # A picture message arrives as several rows: the picture itself, and a
+    # .smil file the carrier adds describing how to lay it out. The second is
+    # of no interest to anybody, so it is dropped here rather than shown as a
+    # mysterious attachment.
+    def _is_layout_file(url):
+        u = str(url or '').lower().split('?')[0]
+        return u.endswith('.smil') or u.endswith('.xml') or 'smil' in u.rsplit('/', 1)[-1]
+
+    def _looks_like_a_picture(url):
+        u = str(url or '').lower().split('?')[0]
+        return u.endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic', '.bmp'))
+
+    sms = []
+    for d, io, cn, msg, media in rows("""
         SELECT TOP 100 smsDate, InOut, ContactNumber, message, MediaURL
-        FROM SMSLog WHERE AccountId = %s ORDER BY smsDate DESC""", (aid,))]
+        FROM SMSLog WHERE AccountId = %s ORDER BY smsDate DESC""", (aid,)):
+        if _is_layout_file(media):
+            continue
+        sms.append({'when': _plain(d), 'direction': io, 'from_to': cn,
+                    'message': msg, 'media': media,
+                    'is_picture': _looks_like_a_picture(media)})
 
     tickets = [{'created': _plain(cr), 'status': st, 'priority': pr,
                 'subject': subj, 'description': desc, 'closed': _plain(cl)}

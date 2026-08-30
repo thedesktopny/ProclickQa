@@ -6694,27 +6694,151 @@ async function cuNoteSave(){
 /* Sending a text from inside the account. The number a customer is texted
    from is the one already assigned to them — this never sets one up, because
    ordering and releasing numbers is delicate and stays in the CMS. */
+
+/* ---------------- pictures in a text ----------------
+   A phone photo is three or four megabytes; carriers drop anything much over
+   half a megabyte, often silently. So the picture is shrunk in the browser
+   before it is uploaded — the person just picks a photo and it works, rather
+   than being told their picture is too big and left to solve it. */
+let cuMedia = null;
+
+const MMS_TARGET_BYTES = 480 * 1024;     // what carriers reliably deliver
+const MMS_MAX_EDGE = 1600;               // plenty for a phone screen
+
+async function cuShrinkPicture(file){
+  if(!file.type.startsWith('image/') || file.type === 'image/gif') return file;
+  if(file.size <= MMS_TARGET_BYTES) return file;
+  try{
+    const img = await new Promise((ok, no)=>{
+      const i = new Image();
+      i.onload = ()=>ok(i); i.onerror = no;
+      i.src = URL.createObjectURL(file);
+    });
+    let {width: w, height: h} = img;
+    const scale = Math.min(1, MMS_MAX_EDGE / Math.max(w, h));
+    w = Math.round(w * scale); h = Math.round(h * scale);
+    const canvas = document.createElement('canvas');
+    canvas.width = w; canvas.height = h;
+    canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+    // step the quality down until it fits, rather than guessing once
+    for(const q of [0.82, 0.7, 0.6, 0.5, 0.4]){
+      const blob = await new Promise(ok => canvas.toBlob(ok, 'image/jpeg', q));
+      if(blob && blob.size <= MMS_TARGET_BYTES){
+        return new File([blob], (file.name || 'photo').replace(/\.\w+$/, '') + '.jpg',
+                        {type: 'image/jpeg'});
+      }
+    }
+    const last = await new Promise(ok => canvas.toBlob(ok, 'image/jpeg', 0.35));
+    return last ? new File([last], 'photo.jpg', {type: 'image/jpeg'}) : file;
+  }catch(e){
+    return file;      // if anything goes wrong, let the server judge it
+  }
+}
+
+async function cuAttach(file){
+  if(!file) return;
+  const out = document.getElementById('sms-out');
+  const box = document.getElementById('sms-attached');
+  out.textContent = 'Preparing the picture…';
+  const original = file.size;
+  const ready = await cuShrinkPicture(file);
+  out.textContent = 'Uploading…';
+  try{
+    const form = new FormData();
+    form.append('file', ready, ready.name || 'attachment');
+    const res = await fetch('/api/media/upload', {
+      method: 'POST',
+      headers: (typeof portalTicket !== 'undefined' && portalTicket)
+        ? {'X-Portal-Ticket': portalTicket}
+        : {'Authorization': 'Bearer ' + getToken()},
+      body: form});
+    const r = await res.json();
+    if(!r.ok){ out.textContent = '❌ ' + r.error; return; }
+    cuMedia = r.url;
+    const kb = Math.round(r.bytes / 1024);
+    const shrunk = original > ready.size
+      ? ` · shrunk from ${Math.round(original/1024)} KB` : '';
+    box.style.display = 'block';
+    box.innerHTML = `
+      <div style="display:flex;gap:10px;align-items:center;background:var(--surface2);
+           border:1px solid var(--border);border-radius:10px;padding:8px 10px;">
+        ${r.type.startsWith('image/')
+          ? `<img src="${esc(r.url)}" style="width:44px;height:44px;object-fit:cover;border-radius:7px;">`
+          : '<span style="font-size:20px;">📄</span>'}
+        <div style="flex:1;min-width:0;font-size:12px;">
+          <div>Attached${shrunk}</div>
+          <div style="color:var(--text3);font-size:11px;">${kb} KB${r.warn ? ' · ' + esc(r.warn) : ''}</div>
+        </div>
+        <button class="cn-chip" onclick="cuUnattach()">Remove</button>
+      </div>`;
+    out.textContent = '';
+  }catch(e){ out.textContent = 'Could not attach that: ' + e.message; }
+}
+
+function cuUnattach(){
+  cuMedia = null;
+  const box = document.getElementById('sms-attached');
+  if(box){ box.style.display = 'none'; box.innerHTML = ''; }
+  const picker = document.getElementById('sms-file');
+  if(picker) picker.value = '';
+}
+
+/* Pasting a picture straight into the box — the way people actually do it. */
+function cuPaste(ev){
+  const items = (ev.clipboardData || {}).items || [];
+  for(const item of items){
+    if(item.kind === 'file' && item.type.startsWith('image/')){
+      ev.preventDefault();
+      cuAttach(item.getAsFile());
+      return;
+    }
+  }
+}
+
 async function cuSendText(){
   if(!cuData) return;
   const box = document.getElementById('sms-text');
   const out = document.getElementById('sms-out');
   const message = (box.value || '').trim();
-  if(!message){ return; }
+  if(!message && !cuMedia){ return; }
   out.textContent = 'Sending…';
   box.disabled = true;
   try{
-    const r = await API.post(`/api/customers/${cuData.account.id}/texts`, {message});
+    const r = await API.post(`/api/customers/${cuData.account.id}/texts`,
+                             {message, media_url: cuMedia});
     if(r.error || r.ok === false){
       out.textContent = '❌ ' + (r.error || 'Could not send.')
         + (r.raw_error && r.raw_error !== r.error ? ' — ' + r.raw_error : '');
       box.disabled = false;
       return;
     }
+    // Add it to the thread rather than reloading the account. Reloading threw
+    // away the tab, the scroll position and anything half-typed — a texting
+    // panel that jumps back to the top after every message is not usable.
     box.value = '';
-    out.textContent = r.meaning || 'Sent.';
+    out.textContent = '';
     box.disabled = false;
-    cuOpen(cuData.account.id);
-    setTimeout(()=>cuTab('sms'), 350);
+    const thread = document.getElementById('sms-thread');
+    if(thread){
+      const empty = thread.querySelector('.payhint');
+      if(empty) empty.remove();
+      const bubble = document.createElement('div');
+      bubble.style.cssText = 'display:flex;justify-content:flex-end;margin-bottom:8px;';
+      bubble.innerHTML = `<div style="max-width:72%;background:var(--accent);color:#fff;
+           padding:9px 13px;border-radius:14px;font-size:12.5px;word-break:break-word;">
+           ${esc(message)}
+           ${cuMedia ? `<div style="margin-top:6px;"><img src="${esc(cuMedia)}"
+                style="max-width:100%;max-height:220px;border-radius:9px;display:block;"></div>` : ''}
+           <div style="font-size:10px;opacity:.6;margin-top:4px;">just now</div></div>`;
+      thread.appendChild(bubble);
+      thread.scrollTop = thread.scrollHeight;
+    }
+    if(cuData && cuData.sms){
+      cuData.sms.unshift({when: new Date().toISOString(), direction: 'Out',
+                          message, media: cuMedia, is_picture: !!cuMedia});
+    }
+    cuUnattach();
+    box.focus();
   }catch(e){
     out.textContent = 'Failed: ' + e.message;
     box.disabled = false;
@@ -6856,16 +6980,34 @@ function cuTab(which){
                  color:${m.direction==='In'?'var(--text)':'#fff'};padding:9px 13px;
                  border-radius:14px;font-size:12.5px;word-break:break-word;">
               ${esc(m.message)}
-              ${m.media ? `<div><a href="${esc(m.media)}" target="_blank"
-                    style="color:inherit;text-decoration:underline;font-size:11px;">attachment</a></div>` : ''}
+              ${m.media ? (m.is_picture
+                ? `<div style="margin-top:6px;">
+                     <img src="${esc(m.media)}" alt="picture message"
+                          onclick="window.open('${esc(m.media)}','_blank')"
+                          onerror="this.replaceWith(Object.assign(document.createElement('a'),{
+                                     href:'${esc(m.media)}', target:'_blank',
+                                     textContent:'picture (open in a new tab)',
+                                     style:'color:inherit;text-decoration:underline;font-size:11px'}))"
+                          style="max-width:100%;max-height:260px;border-radius:9px;
+                                 display:block;cursor:zoom-in;background:rgba(0,0,0,.15);">
+                   </div>`
+                : `<div><a href="${esc(m.media)}" target="_blank"
+                     style="color:inherit;text-decoration:underline;font-size:11px;">attachment</a></div>`) : ''}
               <div style="font-size:10px;opacity:.6;margin-top:4px;">${cuWhen(m.when)}</div>
             </div></div>`).join('')
           : '<div class="payhint">No messages yet.</div>'}
       </div>
       ${canText ? `
-        <div style="display:flex;gap:8px;margin-top:12px;align-items:flex-end;">
+        <div id="sms-attached" style="display:none;margin-top:10px;"></div>
+        <div style="display:flex;gap:8px;margin-top:10px;align-items:flex-end;">
+          <input type="file" id="sms-file" style="display:none;"
+                 accept="image/jpeg,image/png,image/gif,image/bmp,application/pdf,text/vcard"
+                 onchange="cuAttach(this.files[0])">
+          <button class="btn btn-outline" style="font-size:16px;padding:8px 12px;"
+                  title="Attach a picture" onclick="document.getElementById('sms-file').click()">📎</button>
           <textarea id="sms-text" class="cms-in" rows="2" style="flex:1;min-height:0;"
-                    placeholder="Write a message…"
+                    placeholder="Write a message, or paste a picture…"
+                    onpaste="cuPaste(event)"
                     onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();cuSendText();}"></textarea>
           <button class="btn btn-primary" style="font-size:12.5px;" onclick="cuSendText()">Send</button>
         </div>
