@@ -1286,10 +1286,13 @@ td.agent{color:var(--text);font-weight:500;}
     </div>
   </div>
   <div style="padding:20px 28px 44px;">
-    <div style="position:relative;max-width:520px;margin-bottom:20px;">
+    <div style="display:flex;gap:10px;align-items:center;margin-bottom:20px;flex-wrap:wrap;">
+      <div style="position:relative;flex:1;min-width:260px;max-width:520px;">
       <input id="cu-search" class="cms-in" placeholder="Search by name, phone or email…"
              autocomplete="off" oninput="cuSearch()" style="font-size:15px;padding:11px 14px;">
       <div id="cu-results" class="paydrop"></div>
+      </div>
+      <button class="btn btn-primary" onclick="cuNewOpen()">+ New customer</button>
     </div>
     <div id="cu-empty">
       <div style="color:var(--text3);font-size:12.5px;margin-bottom:14px;">
@@ -2424,6 +2427,55 @@ td.agent{color:var(--text);font-weight:500;}
 </div>
 
 <!-- LOGIN MODAL -->
+<div class="modal" id="cu-form-modal">
+  <div class="modal-box" style="width:520px;max-width:94vw;">
+    <div style="font-size:16px;font-weight:650;margin-bottom:4px;" id="cu-form-title">New customer</div>
+    <div style="font-size:12px;color:var(--text3);margin-bottom:18px;" id="cu-form-sub">
+      This creates a real account in the CMS.</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+      <div><div class="cn-lab">First name *</div>
+        <input id="cf-first" class="cms-in" style="width:100%"></div>
+      <div><div class="cn-lab">Last name</div>
+        <input id="cf-last" class="cms-in" style="width:100%"></div>
+      <div><div class="cn-lab">Phone</div>
+        <input id="cf-phone" class="cms-in" style="width:100%"></div>
+      <div><div class="cn-lab">Mobile</div>
+        <input id="cf-mobile" class="cms-in" style="width:100%"></div>
+      <div style="grid-column:1/-1;"><div class="cn-lab">Email</div>
+        <input id="cf-email" class="cms-in" style="width:100%"></div>
+      <div><div class="cn-lab">Home phone</div>
+        <input id="cf-home" class="cms-in" style="width:100%"></div>
+      <div><div class="cn-lab">Other phone</div>
+        <input id="cf-other" class="cms-in" style="width:100%"></div>
+      <div style="grid-column:1/-1;display:flex;gap:18px;align-items:center;">
+        <label style="font-size:12.5px;display:flex;gap:7px;align-items:center;">
+          <input type="checkbox" id="cf-business"> a business</label>
+      </div>
+    </div>
+    <pre id="cu-form-out" style="white-space:pre-wrap;font-size:11.5px;color:var(--text3);
+         margin:14px 0 0;line-height:1.7;"></pre>
+    <div style="display:flex;gap:10px;margin-top:16px;">
+      <button class="btn btn-outline" onclick="hideModal('cu-form-modal')" style="flex:1">Cancel</button>
+      <button class="btn btn-outline" onclick="cuFormSubmit(false)" style="flex:1">Check first</button>
+      <button class="btn btn-primary" onclick="cuFormSubmit(true)" style="flex:1" id="cf-save">Save</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="cu-note-modal">
+  <div class="modal-box" style="width:460px;max-width:94vw;">
+    <div style="font-size:16px;font-weight:650;margin-bottom:4px;">Add a note</div>
+    <div style="font-size:12px;color:var(--text3);margin-bottom:14px;" id="cu-note-sub"></div>
+    <textarea id="cf-note" rows="5" class="cms-in" style="width:100%;resize:vertical;"
+              placeholder="What happened on this call…"></textarea>
+    <pre id="cu-note-out" style="white-space:pre-wrap;font-size:11.5px;color:var(--text3);margin:10px 0 0;"></pre>
+    <div style="display:flex;gap:10px;margin-top:14px;">
+      <button class="btn btn-outline" onclick="hideModal('cu-note-modal')" style="flex:1">Cancel</button>
+      <button class="btn btn-primary" onclick="cuNoteSave()" style="flex:1">Save note</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal" id="login-modal" style="background:#000;">
   <div class="modal-box" style="width:380px;background:var(--surface);border:1px solid var(--border);">
     <div style="text-align:center;margin-bottom:24px;">
@@ -2488,6 +2540,11 @@ const API={
   async post(p,d){
     const r=await fetch(p,{method:'POST',headers:authHeaders(),body:JSON.stringify(d)});
     if(r.status===401&&p!=='/api/login'){throw new Error('Unauthorized');}
+    return r.json();
+  },
+  async patch(p,d){
+    const r=await fetch(p,{method:'PATCH',headers:authHeaders(),body:JSON.stringify(d)});
+    if(r.status===401){throw new Error('Unauthorized');}
     return r.json();
   },
   async put(p,d){
@@ -3475,7 +3532,7 @@ function csExport(){
    appear only for managers — decided by the server, not by hiding buttons. */
 const IS_PORTAL = (typeof IS_PORTAL_EARLY !== 'undefined') ? IS_PORTAL_EARLY
   : (document.body.getAttribute('data-portal') === '1' || location.pathname.startsWith('/portal'));
-let portalTicket = null, portalPages = [];
+let portalTicket = null, portalPages = [], portalIsAdmin = false;
 
 function portalHeaders(){
   const h = {'Content-Type':'application/json'};
@@ -3498,6 +3555,11 @@ async function portalLogin(){
     if(!r.ok){ err.textContent = r.error || 'Could not sign you in.'; return; }
     portalTicket = r.ticket; portalPages = r.pages || [];
     try{ sessionStorage.setItem('portal_ticket', r.ticket); }catch(e){}
+    // a QA reviewer also gets a normal VoiceGuard session, so the review pages
+    // work exactly as they do on the QA dashboard
+    portalIsAdmin = !!r.is_admin;
+    if(r.vg_token){ setToken(r.vg_token); isAdmin = !!r.is_admin;
+                    currentRole = r.is_admin ? 'admin' : r.is_manager ? 'manager' : 'reviewer'; }
     document.getElementById('portal-login').style.display = 'none';
     portalApply(r.name, r.is_manager);
   }catch(e){ err.textContent = 'Could not reach the server.'; }
@@ -3626,15 +3688,27 @@ function portalApply(name, isManager){
     'company-info': ['🔑', 'Info & Logins'],
     'payments':     ['💳', 'Payments'],
     'cms-settings': ['⚙️', 'Settings'],
+    'calls':        ['📞', 'Call Review'],
+    'human-review': ['👁', 'Human Review'],
+    'call-notes':   ['🗒️', 'Call Notes'],
+    'notes':        ['📝', 'Note Quality'],
+    'analytics':    ['📈', 'Analytics'],
   };
+  const QA_SET = ['calls','human-review','call-notes','notes','analytics'];
+  const item = (p, active) =>
+    `<div class="nav-item${active?' active':''}" data-page="${p}" onclick="showPage('${p}')">`
+    + `<span class="icon">${PAGES[p][0]}</span>${PAGES[p][1]}</div>`;
+  const cmsPages = portalPages.filter(p => PAGES[p] && !QA_SET.includes(p));
+  const qaPages  = portalPages.filter(p => PAGES[p] && QA_SET.includes(p));
+
   const scroll = document.querySelector('.sidebar-scroll');
   if(scroll){
     scroll.innerHTML = '<div class="nav-section">'
       + '<div class="nav-label">ProClick</div>'
-      + portalPages.filter(p => PAGES[p]).map((p, i) =>
-          `<div class="nav-item${i===0?' active':''}" data-page="${p}" onclick="showPage('${p}')">`
-          + `<span class="icon">${PAGES[p][0]}</span>${PAGES[p][1]}</div>`).join('')
+      + cmsPages.map((p, i) => item(p, i === 0)).join('')
       + '</div>'
+      + (qaPages.length ? '<div class="nav-section"><div class="nav-label">Quality</div>'
+          + qaPages.map(p => item(p, false)).join('') + '</div>' : '')
       + '<div class="nav-section"><div class="nav-label">Account</div>'
       + '<div class="nav-item" onclick="portalSignOut()"><span class="icon">↩︎</span>Sign out</div>'
       + '</div>';
@@ -3645,7 +3719,8 @@ function portalApply(name, isManager){
     if(el) el.style.display = 'none';
   });
   const sub = document.querySelector('.logo-sub');
-  if(sub) sub.textContent = name + (isManager ? ' · manager' : '');
+  if(sub) sub.textContent = name + (portalIsAdmin ? ' · admin'
+                                   : isManager ? ' · manager' : '');
   const mark = document.querySelector('.logo-mark');
   if(mark) mark.innerHTML = '<div class="logo-icon">🎧</div>ProClick';
   showPage(portalPages[0] || 'live');
@@ -3669,6 +3744,9 @@ async function portalBoot(){
       if(res.ok){
         const me = await res.json();
         portalPages = me.pages || [];
+        portalIsAdmin = !!me.is_admin;
+        if(me.is_qa){ isAdmin = !!me.is_admin;
+                      currentRole = me.is_admin ? 'admin' : me.is_manager ? 'manager' : 'reviewer'; }
         document.getElementById('portal-login').style.display = 'none';
         portalApply(me.name, me.is_manager);
         return;
@@ -5505,6 +5583,103 @@ const cuWhen = d => d ? new Date(d).toLocaleString([], {month:'short',day:'numer
 const cuDate = d => d ? new Date(d).toLocaleDateString([], {month:'short',day:'numeric',year:'numeric'}) : '';
 const esc = s => String(s==null?'':s).replace(/</g,'&lt;');
 
+
+/* ---------------- creating and changing records ----------------
+   Every save is rehearsed first if asked: the statement runs inside a
+   transaction and is rolled back, so the person sees exactly what would happen
+   before anything is kept. Every real change is recorded in the audit log. */
+let cuEditingId = null;
+
+function cuNewOpen(){
+  cuEditingId = null;
+  document.getElementById('cu-form-title').textContent = 'New customer';
+  document.getElementById('cu-form-sub').textContent = 'This creates a real account in the CMS.';
+  ['cf-first','cf-last','cf-phone','cf-mobile','cf-email','cf-home','cf-other']
+    .forEach(id => document.getElementById(id).value = '');
+  document.getElementById('cf-business').checked = false;
+  document.getElementById('cu-form-out').textContent = '';
+  showModal('cu-form-modal');
+  setTimeout(()=>document.getElementById('cf-first').focus(), 80);
+}
+
+function cuEditOpen(){
+  if(!cuData) return;
+  const a = cuData.account;
+  cuEditingId = a.id;
+  document.getElementById('cu-form-title').textContent = 'Edit ' + a.name;
+  document.getElementById('cu-form-sub').textContent = 'Changing account #' + a.id + ' in the CMS.';
+  document.getElementById('cf-first').value  = (a.name||'').split(' ')[0] || '';
+  document.getElementById('cf-last').value   = (a.name||'').split(' ').slice(1).join(' ');
+  document.getElementById('cf-phone').value  = a.phone || '';
+  document.getElementById('cf-mobile').value = a.mobile || '';
+  document.getElementById('cf-email').value  = a.email || '';
+  document.getElementById('cf-home').value   = a.home_phone || '';
+  document.getElementById('cf-other').value  = a.other_phone || '';
+  document.getElementById('cf-business').checked = !!a.business;
+  document.getElementById('cu-form-out').textContent = '';
+  showModal('cu-form-modal');
+}
+
+function cuFormValues(){
+  const v = id => document.getElementById(id).value.trim();
+  const body = {
+    FirstName: v('cf-first'), LastName: v('cf-last'), Phone: v('cf-phone'),
+    Mobile: v('cf-mobile'), Email: v('cf-email'),
+    HomePhone: v('cf-home'), OtherPhone: v('cf-other'),
+    isBusiness: document.getElementById('cf-business').checked,
+  };
+  Object.keys(body).forEach(k => { if(body[k] === '') delete body[k]; });
+  return body;
+}
+
+async function cuFormSubmit(confirm){
+  const out = document.getElementById('cu-form-out');
+  const body = cuFormValues();
+  body.confirm = !!confirm;
+  out.textContent = confirm ? 'Saving…' : 'Checking what would happen…';
+  try{
+    const r = cuEditingId
+      ? await API.patch('/api/customers/' + cuEditingId, body)
+      : await API.post('/api/customers', body);
+    if(r.error || r.ok === false){ out.textContent = '❌ ' + (r.error || 'Could not save.'); return; }
+    if(!confirm){
+      out.textContent = (r.meaning || 'This would work.') +
+        '\nNothing has been saved — press Save to keep it.';
+      return;
+    }
+    out.textContent = '✅ ' + (r.meaning || 'Saved.');
+    setTimeout(()=>{
+      hideModal('cu-form-modal');
+      if(cuEditingId) cuOpen(cuEditingId);
+      else if(r.new_id) cuOpen(r.new_id);
+      cuLoadRecent();
+    }, 700);
+  }catch(e){ out.textContent = 'Failed: ' + e.message; }
+}
+
+function cuNoteOpen(){
+  if(!cuData) return;
+  document.getElementById('cu-note-sub').textContent = 'Against ' + cuData.account.name;
+  document.getElementById('cf-note').value = '';
+  document.getElementById('cu-note-out').textContent = '';
+  showModal('cu-note-modal');
+  setTimeout(()=>document.getElementById('cf-note').focus(), 80);
+}
+
+async function cuNoteSave(){
+  const out = document.getElementById('cu-note-out');
+  const note = document.getElementById('cf-note').value.trim();
+  if(!note){ out.textContent = 'Write something first.'; return; }
+  out.textContent = 'Saving…';
+  try{
+    const r = await API.post('/api/customers/' + cuData.account.id + '/notes',
+                             {note, confirm: true});
+    if(r.error || r.ok === false){ out.textContent = '❌ ' + (r.error || 'Could not save.'); return; }
+    out.textContent = '✅ Saved.';
+    setTimeout(()=>{ hideModal('cu-note-modal'); cuOpen(cuData.account.id); }, 600);
+  }catch(e){ out.textContent = 'Failed: ' + e.message; }
+}
+
 async function cuOpen(id){
   document.getElementById('cu-results').classList.remove('open');
   document.getElementById('cu-empty').style.display = 'none';
@@ -5531,6 +5706,10 @@ async function cuOpen(id){
         ${a.business?'<span class="pill">business</span>':''}
         ${a.deleted?'<span class="pill" style="color:var(--red)">deleted</span>':''}
         ${a.is_free?'<span class="pill" style="color:var(--yellow)">free account</span>':''}
+        <span style="margin-left:auto;display:flex;gap:8px;">
+          <button class="btn btn-outline" style="font-size:12px;" onclick="cuNoteOpen()">+ Note</button>
+          <button class="btn btn-outline" style="font-size:12px;" onclick="cuEditOpen()">Edit</button>
+        </span>
       </div>
       <div style="font-size:12.5px;color:var(--text3);margin-bottom:18px;">
         ${[a.phone,a.mobile,a.home_phone,a.other_phone].filter(Boolean).join(' · ')}

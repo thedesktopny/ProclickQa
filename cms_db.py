@@ -753,8 +753,8 @@ def portal_login(username, password):
         conn.close()
         raise RuntimeError('That account is locked in the CMS')
 
-    # who they are on the floor
-    cu.execute("""SELECT TOP 1 Id, FirstName, LastName, Extension, LeftFirm
+    # who they are on the floor, and whether they do QA
+    cu.execute("""SELECT TOP 1 Id, FirstName, LastName, Extension, LeftFirm, QA
                   FROM Employee WHERE AspNetUserId = %s""", (user_id,))
     emp = cu.fetchone()
 
@@ -776,8 +776,12 @@ def portal_login(username, password):
     if emp and emp[4]:
         raise RuntimeError('That person has left the firm')
 
+    # The CMS has exactly three roles: Admin, Manager and Business Account.
+    # Admin sits above Manager, and the money pages are reserved for Admin.
     low = [r.lower() for r in roles]
-    is_manager = any(k in ' '.join(low) for k in ('admin', 'manager', 'owner', 'supervisor'))
+    joined = ' '.join(low)
+    is_admin = any(k in joined for k in ('admin', 'owner'))
+    is_manager = is_admin or any(k in joined for k in ('manager', 'supervisor'))
     return {
         'user_id': str(user_id),
         'username': uname, 'email': email,
@@ -786,6 +790,10 @@ def portal_login(username, password):
         'extension': (emp[3] if emp else None),
         'roles': roles,
         'is_manager': is_manager,
+        'is_admin': is_admin,
+        # the QA flag on the employee record, or a role that says so
+        'is_qa': bool(emp[5]) if (emp and len(emp) > 5 and emp[5] is not None) else
+                 any('qa' in r.lower() or 'review' in r.lower() for r in roles),
     }
 
 
@@ -946,10 +954,6 @@ def settings_all():
            FROM CompanyUsualSchedule s ORDER BY s.CompanyId, s.DayOfWeek""")
     add('Special dates', 'Days that differ from the usual week — holidays and closures.',
         'SELECT TOP 100 * FROM CompanySpecialSchedule ORDER BY 1 DESC')
-    add('Agent schedules', 'The shift patterns agents are assigned to.',
-        'SELECT TOP 200 * FROM EmployeeSchedule ORDER BY 1')
-    add('Text message templates', 'Prepared messages for campaigns.',
-        'SELECT TOP 100 * FROM SMSCompaignMessage ORDER BY 1 DESC')
     add('Companies', 'The businesses this system runs for.',
         'SELECT TOP 100 * FROM TableCompanies ORDER BY 1')
 

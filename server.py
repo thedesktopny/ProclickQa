@@ -523,8 +523,29 @@ def init_db():
     # Migration — add new columns if they don't exist
     # Commit all CREATE TABLE work before running migrations, so a failing
     # migration can't roll back the schema we just created.
-    try: conn.commit()
+    try:
+        conn.commit()
     except Exception: pass
+
+    # every change this system makes to the CMS is recorded here, in our own
+    # database rather than theirs
+    try:
+        c.execute('''CREATE TABLE IF NOT EXISTS cms_audit (
+            id SERIAL PRIMARY KEY,
+            at TIMESTAMP DEFAULT NOW(),
+            who TEXT,
+            employee_id INTEGER,
+            action TEXT,
+            table_name TEXT,
+            row_id INTEGER,
+            before_json TEXT,
+            after_json TEXT,
+            committed BOOLEAN DEFAULT FALSE,
+            error TEXT
+        )''')
+        conn.commit()
+    except Exception as e:
+        print('[init] cms_audit: ' + str(e)[:120])
 
     migrations = [
         "ALTER TABLE calls ADD COLUMN IF NOT EXISTS caller_id TEXT",
@@ -4541,7 +4562,11 @@ def _setting(key, default=''):
 # their existing user name and password rather than a second set of logins.
 PORTAL_PAGES = ['live', 'customers', 'agent-calls',
                 'agent-list', 'packages', 'company-info']   # everyone
-PORTAL_MANAGER_PAGES = ['payments', 'cms-settings']          # managers only
+PORTAL_MANAGER_PAGES = ['cms-settings']                      # managers and admins
+PORTAL_ADMIN_PAGES = ['payments']                            # admins only — real money
+# QA reviewers additionally get the monitoring side. They are doing QA work, so
+# they need the same call review tools the QA dashboard has.
+PORTAL_QA_PAGES = ['calls', 'human-review', 'call-notes', 'notes', 'analytics']
 
 
 def _portal_ticket(user, minutes=600):
@@ -4549,7 +4574,8 @@ def _portal_ticket(user, minutes=600):
     exp = int(time.time()) + minutes * 60
     body = _json.dumps({'u': user.get('user_id'), 'e': user.get('employee_id'),
                         'n': user.get('name'), 'm': bool(user.get('is_manager')),
-                        'x': exp}, separators=(',', ':'))
+                        'q': bool(user.get('is_qa')),
+                        'a': bool(user.get('is_admin')), 'x': exp}, separators=(',', ':'))
     secret = (os.getenv('SECRET_KEY') or app.secret_key or 'voiceguard').encode()
     sig = hmac.new(secret, body.encode(), hashlib.sha256).hexdigest()[:32]
     return base64.urlsafe_b64encode((body + '.' + sig).encode()).decode()
@@ -4590,8 +4616,28 @@ def portal_or_manager(f):
     return decorated
 
 
+def portal_admin_only(f):
+    """The money pages. In the CMS, Admin sits above Manager, and a manager has
+    no business seeing every payment and refund — so this checks for Admin
+    specifically, on the server, not just in the menu."""
+    from functools import wraps
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        p = _portal_user(request.headers.get('X-Portal-Ticket', ''))
+        if p:
+            if p.get('a'):
+                return f(*args, **kwargs)
+            return jsonify({'error': 'Only an administrator can open the payments pages.'}), 403
+        user = get_token_user(get_request_token())
+        if (user and user.get('role') == 'admin') or session.get('role') == 'admin' \
+           or session.get('admin'):
+            return f(*args, **kwargs)
+        return jsonify({'error': 'Administrators only'}), 403
+    return decorated
+
+
 def portal_manager_only(f):
-    """Payments and settings: managers only, from either door."""
+    """Settings: managers and admins, from either door."""
     from functools import wraps
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -4706,10 +4752,35 @@ def portal_login_route():
         user = cms_db.portal_login(d.get('username'), d.get('password'))
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)[:160]}), 403
+    pages = list(PORTAL_PAGES)
+    if user.get('is_qa'):
+        pages += PORTAL_QA_PAGES
+    if user['is_manager']:
+        pages += PORTAL_MANAGER_PAGES
+    if user.get('is_admin'):
+        pages += PORTAL_ADMIN_PAGES
+
+    # A QA reviewer also needs a normal VoiceGuard session, because the review
+    # pages talk to the QA endpoints and those check a VoiceGuard token. Minting
+    # one here means the existing pages work untouched rather than every one of
+    # them learning about CMS sign-ins.
+    vg_token = None
+    if user.get('is_qa'):
+        try:
+            vg_token = create_token({
+                'id': 'cms-%s' % (user.get('employee_id') or user.get('user_id')),
+                'role': 'manager' if user['is_manager'] else 'reviewer',
+                'username': user.get('username') or user['name'],
+                'full_name': user['name'],
+            })
+        except Exception as e:
+            print('[portal] could not create a QA session: ' + str(e)[:140])
+
     return jsonify({'ok': True, 'ticket': _portal_ticket(user),
                     'name': user['name'], 'is_manager': user['is_manager'],
-                    'extension': user.get('extension'),
-                    'pages': PORTAL_PAGES + (PORTAL_MANAGER_PAGES if user['is_manager'] else [])})
+                    'is_admin': bool(user.get('is_admin')),
+                    'is_qa': bool(user.get('is_qa')), 'vg_token': vg_token,
+                    'extension': user.get('extension'), 'pages': pages})
 
 
 @app.route('/api/portal/me', methods=['GET'])
@@ -4717,8 +4788,15 @@ def portal_me():
     p = _portal_user(request.headers.get('X-Portal-Ticket', ''))
     if not p:
         return jsonify({'signed_in': False}), 401
+    pages = list(PORTAL_PAGES)
+    if p.get('q'):
+        pages += PORTAL_QA_PAGES
+    if p.get('m'):
+        pages += PORTAL_MANAGER_PAGES
+    if p.get('a'):
+        pages += PORTAL_ADMIN_PAGES
     return jsonify({'signed_in': True, 'name': p.get('n'), 'is_manager': bool(p.get('m')),
-                    'pages': PORTAL_PAGES + (PORTAL_MANAGER_PAGES if p.get('m') else [])})
+                    'is_admin': bool(p.get('a')), 'is_qa': bool(p.get('q')), 'pages': pages})
 
 
 @app.route('/api/recording-base/find', methods=['GET', 'POST'])
@@ -4963,6 +5041,78 @@ def agent_list_route():
         return jsonify({'error': str(e)[:240]}), 400
 
 
+def _who():
+    """Who is making this change, for the audit log."""
+    p = _portal_user(request.headers.get('X-Portal-Ticket', ''))
+    if p:
+        return {'name': p.get('n'), 'employee_id': p.get('e')}
+    u = get_token_user(get_request_token()) or {}
+    return {'name': u.get('full_name') or u.get('username') or 'dashboard',
+            'employee_id': None}
+
+
+@app.route('/api/customers', methods=['POST'])
+@portal_or_manager
+def customer_create():
+    """Create a customer account. Send confirm=true to actually save it;
+    without that it is rehearsed and rolled back."""
+    import cms_write
+    d = request.json or {}
+    confirm = bool(d.pop('confirm', False))
+    try:
+        out = cms_write.create('Account', d, _who(), dry_run=not confirm)
+    except cms_write.WriteRefused as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    return jsonify(out), (200 if out.get('ok') else 400)
+
+
+@app.route('/api/customers/<int:account_id>', methods=['PATCH'])
+@portal_or_manager
+def customer_update(account_id):
+    """Change a customer's details."""
+    import cms_write
+    d = request.json or {}
+    confirm = bool(d.pop('confirm', False))
+    try:
+        out = cms_write.update('Account', account_id, d, _who(), dry_run=not confirm)
+    except cms_write.WriteRefused as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    return jsonify(out), (200 if out.get('ok') else 400)
+
+
+@app.route('/api/customers/<int:account_id>/notes', methods=['POST'])
+@portal_or_manager
+def customer_add_note(account_id):
+    """Write a note against an account."""
+    import cms_write
+    d = request.json or {}
+    confirm = bool(d.pop('confirm', True))     # notes save straight away
+    who = _who()
+    values = {'AccountId': account_id, 'Note': (d.get('note') or '').strip()}
+    if who.get('employee_id'):
+        values['CreatedBy'] = who['employee_id']
+    try:
+        out = cms_write.create('AccountNotes', values, who, dry_run=not confirm)
+    except cms_write.WriteRefused as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    return jsonify(out), (200 if out.get('ok') else 400)
+
+
+@app.route('/api/cms-audit', methods=['GET'])
+@portal_manager_only
+def cms_audit_list():
+    """Everything this system has changed in the CMS."""
+    conn = get_db(); c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute("""SELECT at, who, action, table_name, row_id, before_json,
+                        after_json, committed, error
+                 FROM cms_audit ORDER BY at DESC LIMIT 200""")
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    for r in rows:
+        r['at'] = r['at'].isoformat() if r['at'] else None
+    return jsonify({'changes': rows})
+
+
 @app.route('/api/customers/recent', methods=['GET'])
 @portal_or_manager
 def customers_recent():
@@ -5063,7 +5213,7 @@ def recording_link():
 
 
 @app.route('/api/payments/unlock', methods=['POST'])
-@portal_manager_only
+@portal_admin_only
 def payments_unlock():
     """Check the code and hand back a pass that expires."""
     code = str((request.json or {}).get('code') or '').strip()
@@ -5075,7 +5225,7 @@ def payments_unlock():
 
 
 @app.route('/api/payments/data', methods=['GET'])
-@portal_manager_only
+@portal_admin_only
 @require_payments_code
 def payments_data():
     """Everything the payments page shows, for the chosen dates and filters."""
@@ -5092,7 +5242,7 @@ def payments_data():
 
 
 @app.route('/api/payments/people', methods=['GET'])
-@portal_manager_only
+@portal_admin_only
 @require_payments_code
 def payments_people():
     """Names for the agent and account pickers."""
@@ -6657,6 +6807,11 @@ def _portal_host_guard():
     if p in ('/', '/portal', '/portal/'):
         return None
     if p.startswith(PORTAL_ALLOWED_PREFIXES):
+        return None
+    # a QA reviewer signed in here is doing QA work, so the review tools travel
+    # with them — everyone else still cannot reach them from this address
+    who = _portal_user(request.headers.get('X-Portal-Ticket', ''))
+    if who and who.get('q'):
         return None
     # not part of this system
     return jsonify({'error': 'Not available on this address'}), 404
