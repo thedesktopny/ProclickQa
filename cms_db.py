@@ -1332,7 +1332,17 @@ def _live_snapshot(feed_limit=70, hours=6):
 
     agents = [{
         'employee_id': n(r[0]), 'name': (r[1] or '').strip(), 'extension': r[2],
-        'clocked_in': n(r[3]) == 1, 'clocker_since': _plain(r[4]), 'break_minutes': n(r[5]),
+        # EmployeeClockerStatus in the CMS source is Out = 0, In = 1,
+        # OnBreak = 2 — there is no 3 here. (The CMS turns 1 into 3 only when
+        # it writes cms_status into the phone system's own table, for an agent
+        # on Do Not Disturb.) So 1 and 2 both mean on shift; 3 is accepted in
+        # case this column ever carries the phone system's value instead.
+        # DND itself is read from the NotDistrubStatus log below.
+        'clocker_status': n(r[3]),
+        'clocked_in': n(r[3]) in (1, 2, 3),
+        'on_break': n(r[3]) == 2,
+        'cms_dnd': n(r[3]) == 3,
+        'clocker_since': _plain(r[4]), 'break_minutes': n(r[5]),
         'phone': (r[6] or ''), 'phone_since': _plain(r[7]), 'minutes_on_call': n(r[8]),
         'calls_in': n(r[9]), 'calls_out': n(r[10]),
         'last_call_phone': r[11], 'last_call_at': _plain(r[12]),
@@ -1344,8 +1354,8 @@ def _live_snapshot(feed_limit=70, hours=6):
     dnd = _dnd_now(conn)
     for a in agents:
         d = dnd.get(a['employee_id'])
-        a['dnd'] = bool(d)
-        a['dnd_since'] = d['since'] if d else None
+        a['dnd'] = bool(d) or a.get('cms_dnd', False)
+        a['dnd_since'] = d['since'] if d else (a.get('clocker_since') if a.get('cms_dnd') else None)
         a['dnd_note'] = (d.get('note') if d else None)
         a['dnd_type'] = (d.get('type') if d else None)
 
@@ -1431,7 +1441,11 @@ def agents_live():
         n = lambda v: int(v or 0)
         out.append({
             'employee_id': n(r[0]), 'name': (r[1] or '').strip(), 'extension': r[2],
-            'clocked_in': n(r[3]) == 1, 'clocker_since': _plain(r[4]),
+            'clocker_status': n(r[3]),
+            'clocked_in': n(r[3]) in (1, 2, 3),
+            'on_break': n(r[3]) == 2,
+            'cms_dnd': n(r[3]) == 3,
+            'clocker_since': _plain(r[4]),
             'break_minutes': n(r[5]), 'phone': (r[6] or ''), 'phone_since': _plain(r[7]),
             'minutes_on_call': n(r[8]), 'calls_in': n(r[9]), 'calls_out': n(r[10]),
             'last_call_phone': r[11], 'last_call_at': _plain(r[12]),
@@ -1439,7 +1453,7 @@ def agents_live():
     dnd = _dnd_now(conn)
     for a in out:
         d = dnd.get(a['employee_id'])
-        a['dnd'] = bool(d)
+        a['dnd'] = bool(d) or a.get('cms_dnd', False)
         a['dnd_since'] = d['since'] if d else None
         a['dnd_note'] = (d.get('note') if d else None)
     conn.close()

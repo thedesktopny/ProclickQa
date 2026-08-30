@@ -472,6 +472,16 @@ def end_work(work_id, minutes_billed, note, who, task=None, dry_run=False):
             out['previous_balance'] = previous
             out['new_balance'] = new_balance
 
+        if minutes_billed > 0 and out.get('new_balance', 0) < 0:
+            # The CMS emails an admin whenever finishing work takes an account
+            # below zero (HandleBelowZero). Finishing work here must raise the
+            # same flag, or a control quietly stops applying when agents work
+            # from this system instead.
+            out['below_zero'] = True
+            out['warning'] = ('This takes the account to %d minutes — below zero. '
+                              'The CMS treats that as something an owner should see.'
+                              % out.get('new_balance', 0))
+
         if dry_run:
             conn.rollback()
             out.update({'ok': True, 'committed': False,
@@ -508,6 +518,13 @@ def end_work(work_id, minutes_billed, note, who, task=None, dry_run=False):
         except Exception:
             pass
     _log(who, out, before=None)
+    if out.get('committed') and out.get('below_zero'):
+        _log(who, {'action': 'balance_below_zero', 'table': 'Account',
+                   'row_id': out.get('account_id'), 'committed': True,
+                   'values': {'work_id': work_id,
+                              'minutes_billed': minutes_billed,
+                              'previous_balance': out.get('previous_balance'),
+                              'new_balance': out.get('new_balance')}})
     return out
 
 

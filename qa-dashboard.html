@@ -5949,9 +5949,13 @@ function wbEndOpen(){
 function wbPreview(){
   if(!openWork) return;
   const m = parseInt(document.getElementById('we-minutes').value || '0', 10) || 0;
-  document.getElementById('we-preview').textContent = m > 0
-    ? `Charging ${m} minutes takes them from ${openWork.minutes_left} to ${openWork.minutes_left - m}.`
+  const after = openWork.minutes_left - m;
+  const el = document.getElementById('we-preview');
+  el.textContent = m > 0
+    ? `Charging ${m} minutes takes them from ${openWork.minutes_left} to ${after}.`
+      + (after < 0 ? ' That is below zero.' : '')
     : 'Nothing will be charged.';
+  el.style.color = (m > 0 && after < 0) ? 'var(--yellow)' : 'var(--text3)';
 }
 
 async function wbEndSave(confirm){
@@ -5968,7 +5972,8 @@ async function wbEndSave(confirm){
         + (r.raw_error && r.raw_error !== r.error ? '\n\n' + r.raw_error : '');
       return;
     }
-    out.textContent = (confirm ? '✅ ' : '') + (r.meaning || '');
+    out.textContent = (confirm ? '✅ ' : '') + (r.meaning || '')
+      + (r.warning ? '\n\n⚠️ ' + r.warning : '');
     if(confirm) setTimeout(()=>{
       hideModal('work-end-modal');
       const id = openWork.account_id;
