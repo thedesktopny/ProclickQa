@@ -1268,6 +1268,42 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
   </div>
 </div>
 
+<div class="page" id="page-missed">
+  <div class="topbar">
+    <button class="navtoggle" onclick="toggleNav()" aria-label="Menu">☰</button>
+    <div class="page-title">📵 Missed Calls</div>
+    <div class="topbar-right">
+      <select id="mc-hours" class="cms-in" style="width:auto;" onchange="loadMissed()">
+        <option value="12">Last 12 hours</option>
+        <option value="48" selected>Last 2 days</option>
+        <option value="168">Last week</option>
+        <option value="720">Last month</option>
+      </select>
+      <label style="font-size:11.5px;color:var(--text3);display:flex;align-items:center;gap:6px;">
+        <input type="checkbox" id="mc-all" onchange="loadMissed()"> include ones since reached
+      </label>
+      <button class="btn btn-outline" onclick="loadMissed()">Refresh</button>
+    </div>
+  </div>
+  <div style="padding:18px 28px 44px;">
+    <div id="mc-head" class="payhead" style="padding-top:0;"></div>
+    <div class="paygrid" style="margin-top:14px;">
+      <div class="card" style="padding:16px 20px;">
+        <h2 class="payh">Nobody reached them</h2>
+        <div class="payhint">Newest first. Click a caller to open their account, or to
+          find them if they are not a customer yet.</div>
+        <div id="mc-list"></div>
+      </div>
+      <div class="card" style="padding:16px 20px;">
+        <h2 class="payh">When calls go unanswered</h2>
+        <div class="payhint">By hour of day, over the last week. The pattern usually
+          says why — a gap at lunch reads differently from a gap all afternoon.</div>
+        <div id="mc-pattern"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="page" id="page-live">
   <div class="topbar">
     <button class="navtoggle" onclick="toggleNav()" aria-label="Menu">☰</button><div class="page-title">🟢 Live</div>
@@ -3889,6 +3925,7 @@ function portalApply(name, isManager){
     'live':         ['🟢', 'Live'],
     'customers':    ['👤', 'Customers'],
     'agent-calls':  ['🎧', 'Agents & Calls'],
+    'missed':       ['📵', 'Missed Calls'],
     'agent-list':   ['📇', 'Agents'],
     'packages':     ['📦', 'Packages'],
     'company-info': ['🔑', 'Info & Logins'],
@@ -3967,7 +4004,7 @@ async function portalBoot(){
 document.addEventListener('DOMContentLoaded', portalBoot);
 document.addEventListener('DOMContentLoaded', ()=>{
   wbRefresh(); setInterval(wbRefresh, 60000);
-  inPoll(); inTimer = setInterval(inPoll, 8000);     // often enough to catch a ringing call
+  inConnect();                                       // pushed, not polled
 });
 
 
@@ -4043,6 +4080,7 @@ function showPage(id){
   if(id==='cms-pull') cmsPageInit();
   if(id==='agent-calls'){ acLoadLive(); acAutoToggle(); }
   if(id==='live'){ loadLive(); lvAutoToggle(); }
+  if(id==='missed') loadMissed();
   if(id==='cms-settings') loadCmsSettings();
   if(id==='connections') loadConnections();
   if(id==='customers') cuLoadRecent();
@@ -5601,6 +5639,77 @@ const lvAgo = d => {
 const lvTime = d => d ? new Date(d).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '';
 const lvMoney = c => '$' + (Math.round(c||0)/100).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
 
+
+/* ================= missed calls =================
+   A missed call is one the CMS marked IsMissed from the dial status when it
+   ended. It counts as resolved once the same person gets through afterwards,
+   so what matters here is the unresolved ones: they rang, nobody answered,
+   and nobody has spoken to them since. */
+async function loadMissed(){
+  const list = document.getElementById('mc-list');
+  list.innerHTML = '<div style="color:var(--text3);font-size:12.5px;">Loading…</div>';
+  const hours = document.getElementById('mc-hours').value;
+  const all = document.getElementById('mc-all').checked ? '1' : '0';
+  try{
+    const r = await API.get(`/api/missed-calls?hours=${hours}&all=${all}`);
+    if(r.error){ list.innerHTML = `<div style="color:var(--red)">${r.error}</div>`; return; }
+
+    const stat = (lab,val,sub,cls) => `<div class="paycard"><div class="lab">${lab}</div>
+      <div class="payfig paynum ${cls||''}">${val}</div><div class="sub">${sub||'&nbsp;'}</div></div>`;
+    document.getElementById('mc-head').innerHTML =
+      stat('Never reached us', r.unresolved,
+           'still waiting to be called back', r.unresolved ? 'neg' : 'pos') +
+      stat('Missed', r.missed, `of ${r.total_inbound} calls in`, r.missed ? 'warn' : '') +
+      stat('Missed rate', r.missed_rate + '%', 'of everything inbound',
+           r.missed_rate > 15 ? 'neg' : r.missed_rate > 7 ? 'warn' : 'pos') +
+      stat('Just now', (r.just_now||[]).length, 'reported in the last minutes', '');
+
+    const ago = d => {
+      if(!d) return '';
+      const m = Math.round((Date.now() - new Date(d).getTime())/60000);
+      if(m < 60) return m + ' min ago';
+      if(m < 1440) return Math.floor(m/60) + 'h ago';
+      return Math.floor(m/1440) + 'd ago';
+    };
+    list.innerHTML = (r.calls||[]).map(c=>`
+      <div class="payrow" ${c.account_id ? `onclick="showPage('customers');cuOpen(${c.account_id})"` : 'style="cursor:default"'}>
+        <span style="width:8px;height:8px;border-radius:50%;flex:none;
+              background:${c.resolved_by ? 'var(--text3)' : 'var(--red)'};"></span>
+        <div class="nm">${esc(c.account || c.caller_name || c.phone || 'unknown')}
+          <div class="mt">${esc(c.phone)||''}${c.account ? '' : ' · not a customer'}
+            ${c.called ? ' · called ' + esc(c.called) : ''}
+            ${c.status ? ' · ' + esc(c.status) : ''}
+            ${c.requested_callback ? ' · <span style="color:var(--yellow)">asked for a call back</span>' : ''}
+            ${c.resolved_by ? ' · <span style="color:var(--green)">reached us later</span>' : ''}</div></div>
+        <div style="text-align:right;font-size:11.5px;color:var(--text3);white-space:nowrap;">
+          ${ago(c.when)}${c.minutes_left ? `<div>${c.minutes_left} min left</div>` : ''}</div>
+      </div>`).join('')
+      || '<div style="color:var(--text3);font-size:12.5px;">Nobody was missed in this period.</div>';
+
+    const p = await API.get('/api/missed-calls/pattern?days=7');
+    const rows = (p.by_hour||[]).filter(x=>x.calls > 0);
+    const worst = Math.max(1, ...rows.map(x=>x.rate));
+    document.getElementById('mc-pattern').innerHTML = rows.map(x=>`
+      <div style="display:flex;align-items:center;gap:10px;font-size:12px;margin-bottom:4px;">
+        <span style="width:52px;color:var(--text3);">${String(x.hour).padStart(2,'0')}:00</span>
+        <div style="flex:1;height:8px;border-radius:4px;background:var(--surface2);overflow:hidden;">
+          <div style="height:100%;width:${x.rate/worst*100}%;
+               background:${x.rate > 20 ? 'var(--red)' : x.rate > 10 ? 'var(--yellow)' : 'var(--green)'};
+               opacity:.8;"></div></div>
+        <span style="width:96px;text-align:right;color:var(--text3);">
+          ${x.missed}/${x.calls} · ${x.rate}%</span>
+      </div>`).join('') || '<div style="color:var(--text3);font-size:12px;">Not enough calls yet.</div>';
+  }catch(e){ list.innerHTML = `<div style="color:var(--red)">${e.message}</div>`; }
+}
+
+async function loadMissedCount(){
+  try{
+    const r = await API.get('/api/missed-calls?hours=24');
+    const el = document.getElementById('lv-missed-badge');
+    if(el) el.textContent = r.unresolved ? r.unresolved + ' waiting' : '';
+  }catch(e){}
+}
+
 async function loadLive(){
   try{
     const r = await API.get('/api/live');
@@ -5961,10 +6070,40 @@ async function cuFormSubmit(confirm){
    would present a weak match as a certain one. */
 let inCallId = null, inDismissed = null, inTimer = null;
 
+/* The browser holds a connection open and is TOLD about a call, rather than
+   asking every few seconds and finding out late. If the connection drops it
+   reconnects on its own, and if it cannot be held at all we fall back to
+   asking — slower, but never nothing. */
+function inConnect(){
+  if(!IS_PORTAL && !portalTicket) return;
+  if(typeof EventSource === 'undefined'){ inTimer = setInterval(inPoll, 2000); return; }
+  try{
+    // the sign-in has to travel in the URL: a held-open connection cannot
+    // carry custom headers
+    const url = '/api/my-call/stream?t=' + encodeURIComponent(portalTicket || '');
+    const es = new EventSource(url);
+    es.onmessage = ev => {
+      try{ inShow(JSON.parse(ev.data)); }catch(e){}
+    };
+    es.onerror = () => {
+      es.close();
+      setTimeout(inConnect, 4000);          // it will come back
+    };
+  }catch(e){
+    inTimer = setInterval(inPoll, 2000);
+  }
+}
+
 async function inPoll(){
   if(!IS_PORTAL && !portalTicket) return;
   try{
     const r = await API.get('/api/my-call');
+    inShow(r);
+  }catch(e){}
+}
+
+function inShow(r){
+  try{
     const call = r.call;
     const box = document.getElementById('incoming');
     if(!box) return;

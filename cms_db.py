@@ -962,6 +962,102 @@ def settings_all():
             'database': NAME}
 
 
+MISSED_STATUSES = ('NOANSWER', 'NO ANSWER', 'BUSY', 'CANCEL', 'CONGESTION',
+                   'CHANUNAVAIL', 'AFTER HOURS', 'FAILED', 'ABANDON')
+
+
+def is_missed_status(dial_status):
+    """Whether this dial status means the caller did not reach anyone.
+
+    The CMS decides the same way, from the status Asterisk reports when the
+    call ends. Outbound calls are never counted as missed.
+    """
+    s = str(dial_status or '').strip().upper()
+    if not s or s.startswith('OUTBOUND'):
+        return False
+    if s in ('ANSWER', 'ANSWERED'):
+        return False
+    return any(m in s for m in MISSED_STATUSES)
+
+
+def missed_calls(hours=48, include_resolved=False, limit=200):
+    """Calls nobody answered, newest first.
+
+    A missed call is 'resolved' once the same person gets through afterwards —
+    the CMS records that as MissedResolvedId. What matters operationally is the
+    unresolved ones: somebody rang, nobody picked up, and they have not been
+    called back.
+    """
+    conn = _connect()
+    cu = conn.cursor()
+    where = """(ISNULL(c.IsMissed,0) = 1 OR c.DialStatus = 'AFTER HOURS')
+               AND c.Started >= DATEADD(hour, -%d, GETDATE())""" % int(hours)
+    if not include_resolved:
+        where += ' AND ISNULL(c.MissedResolvedId, 0) = 0'
+
+    cu.execute("""SELECT TOP %d c.Id, c.Phone, c.CallersName, c.Started, c.DialStatus,
+                         c.CalledExtension, c.MissedResolvedId, c.RequestedCallBack,
+                         c.SpecificExten, c.AsteriskStateInfo,
+                         a.Id, a.FirstName, a.LastName, ISNULL(a.MinutesLeft, 0)
+                  FROM PhoneCallsLog c
+                  LEFT JOIN Account a ON RIGHT(REPLACE(REPLACE(ISNULL(a.Phone,''),'-',''),' ',''), 10)
+                                       = RIGHT(REPLACE(REPLACE(ISNULL(c.Phone,''),'-',''),' ',''), 10)
+                  WHERE %s
+                  ORDER BY c.Started DESC""" % (int(limit), where))
+    n = lambda v: int(v or 0)
+    out = []
+    while True:
+        r = cu.fetchone()
+        if not r:
+            break
+        out.append({
+            'call_id': n(r[0]), 'phone': r[1], 'caller_name': r[2],
+            'when': _plain(r[3]), 'status': r[4], 'called': r[5],
+            'resolved_by': n(r[6]) or None, 'requested_callback': bool(r[7]),
+            'asked_for': r[8],
+            'account_id': n(r[10]) or None,
+            'account': (('%s %s' % (r[11] or '', r[12] or '')).strip() or None),
+            'minutes_left': n(r[13]),
+        })
+
+    # how many came in and how many were missed, for the same window
+    cu.execute("""SELECT COUNT(*),
+                         SUM(CASE WHEN ISNULL(IsMissed,0) = 1 THEN 1 ELSE 0 END),
+                         SUM(CASE WHEN ISNULL(IsMissed,0) = 1
+                                   AND ISNULL(MissedResolvedId,0) = 0 THEN 1 ELSE 0 END)
+                  FROM PhoneCallsLog
+                  WHERE Started >= DATEADD(hour, -%d, GETDATE())
+                    AND ISNULL(IsOutbound, 0) = 0""" % int(hours))
+    t = cu.fetchone() or (0, 0, 0)
+    conn.close()
+    total, missed, unresolved = n(t[0]), n(t[1]), n(t[2])
+    return {'calls': out, 'hours': hours,
+            'total_inbound': total, 'missed': missed, 'unresolved': unresolved,
+            'missed_rate': (round(missed / total * 100, 1) if total else 0)}
+
+
+def missed_by_hour(days=7):
+    """When calls are being missed — the pattern usually says why."""
+    conn = _connect(); cu = conn.cursor()
+    cu.execute("""SELECT DATEPART(hour, Started) AS h, COUNT(*),
+                         SUM(CASE WHEN ISNULL(IsMissed,0) = 1 THEN 1 ELSE 0 END)
+                  FROM PhoneCallsLog
+                  WHERE Started >= DATEADD(day, -%d, GETDATE())
+                    AND ISNULL(IsOutbound,0) = 0
+                  GROUP BY DATEPART(hour, Started)
+                  ORDER BY DATEPART(hour, Started)""" % int(days))
+    out = []
+    while True:
+        r = cu.fetchone()
+        if not r:
+            break
+        total, missed = int(r[1] or 0), int(r[2] or 0)
+        out.append({'hour': int(r[0] or 0), 'calls': total, 'missed': missed,
+                    'rate': round(missed / total * 100, 1) if total else 0})
+    conn.close()
+    return {'by_hour': out, 'days': days}
+
+
 def find_account_by_phone(phone):
     """Who is calling — kept in the CMS's three groups, not flattened into one.
 

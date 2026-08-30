@@ -11,6 +11,7 @@ from psycopg2.extras import RealDictCursor
 import urllib.request
 import urllib.error
 import urllib.parse
+import threading
 
 # Read once at startup. Two places used this name without it ever being defined,
 # so both failed with "name 'ANTHROPIC_API_KEY' is not defined" the moment they
@@ -755,6 +756,13 @@ def _portal_ticket(user, minutes=600):
     return base64.urlsafe_b64encode((body + '.' + sig).encode()).decode()
 
 
+def _portal_ticket_from_request():
+    """A held-open connection cannot send custom headers, so the pass may
+    arrive in the URL instead. Same signature check either way."""
+    return (request.headers.get('X-Portal-Ticket')
+            or request.args.get('t') or '')
+
+
 def _portal_user(ticket):
     """Returns the signed-in person, or None. The signature is checked before
     anything in the ticket is believed."""
@@ -779,7 +787,8 @@ def portal_or_manager(f):
     from functools import wraps
     @wraps(f)
     def decorated(*args, **kwargs):
-        if _portal_user(request.headers.get('X-Portal-Ticket', '')):
+        if _portal_user(request.headers.get('X-Portal-Ticket')
+                        or request.args.get('t') or ''):
             return f(*args, **kwargs)
         user = get_token_user(get_request_token())
         if user and user.get('role') in ('admin', 'manager'):
@@ -4644,7 +4653,7 @@ def _setting(key, default=''):
 # A second way in, for the people who already have CMS accounts. It serves the
 # same pages but only the ones built on the CMS, and it signs people in with
 # their existing user name and password rather than a second set of logins.
-PORTAL_PAGES = ['live', 'customers', 'agent-calls',
+PORTAL_PAGES = ['live', 'missed', 'customers', 'agent-calls',
                 'agent-list', 'packages', 'company-info']   # everyone
 PORTAL_MANAGER_PAGES = ['cms-settings', 'qa-users']           # managers and admins
 PORTAL_ADMIN_PAGES = ['payments']                            # admins only — real money
@@ -5212,6 +5221,283 @@ def call_account_lookup():
     except Exception as e:
         return jsonify({'error': str(e)[:200], 'primary': None,
                         'others': [], 'associated': []}), 400
+
+
+# ---------------------------------------------------------------- live calls --
+# The CMS writes a PhoneCallsLog row the instant Asterisk reports a pickup, so
+# the row is there within milliseconds. The delay was ours: a browser asking
+# every few seconds. Instead one background reader watches the table a few
+# times a second and pushes to whoever is connected, so an agent sees the
+# caller as the phone is answered rather than seconds later.
+_LIVE_CALLS = {'by_ext': {}, 'at': None, 'error': None}
+
+
+def _live_calls_reader():
+    """Reads the calls that are open right now, a few times a second."""
+    import threading as _t, time as _time
+    import cms_db
+
+    def run():
+        while True:
+            try:
+                conn = cms_db._connect(); cu = conn.cursor()
+                cu.execute("""SELECT c.Id, c.Phone, c.Started, c.PickedUpTime,
+                                     c.PickedUpBy, c.Agent, c.IsOutbound,
+                                     c.DialStatus, c.CalledExtension
+                              FROM PhoneCallsLog c
+                              WHERE c.Ended IS NULL
+                                AND c.Started >= DATEADD(hour, -4, GETDATE())""")
+                by_ext = {}
+                while True:
+                    r = cu.fetchone()
+                    if not r:
+                        break
+                    call = {'call_id': int(r[0]), 'phone': r[1],
+                            'started': cms_db._plain(r[2]),
+                            'picked_up': cms_db._plain(r[3]),
+                            'outbound': bool(r[6]), 'status': r[7],
+                            'called': r[8], 'live': True}
+                    for ext in {(r[4] or '').strip(), (r[5] or '').strip()}:
+                        if ext:
+                            # the answered call wins over one still ringing
+                            existing = by_ext.get(ext)
+                            if not existing or (call['picked_up'] and not existing.get('picked_up')):
+                                by_ext[ext] = call
+                conn.close()
+                # anything the phone system reported directly is fresher than
+                # the table, so it wins until the call ends
+                for k, v in _LIVE_CALLS['by_ext'].items():
+                    if v.get('from_phone_system'):
+                        by_ext[k] = v
+                _LIVE_CALLS['by_ext'] = by_ext
+                _LIVE_CALLS['at'] = datetime.now()
+                _LIVE_CALLS['error'] = None
+            except Exception as e:
+                _LIVE_CALLS['error'] = str(e)[:200]
+                _time.sleep(3)          # back off when the database is unhappy
+            _time.sleep(0.7)
+
+    _t.Thread(target=run, daemon=True).start()
+
+
+@app.route('/api/my-call/stream')
+@portal_or_manager
+def my_call_stream():
+    """Pushes this agent's current call the moment it appears.
+
+    The browser holds this open and is told about a call as it happens, rather
+    than asking repeatedly and finding out late.
+    """
+    import cms_db, json as _json, time as _time
+    p = _portal_user(_portal_ticket_from_request())
+    ext = None
+    try:
+        if p and p.get('e'):
+            conn = cms_db._connect(); cu = conn.cursor()
+            cu.execute('SELECT Extension FROM Employee WHERE Id = %s', (int(p['e']),))
+            r = cu.fetchone(); conn.close()
+            ext = (r[0] or '').strip() if r else None
+    except Exception:
+        pass
+
+    def events():
+        last = None
+        idle = 0
+        while True:
+            call = _LIVE_CALLS['by_ext'].get(ext) if ext else None
+            key = None if not call else '%s|%s' % (call['call_id'], bool(call.get('picked_up')))
+            if key != last:
+                last = key
+                payload = {'call': call}
+                if call:
+                    try:
+                        payload['who'] = cms_db.find_account_by_phone(call.get('phone'))
+                    except Exception:
+                        payload['who'] = None
+                yield 'data: %s\n\n' % _json.dumps(payload, default=str)
+                idle = 0
+            else:
+                idle += 1
+                if idle >= 20:           # a heartbeat, so nothing between us hangs up
+                    yield ': keep-alive\n\n'
+                    idle = 0
+            _time.sleep(0.5)
+
+    from flask import Response
+    resp = Response(events(), mimetype='text/event-stream')
+    resp.headers['Cache-Control'] = 'no-cache'
+    resp.headers['X-Accel-Buffering'] = 'no'      # do not let anything buffer this
+    resp.headers['Connection'] = 'keep-alive'
+    return resp
+
+
+@app.route('/api/phone-event', methods=['POST'])
+def phone_event():
+    """Every stage of a call, as Asterisk reports it.
+
+    Accepts the CMS's own parameter names so the phone system can post the
+    identical body to both places. The stages are:
+
+      start    a call arrived, nobody is ringing yet
+      queue    this extension is being tried right now
+      pickup   this extension answered
+      update   the caller chose an account or a gender
+      end      the call is over
+
+    Held in memory only. Nothing here decides anything about the call — the
+    CMS keeps that job. This is so an agent's screen can keep up.
+    """
+    key = os.getenv('PHONE_EVENT_KEY', '')
+    if key and request.headers.get('X-Event-Key') != key:
+        return jsonify({'error': 'bad key'}), 403
+
+    d = {}
+    d.update(request.form.to_dict() or {})
+    try:
+        d.update(request.json or {})
+    except Exception:
+        pass
+    low = {str(k).lower(): v for k, v in d.items()}
+
+    def pick(*names):
+        for n in names:
+            v = low.get(n.lower())
+            if v not in (None, ''):
+                return v
+        return None
+
+    uniq = str(pick('AstriskUniqId', 'AsteriskUniqId', 'asteriskUniqueId', 'uniqueid') or '')
+    status = str(pick('DialStatus', 'status') or '').strip()
+    event = str(pick('event', 'type') or '').strip().lower()
+    ext = str(pick('PickedUpBy', 'extension', 'exten') or '').strip()
+    agent = str(pick('Agent') or '').strip()
+
+    if not event:
+        if pick('HungUpBy') or pick('AsteriskStateInfo'):
+            event = 'end'
+        elif pick('PickedUpBy'):
+            event = 'pickup'
+        elif pick('extension', 'exten'):
+            event = 'queue'
+        elif pick('AccountToUse', 'Gender', 'NewClient'):
+            event = 'update'
+        else:
+            event = 'start'
+
+    now = datetime.now().isoformat()
+    calls = _LIVE_CALLS.setdefault('by_uniq', {})
+
+    if event == 'end':
+        import cms_db as _c
+        gone = calls.pop(uniq, None)
+        # the CMS works out IsMissed from the dial status when a call ends, so
+        # the same status tells us straight away — no waiting for the table
+        missed = _c.is_missed_status(status) and not (gone or {}).get('outbound')
+        if missed:
+            rec = dict(gone or {}, uniq=uniq, status=status,
+                       ended=now, hung_up_by=pick('HungUpBy'))
+            _LIVE_CALLS.setdefault('missed', []).insert(0, rec)
+            del _LIVE_CALLS['missed'][60:]
+        for k, v in list(_LIVE_CALLS['by_ext'].items()):
+            if (uniq and str(v.get('uniq') or '') == uniq) or (ext and k == ext):
+                _LIVE_CALLS['by_ext'].pop(k, None)
+        _LIVE_CALLS['ended'] = {'uniq': uniq, 'at': now, 'status': status,
+                                'hung_up_by': pick('HungUpBy'), 'missed': missed}
+        return jsonify({'ok': True, 'event': 'end', 'missed': missed,
+                        'was_tracking': bool(gone)})
+
+    call = calls.get(uniq) or {
+        'uniq': uniq, 'call_id': None, 'started': now,
+        'phone': None, 'caller_name': None, 'called': None,
+        'ringing_at': [], 'picked_up': None, 'live': True,
+        'from_phone_system': True,
+    }
+    for field, names in (('phone', ('Phone', 'CallerID', 'caller')),
+                         ('caller_name', ('CallersName', 'caller_name')),
+                         ('called', ('CalledExtension', 'called')),
+                         ('recording', ('RecordingFileUrl',)),
+                         ('account_to_use', ('AccountToUse',)),
+                         ('gender', ('Gender',)),
+                         ('new_client', ('NewClient',))):
+        v = pick(*names)
+        if v not in (None, ''):
+            call[field] = v
+    if status:
+        call['status'] = status
+    if agent:
+        call['outbound'] = True
+        call['agent'] = agent
+
+    if event == 'queue' and ext:
+        # this extension's phone is ringing right now
+        call['ringing_at'] = [ext]
+        call['picked_up'] = None
+        _LIVE_CALLS['by_ext'][ext] = dict(call, ringing=True)
+    elif event == 'pickup' and ext:
+        call['picked_up'] = now
+        call['answered_by'] = ext
+        call['ringing_at'] = []
+        # whoever was ringing but did not answer should stop showing it
+        for k, v in list(_LIVE_CALLS['by_ext'].items()):
+            if str(v.get('uniq') or '') == uniq and k != ext:
+                _LIVE_CALLS['by_ext'].pop(k, None)
+        _LIVE_CALLS['by_ext'][ext] = dict(call, ringing=False)
+    elif event == 'start':
+        pass                      # arrived, nobody ringing yet
+
+    calls[uniq] = call
+    # forget anything that never ended, after an hour
+    if len(calls) > 400:
+        for k in list(calls)[:100]:
+            calls.pop(k, None)
+    return jsonify({'ok': True, 'event': event, 'extension': ext or None})
+
+
+@app.route('/api/missed-calls', methods=['GET'])
+@portal_or_manager
+def missed_calls_route():
+    """Callers nobody reached, and whether they have got through since."""
+    import cms_db
+    try:
+        hours = min(720, max(1, int(request.args.get('hours') or 48)))
+    except Exception:
+        hours = 48
+    try:
+        out = cms_db.missed_calls(hours,
+                                  include_resolved=(request.args.get('all') == '1'))
+        # anything the phone system told us in the last few minutes, before the
+        # CMS has written it
+        out['just_now'] = _LIVE_CALLS.get('missed', [])[:10]
+        return jsonify(out)
+    except Exception as e:
+        return jsonify({'error': str(e)[:200], 'calls': []}), 400
+
+
+@app.route('/api/missed-calls/pattern', methods=['GET'])
+@portal_or_manager
+def missed_calls_pattern():
+    """Which hours of the day calls go unanswered."""
+    import cms_db
+    try:
+        return jsonify(cms_db.missed_by_hour(int(request.args.get('days') or 7)))
+    except Exception as e:
+        return jsonify({'error': str(e)[:200], 'by_hour': []}), 400
+
+
+@app.route('/api/phone-event/recent', methods=['GET'])
+@portal_or_manager
+def phone_event_recent():
+    """What the phone system has told us — for checking the wiring works."""
+    calls = _LIVE_CALLS.get('by_uniq', {})
+    return jsonify({
+        'live_calls': list(calls.values())[-25:],
+        'by_extension': {k: {'phone': v.get('phone'), 'ringing': v.get('ringing'),
+                             'answered': bool(v.get('picked_up'))}
+                         for k, v in _LIVE_CALLS['by_ext'].items()},
+        'last_ended': _LIVE_CALLS.get('ended'),
+        'reader_last_ran': (_LIVE_CALLS['at'].isoformat() if _LIVE_CALLS.get('at') else None),
+        'reader_error': _LIVE_CALLS.get('error'),
+    })
 
 
 @app.route('/api/my-call', methods=['GET'])
@@ -7106,7 +7392,8 @@ PORTAL_ALLOWED_PREFIXES = (
     '/api/agents', '/api/agent-list', '/api/packages', '/api/company-info',
     '/api/recording-link', '/api/payments/', '/api/cms-settings',
     '/api/qa-users', '/api/credentials', '/api/credential-access', '/api/work',
-    '/api/customers/', '/api/calls/', '/api/my-call',
+    '/api/customers/', '/api/calls/', '/api/my-call', '/api/phone-event',
+    '/api/phone-event/recent', '/api/missed-calls',
     '/api/cms-db/', '/api/connections', '/static/', '/favicon',
 )
 
@@ -7228,6 +7515,11 @@ def _warm_skinblock_assets():
 
 
 _warm_skinblock_assets()
+
+try:
+    _live_calls_reader()
+except Exception as e:
+    print('[live] could not start the call reader: ' + str(e)[:140])
 
 if __name__ == '__main__':
     print('\n✅ VoiceGuard QA Server running!')
