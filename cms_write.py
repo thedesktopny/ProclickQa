@@ -691,8 +691,22 @@ def send_text(account_id, message, who, media_url=None):
                                   'Content-Type': 'application/json'})
         with _u.urlopen(req, timeout=20) as resp:
             answer = _json.loads(resp.read().decode() or '{}')
-        ref = answer.get('RefID')
-        if not ref:
+        # BulkVS returns RefId; the CMS's C# reads RefID. Accept either, and
+        # judge on the per-recipient Status rather than the reference alone —
+        # a reply can carry a reference and still have failed for the person
+        # it was meant for.
+        ref = (answer.get('RefId') or answer.get('RefID')
+               or answer.get('refId') or answer.get('ref_id'))
+        results = answer.get('Results') or []
+        statuses = [str(x.get('Status', '')).upper() for x in results
+                    if isinstance(x, dict)]
+        delivered = any(s in ('SUCCESS', 'OK', 'QUEUED', 'ACCEPTED') for s in statuses)
+
+        if statuses and not delivered:
+            raise RuntimeError('refused for %s: %s'
+                               % (', '.join(str(x.get('To', '?')) for x in results),
+                                  ', '.join(statuses)))
+        if not ref and not delivered:
             raise RuntimeError('the texting service did not accept it: %s'
                                % str(answer)[:180])
 
