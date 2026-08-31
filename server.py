@@ -267,6 +267,9 @@ def init_db():
             notes_feedback TEXT,
             call_dropped BOOLEAN DEFAULT FALSE,
             callback_made BOOLEAN DEFAULT FALSE,
+            -- where this call came from: the phone system's push, or picked up
+            -- from the CMS database ourselves
+            source TEXT DEFAULT 'push',
             callback_call_id TEXT,
             requires_human_review BOOLEAN DEFAULT FALSE,
             human_review_reason TEXT,
@@ -527,6 +530,13 @@ def init_db():
     try:
         conn.commit()
     except Exception: pass
+
+    # the calls table predates the pull, so add the column if it is missing
+    try:
+        c.execute("ALTER TABLE calls ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'push'")
+        conn.commit()
+    except Exception as e:
+        print('[init] source column: ' + str(e)[:120])
 
     # Who reviews whom. Both sides are people who already exist in the CMS —
     # QA reviewers carry the QA flag and agents are the rest — so nothing is
@@ -7580,7 +7590,27 @@ def save_flag_reviews(call_id):
 
 @app.route('/api/processing-status', methods=['GET'])
 def get_processing_status():
-    return jsonify({'paused': is_processing_paused()})
+    # Calls that arrived while paused sit at status 'Paused' and are never
+    # picked up again — not by unpausing, not by the stuck-call sweep. That is
+    # deliberate, but it leaves them invisible, so the count is reported here
+    # and shown next to the toggle.
+    parked = 0
+    parked_since = None
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute("""SELECT COUNT(*), MIN(created_at) FROM calls
+                     WHERE status = 'Paused'""")
+        row = c.fetchone()
+        conn.close()
+        parked = int(row[0] or 0)
+        parked_since = row[1].isoformat() if row and row[1] else None
+    except Exception as e:
+        print('[pause] could not count parked calls: ' + str(e)[:120])
+    return jsonify({'paused': is_processing_paused(),
+                    'parked': parked, 'parked_since': parked_since,
+                    'note': ('%d calls arrived while paused and will NOT be '
+                             'processed when you resume — resuming only affects '
+                             'new calls.' % parked) if parked else None})
 
 @app.route('/api/processing-status', methods=['POST'])
 @require_admin
@@ -8154,6 +8184,191 @@ def skinblock_status():
                     'the slow path on this server. Open /sbassets/warmup to fetch '
                     'the rest.' % (have, len(wanted))),
     })
+
+
+# ─── PULLING CALLS FROM THE CMS ──────────────────────────────────────────────
+# The phone system pushes finished calls to /api/analyze, and sometimes that
+# push fails — the call is then never scored and nobody knows. Everything
+# needed is already in the CMS database, so this looks for answered calls with
+# a recording that VoiceGuard has not seen and picks them up itself.
+#
+# The push still works and is still first: whichever arrives first wins,
+# because call_id is unique and a second insert is simply skipped.
+_PULL_STATE = {'last_run': None, 'found': 0, 'queued': 0, 'error': None}
+
+
+def _score_in_background(call):
+    """Downloads the recording and scores it, then writes the result.
+
+    Deliberately the same steps the push path takes, so a call picked up from
+    the database is scored identically to one we were told about — same model,
+    same rules, same stored fields. A pulled call that scored differently from
+    a pushed one would be a nasty thing to discover later.
+    """
+    import threading
+
+    def run():
+        from ai_engine import analyze_call as run_analysis
+        call_id = call['call_id']
+        url = call['recording_url']
+        path_only = url.split('?')[0]
+        ext = os.path.splitext(path_only)[1].lower()
+        if ext not in ['.mp3', '.wav', '.m4a', '.ogg', '.webm', '.flac']:
+            ext = '.wav'
+        upload_dir = os.path.join(os.getenv('HOME', '.'), 'uploads')
+        os.makedirs(upload_dir, exist_ok=True)
+        audio_path = os.path.join(upload_dir, 'pull_%s_%d%s' % (call_id, int(time.time()), ext))
+        try:
+            download_recording(url, audio_path, timeout=60, retries=2)
+            result = run_analysis(audio_path, call.get('agent_name') or '', call_id,
+                                  call_end_first=call.get('call_end_first', 'customer'),
+                                  call_notes=call.get('call_notes', ''),
+                                  account_name=call.get('account_name') or '')
+            conn = get_db(); c = conn.cursor()
+            c.execute("""UPDATE calls SET duration=%s, overall_score=%s, confidence=%s,
+                            emotion=%s, status=%s, flags=%s, scorecard=%s, transcript=%s,
+                            summary=%s, emotion_delta=%s, requires_human_review=%s,
+                            human_review_reason=%s, age_concern=%s, coaching_notes=%s,
+                            positive_highlights=%s, call_dropped=%s, notes_score=%s,
+                            notes_feedback=%s, flagged_moments=%s
+                         WHERE call_id=%s""",
+                      (result.get('duration', '--'), result['overall_score'],
+                       result.get('confidence', 100), result['emotion'], result['status'],
+                       result['flags'], json.dumps(result.get('scorecard', {})),
+                       result.get('transcript', ''), result.get('summary', ''),
+                       json.dumps(result.get('emotion_delta', {})),
+                       result.get('requires_human_review', False),
+                       result.get('human_review_reason', ''),
+                       json.dumps(result.get('age_concern', {})),
+                       result.get('coaching_notes', ''),
+                       result.get('positive_highlights', ''),
+                       result.get('call_dropped', False),
+                       result.get('notes_score', 0),
+                       result.get('notes_feedback', ''),
+                       json.dumps(result.get('flagged_moments', [])),
+                       call_id))
+            for rr in result.get('scorecard', {}).get('rules_evaluation', []):
+                c.execute("""INSERT INTO rule_results
+                             (call_id, rule_description, category, severity,
+                              passed, confidence, evidence)
+                             VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+                          (call_id, rr.get('rule', ''), rr.get('category', ''),
+                           rr.get('severity', ''), rr.get('passed', False),
+                           rr.get('confidence', 100), rr.get('evidence', '')))
+            conn.commit(); conn.close()
+            print('[Pull] scored %s: %s%%' % (call_id, result['overall_score']))
+        except Exception as e:
+            print('[Pull] %s failed: %s' % (call_id, str(e)[:160]))
+            try:
+                conn = get_db(); c = conn.cursor()
+                c.execute("UPDATE calls SET status='Failed' WHERE call_id=%s", (call_id,))
+                conn.commit(); conn.close()
+            except Exception:
+                pass
+        finally:
+            try:
+                os.remove(audio_path)
+            except Exception:
+                pass
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+def _pull_calls_from_cms(minutes=180, limit=50, dry_run=False):
+    """Finds calls the CMS has and VoiceGuard does not, and scores them."""
+    import cms_db
+    out = {'checked': 0, 'already_had': 0, 'queued': 0, 'skipped': [], 'queued_ids': []}
+    if is_processing_paused():
+        out['skipped'].append('processing is paused')
+        return out
+
+    found = cms_db.finished_calls_for_qa(minutes=minutes, limit=limit)['calls']
+    out['checked'] = len(found)
+    if not found:
+        return out
+
+    conn = get_db(); c = conn.cursor()
+    ids = [f['call_id'] for f in found]
+    c.execute('SELECT call_id FROM calls WHERE call_id = ANY(%s)', (ids,))
+    have = {r[0] for r in c.fetchall()}
+    out['already_had'] = len(have)
+
+    base = RECORDING_BASE_DEFAULT
+    try:
+        c.execute("SELECT value FROM app_settings WHERE key = 'recording_base_url'")
+        r = c.fetchone()
+        if r and r[0]:
+            base = r[0]
+    except Exception:
+        pass
+
+    for call in found:
+        if call['call_id'] in have:
+            continue
+        url = call['recording_url'] or ''
+        if not url.lower().startswith(('http://', 'https://')):
+            url = base.rstrip('/') + '/' + url.lstrip('/')
+        if dry_run:
+            out['queued_ids'].append({'call_id': call['call_id'],
+                                      'agent': call['agent_name'],
+                                      'seconds': call['call_duration_seconds'],
+                                      'recording': url})
+            out['queued'] += 1
+            continue
+        try:
+            # Insert first. call_id is unique, so if the push arrives at the
+            # same moment, or another worker is doing this too, the second one
+            # is skipped rather than scoring the same call twice.
+            c.execute("""INSERT INTO calls
+                         (call_id, agent_name, agent_extension, caller_id,
+                          customer_account_id, account_name, recording_url,
+                          call_duration_seconds, billed_minutes, call_notes,
+                          call_end_first, status, source)
+                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'Processing','cms-pull')
+                         ON CONFLICT (call_id) DO NOTHING
+                         RETURNING call_id""",
+                      (call['call_id'], call['agent_name'], call['agent_extension'],
+                       call['caller_id'], call['customer_account_id'],
+                       call['account_name'], url, call['call_duration_seconds'],
+                       call['billed_minutes'], call['call_notes'],
+                       call['call_end_first']))
+            claimed = c.fetchone()
+            conn.commit()
+            if not claimed:
+                continue          # somebody else already had it
+            _score_in_background(dict(call, recording_url=url))
+            out['queued'] += 1
+            out['queued_ids'].append(call['call_id'])
+        except Exception as e:
+            conn.rollback()
+            out['skipped'].append('%s: %s' % (call['call_id'], str(e)[:120]))
+    conn.close()
+    return out
+
+
+@app.route('/api/pull-calls', methods=['POST', 'GET'])
+@require_manager
+def pull_calls():
+    """Look for calls the CMS has that we have not scored.
+
+    GET previews without doing anything; POST actually picks them up.
+    """
+    try:
+        minutes = min(1440, max(5, int(request.args.get('minutes') or 180)))
+    except Exception:
+        minutes = 180
+    dry = (request.method == 'GET')
+    try:
+        out = _pull_calls_from_cms(minutes=minutes, dry_run=dry)
+        out['preview_only'] = dry
+        if not dry:
+            _PULL_STATE.update({'last_run': datetime.now().isoformat(),
+                                'found': out['checked'], 'queued': out['queued'],
+                                'error': None})
+        return jsonify(out)
+    except Exception as e:
+        _PULL_STATE['error'] = str(e)[:200]
+        return jsonify({'error': str(e)[:200]}), 400
 
 
 @app.route('/api/ping')

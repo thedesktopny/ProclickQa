@@ -1362,6 +1362,20 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
     </div>
 
     <div class="card" style="padding:16px 20px;margin-top:14px;">
+      <h2 class="payh">Calls we might have missed</h2>
+      <div class="payhint">Everything needed to score a call is already in the CMS database,
+        so a call can be picked up from there rather than waiting to be told about it.
+        Check first — it shows what would be scored without doing anything.</div>
+      <div style="display:flex;gap:8px;">
+        <button onclick="checkPull()" class="btn btn-outline" style="font-size:12px;">Check</button>
+        <button onclick="doPull(true)" class="btn btn-primary" style="font-size:12px;display:none;"
+                id="pull-go">Score them</button>
+      </div>
+      <pre id="pull-out" style="white-space:pre-wrap;font-size:11.5px;color:var(--text2);
+           margin:12px 0 0;line-height:1.8;"></pre>
+    </div>
+
+    <div class="card" style="padding:16px 20px;margin-top:14px;">
       <h2 class="payh">Texts arriving</h2>
       <div class="payhint">Everything received or sent in the last few hours, exactly as
         stored — including messages attached to no account, which is the usual reason
@@ -3261,7 +3275,7 @@ async function loadProcessingStatus(){
   }
 }
 
-function updateProcessingUI(paused){
+function updateProcessingUI(paused, parked, parkedSince){
   const btn = document.getElementById('processing-pause-btn');
   if(btn){
     if(paused){
@@ -3284,10 +3298,20 @@ function updateProcessingUI(paused){
       banner = document.createElement('div');
       banner.id = 'processing-paused-banner';
       banner.style.cssText = 'background:rgba(242,78,78,0.15);border-bottom:1px solid rgba(242,78,78,0.4);color:var(--red);padding:10px 24px;font-size:13px;font-weight:600;text-align:center;position:sticky;top:0;z-index:150;';
-      banner.innerHTML = '⏸️ Call processing is PAUSED — new calls are being saved but not analyzed. Click "Resume Processing" in the sidebar to continue.';
       document.querySelector('.main')?.prepend(banner);
     }
-  } else if(banner){
+    // Calls that arrive while paused stay parked — resuming does NOT go back
+    // and score them, by design. Saying so here means nobody expects a backlog
+    // to clear itself, and nobody assumes those calls were checked.
+    banner.innerHTML = '⏸️ Call processing is PAUSED — new calls are being saved but not analyzed. '
+      + 'Click "Resume Processing" in the sidebar to continue.'
+      + (parked > 0
+          ? `<div style="font-weight:500;margin-top:5px;font-size:12px;">
+               ${parked} call${parked===1?'':'s'} have arrived while paused`
+            + (parkedSince ? ` (oldest ${new Date(parkedSince).toLocaleString()})` : '')
+            + ` — resuming will NOT score these, only calls that come in afterwards.</div>`
+          : '');
+  } else if(banner && banner.remove){
     banner.remove();
   }
 }
@@ -5727,6 +5751,48 @@ function cmsDbSelect(db){
 
 /* Says whether the payment keys reached the running app, and if not, which of
    the several possible reasons it is. */
+
+/* Calls the CMS has that we have not scored. The check is a preview — nothing
+   happens until the second button, because this spends money per call. */
+let pullFound = 0;
+async function checkPull(){
+  const out = document.getElementById('pull-out');
+  document.getElementById('pull-go').style.display = 'none';
+  out.textContent = 'Looking…';
+  try{
+    const r = await API.get('/api/pull-calls?minutes=180');
+    if(r.error){ out.textContent = '❌ ' + r.error; return; }
+    if((r.skipped||[]).length){
+      out.textContent = 'Nothing done — ' + r.skipped.join(', ') + '.';
+      return;
+    }
+    pullFound = r.queued;
+    const lines = [
+      `${r.checked} answered calls with a recording in the last 3 hours`,
+      `${r.already_had} already scored here`,
+      `${r.queued} not scored yet`, ''];
+    (r.queued_ids||[]).slice(0, 12).forEach(q=>lines.push(
+      `   ${q.call_id}  ${q.agent}  ${Math.round(q.seconds/60)} min`));
+    if(r.queued > 12) lines.push(`   …and ${r.queued - 12} more`);
+    out.textContent = lines.join('\n');
+    if(r.queued > 0) document.getElementById('pull-go').style.display = '';
+  }catch(e){ out.textContent = 'Failed: ' + e.message; }
+}
+
+async function doPull(){
+  if(!confirm(`Score ${pullFound} calls now? Each one costs money to analyse.`)) return;
+  const out = document.getElementById('pull-out');
+  const btn = document.getElementById('pull-go');
+  btn.disabled = true; btn.textContent = 'Starting…';
+  try{
+    const r = await API.post('/api/pull-calls?minutes=180', {});
+    out.textContent = r.error ? ('❌ ' + r.error)
+      : `✅ ${r.queued} calls picked up and being scored now. They will appear on the Calls page as they finish.`;
+    btn.style.display = 'none';
+  }catch(e){ out.textContent = 'Failed: ' + e.message; }
+  finally{ btn.disabled = false; btn.textContent = 'Score them'; }
+}
+
 async function checkCardKeys(){
   const out = document.getElementById('ck-status');
   out.textContent = 'Checking…';

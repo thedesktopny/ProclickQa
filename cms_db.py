@@ -1023,6 +1023,69 @@ def _extension_names(cu, max_age=600):
     return _EXT_NAMES['map']
 
 
+def finished_calls_for_qa(minutes=180, limit=100, min_seconds=20):
+    """Answered calls with a recording, ready to be scored.
+
+    Everything VoiceGuard needs is already here — the recording, who took it,
+    the caller, the length, and the note the agent wrote — so there is no
+    reason to wait to be told about a call we can already see. A push that
+    sometimes fails is a worse source than a table that cannot.
+
+    Skips very short calls: a nine-second call has nothing to score and would
+    cost money to find that out.
+    """
+    conn = _connect(); cu = conn.cursor()
+    cu.execute("""SELECT TOP %d
+                    c.Id, c.Phone, c.Started, c.Ended, c.PickedUpTime, c.PickedUpBy,
+                    c.RecordingFileUrl, c.DialStatus, c.IsOutbound, c.CalledExtension,
+                    c.AccountWorkId, c.Note,
+                    e.FirstName, e.LastName,
+                    w.AccountId, w.Note, w.MinutesBilled,
+                    a.FirstName, a.LastName,
+                    DATEDIFF(second, c.Started, c.Ended)
+                  FROM PhoneCallsLog c
+                  LEFT JOIN Employee e ON e.Extension = c.PickedUpBy
+                  LEFT JOIN AccountWork w ON w.Id = c.AccountWorkId
+                  LEFT JOIN Account a ON a.Id = w.AccountId
+                  WHERE c.Ended IS NOT NULL
+                    AND c.RecordingFileUrl IS NOT NULL AND c.RecordingFileUrl <> ''
+                    AND c.PickedUpBy IS NOT NULL AND c.PickedUpBy <> ''
+                    AND c.Started >= DATEADD(minute, -%d, GETDATE())
+                    AND DATEDIFF(second, c.Started, c.Ended) >= %d
+                  ORDER BY c.Ended DESC"""
+               % (int(limit), int(minutes), int(min_seconds)))
+    out = []
+    while True:
+        r = cu.fetchone()
+        if not r:
+            break
+        seconds = int(r[19] or 0)
+        agent = ('%s %s' % (r[12] or '', r[13] or '')).strip()
+        status = (r[7] or '').strip().upper()
+        out.append({
+            'call_id': 'CMS-%d' % int(r[0]),
+            'cms_call_id': int(r[0]),
+            'agent_name': agent or ('ext ' + str(r[5])),
+            'agent_extension': (r[5] or '').strip(),
+            'caller_id': r[1],
+            'customer_account_id': (str(int(r[14])) if r[14] else None),
+            'account_name': ('%s %s' % (r[17] or '', r[18] or '')).strip() or None,
+            'recording_url': r[6],
+            'call_duration_seconds': seconds,
+            'billed_minutes': int(r[16] or 0),
+            'call_notes': (r[15] or r[11] or ''),
+            'outbound': bool(r[8]),
+            'called': r[9],
+            'ended': _plain(r[3]),
+            # the phone system reports how the call ended; anything that is not
+            # a normal answer is treated as a drop, which the scoring prompt
+            # weighs differently
+            'call_end_first': ('drop' if status not in ('ANSWER', 'ANSWERED') else 'customer'),
+        })
+    conn.close()
+    return {'calls': out, 'minutes': minutes}
+
+
 def call_flow(minutes=180, limit=40):
     """Calls as they happen — who called, where it rang, who took it.
 
