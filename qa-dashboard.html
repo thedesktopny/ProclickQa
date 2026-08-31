@@ -783,6 +783,34 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
   background:var(--surface);
 }
 .ck-field iframe{ width:100%; height:38px; border:0; display:block; }
+
+/* ---------- calls as they happen ---------- */
+.cf-card{
+  background:var(--surface); border:1px solid var(--border); border-left:3px solid var(--border);
+  border-radius:12px; padding:13px 16px; margin-bottom:10px;
+}
+.cf-card.live{ border-left-color:var(--green); }
+.cf-card.ringing{ border-left-color:var(--yellow); }
+.cf-card.missed{ border-left-color:var(--red); }
+.cf-card.outbound{ border-left-color:var(--accent); }
+.cf-badge{
+  display:inline-block; font-size:10px; font-weight:700; letter-spacing:.06em;
+  padding:3px 9px; border-radius:20px; text-transform:uppercase;
+}
+.cf-num{ font-size:16px; font-variant-numeric:tabular-nums; }
+.cf-id{ font-size:10.5px; color:var(--text3); font-variant-numeric:tabular-nums; }
+/* the walk across the floor — one chip per extension it tried */
+.cf-trail{ display:flex; flex-wrap:wrap; gap:6px; margin-top:9px; align-items:center; }
+.cf-try{
+  font-size:11px; padding:3px 9px; border-radius:7px; background:var(--surface2);
+  border:1px solid var(--border); color:var(--text2); white-space:nowrap;
+}
+.cf-try.answered{ background:rgba(16,212,142,.16); border-color:var(--green); color:var(--text); }
+.cf-try.ringing{ background:rgba(245,166,35,.16); border-color:var(--yellow); color:var(--text); }
+.cf-try.noanswer{ opacity:.6; text-decoration:line-through; }
+.cf-arrow{ color:var(--text3); font-size:11px; }
+@keyframes cfpulse{ 0%,100%{opacity:1} 50%{opacity:.45} }
+.cf-pulse{ animation:cfpulse 1.4s infinite; }
 </style>
 </head>
 <body>
@@ -1396,6 +1424,30 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
       </span>
     </div>
     <div id="cs-body"><div style="color:var(--text3);font-size:13px;">Loading…</div></div>
+  </div>
+</div>
+
+<div class="page" id="page-callflow">
+  <div class="topbar">
+    <button class="navtoggle" onclick="toggleNav()" aria-label="Menu">☰</button>
+    <div class="page-title">📞 Calls as they happen</div>
+    <div class="topbar-right">
+      <span id="cf-live" style="font-size:11.5px;color:var(--text3);"></span>
+      <select id="cf-window" class="cms-in" style="width:auto;" onchange="loadCallFlow()">
+        <option value="60">Last hour</option>
+        <option value="180" selected>Last 3 hours</option>
+        <option value="720">Last 12 hours</option>
+      </select>
+      <label style="font-size:11.5px;color:var(--text3);display:flex;align-items:center;gap:6px;">
+        <input type="checkbox" id="cf-auto" checked onchange="cfAutoToggle()"> keep up to date
+      </label>
+      <button class="btn btn-outline" onclick="loadCallFlow()">Refresh</button>
+    </div>
+  </div>
+  <div style="padding:16px 24px 44px;">
+    <input id="cf-search" class="cms-in" style="width:100%;max-width:420px;margin-bottom:14px;"
+           placeholder="A number, an extension or a name…" oninput="cfRender()">
+    <div id="cf-list"></div>
   </div>
 </div>
 
@@ -3972,6 +4024,7 @@ const SEARCH_FIELDS = [
   ['al-search', 'alRender', false],
   ['ci-search', 'ciRender', false],
   ['cw-search', 'cwSearch', false],
+  ['cf-search', 'cfRender', false],
   ['qa-search', 'qaRenderAgents', false],
   ['qa-add-search', 'qaAddRender', false],
 ];
@@ -4384,6 +4437,7 @@ function portalApply(name, isManager){
     'live':         ['🟢', 'Live'],
     'customers':    ['👤', 'Customers'],
     'agent-calls':  ['🎧', 'Agents & Calls'],
+    'callflow':     ['📞', 'Call Flow'],
     'missed':       ['📵', 'Missed Calls'],
     'agent-list':   ['📇', 'Agents'],
     'packages':     ['📦', 'Packages'],
@@ -4540,6 +4594,7 @@ function showPage(id){
   if(id==='agent-calls'){ acLoadLive(); acAutoToggle(); }
   if(id==='live'){ loadLive(); lvAutoToggle(); }
   if(id==='missed') loadMissed();
+  if(id==='callflow'){ loadCallFlow(); cfAutoToggle(); }
   if(id==='qa-assign') loadQaAssign();
   if(id==='cms-settings') loadCmsSettings();
   if(id==='connections') loadConnections();
@@ -6222,6 +6277,129 @@ const lvMoney = c => '$' + (Math.round(c||0)/100).toLocaleString(undefined,{mini
    ended. It counts as resolved once the same person gets through afterwards,
    so what matters here is the unresolved ones: they rang, nobody answered,
    and nobody has spoken to them since. */
+
+/* ================= calls as they happen =================
+   One card per call: who rang, which company they dialled, which extensions it
+   tried on the way and in what order, who picked it up, and how it ended. The
+   trail across the floor is the part worth having — a caller ringing four desks
+   before someone answers is invisible in a plain call list. */
+let cfData = null, cfTimer = null;
+
+async function loadCallFlow(){
+  const box = document.getElementById('cf-list');
+  if(!cfData) box.innerHTML = '<div style="color:var(--text3);font-size:12.5px;">Loading…</div>';
+  try{
+    const r = await API.get('/api/call-flow?minutes=' +
+      document.getElementById('cf-window').value);
+    if(r.error){ box.innerHTML = `<div style="color:var(--red)">${r.error}</div>`; return; }
+    cfData = r;
+    document.getElementById('cf-live').textContent =
+      r.live_now ? r.live_now + ' happening now' : 'nothing live';
+    cfRender();
+  }catch(e){ box.innerHTML = `<div style="color:var(--red)">${e.message}</div>`; }
+}
+
+function cfBadge(c){
+  const s = (c.status || '').toUpperCase();
+  if(c.live && c.answered_by) return ['IN PROGRESS', 'var(--green)', '#062'];
+  if(c.live) return ['RINGING', 'var(--yellow)', '#3a2600'];
+  if(c.outbound) return ['OUTBOUND', 'var(--accent)', '#fff'];
+  if(s.startsWith('ANSWER')) return ['ANSWERED', 'var(--surface2)', 'var(--text)'];
+  if(s === 'CANCEL') return [`CANCEL${c.seconds ? ' (' + c.seconds + 's)' : ''}`, 'var(--red)', '#fff'];
+  if(c.missed || s) return [s || 'MISSED', 'var(--red)', '#fff'];
+  return ['', 'var(--surface2)', 'var(--text)'];
+}
+
+function cfTime(d){
+  if(!d) return '';
+  const t = new Date(d);
+  return t.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+}
+
+function cfRender(){
+  if(!cfData) return;
+  const q = (document.getElementById('cf-search').value || '').toLowerCase().trim();
+  const list = cfData.calls.filter(c => !q
+    || String(c.phone||'').includes(q)
+    || String(c.answered_by||'').includes(q)
+    || (c.answered_by_name||'').toLowerCase().includes(q)
+    || (c.caller_name||'').toLowerCase().includes(q)
+    || (c.tried||[]).some(t => String(t.extension).includes(q)
+                            || (t.name||'').toLowerCase().includes(q)));
+
+  document.getElementById('cf-list').innerHTML = list.map(c=>{
+    const [label, bg, fg] = cfBadge(c);
+    const cls = c.live ? (c.answered_by ? 'live' : 'ringing')
+      : c.outbound ? 'outbound' : (c.missed ? 'missed' : '');
+    const who = c.answered_by
+      ? `${c.outbound ? 'Called out by' : 'Picked up by'} <b>${esc(c.answered_by)}</b>`
+        + (c.answered_by_name ? ` · ${esc(c.answered_by_name)}` : '')
+      : (c.live ? 'ringing the floor' : 'nobody answered');
+
+    // the walk: each extension it tried, in order
+    const trail = (c.tried || []).length ? `
+      <div class="cf-trail">
+        ${c.tried.map((t, i)=>`
+          ${i ? '<span class="cf-arrow">→</span>' : ''}
+          <span class="cf-try ${t.result === 'ringing now' ? 'ringing'
+              : (t.extension === c.answered_by ? 'answered'
+              : (t.result === 'no answer' ? 'noanswer' : ''))}">
+            ${esc(t.extension)}${t.name ? ' · ' + esc(t.name.split(' ')[0]) : ''}
+          </span>`).join('')}
+        ${c.answered_by && !(c.tried||[]).some(t=>t.extension===c.answered_by)
+          ? `<span class="cf-arrow">→</span>
+             <span class="cf-try answered">${esc(c.answered_by)} answered</span>` : ''}
+      </div>` : '';
+
+    return `<div class="cf-card ${cls}">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+        ${label ? `<span class="cf-badge ${c.live?'cf-pulse':''}"
+              style="background:${bg};color:${fg};">${esc(label)}</span>` : ''}
+        <span style="font-size:12.5px;color:var(--text2);">${who}</span>
+        <span style="margin-left:auto;font-size:11.5px;color:var(--text3);white-space:nowrap;">
+          ${cfTime(c.started)}${c.ended ? ' – ' + cfTime(c.ended) : ' –'}
+          ${c.seconds != null ? ` · ${Math.floor(c.seconds/60)}m ${c.seconds%60}s` : ''}
+        </span>
+      </div>
+
+      <div style="display:flex;align-items:baseline;gap:9px;margin-top:7px;flex-wrap:wrap;">
+        <span class="cf-id">${c.call_id || ''}</span>
+        <span class="cf-num">${esc(c.phone) || 'unknown'}</span>
+        ${c.caller_name ? `<span style="font-size:12px;color:var(--text2);">${esc(c.caller_name)}</span>` : ''}
+        ${c.called ? `<span style="font-size:11.5px;color:var(--text3);">→ ${esc(c.called)}</span>` : ''}
+      </div>
+
+      ${trail}
+
+      ${c.recording ? `
+        <div style="margin-top:10px;">
+          <div style="font-size:10.5px;color:var(--text3);margin-bottom:3px;">Call recording</div>
+          <audio controls preload="none" style="width:100%;max-width:420px;height:34px;"
+                 src="${esc(cfRecordingUrl(c.recording))}"></audio>
+        </div>` : ''}
+      ${c.note ? `<div style="font-size:12px;color:var(--text2);margin-top:8px;">${fmtNote(c.note)}</div>` : ''}
+    </div>`;
+  }).join('') || '<div style="color:var(--text3);font-size:12.5px;">No calls in this period.</div>';
+}
+
+function cfRecordingUrl(stored){
+  if(!stored) return '';
+  if(/^https?:\/\//i.test(stored)) return stored;
+  return 'https://getremail.com/' + String(stored).replace(/^\/+/, '');
+}
+
+function cfAutoToggle(){
+  clearInterval(cfTimer);
+  if(document.getElementById('cf-auto').checked){
+    cfTimer = setInterval(()=>{
+      // only while this page is open and being looked at
+      const page = document.getElementById('page-callflow');
+      if(!page || page.style.display === 'none' || document.hidden) return;
+      loadCallFlow();
+    }, 2000);
+  }
+}
+
 async function loadMissed(){
   const list = document.getElementById('mc-list');
   list.innerHTML = '<div style="color:var(--text3);font-size:12.5px;">Loading…</div>';

@@ -998,6 +998,120 @@ def work_pause_state(work_id):
             'paused_since': _plain(r[2])}
 
 
+_EXT_NAMES = {'map': {}, 'at': 0}
+
+
+def _extension_names(cu, max_age=600):
+    """Extension to person, cached — the list barely changes and this is read
+    on every refresh of a live page."""
+    import time as _t
+    if _EXT_NAMES['map'] and (_t.time() - _EXT_NAMES['at']) < max_age:
+        return _EXT_NAMES['map']
+    try:
+        cu.execute("""SELECT Extension, FirstName, LastName FROM Employee
+                      WHERE Extension IS NOT NULL AND Extension <> ''""")
+        out = {}
+        while True:
+            e = cu.fetchone()
+            if not e:
+                break
+            out[(e[0] or '').strip()] = ('%s %s' % (e[1] or '', e[2] or '')).strip()
+        _EXT_NAMES['map'] = out
+        _EXT_NAMES['at'] = _t.time()
+    except Exception:
+        pass
+    return _EXT_NAMES['map']
+
+
+def call_flow(minutes=180, limit=40):
+    """Calls as they happen — who called, where it rang, who took it.
+
+    The card-per-call view: a call arrives, walks the floor trying one
+    extension then the next, and someone answers or nobody does. The queue log
+    is what makes the walk visible, and it is the part the old CMS could not
+    show.
+    """
+    conn = _connect(); cu = conn.cursor()
+    cu.execute("""SELECT TOP %d c.Id, c.Phone, c.CallersName, c.Started, c.Ended,
+                         c.PickedUpTime, c.PickedUpBy, c.Agent, c.DialStatus,
+                         c.IsOutbound, c.CalledExtension, c.RecordingFileUrl,
+                         ISNULL(c.IsMissed, 0), c.AstriskUniqId, c.Note
+                  FROM PhoneCallsLog c
+                  WHERE c.Started >= DATEADD(minute, -%d, GETDATE())
+                  ORDER BY c.Started DESC""" % (int(limit), int(minutes)))
+    calls, ids = [], []
+    while True:
+        r = cu.fetchone()
+        if not r:
+            break
+        cid = int(r[0])
+        ids.append(cid)
+        started, ended, picked = r[3], r[4], r[5]
+        secs = None
+        if started and ended:
+            try:
+                secs = int((ended - started).total_seconds())
+            except Exception:
+                pass
+        calls.append({
+            'call_id': cid, 'phone': r[1], 'caller_name': r[2],
+            'started': _plain(started), 'ended': _plain(ended),
+            'picked_up': _plain(picked), 'answered_by': (r[6] or '').strip() or None,
+            'agent': (r[7] or '').strip() or None,
+            'status': (r[8] or '').strip(), 'outbound': bool(r[9]),
+            'called': r[10], 'recording': r[11], 'missed': bool(r[12]),
+            'uniq': r[13], 'note': r[14],
+            'seconds': secs, 'live': ended is None,
+            'tried': [],
+        })
+
+    # who it rang on the way — the queue log holds one line per attempt
+    if ids:
+        try:
+            marks = ', '.join(['%s'] * len(ids[:40]))
+            cu.execute("""SELECT PhoneCallLogId, Info, Created
+                          FROM QueueInfo
+                          WHERE PhoneCallLogId IN (%s)
+                          ORDER BY Id""" % marks, tuple(ids[:40]))
+            by_call = {}
+            while True:
+                q = cu.fetchone()
+                if not q:
+                    break
+                by_call.setdefault(int(q[0]), []).append(
+                    {'info': (q[1] or '').strip(), 'when': _plain(q[2])})
+            for call in calls:
+                for line in by_call.get(call['call_id'], []):
+                    text = line['info']
+                    low = text.lower()
+                    ext = ''.join(ch for ch in text if ch.isdigit())[:6]
+                    if low.startswith('calling'):
+                        call['tried'].append({'extension': ext, 'result': 'rang',
+                                              'when': line['when']})
+                    elif 'did not answer' in low or 'noanswer' in low:
+                        for t in call['tried']:
+                            if t['extension'] == ext and t['result'] == 'rang':
+                                t['result'] = 'no answer'
+                    elif low.startswith('start queue') or low.startswith('reload'):
+                        call['queue_note'] = text[:120]
+        except Exception as e:
+            print('[cms] queue history: ' + str(e)[:120])
+
+    # Extension to name. Read once and kept for ten minutes: this refreshes
+    # every couple of seconds for every person watching, and 260 employees do
+    # not change between one refresh and the next.
+    names = _extension_names(cu)
+
+    for call in calls:
+        call['answered_by_name'] = names.get(call['answered_by'] or '')
+        call['agent_name'] = names.get(call['agent'] or '')
+        for t in call['tried']:
+            t['name'] = names.get(t['extension'])
+
+    conn.close()
+    return {'calls': calls, 'minutes': minutes}
+
+
 def missed_calls(hours=48, include_resolved=False, limit=200):
     """Calls nobody answered, newest first.
 

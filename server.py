@@ -4672,7 +4672,7 @@ def _setting(key, default=''):
 # A second way in, for the people who already have CMS accounts. It serves the
 # same pages but only the ones built on the CMS, and it signs people in with
 # their existing user name and password rather than a second set of logins.
-PORTAL_PAGES = ['live', 'missed', 'customers', 'agent-calls',
+PORTAL_PAGES = ['live', 'callflow', 'missed', 'customers', 'agent-calls',
                 'agent-list', 'packages', 'company-info']   # everyone
 PORTAL_MANAGER_PAGES = ['cms-settings', 'qa-assign']           # managers and admins
 PORTAL_ADMIN_PAGES = ['payments']                            # admins only — real money
@@ -5818,6 +5818,42 @@ def phone_event():
         for k in list(calls)[:100]:
             calls.pop(k, None)
     return jsonify({'ok': True, 'event': event, 'extension': ext or None})
+
+
+@app.route('/api/call-flow', methods=['GET'])
+@portal_or_manager
+def call_flow_route():
+    """Calls as they happen, with what the phone system has told us directly
+    merged in — so a call that is ringing right now shows which extensions it
+    is trying before any of it reaches the database."""
+    import cms_db
+    try:
+        out = cms_db.call_flow(int(request.args.get('minutes') or 180))
+    except Exception as e:
+        return jsonify({'error': str(e)[:200], 'calls': []}), 400
+
+    # anything the phone system reported that has not reached the table yet
+    known = {str(c.get('uniq') or '') for c in out['calls']}
+    live = []
+    for call in _LIVE_CALLS.get('by_uniq', {}).values():
+        if str(call.get('uniq') or '') in known:
+            continue
+        live.append({
+            'call_id': call.get('call_id'), 'uniq': call.get('uniq'),
+            'phone': call.get('phone'), 'caller_name': call.get('caller_name'),
+            'started': call.get('started'), 'ended': None,
+            'picked_up': call.get('picked_up'),
+            'answered_by': call.get('answered_by'),
+            'status': call.get('status') or ('IN PROGRESS' if call.get('picked_up') else 'RINGING'),
+            'outbound': bool(call.get('outbound')), 'called': call.get('called'),
+            'recording': call.get('recording'), 'missed': False,
+            'live': True, 'from_phone_system': True,
+            'tried': [{'extension': e, 'result': 'ringing now'}
+                      for e in (call.get('ringing_at') or [])],
+        })
+    out['calls'] = live + out['calls']
+    out['live_now'] = len([c for c in out['calls'] if c.get('live')])
+    return jsonify(out)
 
 
 @app.route('/api/missed-calls', methods=['GET'])
@@ -8009,7 +8045,7 @@ PORTAL_ALLOWED_PREFIXES = (
     '/api/customers/', '/api/card-fields', '/api/calls/', '/api/my-call', '/api/phone-event',
     '/api/media/', '/media/',
     '/api/phone-event/recent', '/api/phone-event/check',
-    '/api/missed-calls', '/api/texts/',
+    '/api/missed-calls', '/api/call-flow', '/api/texts/',
     '/api/cms-db/', '/api/connections', '/static/', '/favicon',
 )
 
