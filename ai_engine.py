@@ -27,9 +27,27 @@ def get_db():
 CLAUDE_INPUT_COST_PER_M = 3.00
 CLAUDE_OUTPUT_COST_PER_M = 15.00
 
+# ─── WHICH MODEL DOES THE WORK ───────────────────────────────────────────────
+# gemini-2.5-flash is being retired by Google — its shutdown date is 16 October
+# 2026 and developers have already reported calls failing before then. Once a
+# model is shut down the endpoint stays off, so this is a forced move, not an
+# optimisation.
+#
+# gemini-3-flash is the cheapest capable model in the current generation
+# ($0.50 in / $3.00 out, against 2.5 Flash's $0.30 / $2.50) and beats 2.5 Flash
+# on five of six shared benchmarks. Google names gemini-3.6-flash as the
+# official successor, but that is $1.50 / $7.50 — three times the price for
+# capabilities this work does not need.
+#
+# Kept as a setting so the model can be changed without a deploy.
+GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-3-flash')
+
 # Gemini 2.5 Flash pricing
-GEMINI_AUDIO_COST_PER_MIN = 0.001  # $0.001 per audio minute
-GEMINI_OUTPUT_COST_PER_M = 3.50    # $3.50 per million output tokens
+# Gemini 3 Flash: audio input is billed at twice the text rate ($1.00 per
+# million tokens), and audio is roughly 32 tokens a second — so a minute of
+# audio is about 1,920 tokens, or $0.00192.
+GEMINI_AUDIO_COST_PER_MIN = 0.00192
+GEMINI_OUTPUT_COST_PER_M = 3.00    # $3.00 per million output tokens
 
 def track_usage(service, call_id, input_tokens=0, output_tokens=0, audio_seconds=0, cost_usd=0):
     try:
@@ -80,7 +98,7 @@ def load_active_rules():
 # ─── GEMINI AUDIO ANALYSIS ────────────────────────────────────────────────────
 def analyze_audio_with_gemini(audio_path):
     print(f"[Gemini] Analyzing: {audio_path}")
-    model = genai.GenerativeModel('gemini-2.5-flash')
+    model = genai.GenerativeModel(GEMINI_MODEL)
 
     ext = os.path.splitext(audio_path)[1].lower()
     mime_map = {'.mp3':'audio/mp3','.wav':'audio/wav','.m4a':'audio/mp4',
@@ -464,6 +482,48 @@ def analyze_call(audio_path, agent_name, call_id=None, call_end_first='customer'
     print(f"[VoiceGuard] Agent: {agent_name} | Call: {call_id}")
     print(f"{'='*50}")
 
+    # ── Which pipeline scores this call ──────────────────────────────────────
+    # One Gemini call that both listens and scores, instead of Gemini listening
+    # and Claude scoring. Claude Sonnet is $3.00 per million input against
+    # Gemini 3 Flash's $0.50, and it was being paid on every single call.
+    #
+    # This is a setting rather than a rewrite: SCORING_PIPELINE=two-model puts
+    # Claude back with no deploy, which matters because nobody has yet compared
+    # the two on real calls. The comparison tool on any call's detail page is
+    # what settles that.
+    if os.getenv('SCORING_PIPELINE', 'gemini-only').lower() != 'two-model':
+        rules = load_active_rules()
+        print(f"[VoiceGuard] {len(rules)} rules loaded — scoring with {GEMINI_MODEL} alone")
+        result = analyze_and_score_with_gemini_only(
+            audio_path, rules,
+            call_end_first=call_end_first, call_notes=call_notes,
+            account_name=account_name,
+            agent_qos_tx=agent_qos_tx, agent_qos_rx=agent_qos_rx,
+            customer_qos_tx=customer_qos_tx, customer_qos_rx=customer_qos_rx)
+
+        # The dashboard reads a fixed set of fields. The one-call path did not
+        # produce all of them, because it was written for side-by-side testing
+        # rather than for live use — so they are filled in here. A missing
+        # field would not error; it would quietly show blank on the call page,
+        # which is worse.
+        sc = result.get('scorecard', {})
+        emotion_analysis = {
+            'customer_emotion_overall': sc.get('emotion_end', 'Neutral'),
+            'customer_emotion_start': sc.get('emotion_start', 'Neutral'),
+            'customer_emotion_end': sc.get('emotion_end', 'Neutral'),
+            'summary': (sc.get('emotion_delta') or {}).get('summary', ''),
+        }
+        result.update({
+            'call_id': call_id or f"CALL-{int(time.time())}",
+            'agent_name': agent_name,
+            'emotion_analysis': emotion_analysis,
+            'call_dropped': bool(call_dropped) or (call_end_first == 'drop'),
+            'is_callback': False,
+            'original_call_id': None,
+            'transcript': redact_credentials(result.get('transcript', '')),
+        })
+        return result
+
     # Step 1: Gemini
     gemini_result = analyze_audio_with_gemini(audio_path)
 
@@ -544,7 +604,7 @@ def analyze_and_score_with_gemini_only(audio_path, rules, call_end_first='custom
     score_call_with_claude() so results are directly comparable.
     """
     print(f"[Gemini-Only] Analyzing + scoring: {audio_path}")
-    model = genai.GenerativeModel('gemini-2.5-flash')
+    model = genai.GenerativeModel(GEMINI_MODEL)
 
     ext = os.path.splitext(audio_path)[1].lower()
     mime_map = {'.mp3':'audio/mp3','.wav':'audio/wav','.m4a':'audio/mp4',
@@ -603,11 +663,11 @@ def analyze_and_score_with_gemini_only(audio_path, rules, call_end_first='custom
     notes_context = f'Agent call notes: "{call_notes}"' if call_notes else 'Agent wrote NO call notes after this call'
     customer_context = f'Customer: {account_name}' if account_name else ''
 
+    # The fixed part first, the per-call part last. Everything above the
+    # METADATA line is word-for-word identical on every call, which is what
+    # earns the repeat discount; putting the customer's details near the top
+    # would break the match after the first sentence and lose it.
     prompt = f"""You are a call center QA analyst. Listen to this call recording carefully and score it strictly and concisely against the rules below — you must BOTH transcribe/understand the audio AND evaluate compliance in this single pass.
-
-METADATA:
-{customer_context} | Call end: {call_end_context} | {notes_context}
-Agent QoS: TX={agent_qos_tx} RX={agent_qos_rx} | Customer QoS: TX={customer_qos_tx} RX={customer_qos_rx}
 
 QA RULES (evaluate each against what you hear in the audio):
 {rules_text}
@@ -631,12 +691,23 @@ FLAG TIMESTAMPS: for any flag tied to a specific moment you hear, include the re
 AUDIO QUALITY: assess background noise, audio cuts/drops, and overall clarity directly from what you hear.
 EMOTION: track customer's emotional arc from start to end of the call directly from tone of voice.
 
+THIS CALL:
+{customer_context} | Call end: {call_end_context} | {notes_context}
+Agent QoS: TX={agent_qos_tx} RX={agent_qos_rx} | Customer QoS: TX={customer_qos_tx} RX={customer_qos_rx}
+
 Respond ONLY with valid compact JSON (evidence fields up to 140 chars):
 
 {{"transcript":"Summarized transcript max 2500 chars, label AGENT: and CUSTOMER:","duration_estimate":"mm:ss","summary":"2-3 sentence summary","overall_score":0,"confidence":0,"status":"Passed/Review/Critical","requires_human_review":false,"human_review_reason":"","emotion_start":"Happy/Satisfied/Neutral/Frustrated/Angry/Confused","emotion_end":"Happy/Satisfied/Neutral/Frustrated/Angry/Confused","audio_quality_overall":"Good/Fair/Poor","background_noise":false,"category_scores":{{"accuracy_and_information":{{"score":0,"evidence":"brief","passed":true}},"customer_service_quality":{{"score":0,"evidence":"brief","passed":true}},"active_listening":{{"score":0,"evidence":"brief","passed":true}},"appropriate_actions":{{"score":0,"evidence":"brief","passed":true}},"compliance_and_handling":{{"score":0,"evidence":"brief","passed":true}},"emotion_management":{{"score":0,"evidence":"brief","passed":true}},"script_and_language":{{"score":0,"evidence":"brief","passed":true}},"documentation_quality":{{"score":0,"evidence":"brief","passed":true}},"audio_and_technical":{{"score":0,"evidence":"brief","passed":true}},"call_closure":{{"score":0,"evidence":"brief","passed":true}}}},"notes_score":0,"notes_feedback":"brief","rules_evaluation":[{{"rule":"rule text","category":"cat","severity":"Critical/Warning/Info","passed":true,"confidence":0,"evidence":"SPECIFIC detail, max 140 chars"}}],"flags":[{{"title":"title","description":"under 100 chars","severity":"Critical/Warning","timestamp_seconds":0,"timestamp_display":"mm:ss","evidence_quote":"exact words if applicable, max 80 chars"}}],"emotion_delta":{{"start":"Neutral","end":"Neutral","improved":false,"summary":"brief"}},"age_concern":{{"flagged":false,"reason":""}},"call_end_assessment":"brief","coaching_notes":"2-3 points max","positive_highlights":"1-2 points max"}}"""
 
+    # ORDER MATTERS FOR COST. Gemini discounts the part of a request it has
+    # already seen, but only when it is at the very start — a matching prefix.
+    # The instructions and the 28 rules are identical on every call; the audio
+    # is different every time. With the audio first, nothing ever matches and
+    # the discount never applies. Putting the fixed text first makes it apply
+    # automatically, with no other change and no risk to the result: the model
+    # sees exactly the same content either way.
     response = model.generate_content(
-        [audio_part, prompt],
+        [prompt, audio_part],
         generation_config=genai.GenerationConfig(max_output_tokens=8192, temperature=0.1)
     )
 
