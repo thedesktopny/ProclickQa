@@ -4682,7 +4682,7 @@ def _setting(key, default=''):
 # A second way in, for the people who already have CMS accounts. It serves the
 # same pages but only the ones built on the CMS, and it signs people in with
 # their existing user name and password rather than a second set of logins.
-PORTAL_PAGES = ['live', 'callflow', 'missed', 'customers', 'agent-calls',
+PORTAL_PAGES = ['live', 'missed', 'customers', 'agent-calls',
                 'agent-list', 'packages', 'company-info']   # everyone
 PORTAL_MANAGER_PAGES = ['cms-settings', 'qa-assign']           # managers and admins
 PORTAL_ADMIN_PAGES = ['payments']                            # admins only — real money
