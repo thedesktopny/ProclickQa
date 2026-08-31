@@ -3132,20 +3132,52 @@ function authHeaders(){
   return h;
 }
 
+/* A portal sign-in lasts ten hours. Once it lapses every request comes back
+   401, and anything on a timer then repeats that once a second for ever —
+   which is what filled the console. Repeated refusals now stop the timers and
+   say so once, rather than hammering an endpoint that will never answer. */
+let authFailures = 0;
+
+function handleSignedOut(){
+  authFailures++;
+  if(authFailures < 3) return;
+  [inTimer, cfTimer, lvTimer, acTimer, smsTimer].forEach(t => { try{ clearInterval(t); }catch(e){} });
+  if(!window.__saidSignedOut){
+    window.__saidSignedOut = true;
+    const box = document.getElementById('incoming');
+    if(box) box.style.display = 'none';
+    if(typeof IS_PORTAL !== 'undefined' && IS_PORTAL){
+      showToast('Your sign-in has expired — reload the page and sign in again', true);
+      const bar = document.createElement('div');
+      bar.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:400;padding:12px 20px;'
+        + 'background:var(--red);color:#fff;font-size:13px;font-weight:600;text-align:center;cursor:pointer;';
+      bar.textContent = 'Your sign-in has expired. Click here to sign in again.';
+      bar.onclick = () => location.reload();
+      document.body.appendChild(bar);
+    }else{
+      clearToken(); showModal('login-modal');
+    }
+  }
+}
+
 const API={
   async get(p){
     const r=await fetch(p,{headers:authHeaders()});
     if(r.status===401){
       if(p==='/api/auth-check'){
         if(!(typeof IS_PORTAL_EARLY !== 'undefined' && IS_PORTAL_EARLY)){ clearToken(); showModal('login-modal'); }
+      }else{
+        handleSignedOut();
       }
       throw new Error('Unauthorized');
     }
+    authFailures = 0;          // a good reply means the sign-in is fine again
     return r.json();
   },
   async post(p,d){
     const r=await fetch(p,{method:'POST',headers:authHeaders(),body:JSON.stringify(d)});
-    if(r.status===401&&p!=='/api/login'){throw new Error('Unauthorized');}
+    if(r.status===401&&p!=='/api/login'){ handleSignedOut(); throw new Error('Unauthorized'); }
+    if(r.status!==401) authFailures = 0;
     return r.json();
   },
   async patch(p,d){
@@ -6347,8 +6379,11 @@ async function loadCallFlow(){
   const box = document.getElementById('cf-list');
   if(!cfData) box.innerHTML = '<div style="color:var(--text3);font-size:12.5px;">Loading…</div>';
   try{
-    const r = await API.get('/api/call-flow?minutes=' +
-      document.getElementById('cf-window').value);
+    // The window and auto-refresh controls lived on the old separate page. Now
+    // that this sits inside Live, it follows Live's own "live" switch and a
+    // fixed three-hour window — reading elements that no longer exist is what
+    // caused "Cannot read properties of null".
+    const r = await API.get('/api/call-flow?minutes=180');
     if(r.error){ box.innerHTML = `<div style="color:var(--red)">${r.error}</div>`; return; }
     cfData = r;
     document.getElementById('cf-live').textContent =
@@ -6483,7 +6518,8 @@ function cfRecordingUrl(stored){
 
 function cfAutoToggle(){
   clearInterval(cfTimer);
-  if(document.getElementById('cf-auto').checked){
+  const liveSwitch = document.getElementById('lv-auto');
+  if(!liveSwitch || liveSwitch.checked){
     cfTimer = setInterval(()=>{
       // only while this page is open and being looked at
       const page = document.getElementById('page-live');
