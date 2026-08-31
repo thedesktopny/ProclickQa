@@ -1086,6 +1086,143 @@ def finished_calls_for_qa(minutes=180, limit=100, min_seconds=20):
     return {'calls': out, 'minutes': minutes}
 
 
+def _erlang_c_agents(calls_per_hour, avg_handle_seconds,
+                     target_seconds=20, target_answered=0.80, max_agents=120):
+    """How many agents a period needs.
+
+    This is Erlang C, the standard call-centre staffing calculation. It exists
+    because the obvious arithmetic is wrong: 30 calls an hour averaging 5
+    minutes is 2.5 hours of talking, but 3 agents will NOT cover it. Calls do
+    not arrive evenly — they bunch — so some callers wait while everyone is
+    busy. Erlang C works out how many are needed for a given share of callers
+    to be answered quickly.
+
+    target_answered=0.80 with target_seconds=20 means "80% of callers answered
+    within 20 seconds", the usual yardstick.
+    """
+    import math
+    if calls_per_hour <= 0 or avg_handle_seconds <= 0:
+        return 0
+    # traffic intensity in erlangs: how many hours of talking arrive per hour
+    intensity = (calls_per_hour * avg_handle_seconds) / 3600.0
+    agents = max(1, int(math.floor(intensity)) + 1)
+    while agents < max_agents:
+        rho = intensity / agents
+        if rho < 1:
+            # the chance a caller finds every agent busy
+            top = (intensity ** agents) / math.factorial(agents) * (1 / (1 - rho))
+            bottom = sum((intensity ** k) / math.factorial(k) for k in range(agents))
+            wait_probability = top / (bottom + top)
+            # of those who wait, how many are still waiting after target_seconds
+            still_waiting = math.exp(-(agents - intensity) * target_seconds / avg_handle_seconds)
+            answered_in_time = 1 - (wait_probability * still_waiting)
+            if answered_in_time >= target_answered:
+                return agents
+        agents += 1
+    return agents
+
+
+def staffing_picture(weeks=4, slot_minutes=30, target_seconds=20, target_answered=0.80):
+    """Where you are short of agents and where you have too many.
+
+    Demand comes from the calls themselves, supply from who was actually
+    clocked in — not from who was scheduled, because the two differ and only
+    one of them answered the phone.
+
+    Averaged over several weeks so one unusual day does not drive a decision.
+    """
+    conn = _connect(); cu = conn.cursor()
+    per = int(slot_minutes)
+
+    # ── demand: how many calls arrived, and how long they took ──────────────
+    cu.execute("""SELECT DATEPART(weekday, Started) AS dow,
+                         DATEPART(hour, Started) * 60
+                           + (DATEPART(minute, Started) / %d) * %d AS slot,
+                         COUNT(*) AS calls,
+                         AVG(CAST(DATEDIFF(second, Started, ISNULL(Ended, Started)) AS float)),
+                         SUM(CASE WHEN ISNULL(IsMissed,0) = 1 THEN 1 ELSE 0 END),
+                         COUNT(DISTINCT CAST(Started AS date))
+                  FROM PhoneCallsLog
+                  WHERE Started >= DATEADD(week, -%d, GETDATE())
+                    AND ISNULL(IsOutbound, 0) = 0
+                  GROUP BY DATEPART(weekday, Started),
+                           DATEPART(hour, Started) * 60
+                             + (DATEPART(minute, Started) / %d) * %d"""
+               % (per, per, int(weeks), per, per))
+    demand = {}
+    while True:
+        r = cu.fetchone()
+        if not r:
+            break
+        dow, slot = int(r[0]), int(r[1])
+        days = max(1, int(r[5] or 1))
+        demand[(dow, slot)] = {
+            'calls_per_day': (r[2] or 0) / float(days),
+            'handle_seconds': float(r[3] or 0),
+            'missed_per_day': (r[4] or 0) / float(days),
+            'days_seen': days,
+        }
+
+    # ── supply: who was actually clocked in ─────────────────────────────────
+    # A clocker row is an event, so an agent covers every slot between clocking
+    # in and clocking out. Counting only the slot they clocked in would make it
+    # look as if nobody was there.
+    staffed = {}
+    try:
+        cu.execute("""SELECT DATEPART(weekday, c.InTime) AS dow,
+                             DATEPART(hour, c.InTime) * 60
+                               + (DATEPART(minute, c.InTime) / %d) * %d AS in_slot,
+                             DATEPART(hour, ISNULL(c.OutTime, c.InTime)) * 60
+                               + (DATEPART(minute, ISNULL(c.OutTime, c.InTime)) / %d) * %d AS out_slot,
+                             CAST(c.InTime AS date) AS day
+                      FROM EmployeeClocker c
+                      WHERE c.InTime >= DATEADD(week, -%d, GETDATE())
+                        AND c.OutTime IS NOT NULL"""
+                   % (per, per, per, per, int(weeks)))
+        seen_days = {}
+        while True:
+            r = cu.fetchone()
+            if not r:
+                break
+            dow, a, b = int(r[0]), int(r[1]), int(r[2])
+            seen_days.setdefault(dow, set()).add(r[3])
+            if b < a:
+                b = 24 * 60          # a shift running past midnight
+            for slot in range(a, b + 1, per):
+                staffed[(dow, slot % (24 * 60))] = staffed.get((dow, slot % (24 * 60)), 0) + 1
+        for key in list(staffed):
+            days = max(1, len(seen_days.get(key[0], set())))
+            staffed[key] = staffed[key] / float(days)
+    except Exception as e:
+        print('[cms] clocker coverage: ' + str(e)[:140])
+
+    conn.close()
+
+    # ── put them together ───────────────────────────────────────────────────
+    slots = []
+    for dow in range(1, 8):
+        for slot in range(0, 24 * 60, per):
+            d = demand.get((dow, slot))
+            have = round(staffed.get((dow, slot), 0), 1)
+            if not d and have <= 0:
+                continue
+            calls_day = (d or {}).get('calls_per_day', 0)
+            handle = (d or {}).get('handle_seconds', 0) or 240
+            per_hour = calls_day * (60.0 / per)
+            need = _erlang_c_agents(per_hour, handle, target_seconds, target_answered)
+            slots.append({
+                'day': dow, 'minute': slot,
+                'time': '%02d:%02d' % (slot // 60, slot % 60),
+                'calls_per_day': round(calls_day, 1),
+                'handle_seconds': round(handle),
+                'missed_per_day': round((d or {}).get('missed_per_day', 0), 1),
+                'needed': need, 'staffed': have,
+                'gap': round(have - need, 1),
+            })
+    return {'slots': slots, 'weeks': weeks, 'slot_minutes': per,
+            'target': '%d%% answered within %ds' % (target_answered * 100, target_seconds)}
+
+
 def call_flow(minutes=180, limit=40):
     """Calls as they happen — who called, where it rang, who took it.
 

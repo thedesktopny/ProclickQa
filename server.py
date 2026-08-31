@@ -543,11 +543,32 @@ def init_db():
     # created here, only the pairing, which is ours rather than the CMS's.
     try:
         c.execute('''CREATE TABLE IF NOT EXISTS qa_assignments (
-            agent_employee_id INTEGER PRIMARY KEY,
+            agent_employee_id INTEGER NOT NULL,
             reviewer_employee_id INTEGER NOT NULL,
             assigned_at TIMESTAMP DEFAULT NOW(),
-            assigned_by TEXT
+            assigned_by TEXT,
+            PRIMARY KEY (agent_employee_id, reviewer_employee_id)
         )''')
+        # An agent used to have exactly one reviewer. That was wrong: some
+        # agents are team leaders themselves and are reviewed by people outside
+        # their own team, so the same agent needs to belong to several
+        # reviewers. Existing rows are kept — the key simply widens.
+        try:
+            c.execute("""SELECT constraint_name FROM information_schema.table_constraints
+                         WHERE table_name = 'qa_assignments'
+                           AND constraint_type = 'PRIMARY KEY'""")
+            row = c.fetchone()
+            if row:
+                c.execute("""SELECT COUNT(*) FROM information_schema.key_column_usage
+                             WHERE constraint_name = %s""", (row[0],))
+                if int((c.fetchone() or [0])[0] or 0) == 1:
+                    c.execute('ALTER TABLE qa_assignments DROP CONSTRAINT ' + row[0])
+                    c.execute("""ALTER TABLE qa_assignments
+                                 ADD PRIMARY KEY (agent_employee_id, reviewer_employee_id)""")
+                    print('[init] qa_assignments now allows several reviewers per agent')
+        except Exception as e:
+            conn.rollback()
+            print('[init] qa_assignments key: ' + str(e)[:140])
         conn.commit()
     except Exception as e:
         print('[init] qa_assignments: ' + str(e)[:120])
@@ -4684,7 +4705,7 @@ def _setting(key, default=''):
 # their existing user name and password rather than a second set of logins.
 PORTAL_PAGES = ['live', 'missed', 'customers', 'agent-calls',
                 'agent-list', 'packages', 'company-info']   # everyone
-PORTAL_MANAGER_PAGES = ['cms-settings', 'qa-assign']           # managers and admins
+PORTAL_MANAGER_PAGES = ['cms-settings', 'qa-assign', 'staffing']           # managers and admins
 PORTAL_ADMIN_PAGES = ['payments']                            # admins only — real money
 # QA reviewers additionally get the monitoring side. They are doing QA work, so
 # they need the same call review tools the QA dashboard has.
@@ -5314,22 +5335,25 @@ def qa_assignments_get():
     try:
         conn = get_db(); c = conn.cursor()
         c.execute('SELECT agent_employee_id, reviewer_employee_id FROM qa_assignments')
-        pairs = {int(a): int(r) for a, r in c.fetchall()}
+        pairs = {}
+        for a, r in c.fetchall():
+            pairs.setdefault(int(a), []).append(int(r))
         conn.close()
     except Exception as e:
         print('[qa] could not read assignments: ' + str(e)[:120])
 
     by_reviewer = {}
     for a in others:
-        rid = pairs.get(a['id'])
-        a['reviewer_id'] = rid
-        if rid:
+        rids = pairs.get(a['id'], [])
+        a['reviewer_ids'] = rids
+        a['reviewer_id'] = (rids[0] if rids else None)   # kept for older callers
+        for rid in rids:
             by_reviewer.setdefault(rid, []).append(a['id'])
     for r in reviewers:
         r['agent_ids'] = by_reviewer.get(r.get('id'), [])
         r['agent_count'] = len(r['agent_ids'])
 
-    uncovered = [a for a in others if a['needs_reviewer'] and not a['reviewer_id']]
+    uncovered = [a for a in others if a['needs_reviewer'] and not a['reviewer_ids']]
     return jsonify({'reviewers': reviewers, 'agents': others,
                     'uncovered': [{'id': a['id'], 'name': a['name'],
                                    'extension': a['extension']} for a in uncovered],
@@ -5354,15 +5378,14 @@ def qa_assignments_set():
     who = _who().get('name')
     try:
         conn = get_db(); c = conn.cursor()
+        # only this reviewer's rows are touched — an agent's other reviewers
+        # are left exactly as they were
         c.execute('DELETE FROM qa_assignments WHERE reviewer_employee_id = %s', (reviewer_id,))
         for aid in agent_ids:
             c.execute("""INSERT INTO qa_assignments
                          (agent_employee_id, reviewer_employee_id, assigned_by, assigned_at)
                          VALUES (%s, %s, %s, NOW())
-                         ON CONFLICT (agent_employee_id) DO UPDATE
-                         SET reviewer_employee_id = EXCLUDED.reviewer_employee_id,
-                             assigned_by = EXCLUDED.assigned_by,
-                             assigned_at = NOW()""",
+                         ON CONFLICT (agent_employee_id, reviewer_employee_id) DO NOTHING""",
                       (aid, reviewer_id, who))
         conn.commit(); conn.close()
         return jsonify({'ok': True, 'assigned': len(agent_ids)})
@@ -5828,6 +5851,126 @@ def phone_event():
         for k in list(calls)[:100]:
             calls.pop(k, None)
     return jsonify({'ok': True, 'event': event, 'extension': ext or None})
+
+
+@app.route('/api/staffing', methods=['GET'])
+@portal_manager_only
+def staffing_route():
+    """Where you are short of agents, where you have too many, and what to do.
+
+    Turns the half-hour picture into something worth acting on: runs of hours
+    that are short, how many are missing, and whether the shortfall can be
+    covered by moving people from a quiet stretch on the same day or needs
+    somebody extra.
+    """
+    import cms_db
+    try:
+        weeks = min(12, max(1, int(request.args.get('weeks') or 4)))
+        target = float(request.args.get('service_level') or 0.80)
+    except Exception:
+        weeks, target = 4, 0.80
+    try:
+        picture = cms_db.staffing_picture(weeks=weeks, target_answered=target)
+    except Exception as e:
+        return jsonify({'error': str(e)[:200], 'slots': []}), 400
+
+    days = {1: 'Sunday', 2: 'Monday', 3: 'Tuesday', 4: 'Wednesday',
+            5: 'Thursday', 6: 'Friday', 7: 'Saturday'}
+    by_day = {}
+    for s_ in picture['slots']:
+        by_day.setdefault(s_['day'], []).append(s_)
+
+    advice = []
+    for dow, slots in sorted(by_day.items()):
+        slots.sort(key=lambda x: x['minute'])
+        # gather neighbouring short periods into one stretch, because "short at
+        # 12:00, 12:30 and 13:00" is one problem, not three
+        runs, current = [], None
+        for s_ in slots:
+            short = s_['gap'] <= -1
+            if short and current:
+                current['slots'].append(s_)
+            elif short:
+                current = {'slots': [s_]}
+            elif current:
+                runs.append(current); current = None
+        if current:
+            runs.append(current)
+
+        surplus = [s_ for s_ in slots if s_['gap'] >= 1]
+        spare_total = round(sum(s_['gap'] for s_ in surplus), 1)
+
+        for run in runs:
+            worst = min(s_['gap'] for s_ in run['slots'])
+            short_by = int(round(abs(worst)))
+            missed = round(sum(s_['missed_per_day'] for s_ in run['slots']), 1)
+            start = run['slots'][0]['time']
+            end_min = run['slots'][-1]['minute'] + picture['slot_minutes']
+            end = '%02d:%02d' % (end_min // 60 % 24, end_min % 60)
+            hours = len(run['slots']) * picture['slot_minutes'] / 60.0
+
+            # can a quiet stretch on the same day cover it?
+            movable = [s_ for s_ in surplus
+                       if s_['minute'] < run['slots'][0]['minute']
+                       or s_['minute'] > run['slots'][-1]['minute']]
+            can_move = min(short_by, int(spare_total)) if movable else 0
+            where_from = ''
+            if can_move:
+                spots = sorted(movable, key=lambda x: -x['gap'])[:2]
+                where_from = ' and '.join('%s (%s spare)' % (x['time'], x['gap']) for x in spots)
+
+            if can_move >= short_by:
+                what = ('Move %d agent%s into %s–%s from %s — the cover exists, '
+                        'it is in the wrong place.'
+                        % (short_by, '' if short_by == 1 else 's', start, end, where_from))
+            elif can_move:
+                what = ('Move %d from %s, and %d more still needed for %s–%s.'
+                        % (can_move, where_from, short_by - can_move, start, end))
+            else:
+                what = ('%d more agent%s needed for %s–%s — there is no spare '
+                        'anywhere else that day.'
+                        % (short_by, '' if short_by == 1 else 's', start, end))
+
+            advice.append({
+                'day': days.get(dow, dow), 'day_number': dow,
+                'from': start, 'to': end, 'hours': round(hours, 1),
+                'short_by': short_by, 'missed_per_day': missed,
+                'can_move': can_move, 'suggestion': what,
+                'priority': round(missed * 2 + short_by * hours, 1),
+            })
+
+    over = []
+    for dow, slots in sorted(by_day.items()):
+        runs, current = [], None
+        for s_ in sorted(slots, key=lambda x: x['minute']):
+            spare = s_['gap'] >= 1
+            if spare and current:
+                current.append(s_)
+            elif spare:
+                current = [s_]
+            elif current:
+                runs.append(current); current = None
+        if current:
+            runs.append(current)
+        for run in runs:
+            if len(run) * picture['slot_minutes'] < 60:
+                continue                     # half an hour spare is not a finding
+            end_min = run[-1]['minute'] + picture['slot_minutes']
+            over.append({
+                'day': days.get(dow, dow),
+                'from': run[0]['time'],
+                'to': '%02d:%02d' % (end_min // 60 % 24, end_min % 60),
+                'spare': round(min(x['gap'] for x in run), 1),
+                'calls_per_day': round(sum(x['calls_per_day'] for x in run), 1),
+            })
+
+    advice.sort(key=lambda a: -a['priority'])
+    return jsonify({
+        'slots': picture['slots'], 'weeks': weeks, 'target': picture['target'],
+        'shortfalls': advice[:20], 'overstaffed': sorted(over, key=lambda x: -x['spare'])[:12],
+        'total_short_hours': round(sum(a['hours'] * a['short_by'] for a in advice), 1),
+        'missed_a_day': round(sum(a['missed_per_day'] for a in advice), 1),
+    })
 
 
 @app.route('/api/call-flow', methods=['GET'])

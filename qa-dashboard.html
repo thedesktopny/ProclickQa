@@ -818,6 +818,16 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
 #page-live .paygrid{ grid-template-columns:1.3fr 1fr 1.4fr; }
 @media (max-width:1400px){ #page-live .paygrid{ grid-template-columns:1fr 1fr; } }
 @media (max-width:900px){ #page-live .paygrid{ grid-template-columns:1fr; } }
+
+/* the week grid: one row per day, one cell per half hour */
+.st-row{ display:flex; align-items:center; gap:2px; margin-bottom:3px; }
+.st-day{ width:78px; font-size:11.5px; color:var(--text3); flex:none; }
+.st-cell{
+  width:13px; height:20px; border-radius:2px; flex:none; cursor:default;
+  background:var(--surface2);
+}
+.st-hours{ display:flex; gap:2px; margin:0 0 4px 78px; }
+.st-hour{ width:28px; font-size:9.5px; color:var(--text3); flex:none; }
 </style>
 </head>
 <body>
@@ -1448,6 +1458,47 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
   </div>
 </div>
 
+<div class="page" id="page-staffing">
+  <div class="topbar">
+    <button class="navtoggle" onclick="toggleNav()" aria-label="Menu">☰</button>
+    <div class="page-title">📊 Staffing</div>
+    <div class="topbar-right">
+      <select id="st-weeks" class="cms-in" style="width:auto;" onchange="loadStaffing()">
+        <option value="2">Last 2 weeks</option>
+        <option value="4" selected>Last 4 weeks</option>
+        <option value="8">Last 8 weeks</option>
+      </select>
+      <select id="st-target" class="cms-in" style="width:auto;" onchange="loadStaffing()">
+        <option value="0.70">70% answered in 20s</option>
+        <option value="0.80" selected>80% answered in 20s</option>
+        <option value="0.90">90% answered in 20s</option>
+      </select>
+      <button class="btn btn-outline" onclick="loadStaffing()">Refresh</button>
+    </div>
+  </div>
+  <div style="padding:18px 26px 44px;">
+    <div class="payhint" style="margin-bottom:14px;">
+      How many agents each half hour actually needs, worked out from the calls that
+      arrived and how long they took, against how many were really clocked in.
+      Averaged over several weeks so one odd day doesn't drive a decision.
+    </div>
+    <div id="st-head" class="payhead" style="padding-top:0;"></div>
+    <div class="card" style="padding:16px 20px;margin-top:14px;">
+      <h2 class="payh">What to change</h2>
+      <div id="st-advice"></div>
+    </div>
+    <div class="card" style="padding:16px 20px;margin-top:14px;">
+      <h2 class="payh">The week, half hour by half hour</h2>
+      <div class="payhint">Red is short, green has room to spare. Hover for the numbers.</div>
+      <div id="st-grid" style="overflow-x:auto;"></div>
+    </div>
+    <div class="card" style="padding:16px 20px;margin-top:14px;">
+      <h2 class="payh">Where you have more than you need</h2>
+      <div id="st-over"></div>
+    </div>
+  </div>
+</div>
+
 <div class="page" id="page-missed">
   <div class="topbar">
     <button class="navtoggle" onclick="toggleNav()" aria-label="Menu">☰</button>
@@ -1564,8 +1615,9 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
   <div style="padding:18px 28px 44px;">
     <div class="payhint" style="margin-bottom:12px;">
       Everyone here already exists in the CMS. Pick a reviewer, then tick the agents
-      they are responsible for. Every agent should have one — admins, managers and the
-      reviewers themselves are not reviewed.
+      they are responsible for. An agent can belong to several reviewers, so ticking
+      here adds a reviewer rather than taking the agent from anyone. Every agent should
+      have at least one — admins, managers and the reviewers themselves are not reviewed.
     </div>
     <div id="qa-cover" style="margin-bottom:14px;"></div>
     <div class="paygrid" style="grid-template-columns:1fr 1.4fr;">
@@ -4343,15 +4395,22 @@ function qaRenderAgents(){
 
   document.getElementById('qa-agents').innerHTML = list.map(a=>{
     const mine = qaPicked.has(a.id);
-    const other = a.reviewer_id && a.reviewer_id !== qaReviewer
-      ? qaData.reviewers.find(x=>x.id===a.reviewer_id) : null;
+    // An agent can belong to several reviewers — some are team leaders and are
+    // reviewed by people outside their own team. So the others are listed
+    // rather than warned about: ticking here adds a reviewer, it does not take
+    // the agent away from anyone.
+    const others = (a.reviewer_ids || [])
+      .filter(id => id !== qaReviewer)
+      .map(id => (qaData.reviewers.find(x => x.id === id) || {}).name)
+      .filter(Boolean);
     return `<label class="payrow" style="cursor:pointer;">
       <input type="checkbox" ${mine?'checked':''} ${v?'':'disabled'}
              onchange="qaToggle(${a.id}, this.checked)">
       <div class="nm">${esc(a.name)}
         <div class="mt">ext ${esc(a.extension)||'—'}
-          ${other ? ` · <span style="color:var(--yellow)">currently ${esc(other.name)}'s</span>` : ''}
-          ${!a.reviewer_id ? ' · <span style="color:var(--text3)">nobody reviews them</span>' : ''}</div></div>
+          ${others.length ? ` · <span style="color:var(--text2)">also reviewed by
+              ${others.map(esc).join(', ')}</span>` : ''}
+          ${!(a.reviewer_ids||[]).length ? ' · <span style="color:var(--text3)">nobody reviews them</span>' : ''}</div></div>
     </label>`;
   }).join('') || '<div style="color:var(--text3);font-size:12.5px;">No agents match.</div>';
 }
@@ -4488,6 +4547,7 @@ function portalApply(name, isManager){
     'customers':    ['👤', 'Customers'],
     'agent-calls':  ['🎧', 'Agents & Calls'],
     'missed':       ['📵', 'Missed Calls'],
+    'staffing':     ['📊', 'Staffing'],
     'agent-list':   ['📇', 'Agents'],
     'packages':     ['📦', 'Packages'],
     'company-info': ['🔑', 'Info & Logins'],
@@ -4643,6 +4703,7 @@ function showPage(id){
   if(id==='agent-calls'){ acLoadLive(); acAutoToggle(); }
   if(id==='live'){ loadLive(); lvAutoToggle(); loadCallFlow(); cfAutoToggle(); }
   if(id==='missed') loadMissed();
+  if(id==='staffing') loadStaffing();
   if(id==='qa-assign') loadQaAssign();
   if(id==='cms-settings') loadCmsSettings();
   if(id==='connections') loadConnections();
@@ -6527,6 +6588,81 @@ function cfAutoToggle(){
       loadCallFlow();
     }, 2000);
   }
+}
+
+
+/* ================= staffing =================
+   Two questions, answered from data already collected: how many agents does
+   each half hour actually need, and how many were there. The gap is what to
+   act on. */
+async function loadStaffing(){
+  const advice = document.getElementById('st-advice');
+  advice.innerHTML = '<div style="color:var(--text3);font-size:12.5px;">Working it out…</div>';
+  try{
+    const r = await API.get('/api/staffing?weeks='
+      + document.getElementById('st-weeks').value
+      + '&service_level=' + document.getElementById('st-target').value);
+    if(r.error){ advice.innerHTML = `<div style="color:var(--red)">${r.error}</div>`; return; }
+
+    const card = (lab,val,sub,cls) => `<div class="paycard"><div class="lab">${lab}</div>
+      <div class="payfig paynum ${cls||''}">${val}</div><div class="sub">${sub||'&nbsp;'}</div></div>`;
+    document.getElementById('st-head').innerHTML =
+      card('Gaps found', r.shortfalls.length, 'stretches needing more people',
+           r.shortfalls.length ? 'neg' : 'pos') +
+      card('Agent-hours short', r.total_short_hours, 'across the week', 'warn') +
+      card('Calls missed', r.missed_a_day, 'a day in those gaps',
+           r.missed_a_day > 5 ? 'neg' : '') +
+      card('Aiming for', r.target.split(' ')[0], 'answered within 20 seconds', '');
+
+    advice.innerHTML = r.shortfalls.length ? r.shortfalls.map(a=>`
+      <div class="payrow" style="cursor:default;align-items:flex-start;">
+        <span style="width:8px;height:8px;border-radius:50%;flex:none;margin-top:6px;
+              background:${a.can_move >= a.short_by ? 'var(--yellow)' : 'var(--red)'};"></span>
+        <div class="nm" style="white-space:normal;">
+          ${esc(a.day)} ${esc(a.from)}–${esc(a.to)}
+          <div class="mt" style="line-height:1.6;margin-top:3px;">${esc(a.suggestion)}</div>
+        </div>
+        <div style="text-align:right;font-size:11.5px;color:var(--text3);white-space:nowrap;">
+          short ${a.short_by}<div>${a.missed_per_day} missed/day</div></div>
+      </div>`).join('')
+      : '<div style="color:var(--green);font-size:12.5px;">Every hour has enough people.</div>';
+
+    // the week as a grid
+    const days = {1:'Sunday',2:'Monday',3:'Tuesday',4:'Wednesday',5:'Thursday',6:'Friday',7:'Saturday'};
+    const byDay = {};
+    r.slots.forEach(s => { (byDay[s.day] = byDay[s.day] || {})[s.minute] = s; });
+    let grid = '<div class="st-hours">' +
+      Array.from({length:12}, (_,i)=>`<div class="st-hour">${String(i*2).padStart(2,'0')}</div>`).join('') +
+      '</div>';
+    for(let d=1; d<=7; d++){
+      if(!byDay[d]) continue;
+      grid += `<div class="st-row"><div class="st-day">${days[d]}</div>`;
+      for(let m=0; m<1440; m+=30){
+        const s = byDay[d][m];
+        let colour = 'var(--surface2)', title = `${String(Math.floor(m/60)).padStart(2,'0')}:${m%60===0?'00':'30'} — no calls`;
+        if(s){
+          colour = s.gap <= -2 ? 'var(--red)'
+                 : s.gap <= -1 ? 'rgba(242,78,78,.55)'
+                 : s.gap >= 2  ? 'rgba(16,212,142,.5)'
+                 : 'rgba(16,212,142,.22)';
+          title = `${s.time} · ${s.calls_per_day} calls · needs ${s.needed}, had ${s.staffed}`
+                + (s.gap < 0 ? ` · SHORT ${Math.abs(s.gap)}` : ` · ${s.gap} spare`);
+        }
+        grid += `<div class="st-cell" style="background:${colour}" title="${title}"></div>`;
+      }
+      grid += '</div>';
+    }
+    document.getElementById('st-grid').innerHTML = grid;
+
+    document.getElementById('st-over').innerHTML = r.overstaffed.length
+      ? r.overstaffed.map(o=>`
+        <div class="payrow" style="cursor:default;">
+          <div class="nm">${esc(o.day)} ${esc(o.from)}–${esc(o.to)}
+            <div class="mt">${o.calls_per_day} calls in that stretch</div></div>
+          <div style="font-size:13px;color:var(--green);">${o.spare} spare</div>
+        </div>`).join('')
+      : '<div style="color:var(--text3);font-size:12.5px;">Nothing obviously over-covered.</div>';
+  }catch(e){ advice.innerHTML = `<div style="color:var(--red)">${e.message}</div>`; }
 }
 
 async function loadMissed(){
