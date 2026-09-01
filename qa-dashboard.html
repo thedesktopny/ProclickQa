@@ -840,14 +840,38 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
     <div style="font-size:19px;font-weight:660;letter-spacing:-.01em;">ProClick</div>
     <div style="font-size:12.5px;color:var(--text3);margin:4px 0 22px;">
       Sign in with the same user name and password you use for the CMS.</div>
-    <input id="portal-user" class="cms-in" placeholder="User name or email" autocomplete="username"
-           onkeydown="if(event.key==='Enter')document.getElementById('portal-pass').focus()"
-           style="width:100%;font-size:15px;padding:12px 14px;margin-bottom:10px;">
-    <input id="portal-pass" class="cms-in" type="password" placeholder="Password"
-           autocomplete="current-password" onkeydown="if(event.key==='Enter')portalLogin()"
-           style="width:100%;font-size:15px;padding:12px 14px;">
-    <div id="portal-err" style="color:var(--red);font-size:12.5px;min-height:20px;margin:8px 0 2px;"></div>
-    <button onclick="portalLogin()" class="btn btn-primary" style="width:100%;padding:11px;">Sign in</button>
+    <div id="portal-step-password">
+      <input id="portal-user" class="cms-in" placeholder="User name or email" autocomplete="username"
+             onkeydown="if(event.key==='Enter')document.getElementById('portal-pass').focus()"
+             style="width:100%;font-size:15px;padding:12px 14px;margin-bottom:10px;">
+      <input id="portal-pass" class="cms-in" type="password" placeholder="Password"
+             autocomplete="current-password" onkeydown="if(event.key==='Enter')portalLogin()"
+             style="width:100%;font-size:15px;padding:12px 14px;">
+      <div id="portal-err" style="color:var(--red);font-size:12.5px;min-height:20px;margin:8px 0 2px;"></div>
+      <button onclick="portalLogin()" class="btn btn-primary" style="width:100%;padding:11px;">Sign in</button>
+    </div>
+
+    <div id="portal-step-code" style="display:none;">
+      <div id="portal-code-sent" style="font-size:12.5px;color:var(--text2);
+           line-height:1.6;margin-bottom:14px;"></div>
+      <input id="portal-code" class="cms-in" inputmode="numeric" maxlength="6"
+             placeholder="000000" autocomplete="one-time-code"
+             onkeydown="if(event.key==='Enter')portalVerifyCode()"
+             style="width:100%;font-size:26px;padding:12px 14px;text-align:center;
+                    letter-spacing:.32em;font-variant-numeric:tabular-nums;">
+      <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;
+             color:var(--text2);margin:14px 0 4px;cursor:pointer;">
+        <input type="checkbox" id="portal-remember" checked>
+        Remember this device for 30 days
+      </label>
+      <div style="font-size:11px;color:var(--text3);margin-bottom:8px;line-height:1.5;">
+        Only tick this on a machine that is yours. On a shared computer, leave it off.
+      </div>
+      <button onclick="portalVerifyCode()" class="btn btn-primary"
+              style="width:100%;padding:11px;">Sign in</button>
+      <button onclick="portalBackToPassword()" class="btn btn-outline"
+              style="width:100%;padding:9px;margin-top:8px;font-size:12.5px;">Start again</button>
+    </div>
   </div>
 </div>
 
@@ -4253,6 +4277,20 @@ function portalHeaders(){
   return h;
 }
 
+/* ---------------- signing in ----------------
+   A password alone opened customer records, stored logins and card payments.
+   Now a six-digit code goes to the person's own email address as well, so a
+   password someone has shared or lost is no longer enough on its own.
+
+   The device can be remembered for thirty days — without that, sixty agents
+   would be emailed a code at the start of every shift, and people who find
+   security tiresome start working around it. */
+let portalChallenge = null;
+
+function portalDeviceToken(){
+  try{ return localStorage.getItem('portal_device') || null; }catch(e){ return null; }
+}
+
 async function portalLogin(){
   const u = document.getElementById('portal-user').value.trim();
   const p = document.getElementById('portal-pass').value;
@@ -4262,10 +4300,56 @@ async function portalLogin(){
   try{
     const res = await fetch('/api/portal/login', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({username:u, password:p})
+      body: JSON.stringify({username:u, password:p, device_token: portalDeviceToken()})
     });
     const r = await res.json();
+    if(r.needs_code){
+      portalChallenge = r.challenge;
+      portalShowCodeStep(r.sent_to, r.name);
+      return;
+    }
     if(!r.ok){ err.textContent = r.error || 'Could not sign you in.'; return; }
+    portalFinishLogin(r);
+  }catch(e){ err.textContent = 'Could not reach the server.'; }
+}
+
+function portalShowCodeStep(sentTo, name){
+  document.getElementById('portal-step-password').style.display = 'none';
+  document.getElementById('portal-step-code').style.display = '';
+  document.getElementById('portal-code-sent').textContent =
+    'We sent a six-digit code to ' + (sentTo || 'your email address') + '.';
+  document.getElementById('portal-err').textContent = '';
+  setTimeout(()=>{ const f = document.getElementById('portal-code'); if(f) f.focus(); }, 80);
+}
+
+async function portalVerifyCode(){
+  const err = document.getElementById('portal-err');
+  const code = (document.getElementById('portal-code').value || '').replace(/\D/g, '');
+  if(code.length !== 6){ err.textContent = 'Enter the six-digit code.'; return; }
+  err.textContent = 'Checking…';
+  try{
+    const res = await fetch('/api/portal/verify-code', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({challenge: portalChallenge, code,
+                            remember_device: document.getElementById('portal-remember').checked})
+    });
+    const r = await res.json();
+    if(!r.ok){ err.textContent = r.error || 'That did not work.'; return; }
+    if(r.device_token){
+      try{ localStorage.setItem('portal_device', r.device_token); }catch(e){}
+    }
+    portalFinishLogin(r);
+  }catch(e){ err.textContent = 'Could not reach the server.'; }
+}
+
+function portalBackToPassword(){
+  document.getElementById('portal-step-code').style.display = 'none';
+  document.getElementById('portal-step-password').style.display = '';
+  document.getElementById('portal-err').textContent = '';
+  portalChallenge = null;
+}
+
+function portalFinishLogin(r){
     portalTicket = r.ticket; portalPages = r.pages || [];
     try{ sessionStorage.setItem('portal_ticket', r.ticket); }catch(e){}
     // a QA reviewer also gets a normal VoiceGuard session, so the review pages
@@ -4275,7 +4359,6 @@ async function portalLogin(){
                     currentRole = r.is_admin ? 'admin' : r.is_manager ? 'manager' : 'reviewer'; }
     document.getElementById('portal-login').style.display = 'none';
     portalApply(r.name, r.is_manager);
-  }catch(e){ err.textContent = 'Could not reach the server.'; }
 }
 
 /* Shows only the pages this person may open, and labels who they are. */

@@ -538,6 +538,38 @@ def init_db():
     except Exception as e:
         print('[init] source column: ' + str(e)[:120])
 
+    # A code sent by email, valid for a few minutes. Only its hash is kept, so
+    # a look at this table does not let anyone sign in.
+    try:
+        c.execute('''CREATE TABLE IF NOT EXISTS portal_2fa (
+            id SERIAL PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            code_hash TEXT NOT NULL,
+            sent_to TEXT,
+            attempts INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT NOW(),
+            expires_at TIMESTAMP NOT NULL,
+            used BOOLEAN DEFAULT FALSE
+        )''')
+        # A device the person has already proved themselves on, so an agent is
+        # not emailed a code at the start of every shift. Without this, sixty
+        # agents get sixty emails a day and start resenting it — which is how
+        # people end up sharing logins.
+        c.execute('''CREATE TABLE IF NOT EXISTS portal_trusted_devices (
+            id SERIAL PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            token_hash TEXT NOT NULL,
+            label TEXT,
+            created_at TIMESTAMP DEFAULT NOW(),
+            last_used TIMESTAMP DEFAULT NOW(),
+            expires_at TIMESTAMP NOT NULL
+        )''')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_2fa_user ON portal_2fa(user_id)')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_trusted_user ON portal_trusted_devices(user_id)')
+        conn.commit()
+    except Exception as e:
+        print('[init] two-step tables: ' + str(e)[:140])
+
     # Who reviews whom. Both sides are people who already exist in the CMS —
     # QA reviewers carry the QA flag and agents are the rest — so nothing is
     # created here, only the pairing, which is ours rather than the CMS's.
@@ -4800,6 +4832,165 @@ def portal_diagnose():
     return jsonify(out)
 
 
+# ─── SIGNING IN WITH A CODE ──────────────────────────────────────────────────
+# The portal opens customer records, stored logins and card payments, and until
+# now a password was the only thing between someone and all of it. A code sent
+# to the person's own email address means a leaked or shared password is no
+# longer enough on its own.
+#
+# Postmark carries it because that is what the CMS already uses for its own
+# two-factor codes — same provider, same sender, so it lands in the same place
+# agents already look.
+POSTMARK_URL = 'https://api.postmarkapp.com/email'
+
+
+def _send_code_email(to_address, code, name=''):
+    """Emails a sign-in code. Returns None on success, or why it failed."""
+    token = os.getenv('POSTMARK_TOKEN', '').strip()
+    if not token:
+        return 'Two-step sign-in is not set up yet (POSTMARK_TOKEN).'
+    sender = os.getenv('POSTMARK_FROM', 'david@myhellodesk.com').strip()
+    # A plain-text version travels alongside the styled one, because some mail
+    # clients show only that — and a code nobody can read is a locked door.
+    text = (('Hello %s,\n\n' % name) if name else '') + (
+        'Your ProClick sign-in code is:\n\n'
+        '    %s\n\n'
+        'It works for the next 10 minutes and can only be used once.\n\n'
+        'If you did not just try to sign in, somebody has your password — '
+        'tell David straight away.\n\n'
+        'ProClick\n' % code)
+
+    greeting = ('Hello %s, ' % name) if name else ''
+    html = """<!doctype html>
+<html><body style="margin:0;padding:0;background:#f4f5f9;
+      font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+         style="background:#f4f5f9;padding:32px 16px;">
+    <tr><td align="center">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+             style="max-width:440px;background:#ffffff;border-radius:14px;
+                    border:1px solid #e4e6f0;overflow:hidden;">
+
+        <tr><td style="background:#4F6EF7;padding:20px 28px;">
+          <div style="color:#ffffff;font-size:17px;font-weight:700;">ProClick</div>
+          <div style="color:rgba(255,255,255,.82);font-size:12.5px;margin-top:2px;">
+            Two-step sign-in</div>
+        </td></tr>
+
+        <tr><td style="padding:28px;">
+          <p style="margin:0 0 18px;font-size:15px;color:#1b1f33;line-height:1.55;">
+            __GREETING__Here is your code to finish signing in.</p>
+
+          <div style="background:#f4f5f9;border:1px solid #e4e6f0;border-radius:10px;
+                      padding:18px;text-align:center;margin-bottom:18px;">
+            <div style="font-size:34px;font-weight:700;letter-spacing:.22em;color:#1b1f33;
+                        font-family:'SF Mono',Menlo,Consolas,monospace;">__CODE__</div>
+          </div>
+
+          <p style="margin:0 0 6px;font-size:13.5px;color:#5b6180;line-height:1.6;">
+            It works for the next <strong>10 minutes</strong> and can only be used once.</p>
+          <p style="margin:0;font-size:13.5px;color:#5b6180;line-height:1.6;">
+            Nobody at ProClick will ever ask you for this code.</p>
+
+          <div style="margin-top:22px;padding-top:18px;border-top:1px solid #e4e6f0;">
+            <p style="margin:0;font-size:12.5px;color:#8a90ab;line-height:1.6;">
+              If you did not just try to sign in, somebody else has your password.
+              Tell David straight away.</p>
+          </div>
+        </td></tr>
+
+        <tr><td style="background:#fafbfd;padding:14px 28px;border-top:1px solid #e4e6f0;">
+          <div style="font-size:11.5px;color:#8a90ab;">
+            Sent automatically by ProClick — please do not reply.</div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body></html>""".replace('__GREETING__', greeting).replace('__CODE__', code)
+
+    body = {
+        'From': sender,
+        'To': to_address,
+        # the code stays OUT of the subject: it shows on a lock screen and on
+        # any shoulder near the desk, and the point is that only they see it
+        'Subject': 'Your ProClick sign-in code',
+        'TextBody': text,
+        'HtmlBody': html,
+        'MessageStream': os.getenv('POSTMARK_STREAM', 'outbound'),
+    }
+    try:
+        req = urllib.request.Request(
+            POSTMARK_URL, data=json.dumps(body).encode(),
+            headers={'Accept': 'application/json', 'Content-Type': 'application/json',
+                     'X-Postmark-Server-Token': token})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            answer = json.loads(resp.read().decode() or '{}')
+        if int(answer.get('ErrorCode', 0)) != 0:
+            return answer.get('Message') or 'the email service refused it'
+        return None
+    except Exception as e:
+        return str(e)[:160]
+
+
+def _hash_secret(value):
+    return hashlib.sha256(('portal2fa:' + str(value)).encode()).hexdigest()
+
+
+def _start_code_challenge(user):
+    """Makes a code, stores its hash and emails it. Returns (ok, message)."""
+    import secrets
+    email = (user.get('email') or '').strip()
+    if not email or '@' not in email:
+        return False, ('There is no email address on your CMS record, so a code '
+                       'cannot be sent. Ask David to add one.')
+    code = '%06d' % secrets.randbelow(1000000)
+    try:
+        conn = get_db(); c = conn.cursor()
+        # anything still outstanding for this person is void once a new one is sent
+        c.execute("UPDATE portal_2fa SET used = TRUE WHERE user_id = %s AND used = FALSE",
+                  (str(user['user_id']),))
+        c.execute("""INSERT INTO portal_2fa (user_id, code_hash, sent_to, expires_at)
+                     VALUES (%s, %s, %s, NOW() + INTERVAL '10 minutes')""",
+                  (str(user['user_id']), _hash_secret(code), email))
+        conn.commit(); conn.close()
+    except Exception as e:
+        return False, 'Could not start the check: ' + str(e)[:140]
+
+    problem = _send_code_email(email, code, user.get('name', ''))
+    if problem:
+        return False, 'The code could not be sent: ' + problem
+    return True, email
+
+
+def _mask_email(address):
+    """Shows enough to recognise the address without publishing it."""
+    try:
+        name, domain = str(address).split('@', 1)
+        shown = name[0] + '···' + (name[-1] if len(name) > 2 else '')
+        return '%s@%s' % (shown, domain)
+    except Exception:
+        return 'your email address'
+
+
+def _device_is_trusted(user_id, device_token):
+    if not device_token:
+        return False
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute("""SELECT id FROM portal_trusted_devices
+                     WHERE user_id = %s AND token_hash = %s AND expires_at > NOW()""",
+                  (str(user_id), _hash_secret(device_token)))
+        row = c.fetchone()
+        if row:
+            c.execute('UPDATE portal_trusted_devices SET last_used = NOW() WHERE id = %s',
+                      (row[0],))
+            conn.commit()
+        conn.close()
+        return bool(row)
+    except Exception:
+        return False
+
+
 @app.route('/api/portal/login', methods=['POST'])
 def portal_login_route():
     """Sign in with a CMS user name and password."""
@@ -4811,6 +5002,32 @@ def portal_login_route():
         user = cms_db.portal_login(d.get('username'), d.get('password'))
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)[:160]}), 403
+
+    # The password is right. Unless this device has been proved before, a code
+    # goes to the person's own email and nothing is issued until it comes back.
+    if os.getenv('PORTAL_2FA', 'on').lower() not in ('off', '0', 'false'):
+        if not _device_is_trusted(user['user_id'], d.get('device_token')):
+            ok, detail = _start_code_challenge(user)
+            if not ok:
+                return jsonify({'ok': False, 'error': detail}), 403
+            return jsonify({
+                'ok': False, 'needs_code': True,
+                'sent_to': _mask_email(detail),
+                'name': user.get('name'),
+                # carries only who is waiting, signed and short-lived — it is
+                # not a sign-in and grants nothing on its own
+                'challenge': _portal_ticket({'user_id': user['user_id'],
+                                             'employee_id': user.get('employee_id'),
+                                             'name': 'PENDING-CODE',
+                                             'is_manager': False, 'is_admin': False,
+                                             'is_qa': False}),
+            })
+
+    return _issue_portal_session(user, remember_device=False)
+
+
+def _issue_portal_session(user, remember_device=False):
+    """Everything that happens once someone has proved who they are."""
     pages = list(PORTAL_PAGES)
     if user.get('is_qa') or user.get('is_admin'):
         pages += PORTAL_QA_PAGES
@@ -4835,11 +5052,89 @@ def portal_login_route():
         except Exception as e:
             print('[portal] could not create a QA session: ' + str(e)[:140])
 
-    return jsonify({'ok': True, 'ticket': _portal_ticket(user),
-                    'name': user['name'], 'is_manager': user['is_manager'],
-                    'is_admin': bool(user.get('is_admin')),
-                    'is_qa': bool(user.get('is_qa')), 'vg_token': vg_token,
-                    'extension': user.get('extension'), 'pages': pages})
+    out = {'ok': True, 'ticket': _portal_ticket(user),
+           'name': user['name'], 'is_manager': user['is_manager'],
+           'is_admin': bool(user.get('is_admin')),
+           'is_qa': bool(user.get('is_qa')), 'vg_token': vg_token,
+           'extension': user.get('extension'), 'pages': pages}
+
+    if remember_device:
+        # 30 days, so an agent proves themselves about once a month on their
+        # own machine rather than at the start of every shift
+        import secrets
+        device_token = secrets.token_urlsafe(32)
+        try:
+            conn = get_db(); c = conn.cursor()
+            c.execute("""INSERT INTO portal_trusted_devices
+                         (user_id, token_hash, label, expires_at)
+                         VALUES (%s, %s, %s, NOW() + INTERVAL '30 days')""",
+                      (str(user['user_id']), _hash_secret(device_token),
+                       (request.headers.get('User-Agent') or '')[:120]))
+            conn.commit(); conn.close()
+            out['device_token'] = device_token
+        except Exception as e:
+            print('[portal] could not remember this device: ' + str(e)[:140])
+    return jsonify(out)
+
+
+@app.route('/api/portal/verify-code', methods=['POST'])
+def portal_verify_code():
+    """Checks the emailed code and, if it is right, signs the person in."""
+    import cms_db
+    import time as _t
+    d = request.json or {}
+    _t.sleep(0.3)                       # slows down anyone guessing codes
+
+    pending = _portal_user(d.get('challenge') or '')
+    if not pending or pending.get('n') != 'PENDING-CODE':
+        return jsonify({'ok': False, 'error': 'That sign-in attempt has expired. '
+                                              'Start again.'}), 403
+    code = ''.join(ch for ch in str(d.get('code') or '') if ch.isdigit())
+    if len(code) != 6:
+        return jsonify({'ok': False, 'error': 'Enter the six-digit code.'}), 400
+
+    user_id = str(pending['u'])
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute("""SELECT id, code_hash, attempts FROM portal_2fa
+                     WHERE user_id = %s AND used = FALSE AND expires_at > NOW()
+                     ORDER BY id DESC LIMIT 1""", (user_id,))
+        row = c.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({'ok': False,
+                            'error': 'That code has expired. Sign in again for a new one.'}), 403
+        row_id, code_hash, attempts = int(row[0]), row[1], int(row[2] or 0)
+
+        # five guesses, then the code is dead — otherwise six digits is only a
+        # million tries for a patient script
+        if attempts >= 5:
+            c.execute('UPDATE portal_2fa SET used = TRUE WHERE id = %s', (row_id,))
+            conn.commit(); conn.close()
+            return jsonify({'ok': False,
+                            'error': 'Too many wrong tries. Sign in again for a new code.'}), 403
+
+        if _hash_secret(code) != code_hash:
+            c.execute('UPDATE portal_2fa SET attempts = attempts + 1 WHERE id = %s', (row_id,))
+            conn.commit(); conn.close()
+            left = 4 - attempts
+            return jsonify({'ok': False,
+                            'error': 'That code is not right. %d %s left.'
+                                     % (left, 'try' if left == 1 else 'tries')}), 403
+
+        c.execute('UPDATE portal_2fa SET used = TRUE WHERE id = %s', (row_id,))
+        conn.commit(); conn.close()
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'Could not check the code: ' + str(e)[:140]}), 400
+
+    # the code was right — build the real session from the CMS record
+    try:
+        user = cms_db.portal_user_by_id(user_id)
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)[:160]}), 403
+    if not user:
+        return jsonify({'ok': False, 'error': 'That account could not be found.'}), 403
+    return _issue_portal_session(user, remember_device=bool(d.get('remember_device')))
 
 
 @app.route('/api/portal/me', methods=['GET'])
@@ -5449,6 +5744,99 @@ def customer_update(account_id):
         # never let a failure come back as a bare 500 — the form has nothing to
         # show for that, which is how a broken save looks like nothing happening
         return jsonify({'ok': False, 'error': 'The change could not be made.',
+                        'raw_error': str(e)[:300]}), 400
+    return jsonify(out), (200 if out.get('ok') else 400)
+
+
+@app.route('/api/agents', methods=['POST'])
+@portal_manager_only
+def create_agent_route():
+    """Create someone who can sign in and take calls.
+
+    Rehearses by default — pass confirm: true to actually save.
+    """
+    import cms_write
+    d = request.json or {}
+    try:
+        out = cms_write.create_agent(d, _who(), dry_run=not d.get('confirm'))
+    except cms_write.WriteRefused as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'The agent could not be created.',
+                        'raw_error': str(e)[:300]}), 400
+    return jsonify(out), (200 if out.get('ok') else 400)
+
+
+@app.route('/api/agents/<int:employee_id>', methods=['PATCH'])
+@portal_manager_only
+def update_agent_route(employee_id):
+    """Change an agent's details — name, extension, flags."""
+    import cms_write
+    d = request.json or {}
+    allowed = {'FirstName': d.get('first_name'), 'LastName': d.get('last_name'),
+               'Extension': d.get('extension'), 'QA': d.get('is_qa'),
+               'WithCamera': d.get('with_camera'), 'Gender': d.get('gender')}
+    values = {k: v for k, v in allowed.items() if v is not None}
+    if not values:
+        return jsonify({'ok': False, 'error': 'Nothing to change.'}), 400
+    try:
+        out = cms_write.update('Employee', employee_id, values, _who(),
+                               dry_run=not d.get('confirm'))
+    except cms_write.WriteRefused as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'Could not save the change.',
+                        'raw_error': str(e)[:300]}), 400
+    return jsonify(out), (200 if out.get('ok') else 400)
+
+
+@app.route('/api/packages', methods=['POST'])
+@portal_manager_only
+def create_package_route():
+    """Add a refill option customers can buy."""
+    import cms_write
+    d = request.json or {}
+    values = cms_write._check_package({
+        'Name': (d.get('name') or '').strip(),
+        'Minutes': d.get('minutes'), 'Price': d.get('price_cents'),
+        'Currency': (d.get('currency') or 'usd'),
+    })
+    try:
+        out = cms_write.create('Packages', values, _who(), dry_run=not d.get('confirm'))
+    except cms_write.WriteRefused as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'The package could not be created.',
+                        'raw_error': str(e)[:300]}), 400
+    return jsonify(out), (200 if out.get('ok') else 400)
+
+
+@app.route('/api/packages/<int:package_id>', methods=['PATCH'])
+@portal_manager_only
+def update_package_route(package_id):
+    """Change a package. Note this affects what future buyers are charged;
+    sales already made keep the price they were sold at."""
+    import cms_write
+    d = request.json or {}
+    values = {}
+    if d.get('name') is not None:
+        values['Name'] = d['name']
+    if d.get('minutes') is not None:
+        values['Minutes'] = d['minutes']
+    if d.get('price_cents') is not None:
+        values['Price'] = d['price_cents']
+    if d.get('currency') is not None:
+        values['Currency'] = d['currency']
+    if not values:
+        return jsonify({'ok': False, 'error': 'Nothing to change.'}), 400
+    try:
+        values = cms_write._check_package(values)
+        out = cms_write.update('Packages', package_id, values, _who(),
+                               dry_run=not d.get('confirm'))
+    except cms_write.WriteRefused as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'Could not save the package.',
                         'raw_error': str(e)[:300]}), 400
     return jsonify(out), (200 if out.get('ok') else 400)
 
@@ -8249,7 +8637,7 @@ PORTAL_ALLOWED_PREFIXES = (
     '/api/whoami', '/api/portal/', '/api/live', '/api/customers',
     '/api/agents', '/api/agent-list', '/api/packages', '/api/company-info',
     '/api/recording-link', '/api/recordings/', '/api/payments/', '/api/cms-settings',
-    '/api/qa-users', '/api/qa-assignments', '/api/employees/',
+    '/api/qa-users', '/api/qa-assignments', '/api/employees/', '/api/agents',
     '/api/credentials', '/api/credential-access', '/api/work',
     '/api/customers/', '/api/card-fields', '/api/calls/', '/api/my-call', '/api/phone-event',
     '/api/media/', '/media/',

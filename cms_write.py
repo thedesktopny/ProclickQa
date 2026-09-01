@@ -43,9 +43,20 @@ WRITABLE = {
     ),
     # Only the QA flag. Not the extension, not the pay rate, not whether they
     # have left — those carry consequences in the phone system and in payroll.
+    # Employee details that are safe to change from here. Extension is included
+    # because it is how calls reach someone and it does change; the login
+    # (AspNetUserId), pay and LeftFirm stay out — those have consequences
+    # elsewhere.
     'Employee': (
-        {'QA'},
+        {'QA', 'FirstName', 'LastName', 'Extension', 'WithCamera', 'Gender',
+         'ExperienceLevel', 'notLogIn', 'ScheduleId'},
         set(),
+    ),
+    # The refill options customers buy. Price is in cents and Currency decides
+    # what is actually charged, so both are checked before saving.
+    'Packages': (
+        {'Name', 'Minutes', 'Price', 'Currency', 'Commission', 'PhoneSystemOption'},
+        {'Minutes', 'Price'},
     ),
 }
 
@@ -1461,6 +1472,169 @@ def refund_payment(payment_id, reason, who, amount_cents=None):
         except Exception:
             pass
 
+    _log(who, out)
+    return out
+
+
+def _check_package(values):
+    """A package sets what a customer is charged, so the numbers are checked
+    rather than trusted. A price of 1890000 instead of 18900 is an $18,900
+    charge, and nothing downstream would question it."""
+    if values.get('Price') is not None:
+        try:
+            price = int(values['Price'])
+        except Exception:
+            raise WriteRefused('The price must be a whole number of cents.')
+        if price < 0:
+            raise WriteRefused('The price cannot be negative.')
+        if price > 500000:
+            raise WriteRefused('That price is over $5,000 — it is in CENTS, so '
+                               '18900 means $189.00. Check the figure.')
+    if values.get('Minutes') is not None:
+        try:
+            mins = int(values['Minutes'])
+        except Exception:
+            raise WriteRefused('Minutes must be a whole number.')
+        if mins < 0 or mins > 100000:
+            raise WriteRefused('That number of minutes does not look right.')
+    if values.get('Currency'):
+        cur = str(values['Currency']).strip().upper()
+        if cur not in CARDKNOX_CURRENCIES:
+            raise WriteRefused('The currency must be one the card service accepts: %s.'
+                               % ', '.join(CARDKNOX_CURRENCIES))
+        values['Currency'] = cur.lower()
+    return values
+
+
+def create_agent(fields, who, dry_run=True):
+    """Create a person who can sign in and take calls.
+
+    Three tables have to agree or the result is a half-made account: an
+    AspNetUsers row (the login), an AspNetUserRoles row (what they may do) and
+    an Employee row (the person, their extension, their pay). They are written
+    in ONE transaction, so a failure leaves nothing behind rather than a login
+    with no employee or an employee who cannot sign in.
+
+    The password hash is made in ASP.NET Identity's own v3 format and verified
+    with the same code the CMS login uses before anything is saved — a hash in
+    the wrong shape would create somebody who simply cannot get in, and that is
+    not discovered until they try.
+    """
+    import uuid
+    import aspnet_auth
+
+    first = (fields.get('first_name') or '').strip()
+    last = (fields.get('last_name') or '').strip()
+    email = (fields.get('email') or '').strip()
+    extension = (fields.get('extension') or '').strip()
+    password = fields.get('password') or ''
+    role = (fields.get('role') or '').strip()
+
+    if not first or not last:
+        raise WriteRefused('A first and last name are needed.')
+    if not email or '@' not in email:
+        raise WriteRefused('A working email address is needed — it is the user name '
+                           'they sign in with, and where their sign-in code goes.')
+    if len(password) < 8:
+        raise WriteRefused('The password must be at least 8 characters.')
+    if not extension:
+        raise WriteRefused('An extension is needed, or calls cannot reach them.')
+
+    # prove the hash works before it is written, not after
+    password_hash = aspnet_auth.make_hash_v3(password)
+    if not aspnet_auth.verify_password(password, password_hash):
+        raise WriteRefused('The password could not be stored safely. Nothing was saved.')
+
+    conn = cms_db._connect()
+    cu = conn.cursor()
+    cu.execute('SELECT COUNT(*) FROM AspNetUsers WHERE UserName = %s OR Email = %s',
+               (email, email))
+    if int((cu.fetchone() or [0])[0] or 0) > 0:
+        conn.close()
+        raise WriteRefused('Someone already signs in with that email address.')
+    cu.execute("""SELECT TOP 1 Id, FirstName, LastName FROM Employee
+                  WHERE Extension = %s AND ISNULL(LeftFirm, 0) = 0""", (extension,))
+    clash = cu.fetchone()
+    if clash:
+        conn.close()
+        raise WriteRefused('Extension %s already belongs to %s %s.'
+                           % (extension, clash[1] or '', clash[2] or ''))
+
+    role_id = None
+    if role:
+        cu.execute('SELECT TOP 1 Id, Name FROM AspNetRoles WHERE Name = %s', (role,))
+        r = cu.fetchone()
+        if not r:
+            conn.close()
+            raise WriteRefused('There is no role called "%s" in the CMS.' % role)
+        role_id = r[0]
+
+    user_id = str(uuid.uuid4())
+    out = {'table': 'Employee', 'action': 'create_agent', 'dry_run': bool(dry_run),
+           'values': {'name': '%s %s' % (first, last), 'email': email,
+                      'extension': extension, 'role': role or '(none)'}}
+    try:
+        cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        cu.execute('BEGIN TRANSACTION')
+
+        cu.execute("""INSERT INTO [AspNetUsers]
+                      (Id, UserName, Email, EmailConfirmed, PasswordHash,
+                       SecurityStamp, PhoneNumberConfirmed, TwoFactorEnabled,
+                       LockoutEnabled, AccessFailedCount)
+                      VALUES (%s, %s, %s, 1, %s, %s, 0, 0, 1, 0)""",
+                   (user_id, email, email, password_hash, str(uuid.uuid4())))
+
+        if role_id:
+            cu.execute('INSERT INTO [AspNetUserRoles] (UserId, RoleId) VALUES (%s, %s)',
+                       (user_id, role_id))
+
+        cu.execute("""INSERT INTO [Employee]
+                      (FirstName, LastName, Extension, AspNetUserId, LeftFirm,
+                       Created, QA, WithCamera, Gender, HourlyRate)
+                      OUTPUT INSERTED.Id
+                      VALUES (%s, %s, %s, %s, 0, GETDATE(), %s, %s, %s, %s)""",
+                   (first, last, extension, user_id,
+                    1 if fields.get('is_qa') else 0,
+                    1 if fields.get('with_camera') else 0,
+                    (fields.get('gender') or None),
+                    int(fields.get('hourly_rate') or 0)))
+        row = cu.fetchone()
+        employee_id = int(row[0]) if row else None
+
+        if dry_run:
+            cu.execute('ROLLBACK TRANSACTION')
+            out.update({'ok': True, 'committed': False,
+                        'meaning': ('This would create %s %s on extension %s, with a '
+                                    'sign-in for %s%s. Nothing has been saved yet.'
+                                    % (first, last, extension, email,
+                                       (' as %s' % role) if role else ''))})
+        else:
+            cu.execute('COMMIT TRANSACTION')
+            conn.commit()
+            # read it back — a commit that silently did nothing has bitten us before
+            check = conn.cursor()
+            check.execute('SELECT Id, Extension FROM Employee WHERE Id = %s', (employee_id,))
+            back = check.fetchone()
+            if not back:
+                raise RuntimeError('the employee record is not there after saving')
+            out.update({'ok': True, 'committed': True, 'employee_id': employee_id,
+                        'user_id': user_id,
+                        'meaning': '%s %s created on extension %s. They sign in with %s.'
+                                   % (first, last, extension, email)})
+    except WriteRefused:
+        raise
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        out.update({'ok': False, 'committed': False,
+                    'error': _explain(e), 'raw_error': str(e)[:300]})
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
     _log(who, out)
     return out
 
