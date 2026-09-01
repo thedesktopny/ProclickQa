@@ -1481,6 +1481,99 @@ def our_sms_numbers():
     return out
 
 
+def waiting_now():
+    """Callers holding right now — started, nobody has picked up, not ended.
+
+    This is the number that matters on a busy floor: not how many calls are
+    happening, but how many people are listening to hold music.
+    """
+    conn = _connect(); cu = conn.cursor()
+    out = {'waiting': [], 'count': 0, 'longest_seconds': 0}
+    try:
+        cu.execute("""SELECT c.Id, c.Phone, c.Started, c.CalledExtension, c.CallersName,
+                             DATEDIFF(second, c.Started, GETDATE())
+                      FROM PhoneCallsLog c
+                      WHERE c.Ended IS NULL
+                        AND c.PickedUpTime IS NULL
+                        AND ISNULL(c.IsOutbound, 0) = 0
+                        AND c.Started >= DATEADD(minute, -30, GETDATE())
+                      ORDER BY c.Started""")
+        while True:
+            r = cu.fetchone()
+            if not r:
+                break
+            secs = int(r[5] or 0)
+            # a call still open after half an hour is almost certainly a row
+            # nobody closed, not somebody genuinely holding
+            if secs > 1800:
+                continue
+            out['waiting'].append({
+                'call_id': int(r[0]), 'phone': r[1], 'started': _plain(r[2]),
+                'called': r[3], 'caller_name': r[4], 'seconds': secs})
+        out['count'] = len(out['waiting'])
+        out['longest_seconds'] = max([w['seconds'] for w in out['waiting']] or [0])
+    except Exception as e:
+        out['error'] = str(e)[:180]
+    conn.close()
+    return out
+
+
+def queue_kinds(hours=24):
+    """What the queue log actually records, so "express" can be identified
+    rather than guessed at.
+
+    The CMS source has no notion of an express queue, so if one exists it is
+    either an Asterisk dialplan thing or something written into QueueInfo.Info.
+    This reports the real values.
+    """
+    conn = _connect(); cu = conn.cursor()
+    out = {}
+    try:
+        cu.execute("""SELECT TOP 25 Info, COUNT(*) FROM QueueInfo
+                      WHERE Created >= DATEADD(hour, -%d, GETDATE())
+                      GROUP BY Info ORDER BY COUNT(*) DESC""" % int(hours))
+        rows = []
+        while True:
+            r = cu.fetchone()
+            if not r:
+                break
+            rows.append({'info': (r[0] or '')[:70], 'rows': int(r[1] or 0)})
+        out['info_values'] = rows
+    except Exception as e:
+        out['info_error'] = str(e)[:180]
+
+    try:
+        cu.execute("""SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS
+                      WHERE TABLE_NAME = 'QueueInfo' ORDER BY ORDINAL_POSITION""")
+        cols = []
+        while True:
+            r = cu.fetchone()
+            if not r:
+                break
+            cols.append({'name': r[0], 'type': r[1]})
+        out['columns'] = cols
+    except Exception as e:
+        out['columns_error'] = str(e)[:180]
+
+    # the numbers customers dial — an express line would be one of these
+    try:
+        cu.execute("""SELECT TOP 15 CalledExtension, COUNT(*) FROM PhoneCallsLog
+                      WHERE Started >= DATEADD(hour, -%d, GETDATE())
+                        AND ISNULL(IsOutbound, 0) = 0
+                      GROUP BY CalledExtension ORDER BY COUNT(*) DESC""" % int(hours))
+        dialled = []
+        while True:
+            r = cu.fetchone()
+            if not r:
+                break
+            dialled.append({'number': r[0], 'calls': int(r[1] or 0)})
+        out['numbers_dialled'] = dialled
+    except Exception as e:
+        out['dialled_error'] = str(e)[:180]
+    conn.close()
+    return out
+
+
 def employee_context(employee_id, account_id=None):
     """What this person is doing right now — are they on shift, and are they
     working on that account?

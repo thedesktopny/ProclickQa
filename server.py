@@ -547,14 +547,6 @@ def init_db():
             revoked_epoch BIGINT NOT NULL DEFAULT 0,
             reason TEXT
         )''')
-        # an earlier version of this table used a timestamp; drop it rather
-        # than migrate, since it holds nothing worth keeping
-        try:
-            c.execute("ALTER TABLE portal_revocations ADD COLUMN IF NOT EXISTS "
-                      "revoked_epoch BIGINT NOT NULL DEFAULT 0")
-            c.execute("ALTER TABLE portal_revocations DROP COLUMN IF EXISTS revoked_at")
-        except Exception:
-            conn.rollback()
         conn.commit()
     except Exception as e:
         print('[init] portal_revocations: ' + str(e)[:140])
@@ -610,6 +602,23 @@ def init_db():
         conn.commit()
     except Exception as e:
         print('[init] two-step tables: ' + str(e)[:140])
+
+    # An earlier version of portal_revocations used a timestamp column. Adding
+    # the new one runs on ITS OWN connection: in Postgres a failed statement
+    # aborts the whole transaction, so one failing migration in the middle of
+    # init takes every statement after it down with it — which is exactly what
+    # stopped the app booting and returned 503.
+    try:
+        mig = get_db(); mc = mig.cursor()
+        mc.execute("ALTER TABLE portal_revocations "
+                   "ADD COLUMN IF NOT EXISTS revoked_epoch BIGINT NOT NULL DEFAULT 0")
+        mig.commit(); mig.close()
+    except Exception as e:
+        print('[init] revocation column: ' + str(e)[:140])
+        try:
+            mig.rollback(); mig.close()
+        except Exception:
+            pass
 
     # Who reviews whom. Both sides are people who already exist in the CMS —
     # QA reviewers carry the QA flag and agents are the rest — so nothing is
@@ -6970,6 +6979,39 @@ def staffing_route():
     })
 
 
+@app.route('/api/waiting', methods=['GET'])
+@portal_or_manager
+def waiting_route():
+    """How many callers are holding right now."""
+    import cms_db
+    try:
+        out = cms_db.waiting_now()
+        # anything the phone system has told us but the table has not caught up
+        # with — a call that has started and not been picked up
+        live_extra = 0
+        for call in _LIVE_CALLS.get('by_uniq', {}).values():
+            if not call.get('picked_up') and not call.get('ended') \
+               and not call.get('outbound'):
+                if not any(w['call_id'] == call.get('call_id') for w in out['waiting']):
+                    live_extra += 1
+        out['also_ringing'] = live_extra
+        return jsonify(out)
+    except Exception as e:
+        return jsonify({'error': str(e)[:200], 'count': 0, 'waiting': []}), 400
+
+
+@app.route('/api/queue-kinds', methods=['GET'])
+@portal_manager_only
+def queue_kinds_route():
+    """What the queue log really contains — for working out whether an express
+    queue is distinguishable at all."""
+    import cms_db
+    try:
+        return jsonify(cms_db.queue_kinds())
+    except Exception as e:
+        return jsonify({'error': str(e)[:200]}), 400
+
+
 @app.route('/api/call-flow', methods=['GET'])
 @portal_or_manager
 def call_flow_route():
@@ -9215,7 +9257,8 @@ PORTAL_ALLOWED_PREFIXES = (
     '/api/customers/', '/api/card-fields', '/api/calls/', '/api/my-call', '/api/phone-event',
     '/api/media/', '/media/',
     '/api/phone-event/recent', '/api/phone-event/check',
-    '/api/missed-calls', '/api/call-flow', '/api/dnd-check', '/api/why-failing', '/api/texts/',
+    '/api/missed-calls', '/api/call-flow', '/api/dnd-check', '/api/why-failing',
+    '/api/waiting', '/api/queue-kinds', '/api/texts/',
     '/api/cms-db/', '/api/connections', '/static/', '/favicon',
 )
 
