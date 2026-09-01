@@ -5853,6 +5853,17 @@ def phone_event():
     return jsonify({'ok': True, 'event': event, 'extension': ext or None})
 
 
+@app.route('/api/dnd-check', methods=['GET'])
+@portal_or_manager
+def dnd_check_route():
+    """Everyone on Do Not Disturb, for comparing against the CMS."""
+    import cms_db
+    try:
+        return jsonify(cms_db.dnd_check())
+    except Exception as e:
+        return jsonify({'error': str(e)[:200], 'on_dnd': []}), 400
+
+
 @app.route('/api/staffing/clocker-check', methods=['GET'])
 @portal_manager_only
 def staffing_clocker_check():
@@ -8243,7 +8254,7 @@ PORTAL_ALLOWED_PREFIXES = (
     '/api/customers/', '/api/card-fields', '/api/calls/', '/api/my-call', '/api/phone-event',
     '/api/media/', '/media/',
     '/api/phone-event/recent', '/api/phone-event/check',
-    '/api/missed-calls', '/api/call-flow', '/api/texts/',
+    '/api/missed-calls', '/api/call-flow', '/api/dnd-check', '/api/texts/',
     '/api/cms-db/', '/api/connections', '/static/', '/favicon',
 )
 

@@ -2084,21 +2084,69 @@ def _dnd_now(conn):
     out = {}
     try:
         cu = conn.cursor()
+        # NO date limit here, deliberately. This used to look only at the last
+        # two days, which quietly lost anyone who set DND earlier and never
+        # ended it — they stay on DND in the CMS but vanished from ours. The
+        # current state is simply the newest row per agent, whenever it was
+        # written.
         cu.execute("""SELECT n.EmployeeID, n.Status, n.Created, n.Note, n.TypeDND
                       FROM NotDistrubStatus n
                       JOIN (SELECT EmployeeID, MAX(Id) AS Id
                             FROM NotDistrubStatus
-                            WHERE Created >= DATEADD(day, -2, GETDATE())
                             GROUP BY EmployeeID) last
                         ON last.Id = n.Id""")
         while True:
             r = cu.fetchone()
             if not r:
                 break
-            if str(r[1] or '').upper() == 'NOT_DISTRUB':
-                out[int(r[0] or 0)] = {'since': _plain(r[2]), 'note': r[3], 'type': r[4]}
+            status = str(r[1] or '').upper().strip()
+            # anything that is not an explicit end counts as still on it — the
+            # CMS treats it the same way, and guessing the other way hides
+            # someone who is genuinely unavailable
+            if status and not status.startswith('END'):
+                out[int(r[0] or 0)] = {'since': _plain(r[2]), 'note': r[3],
+                                       'type': r[4], 'status': status}
     except Exception as e:
         print('[cms] could not read DND status: ' + str(e)[:120])
+    return out
+
+
+def dnd_check():
+    """Everyone currently on Do Not Disturb, with when and why.
+
+    For comparing against the CMS's own screen. Shows the raw newest row per
+    agent, including ones that are NOT being counted, so a difference can be
+    seen rather than guessed at.
+    """
+    conn = _connect(); cu = conn.cursor()
+    out = {'on_dnd': [], 'not_counted': []}
+    try:
+        cu.execute("""SELECT n.EmployeeID, n.Status, n.Created, n.Note, n.TypeDND,
+                             e.FirstName, e.LastName, e.Extension, ISNULL(e.LeftFirm, 0)
+                      FROM NotDistrubStatus n
+                      JOIN (SELECT EmployeeID, MAX(Id) AS Id
+                            FROM NotDistrubStatus GROUP BY EmployeeID) last
+                        ON last.Id = n.Id
+                      LEFT JOIN Employee e ON e.Id = n.EmployeeID
+                      ORDER BY n.Created DESC""")
+        while True:
+            r = cu.fetchone()
+            if not r:
+                break
+            status = str(r[1] or '').upper().strip()
+            item = {'employee_id': int(r[0] or 0),
+                    'name': ('%s %s' % (r[5] or '', r[6] or '')).strip() or '(unknown)',
+                    'extension': r[7], 'status': status, 'since': _plain(r[2]),
+                    'note': r[3], 'type': r[4], 'left_firm': bool(r[8])}
+            if status and not status.startswith('END'):
+                out['on_dnd'].append(item)
+            else:
+                out['not_counted'].append(item)
+    except Exception as e:
+        out['error'] = str(e)[:200]
+    conn.close()
+    out['count'] = len(out['on_dnd'])
+    out['not_counted'] = out['not_counted'][:10]
     return out
 
 
