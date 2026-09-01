@@ -1481,6 +1481,58 @@ def our_sms_numbers():
     return out
 
 
+def callback_list(hours=48, limit=100):
+    """Missed callers who still need calling back.
+
+    Two ways a name leaves this list, matching the old CMS: the caller rings
+    again and gets through (MissedResolvedId is set for them), or somebody
+    marks it dealt with (Resolved). Anything else is still owed a call.
+    """
+    conn = _connect(); cu = conn.cursor()
+    out = {'calls': [], 'count': 0}
+    try:
+        cu.execute("""SELECT TOP %d c.Id, c.Phone, c.Started, c.DialStatus,
+                             c.CalledExtension, c.CallersName, c.Note,
+                             a.Id, a.FirstName, a.LastName, a.MinutesLeft,
+                             DATEDIFF(minute, c.Started, GETDATE())
+                      FROM PhoneCallsLog c
+                      LEFT JOIN Account a
+                        ON RIGHT(REPLACE(REPLACE(REPLACE(ISNULL(a.Phone,''),'-',''),' ',''),'(',''), 10)
+                           = RIGHT(c.Phone, 10)
+                      WHERE ISNULL(c.IsMissed, 0) = 1
+                        AND ISNULL(c.Resolved, 0) = 0
+                        AND c.MissedResolvedId IS NULL
+                        AND ISNULL(c.IsOutbound, 0) = 0
+                        AND c.Started >= DATEADD(hour, -%d, GETDATE())
+                      ORDER BY c.Started DESC""" % (int(limit), int(hours)))
+        seen = set()
+        while True:
+            r = cu.fetchone()
+            if not r:
+                break
+            phone = (r[1] or '').strip()
+            # one entry per caller — five missed calls from the same number is
+            # one person to ring back, not five
+            key = phone[-10:] if len(phone) >= 10 else phone
+            if key in seen:
+                continue
+            seen.add(key)
+            out['calls'].append({
+                'call_id': int(r[0]), 'phone': phone, 'when': _plain(r[2]),
+                'why': (r[3] or '').strip(), 'called': r[4],
+                'caller_name': r[5], 'note': r[6],
+                'account_id': (int(r[7]) if r[7] else None),
+                'account_name': (('%s %s' % (r[8] or '', r[9] or '')).strip() or None),
+                'minutes_left': (int(r[10]) if r[10] is not None else None),
+                'minutes_ago': int(r[11] or 0),
+            })
+        out['count'] = len(out['calls'])
+    except Exception as e:
+        out['error'] = str(e)[:200]
+    conn.close()
+    return out
+
+
 def waiting_now():
     """Callers holding right now — started, nobody has picked up, not ended.
 

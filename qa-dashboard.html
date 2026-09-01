@@ -1709,6 +1709,21 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
 
   <div style="padding:18px 28px 44px;">
     <div id="lv-waiting" class="lv-waiting"></div>
+    <div class="card" id="lv-callbacks-card" style="padding:16px 20px;margin-bottom:14px;display:none;">
+      <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;">
+        <h2 class="payh" style="margin:0;">📞 To call back</h2>
+        <span id="lv-cb-count" style="font-size:11.5px;color:var(--text3);"></span>
+        <select id="lv-cb-hours" class="cms-in" style="width:auto;margin-left:auto;font-size:12px;"
+                onchange="loadCallbacks()">
+          <option value="12">Last 12 hours</option>
+          <option value="48" selected>Last 2 days</option>
+          <option value="168">Last week</option>
+        </select>
+      </div>
+      <div class="payhint">Callers who never got through. A name leaves this list when they
+        ring back and reach somebody, or when you mark it done.</div>
+      <div id="lv-callbacks" style="max-height:40vh;overflow:auto;margin-top:8px;"></div>
+    </div>
     <div id="lv-today" class="payhead" style="padding-top:0;"></div>
 
     <div class="card" style="padding:16px 20px;margin-top:14px;">
@@ -3349,6 +3364,20 @@ function authHeaders(){
 let authFailures = 0;
 
 function handleSignedOut(){
+  // Not signed in yet is NOT the same as signed out. On the sign-in screen the
+  // pollers are still running and every request is refused, which used to show
+  // "your sign-in has expired" to somebody who had not signed in at all.
+  const haveTicket = (typeof portalTicket !== 'undefined' && portalTicket);
+  let haveToken = false;
+  try{ haveToken = !!getToken(); }catch(e){}
+  if(!haveTicket && !haveToken){
+    // just stop the pollers quietly — there is nothing to tell them
+    [inTimer, cfTimer, lvTimer, acTimer, smsTimer].forEach(t => {
+      try{ clearInterval(t); }catch(e){}
+    });
+    return;
+  }
+
   authFailures++;
   if(authFailures < 3) return;
   [inTimer, cfTimer, lvTimer, acTimer, smsTimer].forEach(t => { try{ clearInterval(t); }catch(e){} });
@@ -4951,6 +4980,13 @@ document.addEventListener('click', e => {
    means a portal user who never visits them costs nothing. */
 let portalLoaded = {};
 
+/* True once a sign-in has happened. The pollers check this, so nothing runs
+   against the server while the sign-in screen is up. */
+function portalSignedIn(){
+  if(typeof portalTicket !== 'undefined' && portalTicket) return true;
+  try{ return !!getToken(); }catch(e){ return false; }
+}
+
 async function portalLoadQaPage(which){
   if(portalLoaded[which]) return;
   portalLoaded[which] = true;
@@ -5014,7 +5050,7 @@ function showPage(id){
   setTimeout(enhanceSearchFields, 0);
   if(id==='cms-pull') cmsPageInit();
   if(id==='agent-calls'){ acLoadLive(); acAutoToggle(); }
-  if(id==='live'){ loadLive(); loadWaiting(); lvAutoToggle(); loadCallFlow(); cfAutoToggle(); }
+  if(id==='live'){ loadLive(); loadWaiting(); loadCallbacks(); lvAutoToggle(); loadCallFlow(); cfAutoToggle(); }
   if(id==='missed') loadMissed();
   if(id==='staffing') loadStaffing();
   if(id==='qa-assign') loadQaAssign();
@@ -7086,6 +7122,7 @@ function cfAutoToggle(){
       // only while this page is open and being looked at
       const page = document.getElementById('page-live');
       if(!page || page.style.display === 'none' || document.hidden) return;
+      if(!portalSignedIn()) return;
       loadCallFlow();
       loadWaiting();
     }, 2000);
@@ -7428,6 +7465,60 @@ async function loadMissedCount(){
 /* How many callers are holding. Not how many calls are happening — how many
    people are listening to hold music, which is the number that tells you the
    floor is in trouble. */
+
+/* Who still needs ringing back. This is the list the old CMS had: a caller
+   drops off it either by getting through on their own or by somebody marking
+   it done, so it empties as the work is actually finished. */
+async function loadCallbacks(){
+  const card = document.getElementById('lv-callbacks-card');
+  const box = document.getElementById('lv-callbacks');
+  if(!card || !box) return;
+  try{
+    const hours = document.getElementById('lv-cb-hours').value;
+    const r = await API.get('/api/callbacks?hours=' + hours);
+    if(r.error){ card.style.display = 'none'; return; }
+    card.style.display = r.count ? '' : 'none';
+    document.getElementById('lv-cb-count').textContent =
+      r.count ? `${r.count} waiting for a call back` : '';
+    box.innerHTML = r.calls.map(c=>`
+      <div class="payrow" style="cursor:default;" id="cb-${c.call_id}">
+        <div class="nm">
+          <span style="font-variant-numeric:tabular-nums;font-size:14px;">${esc(c.phone)}</span>
+          ${c.account_name ? `<span style="color:var(--text2);margin-left:8px;">${esc(c.account_name)}</span>` : ''}
+          <div class="mt">${c.minutes_ago < 60
+              ? c.minutes_ago + ' min ago'
+              : Math.floor(c.minutes_ago/60) + 'h ' + (c.minutes_ago%60) + 'm ago'}
+            · ${esc(c.why || 'missed')}
+            ${c.account_id ? '' : ' · not a customer we know'}
+            ${c.minutes_left != null ? ' · ' + c.minutes_left + ' min left' : ''}</div>
+        </div>
+        <div style="display:flex;gap:6px;">
+          ${c.account_id ? `<button class="cn-chip" onclick="cuOpen(${c.account_id})">Open</button>` : ''}
+          <button class="cn-chip" onclick="callbackDone(${c.call_id}, this)">Called back</button>
+        </div>
+      </div>`).join('');
+  }catch(e){ /* the rest of the page matters more */ }
+}
+
+async function callbackDone(callId, btn){
+  btn.disabled = true; btn.textContent = 'Saving…';
+  try{
+    const r = await API.post('/api/callbacks/' + callId + '/done', {});
+    if(r.error || r.ok === false){
+      showToast(r.error || 'Could not mark it done', true);
+      btn.disabled = false; btn.textContent = 'Called back';
+      return;
+    }
+    // take it off the list straight away — the point is that it empties
+    const row = document.getElementById('cb-' + callId);
+    if(row) row.remove();
+    loadCallbacks();
+  }catch(e){
+    showToast(e.message, true);
+    btn.disabled = false; btn.textContent = 'Called back';
+  }
+}
+
 async function loadWaiting(){
   const box = document.getElementById('lv-waiting');
   if(!box) return;
@@ -7460,7 +7551,21 @@ async function loadWaiting(){
           ${Math.floor(longest/60)}:${String(longest%60).padStart(2,'0')}</div>
         <div class="lab">longest wait</div></div>` : ''}
       ${chips ? `<div class="lv-queue">${chips}</div>` : ''}
+      <div id="lv-missed-strip" style="margin-left:${chips ? '10px' : 'auto'};
+           text-align:right;"></div>
     </div>`;
+
+    // how many people are still owed a call back, alongside the live figures
+    try{
+      const m = await API.get('/api/callbacks?hours=48');
+      const strip = document.getElementById('lv-missed-strip');
+      if(strip && !m.error){
+        strip.innerHTML = m.count
+          ? `<div class="big" style="font-size:22px;color:var(--red);">${m.count}</div>
+             <div class="lab">to call back</div>`
+          : `<div class="lab" style="color:var(--green);">nobody waiting for a call back</div>`;
+      }
+    }catch(e){}
   }catch(e){ /* the floor board matters more than this strip */ }
 }
 
@@ -7851,7 +7956,10 @@ function inConnect(){
 }
 
 async function inPoll(){
-  if(!IS_PORTAL && !portalTicket) return;
+  // In portal mode this used to poll whether or not anybody was signed in, so
+  // the sign-in screen produced a 401 every second — which is what raised the
+  // "your sign-in has expired" bar to somebody who had not signed in.
+  if(!portalSignedIn()) return;
   try{
     const r = await API.get('/api/my-call');
     inShow(r);

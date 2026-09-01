@@ -52,6 +52,13 @@ WRITABLE = {
          'ExperienceLevel', 'notLogIn', 'ScheduleId'},
         set(),
     ),
+    # Marking a missed call as dealt with — exactly what the CMS's
+    # MarkCallResolved does: Resolved = true and Modified = now. Nothing else
+    # on a call row may be touched from here.
+    'PhoneCallsLog': (
+        {'Resolved', 'ResolvedBy', 'Modified'},
+        set(),
+    ),
     # The refill options customers buy. Price is in cents and Currency decides
     # what is actually charged, so both are checked before saving.
     'Packages': (
@@ -1504,6 +1511,105 @@ def _check_package(values):
                                % ', '.join(CARDKNOX_CURRENCIES))
         values['Currency'] = cur.lower()
     return values
+
+
+def lock_login(employee_id, reason, who=None):
+    """Shut someone out of the CMS and the portal at once.
+
+    Uses ASP.NET Identity's own lockout — LockoutEnabled with an end date far
+    in the future — which is exactly what the CMS does when somebody leaves.
+    That means the lock holds everywhere they could sign in, not only here.
+
+    Deliberately does NOT delete anything or mark them as having left; a lock
+    is reversible and a manager undoes it in a moment.
+    """
+    conn = cms_db._connect()
+    out = {'table': 'AspNetUsers', 'action': 'lock_login', 'dry_run': False,
+           'values': {'employee_id': employee_id, 'reason': reason[:200]}}
+    try:
+        cu = conn.cursor()
+        cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        cu.execute("""SELECT TOP 1 e.AspNetUserId, e.FirstName, e.LastName, u.UserName
+                      FROM Employee e
+                      LEFT JOIN AspNetUsers u ON u.Id = e.AspNetUserId
+                      WHERE e.Id = %s""", (int(employee_id),))
+        r = cu.fetchone()
+        if not r or not r[0]:
+            conn.close()
+            raise WriteRefused('That employee has no sign-in to lock.')
+        user_id, name = str(r[0]), ('%s %s' % (r[1] or '', r[2] or '')).strip()
+
+        cu.execute("""UPDATE [AspNetUsers]
+                      SET LockoutEnabled = 1,
+                          LockoutEndDateUtc = '9999-12-30 00:00:00'
+                      WHERE Id = %s""", (user_id,))
+        conn.commit()
+
+        # read it back — a lock that did not actually save is worse than none,
+        # because everyone would believe the person is shut out
+        check = conn.cursor()
+        check.execute('SELECT LockoutEndDateUtc FROM AspNetUsers WHERE Id = %s', (user_id,))
+        back = check.fetchone()
+        locked = bool(back and back[0] and str(back[0]).startswith('9999'))
+        if not locked:
+            raise RuntimeError('the lock did not save — the login is still open')
+
+        out.update({'ok': True, 'committed': True, 'user_id': user_id, 'name': name,
+                    'meaning': '%s is locked out of the CMS and the portal.' % name})
+    except WriteRefused:
+        raise
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        out.update({'ok': False, 'committed': False,
+                    'error': _explain(e), 'raw_error': str(e)[:300]})
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    _log(who, out)
+    return out
+
+
+def unlock_login(employee_id, who=None):
+    """Let somebody back in. Only a manager or admin reaches this."""
+    conn = cms_db._connect()
+    out = {'table': 'AspNetUsers', 'action': 'unlock_login', 'dry_run': False,
+           'values': {'employee_id': employee_id}}
+    try:
+        cu = conn.cursor()
+        cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        cu.execute("""SELECT TOP 1 AspNetUserId, FirstName, LastName
+                      FROM Employee WHERE Id = %s""", (int(employee_id),))
+        r = cu.fetchone()
+        if not r or not r[0]:
+            conn.close()
+            raise WriteRefused('That employee has no sign-in.')
+        user_id, name = str(r[0]), ('%s %s' % (r[1] or '', r[2] or '')).strip()
+        cu.execute('UPDATE [AspNetUsers] SET LockoutEndDateUtc = NULL WHERE Id = %s',
+                   (user_id,))
+        conn.commit()
+        out.update({'ok': True, 'committed': True, 'name': name,
+                    'meaning': '%s can sign in again.' % name})
+    except WriteRefused:
+        raise
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        out.update({'ok': False, 'committed': False,
+                    'error': _explain(e), 'raw_error': str(e)[:300]})
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    _log(who, out)
+    return out
 
 
 def create_agent(fields, who, dry_run=True):

@@ -6979,6 +6979,41 @@ def staffing_route():
     })
 
 
+@app.route('/api/callbacks', methods=['GET'])
+@portal_or_manager
+def callbacks_route():
+    """Who still needs calling back."""
+    import cms_db
+    try:
+        hours = min(168, max(1, int(request.args.get('hours') or 48)))
+    except Exception:
+        hours = 48
+    try:
+        return jsonify(cms_db.callback_list(hours=hours))
+    except Exception as e:
+        return jsonify({'error': str(e)[:200], 'calls': [], 'count': 0}), 400
+
+
+@app.route('/api/callbacks/<int:call_id>/done', methods=['POST'])
+@portal_or_manager
+def callback_done(call_id):
+    """Mark a missed call as dealt with — the same thing the CMS's
+    MarkCallResolved does, so both systems agree on what is outstanding."""
+    import cms_write
+    who = _who()
+    try:
+        out = cms_write.update('PhoneCallsLog', call_id,
+                               {'Resolved': True,
+                                'ResolvedBy': (who or {}).get('employee_id')},
+                               who, dry_run=False)
+    except cms_write.WriteRefused as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'Could not mark it done.',
+                        'raw_error': str(e)[:300]}), 400
+    return jsonify(out), (200 if out.get('ok') else 400)
+
+
 @app.route('/api/waiting', methods=['GET'])
 @portal_or_manager
 def waiting_route():
@@ -9258,7 +9293,7 @@ PORTAL_ALLOWED_PREFIXES = (
     '/api/media/', '/media/',
     '/api/phone-event/recent', '/api/phone-event/check',
     '/api/missed-calls', '/api/call-flow', '/api/dnd-check', '/api/why-failing',
-    '/api/waiting', '/api/queue-kinds', '/api/texts/',
+    '/api/waiting', '/api/queue-kinds', '/api/callbacks', '/api/texts/',
     '/api/cms-db/', '/api/connections', '/static/', '/favicon',
 )
 
