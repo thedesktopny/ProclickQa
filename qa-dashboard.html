@@ -1448,6 +1448,32 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
     </div>
 
     <div class="card" style="padding:16px 20px;margin-top:14px;">
+      <h2 class="payh">Security alerts</h2>
+      <div class="payhint">Raised the moment somebody opens a customer's stored login while
+        not working on that customer, or while not on shift at all. Emailed as they happen.</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button onclick="loadAlerts()" class="btn btn-outline" style="font-size:12px;">Show recent</button>
+        <button onclick="testAlert()" class="btn btn-outline" style="font-size:12px;">Send a test</button>
+        <button onclick="showSmsNumbers()" class="btn btn-outline" style="font-size:12px;">Which number to send from?</button>
+      </div>
+      <div id="al-out" style="margin-top:12px;"></div>
+    </div>
+
+    <div class="card" style="padding:16px 20px;margin-top:14px;">
+      <h2 class="payh">Two-step sign-in</h2>
+      <div class="payhint">Whether the code emails are actually working. The test sends a
+        real code to an address you choose — it will not sign anyone in.</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button onclick="checkTwoStep()" class="btn btn-outline" style="font-size:12px;">Check</button>
+        <input id="ts-to" class="cms-in" style="width:220px;font-size:12px;"
+               placeholder="send a test to…">
+        <button onclick="sendTwoStepTest()" class="btn btn-outline" style="font-size:12px;">Send test</button>
+      </div>
+      <pre id="ts-out" style="white-space:pre-wrap;font-size:11.5px;color:var(--text2);
+           margin:12px 0 0;line-height:1.8;"></pre>
+    </div>
+
+    <div class="card" style="padding:16px 20px;margin-top:14px;">
       <h2 class="payh">Card payments</h2>
       <div class="payhint">Whether the two Cardknox keys have actually reached the running
         app. A setting saved in Azure does not take effect until the app restarts.</div>
@@ -3445,9 +3471,18 @@ async function checkAuth(){
 }
 
 async function doLogout(){
+  [inTimer, cfTimer, lvTimer, acTimer, smsTimer].forEach(t => {
+    try{ clearInterval(t); }catch(e){}
+  });
+  window.__saidSignedOut = true;
+  try{ if(portalTicket) await fetch('/api/portal/logout',
+        {method:'POST', headers: portalHeaders()}); }catch(e){}
   try{ await API.post('/api/logout',{}); }catch(e){}
   clearToken();
-  location.reload();
+  // a portal ticket may also be sitting here if the person came in that way
+  try{ sessionStorage.removeItem('portal_ticket'); }catch(e){}
+  portalTicket = null;
+  location.replace(location.pathname);
 }
 
 async function loadStats(){try{stats=await API.get('/api/stats');}catch(e){}}
@@ -4790,10 +4825,34 @@ function portalApply(name, isManager){
   showPage(portalPages[0] || 'live');
 }
 
-function portalSignOut(){
+/* Signing out has to undo everything the sign-in set up, not just the portal
+   ticket. A QA reviewer also gets a VoiceGuard token, and several timers keep
+   polling — left running they fire off requests with no sign-in, which is what
+   produced the "your sign-in has expired" bar straight after signing out. */
+async function portalSignOut(){
+  // stop everything that polls, before anything is cleared
+  [inTimer, cfTimer, lvTimer, acTimer, smsTimer].forEach(t => {
+    try{ clearInterval(t); }catch(e){}
+  });
+  window.__saidSignedOut = true;      // and no expired-session bar on the way out
+
+  // Tell the server, so the ticket stops working everywhere — not only in
+  // this browser. A signed ticket is otherwise valid for its full ten hours
+  // however thoroughly the page is cleared.
+  try{ await fetch('/api/portal/logout', {method:'POST', headers: portalHeaders()}); }catch(e){}
+  try{ if(getToken()) await API.post('/api/logout', {}); }catch(e){}
+
   portalTicket = null;
+  portalPages = [];
+  portalIsAdmin = false;
   try{ sessionStorage.removeItem('portal_ticket'); }catch(e){}
-  location.reload();
+  try{ clearToken(); }catch(e){}      // the QA token a reviewer was given
+  try{ sessionStorage.clear(); }catch(e){}
+
+  // the remembered device is deliberately KEPT: signing out is not the same as
+  // saying "this machine is not mine", and clearing it would email a code at
+  // every sign-in, which is what people work around.
+  location.replace(location.pathname);
 }
 
 async function portalBoot(){
@@ -6110,6 +6169,158 @@ async function doPull(){
     btn.style.display = 'none';
   }catch(e){ out.textContent = 'Failed: ' + e.message; }
   finally{ btn.disabled = false; btn.textContent = 'Score them'; }
+}
+
+
+/* Is two-step sign-in really working — settings, and a real send. */
+function twoStepLines(r){
+  const lines = [
+    (r.enabled ? '✓  two-step sign-in is ON' : '✗  two-step sign-in is switched OFF (PORTAL_2FA)'),
+    (r.token ? '✓' : '✗') + '  POSTMARK_TOKEN — ' + r.why
+      + (r.length ? '  ·  ' + r.length + ' characters, starts ' + (r.starts || '') : ''),
+    '   codes come from ' + r.sender,
+  ];
+  if(r.codes_sent_7d !== undefined){
+    lines.push('', `in the last 7 days: ${r.codes_sent_7d} codes sent, ${r.codes_used_7d} used`);
+    lines.push(`${r.remembered_devices} devices currently remembered`);
+  }
+  lines.push('', 'this app started ' + String(r.app_started).replace('T',' ').slice(0,19)
+             + '  (' + (r.app_started_note || '') + ')');
+  if(!r.token) lines.push('', 'The key is the value passed to new PostmarkClient(...) in '
+    + 'EmailClient.cs — 36 characters, starts b20e44fd.');
+  return lines.join('\n');
+}
+
+
+/* What has been flagged. Recording without noticing is only half of it, so
+   these are emailed as they happen and listed here afterwards. */
+
+/* Undoes a lock. Only managers and admins can reach this, and the unlock is
+   itself recorded — who let somebody back in is as worth knowing as who was
+   locked out. */
+
+/* Which of our numbers to send alerts from. A spare one, not a customer's —
+   otherwise replies land in that customer's conversation. */
+async function showSmsNumbers(){
+  const box = document.getElementById('al-out');
+  box.innerHTML = '<div style="color:var(--text3);font-size:12.5px;">Looking…</div>';
+  try{
+    const r = await API.get('/api/our-sms-numbers');
+    if(r.error){ box.innerHTML = `<div style="color:var(--red)">${r.error}</div>`; return; }
+    const lines = [];
+    lines.push('<div style="font-size:12.5px;line-height:1.9;">');
+    lines.push('<b>Sending alerts from:</b> ' + (r.currently_set
+      ? esc(r.currently_set) : '<span style="color:var(--yellow)">not set yet (ALERT_SMS_FROM)</span>'));
+    lines.push('<b>Alerts go to:</b> ' + (r.alerts_go_to.length
+      ? r.alerts_go_to.map(esc).join(', ')
+      : '<span style="color:var(--yellow)">nobody yet (ALERT_SMS_TO)</span>'));
+    lines.push('</div>');
+
+    lines.push(`<div style="margin-top:12px;font-size:11px;letter-spacing:.08em;
+      text-transform:uppercase;color:var(--text3);">Spare numbers — use one of these</div>`);
+    lines.push((r.spare || []).length
+      ? '<div style="font-size:13px;line-height:2;font-variant-numeric:tabular-nums;">'
+        + r.spare.map(n => esc(n.number)).join('<br>') + '</div>'
+      : `<div style="color:var(--yellow);font-size:12.5px;">The spare pool is empty —
+           every number is assigned to a customer. ${r.spare_error ? esc(r.spare_error) : ''}</div>`);
+
+    lines.push(`<div style="margin-top:12px;font-size:11px;letter-spacing:.08em;
+      text-transform:uppercase;color:var(--text3);">Already a customer's — do not use</div>`);
+    lines.push('<div style="font-size:12px;color:var(--text3);line-height:1.8;">'
+      + `${r.in_use_count} numbers are assigned to customers, for example: `
+      + (r.in_use_sample || []).map(n => esc(n.number) + ' (' + esc(n.customer) + ')').join(', ')
+      + '</div>');
+    box.innerHTML = lines.join('');
+  }catch(e){ box.innerHTML = `<div style="color:var(--red)">${e.message}</div>`; }
+}
+
+async function unlockPerson(employeeId, btn){
+  if(!confirm('Let this person sign in again?')) return;
+  btn.disabled = true; btn.textContent = 'Unlocking…';
+  try{
+    const r = await API.post('/api/employees/' + employeeId + '/unlock', {});
+    if(r.error || r.ok === false){
+      showToast(r.error || 'Could not unlock', true);
+      btn.disabled = false; btn.textContent = 'Let them back in';
+      return;
+    }
+    showToast(r.meaning || 'They can sign in again');
+    loadAlerts();
+  }catch(e){
+    showToast(e.message, true);
+    btn.disabled = false; btn.textContent = 'Let them back in';
+  }
+}
+
+async function loadAlerts(){
+  const box = document.getElementById('al-out');
+  box.innerHTML = '<div style="color:var(--text3);font-size:12.5px;">Looking…</div>';
+  try{
+    const r = await API.get('/api/security-alerts?days=14');
+    if(r.error){ box.innerHTML = `<div style="color:var(--red)">${r.error}</div>`; return; }
+    const head = `<div style="font-size:12px;color:var(--text3);margin-bottom:8px;">
+      ${r.alerts.length} in the last ${r.days} days · ${r.last_7_days} this week
+      ${r.email_set ? '' : ' · <span style="color:var(--yellow)">emails are not set up '
+        + '(SENDGRID_KEY and ALERT_EMAIL)</span>'}</div>`;
+    box.innerHTML = head + (r.alerts.length ? r.alerts.map(a=>`
+      <div class="payrow" style="cursor:default;align-items:flex-start;">
+        <span style="width:8px;height:8px;border-radius:50%;flex:none;margin-top:6px;
+              background:${a.severity==='high'?'var(--red)':
+                          a.severity==='info'?'var(--text3)':'var(--yellow)'};"></span>
+        <div class="nm" style="white-space:normal;">${esc(a.headline)}
+          ${a.detail && a.detail.account_locked && a.detail.employee_id ? `
+            <div style="margin-top:6px;">
+              <button class="cn-chip" onclick="unlockPerson(${a.detail.employee_id}, this)">
+                Let them back in</button></div>` : ''}
+          ${a.detail && a.detail.lock_failed ? `
+            <div style="font-size:11.5px;color:var(--red);margin-top:4px;">
+              THE LOCK FAILED — they are not shut out: ${esc(a.detail.lock_failed)}</div>` : ''}
+          <div class="mt" style="margin-top:3px;">
+            ${Object.entries(a.detail||{}).map(([k,v])=>
+              esc(k.replace(/_/g,' ')) + ': ' + esc(String(v))).join(' · ')}</div>
+          ${a.email_error ? `<div style="font-size:11px;color:var(--red);margin-top:3px;">
+            email failed: ${esc(a.email_error)}</div>` : ''}
+        </div>
+        <div style="text-align:right;font-size:11px;color:var(--text3);white-space:nowrap;">
+          ${new Date(a.when).toLocaleString()}
+          <div>${a.emailed ? 'emailed' : (a.email_error ? 'not emailed' : 'sending…')}</div></div>
+      </div>`).join('')
+      : '<div style="color:var(--green);font-size:12.5px;">Nothing flagged.</div>');
+  }catch(e){ box.innerHTML = `<div style="color:var(--red)">${e.message}</div>`; }
+}
+
+async function testAlert(){
+  const box = document.getElementById('al-out');
+  box.innerHTML = '<div style="color:var(--text3);font-size:12.5px;">Sending…</div>';
+  try{
+    const r = await API.post('/api/security-alerts/test', {});
+    box.innerHTML = r.ok
+      ? `<div style="color:var(--green);font-size:12.5px;">✅ Test alert sent to ${esc(r.sent_to)}.</div>`
+      : `<div style="color:var(--red);font-size:12.5px;">❌ ${esc(r.error || 'It did not send.')}
+         <div style="color:var(--text3);margin-top:5px;">Needs SENDGRID_KEY and ALERT_EMAIL in
+           Azure. The SendGrid key is in EmailClient.cs, in the Send method.</div></div>`;
+  }catch(e){ box.innerHTML = `<div style="color:var(--red)">${e.message}</div>`; }
+}
+
+async function checkTwoStep(){
+  const out = document.getElementById('ts-out');
+  out.textContent = 'Checking…';
+  try{
+    const r = await API.get('/api/two-step-check');
+    out.textContent = r.error ? ('❌ ' + r.error) : twoStepLines(r);
+  }catch(e){ out.textContent = 'Failed: ' + e.message; }
+}
+
+async function sendTwoStepTest(){
+  const out = document.getElementById('ts-out');
+  const to = (document.getElementById('ts-to').value || '').trim();
+  if(!to){ out.textContent = 'Type an address to send the test to.'; return; }
+  out.textContent = 'Sending…';
+  try{
+    const r = await API.post('/api/two-step-check', {to});
+    out.textContent = (r.sent ? '✅ ' + r.note : '❌ ' + (r.error || 'It did not send.'))
+      + '\n\n' + twoStepLines(r);
+  }catch(e){ out.textContent = 'Failed: ' + e.message; }
 }
 
 async function checkCardKeys(){

@@ -538,6 +538,39 @@ def init_db():
     except Exception as e:
         print('[init] source column: ' + str(e)[:120])
 
+    # A portal ticket is signed and lasts ten hours, so until now NOTHING could
+    # stop one working — not signing out, not locking the account. This records
+    # the moment from which a person's tickets are refused.
+    try:
+        c.execute('''CREATE TABLE IF NOT EXISTS portal_revocations (
+            user_id TEXT PRIMARY KEY,
+            revoked_at TIMESTAMP DEFAULT NOW(),
+            reason TEXT
+        )''')
+        conn.commit()
+    except Exception as e:
+        print('[init] portal_revocations: ' + str(e)[:140])
+
+    try:
+        c.execute('''CREATE TABLE IF NOT EXISTS security_alerts (
+            id SERIAL PRIMARY KEY,
+            kind TEXT NOT NULL,
+            severity TEXT DEFAULT 'warning',
+            headline TEXT NOT NULL,
+            detail TEXT,
+            who_name TEXT,
+            employee_id INTEGER,
+            account_id INTEGER,
+            emailed BOOLEAN DEFAULT FALSE,
+            email_error TEXT,
+            seen BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT NOW()
+        )''')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_alerts_when ON security_alerts(created_at DESC)')
+        conn.commit()
+    except Exception as e:
+        print('[init] security_alerts: ' + str(e)[:140])
+
     # A code sent by email, valid for a few minutes. Only its hash is kept, so
     # a look at this table does not let anyone sign in.
     try:
@@ -824,10 +857,13 @@ def require_manager(f):
 def _portal_ticket(user, minutes=600):
     import hmac, hashlib, base64, time, json as _json
     exp = int(time.time()) + minutes * 60
+    # 'i' is when this ticket was issued — without it a revocation cannot tell
+    # an old ticket from one minted a second later by a fresh sign-in
     body = _json.dumps({'u': user.get('user_id'), 'e': user.get('employee_id'),
                         'n': user.get('name'), 'm': bool(user.get('is_manager')),
                         'q': bool(user.get('is_qa')),
-                        'a': bool(user.get('is_admin')), 'x': exp}, separators=(',', ':'))
+                        'a': bool(user.get('is_admin')),
+                        'i': int(time.time()), 'x': exp}, separators=(',', ':'))
     secret = (os.getenv('SECRET_KEY') or app.secret_key or 'voiceguard').encode()
     sig = hmac.new(secret, body.encode(), hashlib.sha256).hexdigest()[:32]
     return base64.urlsafe_b64encode((body + '.' + sig).encode()).decode()
@@ -838,6 +874,43 @@ def _portal_ticket_from_request():
     arrive in the URL instead. Same signature check either way."""
     return (request.headers.get('X-Portal-Ticket')
             or request.args.get('t') or '')
+
+
+_REVOKED = {'at': 0, 'map': {}}
+
+
+def _revocations(max_age=20):
+    """Who has signed out or been locked, and when. Cached briefly — this is
+    read on every single request."""
+    import time as _t
+    if _REVOKED['map'] is not None and (_t.time() - _REVOKED['at']) < max_age:
+        return _REVOKED['map']
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute('SELECT user_id, revoked_at FROM portal_revocations')
+        _REVOKED['map'] = {str(r[0]): r[1] for r in c.fetchall()}
+        _REVOKED['at'] = _t.time()
+        conn.close()
+    except Exception as e:
+        print('[portal] could not read revocations: ' + str(e)[:120])
+    return _REVOKED['map'] or {}
+
+
+def revoke_portal_sessions(user_id, reason=''):
+    """Stops every ticket that person currently holds."""
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute("""INSERT INTO portal_revocations (user_id, revoked_at, reason)
+                     VALUES (%s, NOW(), %s)
+                     ON CONFLICT (user_id) DO UPDATE
+                     SET revoked_at = NOW(), reason = EXCLUDED.reason""",
+                  (str(user_id), (reason or '')[:200]))
+        conn.commit(); conn.close()
+        _REVOKED['at'] = 0          # so the next request sees it immediately
+        return True
+    except Exception as e:
+        print('[portal] could not revoke: ' + str(e)[:140])
+        return False
 
 
 def _portal_user(ticket):
@@ -854,6 +927,22 @@ def _portal_user(ticket):
         data = _json.loads(body)
         if int(data.get('x', 0)) < time.time():
             return None
+
+        # A valid signature is not enough on its own. If the person signed out,
+        # or was locked, every ticket issued before that moment stops working —
+        # otherwise signing out only cleared the browser and the ticket kept
+        # working for up to ten hours, and locking somebody did not actually
+        # remove them from the system they were already in.
+        revoked_at = _revocations().get(str(data.get('u', '')))
+        if revoked_at:
+            try:
+                issued = int(data.get('i', 0))
+                if issued and issued < revoked_at.timestamp():
+                    return None
+                if not issued:
+                    return None        # older ticket with no issue time — refuse
+            except Exception:
+                return None
         return data
     except Exception:
         return None
@@ -5003,6 +5092,12 @@ def portal_login_route():
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)[:160]}), 403
 
+    # portal_login already refuses a locked account, but check again here: a
+    # locked person signing in would otherwise clear their own revocation.
+    if user.get('locked_out'):
+        return jsonify({'ok': False,
+                        'error': 'This account is locked. A manager has to reopen it.'}), 403
+
     # The password is right. Unless this device has been proved before, a code
     # goes to the person's own email and nothing is issued until it comes back.
     if os.getenv('PORTAL_2FA', 'on').lower() not in ('off', '0', 'false'):
@@ -5028,6 +5123,18 @@ def portal_login_route():
 
 def _issue_portal_session(user, remember_device=False):
     """Everything that happens once someone has proved who they are."""
+    # A fresh, proven sign-in clears any revocation. Without this, signing out
+    # and signing straight back in would refuse the new ticket too, because a
+    # ticket issued in the same second as the revocation cannot be told apart
+    # from one issued just before it.
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute('DELETE FROM portal_revocations WHERE user_id = %s',
+                  (str(user['user_id']),))
+        conn.commit(); conn.close()
+        _REVOKED['at'] = 0
+    except Exception as e:
+        print('[portal] could not clear the revocation: ' + str(e)[:120])
     pages = list(PORTAL_PAGES)
     if user.get('is_qa') or user.get('is_admin'):
         pages += PORTAL_QA_PAGES
@@ -5075,6 +5182,15 @@ def _issue_portal_session(user, remember_device=False):
         except Exception as e:
             print('[portal] could not remember this device: ' + str(e)[:140])
     return jsonify(out)
+
+
+@app.route('/api/portal/logout', methods=['POST'])
+def portal_logout():
+    """Ends this person's portal sessions everywhere, not just in this browser."""
+    p = _portal_user(request.headers.get('X-Portal-Ticket', ''))
+    if p and p.get('u'):
+        revoke_portal_sessions(p['u'], 'signed out')
+    return jsonify({'ok': True})
 
 
 @app.route('/api/portal/verify-code', methods=['POST'])
@@ -5470,6 +5586,19 @@ def credential_reveal(credential_id):
         # no record, no reveal
         return jsonify({'error': 'Could not record who is looking, so the login '
                                  'was not shown. ' + str(e)[:120]}), 500
+
+    # Recorded. Now decide whether it deserves an alert — after logging and
+    # before the value is returned, so a failure here can never stop somebody
+    # seeing a login they are entitled to.
+    try:
+        verdict = check_credential_view(info.get('account_id'), info.get('title'), who)
+        if isinstance(verdict, dict) and verdict.get('blocked'):
+            # refused, locked, and the manager already told — the value never
+            # leaves the server
+            return jsonify({'error': verdict['message'], 'locked': verdict.get('locked'),
+                            'blocked': True}), 403
+    except Exception as e:
+        print('[alert] credential check: ' + str(e)[:140])
 
     # The CMS keeps its own access record (PersonalInfoMetadata, which its
     # "who viewed personal info" report reads). Writing there too means both
@@ -5886,6 +6015,371 @@ def payment_refund(payment_id):
         return jsonify({'ok': False, 'error': 'The refund could not be completed.',
                         'raw_error': str(e)[:300]}), 400
     return jsonify(out), (200 if out.get('ok') else 400)
+
+
+# ─── SECURITY ALERTS ─────────────────────────────────────────────────────────
+# Every look at a customer's stored login has been recorded for a while, but
+# recorded is not the same as noticed. These are the things worth an email the
+# moment they happen: somebody opening a customer's password when they are not
+# working on that customer, or not even on shift, or working through several
+# customers in a row.
+#
+# SendGrid carries these because that is what the CMS already uses for its
+# admin warnings — same sender, so they land where such things already do.
+SENDGRID_URL = 'https://api.sendgrid.com/v3/mail/send'
+
+
+def _send_alert_email(subject, lines, to=None):
+    """Emails an admin. Returns None on success, or why it failed."""
+    key = os.getenv('SENDGRID_KEY', '').strip()
+    if not key:
+        return 'SENDGRID_KEY is not set'
+    recipient = (to or os.getenv('ALERT_EMAIL', '') or '').strip()
+    if not recipient:
+        return 'ALERT_EMAIL is not set — nobody to send to'
+    sender = os.getenv('SENDGRID_FROM', 'proclickemail@gmail.com').strip()
+    text = '\n'.join(lines)
+    html = ('<div style="font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;'
+            'font-size:14px;color:#1b1f33;line-height:1.65;">'
+            '<div style="background:#F24E4E;color:#fff;padding:14px 20px;'
+            'border-radius:10px 10px 0 0;font-weight:700;">ProClick — security alert</div>'
+            '<div style="border:1px solid #e4e6f0;border-top:0;border-radius:0 0 10px 10px;'
+            'padding:20px;">' +
+            ''.join('<p style="margin:0 0 8px;">%s</p>' % l for l in lines if l) +
+            '</div></div>')
+    body = {
+        'personalizations': [{'to': [{'email': a.strip()} for a in recipient.split(',') if a.strip()]}],
+        'from': {'email': sender, 'name': 'ProClick'},
+        'subject': subject,
+        'content': [{'type': 'text/plain', 'value': text},
+                    {'type': 'text/html', 'value': html}],
+    }
+    try:
+        req = urllib.request.Request(
+            SENDGRID_URL, data=json.dumps(body).encode(),
+            headers={'Authorization': 'Bearer ' + key,
+                     'Content-Type': 'application/json'})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            if resp.status not in (200, 202):
+                return 'SendGrid answered %s' % resp.status
+        return None
+    except Exception as e:
+        return str(e)[:160]
+
+
+def _raise_security_alert(kind, headline, detail, who, account_id=None, severity='warning'):
+    """Records an alert and emails it. Recording happens first, so an email
+    failure never loses the fact that something happened."""
+    import threading
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute("""INSERT INTO security_alerts
+                     (kind, severity, headline, detail, who_name, employee_id,
+                      account_id, created_at)
+                     VALUES (%s,%s,%s,%s,%s,%s,%s, NOW()) RETURNING id""",
+                  (kind, severity, headline, json.dumps(detail),
+                   (who or {}).get('name'), (who or {}).get('employee_id'), account_id))
+        row = c.fetchone()
+        conn.commit(); conn.close()
+        alert_id = int(row[0]) if row else None
+    except Exception as e:
+        print('[alert] could not record: ' + str(e)[:140])
+        alert_id = None
+
+    def send():
+        lines = ['<b>%s</b>' % headline, '']
+        for k, v in (detail or {}).items():
+            lines.append('%s: %s' % (k.replace('_', ' ').capitalize(), v))
+        lines += ['', 'Seen at %s (server time).' % datetime.now().strftime('%d %b %Y, %H:%M'),
+                  'Every look at a stored login is recorded — the full list is on the '
+                  'Connections page of the portal.']
+        problem = _send_alert_email('ProClick alert: ' + headline, lines)
+        if problem:
+            print('[alert] email not sent: ' + problem)
+            try:
+                conn2 = get_db(); c2 = conn2.cursor()
+                c2.execute('UPDATE security_alerts SET email_error = %s WHERE id = %s',
+                           (problem[:200], alert_id))
+                conn2.commit(); conn2.close()
+            except Exception:
+                pass
+        elif alert_id:
+            try:
+                conn2 = get_db(); c2 = conn2.cursor()
+                c2.execute('UPDATE security_alerts SET emailed = TRUE WHERE id = %s', (alert_id,))
+                conn2.commit(); conn2.close()
+            except Exception:
+                pass
+
+    threading.Thread(target=send, daemon=True).start()
+    return alert_id
+
+
+def _send_alert_sms(text):
+    """Texts the owner. Uses BulkVS, the same service the CMS texts customers
+    with, from one of the numbers already on the account."""
+    import urllib.parse as _p
+    auth = os.getenv('BULKVS_AUTH', '').strip()
+    to_numbers = [n.strip() for n in os.getenv('ALERT_SMS_TO', '').split(',') if n.strip()]
+    from_number = os.getenv('ALERT_SMS_FROM', '').strip()
+    if not auth:
+        return 'BULKVS_AUTH is not set'
+    if not to_numbers or not from_number:
+        return 'ALERT_SMS_TO and ALERT_SMS_FROM are not set'
+    body = {'From': from_number, 'To': to_numbers, 'Message': text[:900]}
+    try:
+        req = urllib.request.Request(
+            'https://portal.bulkvs.com/api/v1.0/messageSend',
+            data=json.dumps(body).encode(),
+            headers={'Authorization': 'Basic ' + auth,
+                     'Content-Type': 'application/json'})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            answer = json.loads(resp.read().decode() or '{}')
+        results = answer.get('Results') or []
+        ok = any(str(x.get('Status', '')).upper() in ('SUCCESS', 'OK', 'QUEUED')
+                 for x in results if isinstance(x, dict))
+        if not (ok or answer.get('RefId') or answer.get('RefID')):
+            return 'the texting service did not accept it: %s' % str(answer)[:120]
+        return None
+    except Exception as e:
+        return str(e)[:160]
+
+
+def check_credential_view(account_id, title, who):
+    """Decides whether this look at a stored login deserves an alert.
+
+    The CMS has the same idea in IsEmployeeWorkingOnAccount; this adds the
+    shift question, because looking at customer passwords when you are not
+    even working is the clearer signal.
+    """
+    import cms_db
+    employee_id = (who or {}).get('employee_id')
+    if not employee_id:
+        return None
+    try:
+        ctx = cms_db.employee_context(employee_id, account_id)
+    except Exception as e:
+        print('[alert] could not judge the context: ' + str(e)[:140])
+        return None
+
+    name = (who or {}).get('name') or 'Someone'
+
+    # Somebody marked ExcludeSecurity in the CMS is exempt, exactly as the CMS
+    # itself treats them. This is checked before anything else — an exempt
+    # person is never locked out and never generates an alert.
+    if ctx.get('exclude_security'):
+        return None
+
+    detail = {'who': name, 'employee_id': employee_id,
+              'account_id': account_id, 'credential': title or '(untitled)',
+              'on_shift': ctx['on_shift'], 'working_on_this_account': ctx['working_on_account']}
+
+    if not ctx['on_shift']:
+        # Locking comes FIRST — before the password is handed over, and before
+        # anything is emailed. An alert that arrives after the person already
+        # has the login is a record of a theft, not a prevention of one.
+        import cms_write
+        locked, lock_note = False, ''
+        try:
+            out = cms_write.lock_login(
+                employee_id,
+                'opened a customer login while not on shift', who)
+            locked = bool(out.get('ok'))
+            lock_note = out.get('error') or ''
+            # locking the login is not enough on its own — they are already
+            # signed in, and that ticket would keep working for hours
+            if locked and out.get('user_id'):
+                revoke_portal_sessions(out['user_id'], 'locked: off-shift credential access')
+        except Exception as e:
+            lock_note = str(e)[:160]
+        detail['account_locked'] = locked
+        if not locked:
+            detail['lock_failed'] = lock_note
+
+        headline = ('%s tried to open a customer login while NOT ON SHIFT — '
+                    'their account has been locked' % name) if locked else \
+                   ('%s tried to open a customer login while NOT ON SHIFT — '
+                    'THE LOCK FAILED, act now' % name)
+        _raise_security_alert('credential_off_shift', headline, detail, who,
+                              account_id, severity='high')
+
+        # and a text, because this is the one that should not wait for an inbox
+        def text_it():
+            msg = ('ProClick: %s tried to open a customer login while not on shift. '
+                   'Customer #%s, "%s". %s They were NOT shown the login. '
+                   'Unlock them in the portal under Security alerts.'
+                   % (name, account_id, (title or 'a stored login'),
+                      'Their account is now locked.' if locked
+                      else 'THE LOCK FAILED — check immediately.'))
+            problem = _send_alert_sms(msg)
+            if problem:
+                print('[alert] text not sent: ' + problem)
+        import threading
+        threading.Thread(target=text_it, daemon=True).start()
+
+        # nothing is revealed
+        return {'blocked': True, 'locked': locked,
+                'message': ('You are not on shift, so this login was not shown. '
+                            'Your account has been locked and a manager has been told.')}
+
+    if not ctx['working_on_account']:
+        other = ctx.get('open_work_account_id')
+        detail['currently_working_on'] = other or 'nothing'
+        return _raise_security_alert(
+            'credential_wrong_account',
+            ('%s viewed customer info while working on a different account' % name),
+            detail, who, account_id, severity='warning')
+    return None
+
+
+@app.route('/api/employees/<int:employee_id>/unlock', methods=['POST'])
+@portal_manager_only
+def unlock_employee(employee_id):
+    """Let a locked-out person back in. Managers and admins only."""
+    import cms_write
+    try:
+        out = cms_write.unlock_login(employee_id, _who())
+    except cms_write.WriteRefused as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'Could not unlock.',
+                        'raw_error': str(e)[:300]}), 400
+    if out.get('ok'):
+        _raise_security_alert('account_unlocked',
+                              '%s was unlocked by %s' % (out.get('name'),
+                                                         (_who() or {}).get('name')),
+                              {'employee_id': employee_id}, _who(),
+                              severity='info')
+    return jsonify(out), (200 if out.get('ok') else 400)
+
+
+@app.route('/api/our-sms-numbers', methods=['GET'])
+@portal_manager_only
+def our_sms_numbers_route():
+    """Which numbers we could send alerts from, and which are already a
+    customer's."""
+    import cms_db
+    try:
+        out = cms_db.our_sms_numbers()
+        out['currently_set'] = os.getenv('ALERT_SMS_FROM', '') or None
+        out['alerts_go_to'] = [n.strip() for n in
+                               os.getenv('ALERT_SMS_TO', '').split(',') if n.strip()]
+        return jsonify(out)
+    except Exception as e:
+        return jsonify({'error': str(e)[:200], 'spare': []}), 400
+
+
+@app.route('/api/security-alerts', methods=['GET'])
+@portal_manager_only
+def security_alerts_route():
+    """What has been flagged, newest first."""
+    try:
+        days = min(90, max(1, int(request.args.get('days') or 14)))
+    except Exception:
+        days = 14
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute("""SELECT id, kind, severity, headline, detail, who_name,
+                            account_id, emailed, email_error, seen, created_at
+                     FROM security_alerts
+                     WHERE created_at > NOW() - (%s || ' days')::interval
+                     ORDER BY created_at DESC LIMIT 200""", (str(days),))
+        rows = []
+        for r in c.fetchall():
+            try:
+                detail = json.loads(r[4] or '{}')
+            except Exception:
+                detail = {}
+            rows.append({'id': r[0], 'kind': r[1], 'severity': r[2], 'headline': r[3],
+                         'detail': detail, 'who': r[5], 'account_id': r[6],
+                         'emailed': bool(r[7]), 'email_error': r[8],
+                         'seen': bool(r[9]),
+                         'when': r[10].isoformat() if r[10] else None})
+        c.execute("""SELECT COUNT(*) FROM security_alerts
+                     WHERE created_at > NOW() - INTERVAL '7 days'""")
+        week = int((c.fetchone() or [0])[0] or 0)
+        conn.close()
+        return jsonify({'alerts': rows, 'days': days, 'last_7_days': week,
+                        'email_set': bool(os.getenv('SENDGRID_KEY', '').strip()
+                                          and os.getenv('ALERT_EMAIL', '').strip())})
+    except Exception as e:
+        return jsonify({'error': str(e)[:200], 'alerts': []}), 400
+
+
+@app.route('/api/security-alerts/test', methods=['POST'])
+@portal_manager_only
+def security_alerts_test():
+    """Sends a real alert email, to prove the wiring works."""
+    to = (request.json or {}).get('to') or os.getenv('ALERT_EMAIL', '')
+    problem = _send_alert_email(
+        'ProClick alert: this is a test',
+        ['<b>This is a test alert.</b>', '',
+         'Nothing has happened — somebody pressed the test button in the portal.',
+         'Real alerts look like this and arrive the moment they happen.'],
+        to=to)
+    return jsonify({'ok': problem is None, 'error': problem,
+                    'sent_to': to or '(nowhere — ALERT_EMAIL is not set)'}), \
+           (200 if problem is None else 400)
+
+
+@app.route('/api/two-step-check', methods=['GET', 'POST'])
+@portal_manager_only
+def two_step_check():
+    """Is two-step sign-in actually working.
+
+    GET reports whether the settings have reached the running app; POST sends
+    a real code to the address given, because a token that looks present can
+    still be rejected by Postmark and only a real send proves otherwise.
+    """
+    token = os.environ.get('POSTMARK_TOKEN')
+    state = {
+        'enabled': os.getenv('PORTAL_2FA', 'on').lower() not in ('off', '0', 'false'),
+        'sender': os.getenv('POSTMARK_FROM', 'david@myhellodesk.com'),
+        'app_started': _APP_STARTED,
+        'app_started_note': 'server time (UTC) — a setting saved after this needs a restart',
+    }
+    if token is None:
+        state.update({'token': False, 'why': 'POSTMARK_TOKEN is not present at all'})
+    elif not token.strip():
+        state.update({'token': False, 'why': 'POSTMARK_TOKEN is present but empty'})
+    elif token.strip() != token:
+        state.update({'token': True, 'length': len(token.strip()),
+                      'why': 'it has spaces or a line break around it — that will be sent too'})
+    else:
+        state.update({'token': True, 'length': len(token),
+                      'starts': token[:8] + '…',
+                      'why': ('looks right — Postmark tokens are 36 characters'
+                              if len(token) == 36 else
+                              'present, but Postmark tokens are usually 36 characters')})
+
+    if request.method == 'POST':
+        to = (request.json or {}).get('to') or ''
+        if '@' not in to:
+            return jsonify(dict(state, sent=False,
+                                error='Give an address to send the test to.')), 400
+        import secrets
+        code = '%06d' % secrets.randbelow(1000000)
+        problem = _send_code_email(to, code, 'test')
+        state.update({'sent': problem is None, 'error': problem,
+                      'note': ('A real code was sent to %s — it is a test and will not '
+                               'sign anyone in.' % to) if not problem else None})
+        return jsonify(state), (200 if not problem else 400)
+
+    # count how many people have actually signed in with a code
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute("""SELECT COUNT(*), SUM(CASE WHEN used THEN 1 ELSE 0 END)
+                     FROM portal_2fa WHERE created_at > NOW() - INTERVAL '7 days'""")
+        row = c.fetchone()
+        c.execute("SELECT COUNT(*) FROM portal_trusted_devices WHERE expires_at > NOW()")
+        devices = int((c.fetchone() or [0])[0] or 0)
+        conn.close()
+        state.update({'codes_sent_7d': int(row[0] or 0),
+                      'codes_used_7d': int(row[1] or 0),
+                      'remembered_devices': devices})
+    except Exception as e:
+        state['history_error'] = str(e)[:160]
+    return jsonify(state)
 
 
 @app.route('/api/card-fields', methods=['GET'])
@@ -8637,7 +9131,7 @@ PORTAL_ALLOWED_PREFIXES = (
     '/api/whoami', '/api/portal/', '/api/live', '/api/customers',
     '/api/agents', '/api/agent-list', '/api/packages', '/api/company-info',
     '/api/recording-link', '/api/recordings/', '/api/payments/', '/api/cms-settings',
-    '/api/qa-users', '/api/qa-assignments', '/api/employees/', '/api/agents',
+    '/api/qa-users', '/api/qa-assignments', '/api/security-alerts', '/api/employees/', '/api/agents',
     '/api/credentials', '/api/credential-access', '/api/work',
     '/api/customers/', '/api/card-fields', '/api/calls/', '/api/my-call', '/api/phone-event',
     '/api/media/', '/media/',

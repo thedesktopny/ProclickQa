@@ -726,6 +726,53 @@ def find_recording_base(sample_limit=5):
             'candidates': candidates, 'notes': notes}
 
 
+def portal_user_by_id(user_id):
+    """Rebuilds a signed-in user from their id, without a password.
+
+    Used after an emailed code is confirmed: the password was already checked
+    a moment ago, and asking for it twice would be theatre.
+    """
+    conn = _connect(); cu = conn.cursor()
+    cu.execute("""SELECT Id, UserName, Email FROM AspNetUsers WHERE Id = %s""",
+               (str(user_id),))
+    r = cu.fetchone()
+    if not r:
+        conn.close()
+        return None
+    uid, uname, email = str(r[0]), r[1], r[2]
+
+    cu.execute("""SELECT TOP 1 Id, FirstName, LastName, Extension, ISNULL(LeftFirm,0), QA
+                  FROM Employee WHERE AspNetUserId = %s""", (uid,))
+    emp = cu.fetchone()
+
+    roles = []
+    try:
+        cu.execute("""SELECT r.Name FROM AspNetUserRoles ur
+                      JOIN AspNetRoles r ON r.Id = ur.RoleId
+                      WHERE ur.UserId = %s""", (uid,))
+        while True:
+            rr = cu.fetchone()
+            if not rr:
+                break
+            roles.append(rr[0])
+    except Exception:
+        pass
+    conn.close()
+
+    joined = ' '.join(roles).lower()
+    is_admin = 'admin' in joined or 'owner' in joined
+    is_manager = is_admin or 'manager' in joined or 'supervisor' in joined
+    return {
+        'user_id': uid, 'username': uname, 'email': email,
+        'employee_id': int(emp[0]) if emp else None,
+        'name': (('%s %s' % (emp[1] or '', emp[2] or '')).strip() if emp else (uname or email)),
+        'extension': (emp[3] if emp else None),
+        'roles': roles, 'is_manager': is_manager, 'is_admin': is_admin,
+        'is_qa': bool(emp[5]) if (emp and len(emp) > 5 and emp[5] is not None)
+                 else ('qa' in joined or 'review' in joined),
+    }
+
+
 def portal_login(username, password):
     """Sign in with a CMS account.
 
@@ -1387,6 +1434,109 @@ def staffing_picture(weeks=4, slot_minutes=30, target_seconds=20, target_answere
                                  'No clock-in records could be read, so every hour looks '
                                  'unstaffed and the numbers below are meaningless.'),
             'target': '%d%% answered within %ds' % (target_answered * 100, target_seconds)}
+
+
+def our_sms_numbers():
+    """Numbers we can text from.
+
+    Two kinds: spares sitting in the pool (SMSNumberTable), which belong to
+    nobody, and numbers already assigned to a customer. An alert should go out
+    from a SPARE — sending from a customer's number means their replies land in
+    that customer's conversation, and the customer may recognise it.
+    """
+    conn = _connect(); cu = conn.cursor()
+    out = {'spare': [], 'in_use_count': 0, 'in_use_sample': []}
+    try:
+        cu.execute("""SELECT TOP 25 Number, Created FROM SMSNumberTable
+                      ORDER BY Created DESC""")
+        while True:
+            r = cu.fetchone()
+            if not r:
+                break
+            out['spare'].append({'number': (r[0] or '').strip(),
+                                 'added': _plain(r[1])})
+    except Exception as e:
+        out['spare_error'] = str(e)[:180]
+
+    try:
+        cu.execute("""SELECT COUNT(DISTINCT smsNumber) FROM Account
+                      WHERE smsNumber IS NOT NULL AND smsNumber <> ''
+                        AND ISNULL(smsActivate, 0) = 1""")
+        out['in_use_count'] = int((cu.fetchone() or [0])[0] or 0)
+        cu.execute("""SELECT TOP 5 a.smsNumber, a.FirstName, a.LastName
+                      FROM Account a
+                      WHERE a.smsNumber IS NOT NULL AND a.smsNumber <> ''
+                        AND ISNULL(a.smsActivate, 0) = 1
+                      ORDER BY a.Id DESC""")
+        while True:
+            r = cu.fetchone()
+            if not r:
+                break
+            out['in_use_sample'].append({
+                'number': (r[0] or '').strip(),
+                'customer': ('%s %s' % (r[1] or '', r[2] or '')).strip()})
+    except Exception as e:
+        out['in_use_error'] = str(e)[:180]
+    conn.close()
+    return out
+
+
+def employee_context(employee_id, account_id=None):
+    """What this person is doing right now — are they on shift, and are they
+    working on that account?
+
+    Both questions matter for judging whether looking at a customer's stored
+    login is normal. Someone on a call with that customer needs their login;
+    someone at home on a Sunday does not.
+    """
+    out = {'on_shift': False, 'clocker_status': None, 'on_break': False,
+           'working_on_account': False, 'open_work_account_id': None,
+           'exclude_security': False}
+    if not employee_id:
+        return out
+    conn = _connect(); cu = conn.cursor()
+
+    # The CMS has an ExcludeSecurity flag on Employee and honours it before
+    # raising any of these alerts. Ignoring it would lock out the very people
+    # who legitimately look at accounts they are not working on — a manager
+    # helping with a problem — and the first thing that happens then is that
+    # somebody turns the whole feature off.
+    try:
+        cu.execute('SELECT ISNULL(ExcludeSecurity, 0) FROM Employee WHERE Id = %s',
+                   (int(employee_id),))
+        r = cu.fetchone()
+        out['exclude_security'] = bool(r[0]) if r else False
+    except Exception as e:
+        print('[cms] exclude-security check: ' + str(e)[:120])
+    try:
+        # the newest clock event decides: 1 in, 2 on break, 0 out
+        cu.execute("""SELECT TOP 1 Status, Created FROM EmployeeClocker
+                      WHERE EmployeeId = %s AND Status IS NOT NULL
+                        AND Created >= DATEADD(hour, -20, GETDATE())
+                      ORDER BY Created DESC""", (int(employee_id),))
+        r = cu.fetchone()
+        if r:
+            status = int(r[0])
+            out['clocker_status'] = status
+            out['on_shift'] = status in (1, 2)
+            out['on_break'] = status == 2
+            out['clocked_since'] = _plain(r[1])
+    except Exception as e:
+        print('[cms] shift check: ' + str(e)[:120])
+
+    try:
+        cu.execute("""SELECT TOP 1 Id, AccountId FROM AccountWork
+                      WHERE EmployeeId = %s AND EndTime IS NULL
+                      ORDER BY StartTime DESC""", (int(employee_id),))
+        w = cu.fetchone()
+        if w:
+            out['open_work_account_id'] = int(w[1] or 0)
+            if account_id is not None:
+                out['working_on_account'] = int(w[1] or 0) == int(account_id)
+    except Exception as e:
+        print('[cms] open work check: ' + str(e)[:120])
+    conn.close()
+    return out
 
 
 def call_flow(minutes=180, limit=40):
