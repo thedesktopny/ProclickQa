@@ -5853,6 +5853,17 @@ def phone_event():
     return jsonify({'ok': True, 'event': event, 'extension': ext or None})
 
 
+@app.route('/api/staffing/clocker-check', methods=['GET'])
+@portal_manager_only
+def staffing_clocker_check():
+    """What is really in the clock-in table — for when coverage reads as empty."""
+    import cms_db
+    try:
+        return jsonify(cms_db.clocker_check(int(request.args.get('weeks') or 4)))
+    except Exception as e:
+        return jsonify({'error': str(e)[:250]}), 400
+
+
 @app.route('/api/staffing', methods=['GET'])
 @portal_manager_only
 def staffing_route():
@@ -5975,6 +5986,8 @@ def staffing_route():
         return jsonify({
             'slots': picture['slots'], 'weeks': weeks, 'target': picture['target'],
             'coverage_warning': picture['coverage_warning'],
+            'coverage_error': picture.get('coverage_error'),
+            'clocker_rows': picture.get('clocker_rows', 0),
             'shortfalls': [], 'overstaffed': [],
             'total_short_hours': 0, 'missed_a_day': 0})
     return jsonify({

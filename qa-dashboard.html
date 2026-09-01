@@ -6595,6 +6595,34 @@ function cfAutoToggle(){
    Two questions, answered from data already collected: how many agents does
    each half hour actually need, and how many were there. The gap is what to
    act on. */
+
+/* Reports what is actually in the clock-in table, so a third guess is not
+   needed. */
+async function checkClocker(){
+  const out = document.getElementById('st-clocker');
+  out.textContent = 'Looking…';
+  try{
+    const r = await API.get('/api/staffing/clocker-check');
+    const lines = [];
+    if(r.error){ out.textContent = '❌ ' + r.error; return; }
+    lines.push(`rows in the table: ${r.total_rows ?? '(could not count)'}`);
+    if(r.oldest) lines.push(`covering ${String(r.oldest).slice(0,10)} to ${String(r.newest).slice(0,10)}`);
+    lines.push(`rows in the last 4 weeks: ${r.rows_in_window ?? '(unknown)'}`);
+    if((r.inout_values||[]).length){
+      lines.push('', 'what the in/out column holds:');
+      r.inout_values.forEach(v => lines.push(`   ${v.value}  —  ${v.rows} rows`));
+    }
+    if((r.recent||[]).length){
+      lines.push('', 'the most recent rows:');
+      r.recent.forEach(x => lines.push(
+        `   employee ${x.employee}  ${String(x.when).slice(0,16).replace('T',' ')}  ${x.inout} (${x.type})`));
+    }
+    Object.keys(r).filter(k=>k.startsWith('error_')).forEach(k=>
+      lines.push('', k + ': ' + r[k]));
+    out.textContent = lines.join('\n');
+  }catch(e){ out.textContent = 'Failed: ' + e.message; }
+}
+
 async function loadStaffing(){
   const advice = document.getElementById('st-advice');
   advice.innerHTML = '<div style="color:var(--text3);font-size:12.5px;">Working it out…</div>';
@@ -6606,7 +6634,14 @@ async function loadStaffing(){
     if(r.coverage_warning){
       advice.innerHTML = `<div class="alert-bar" style="background:rgba(242,88,95,.08);
            border-color:rgba(242,88,95,.3);"><span style="font-size:15px;">⚠️</span>
-           <span style="font-size:12.5px;color:var(--text2);">${esc(r.coverage_warning)}</span></div>`;
+           <span style="font-size:12.5px;color:var(--text2);">${esc(r.coverage_warning)}
+             ${r.coverage_error ? '<br><span style="color:var(--text3);font-size:11.5px;">'
+                + esc(r.coverage_error) + '</span>' : ''}
+             <br><button class="cn-chip" style="margin-top:8px;" onclick="checkClocker()">
+               What is in the clock-in table?</button>
+             <pre id="st-clocker" style="white-space:pre-wrap;font-size:11px;color:var(--text3);
+                  margin:8px 0 0;line-height:1.7;"></pre>
+           </span></div>`;
       document.getElementById('st-head').innerHTML = '';
       document.getElementById('st-grid').innerHTML = '';
       document.getElementById('st-over').innerHTML = '';

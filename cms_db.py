@@ -1122,6 +1122,63 @@ def _erlang_c_agents(calls_per_hour, avg_handle_seconds,
     return agents
 
 
+def clocker_check(weeks=4):
+    """What is actually in EmployeeClocker.
+
+    Rather than guessing at column names and shapes a third time, this reports
+    the facts: how many rows are there, what the InOut values look like, and a
+    few real examples.
+    """
+    conn = _connect(); cu = conn.cursor()
+    out = {}
+    try:
+        cu.execute("""SELECT COUNT(*), MIN(Created), MAX(Created)
+                      FROM EmployeeClocker""")
+        r = cu.fetchone()
+        out['total_rows'] = int(r[0] or 0)
+        out['oldest'] = _plain(r[1])
+        out['newest'] = _plain(r[2])
+    except Exception as e:
+        out['error_counting'] = str(e)[:200]
+
+    try:
+        cu.execute("""SELECT COUNT(*) FROM EmployeeClocker
+                      WHERE Created >= DATEADD(week, -%d, GETDATE())""" % int(weeks))
+        out['rows_in_window'] = int((cu.fetchone() or [0])[0] or 0)
+    except Exception as e:
+        out['error_window'] = str(e)[:200]
+
+    try:
+        cu.execute("""SELECT TOP 10 InOut, COUNT(*) FROM EmployeeClocker
+                      GROUP BY InOut ORDER BY COUNT(*) DESC""")
+        values = []
+        while True:
+            r = cu.fetchone()
+            if not r:
+                break
+            values.append({'value': repr(r[0]), 'rows': int(r[1] or 0)})
+        out['inout_values'] = values
+    except Exception as e:
+        out['error_values'] = str(e)[:200]
+
+    try:
+        cu.execute("""SELECT TOP 6 EmployeeId, Created, InOut
+                      FROM EmployeeClocker ORDER BY Created DESC""")
+        rows = []
+        while True:
+            r = cu.fetchone()
+            if not r:
+                break
+            rows.append({'employee': r[0], 'when': _plain(r[1]),
+                         'inout': repr(r[2]), 'type': type(r[2]).__name__})
+        out['recent'] = rows
+    except Exception as e:
+        out['error_recent'] = str(e)[:200]
+
+    conn.close()
+    return out
+
+
 def staffing_picture(weeks=4, slot_minutes=30, target_seconds=20, target_answered=0.80):
     """Where you are short of agents and where you have too many.
 
@@ -1174,6 +1231,8 @@ def staffing_picture(weeks=4, slot_minutes=30, target_seconds=20, target_answere
     # claimed 31 agents were needed at midnight.
     staffed = {}
     coverage_source = 'clocker'
+    coverage_error = None
+    clocker_rows = 0
     try:
         cu.execute("""SELECT EmployeeId, Created, InOut
                       FROM EmployeeClocker
@@ -1184,6 +1243,7 @@ def staffing_picture(weeks=4, slot_minutes=30, target_seconds=20, target_answere
             r = cu.fetchone()
             if not r:
                 break
+            clocker_rows += 1
             events.append((int(r[0] or 0), r[1], str(r[2] or '').strip().lower()))
 
         # pair each clock-in with the next clock-out for that person
@@ -1216,9 +1276,12 @@ def staffing_picture(weeks=4, slot_minutes=30, target_seconds=20, target_answere
             staffed[key] = staffed[key] / float(days)
         if not staffed:
             coverage_source = 'none'
+            coverage_error = ('read %d clocker rows and built %d shifts from them'
+                              % (clocker_rows, len(shifts)))
     except Exception as e:
         coverage_source = 'failed'
-        print('[cms] clocker coverage: ' + str(e)[:160])
+        coverage_error = str(e)[:300]
+        print('[cms] clocker coverage: ' + str(e)[:200])
 
     conn.close()
 
@@ -1245,6 +1308,8 @@ def staffing_picture(weeks=4, slot_minutes=30, target_seconds=20, target_answere
             })
     return {'slots': slots, 'weeks': weeks, 'slot_minutes': per,
             'coverage_source': coverage_source,
+            'coverage_error': coverage_error,
+            'clocker_rows': clocker_rows,
             'coverage_warning': (None if coverage_source == 'clocker' else
                                  'No clock-in records could be read, so every hour looks '
                                  'unstaffed and the numbers below are meaningless.'),
