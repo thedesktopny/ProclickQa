@@ -4,10 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-<!-- Cardknox iFields: the card number and security code are typed into frames
-     served by Cardknox, so those values go straight to them and never reach
-     this server. -->
-<script src="https://cdn.cardknox.com/ifields/2.15.2503.2601/ifields.min.js"></script>
+<!-- Cardknox's hosted card fields are loaded only when a card is actually
+     being added, and only if the key for them is set. Loading them on every
+     page meant four requests for a file that is not needed, all 404ing on a
+     version path that does not exist. -->
 <link rel="alternate icon" type="image/png" href="/favicon.png">
 <link rel="apple-touch-icon" href="/favicon.png">
 <meta name="theme-color" content="#6C5CE7">
@@ -828,6 +828,69 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
 }
 .st-hours{ display:flex; gap:2px; margin:0 0 4px 78px; }
 .st-hour{ width:28px; font-size:9.5px; color:var(--text3); flex:none; }
+
+/* ---------- settings tabs ---------- */
+.cs-tabs{
+  display:flex; flex-wrap:wrap; gap:6px; margin-bottom:16px;
+  padding-bottom:14px; border-bottom:1px solid var(--border);
+}
+.cs-tab{
+  background:var(--surface); border:1px solid var(--border); color:var(--text2);
+  padding:7px 13px; border-radius:9px; font-size:12.5px; cursor:pointer;
+  display:flex; align-items:center; gap:7px; font-family:inherit;
+  transition:background .12s, border-color .12s, color .12s;
+}
+.cs-tab:hover{ background:var(--surface2); color:var(--text); }
+.cs-tab.on{ background:rgba(79,110,247,.15); border-color:var(--accent); color:var(--text); font-weight:600; }
+.cs-tab .n{
+  font-size:10.5px; color:var(--text3); background:var(--surface2);
+  padding:1px 6px; border-radius:20px; font-variant-numeric:tabular-nums;
+}
+.cs-tab.on .n{ background:rgba(79,110,247,.2); color:var(--accent); }
+.cs-tab.empty{ opacity:.4; }
+
+/* ---------- staffing ---------- */
+.st-verdict{
+  border-radius:14px; padding:18px 22px; font-size:15px; line-height:1.6;
+  border:1px solid var(--border); background:var(--surface);
+}
+.st-verdict b{ font-weight:660; }
+.st-verdict.bad{ background:rgba(242,78,78,.09); border-color:rgba(242,78,78,.35); }
+.st-verdict.ok{ background:rgba(16,212,142,.08); border-color:rgba(16,212,142,.3); }
+.st-verdict .sub{ font-size:12.5px; color:var(--text3); margin-top:7px; }
+
+.st-daytabs{ display:flex; gap:4px; margin-left:auto; flex-wrap:wrap; }
+.st-daytab{
+  background:var(--surface2); border:1px solid var(--border); color:var(--text3);
+  padding:4px 9px; border-radius:7px; font-size:11.5px; cursor:pointer;
+  font-family:inherit;
+}
+.st-daytab:hover{ color:var(--text); }
+.st-daytab.on{ background:rgba(79,110,247,.16); border-color:var(--accent); color:var(--text); font-weight:600; }
+.st-daytab .dot{ display:inline-block; width:5px; height:5px; border-radius:50%;
+  background:var(--red); margin-left:5px; vertical-align:middle; }
+
+.st-legend{ display:flex; gap:12px; flex-wrap:wrap; font-size:11px; color:var(--text3); }
+.st-legend span{ display:flex; align-items:center; gap:5px; }
+.st-legend i{ width:11px; height:11px; border-radius:3px; display:inline-block; }
+
+.st-row{ display:flex; align-items:center; gap:2px; margin-bottom:3px; }
+.st-day{ width:78px; font-size:11.5px; color:var(--text3); flex:none; }
+.st-cell{ width:13px; height:20px; border-radius:2px; flex:none; background:var(--surface2); }
+.st-hours{ display:flex; gap:2px; margin:0 0 4px 78px; }
+.st-hour{ width:28px; font-size:9.5px; color:var(--text3); flex:none; }
+
+.st-fix{
+  display:flex; gap:11px; align-items:flex-start; padding:12px 0;
+  border-bottom:1px solid var(--border);
+}
+.st-fix:last-child{ border-bottom:0; }
+.st-fix .tag{
+  font-size:10px; font-weight:700; letter-spacing:.05em; text-transform:uppercase;
+  padding:3px 8px; border-radius:20px; white-space:nowrap; flex:none; margin-top:2px;
+}
+.st-fix .tag.move{ background:rgba(245,166,35,.16); color:var(--yellow); }
+.st-fix .tag.hire{ background:rgba(242,78,78,.16); color:var(--red); }
 </style>
 </head>
 <body>
@@ -1502,32 +1565,46 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
         <option value="8">Last 8 weeks</option>
       </select>
       <select id="st-target" class="cms-in" style="width:auto;" onchange="loadStaffing()">
-        <option value="0.70">70% answered in 20s</option>
-        <option value="0.80" selected>80% answered in 20s</option>
-        <option value="0.90">90% answered in 20s</option>
+        <option value="0.70">Answer 70% in 20s</option>
+        <option value="0.80" selected>Answer 80% in 20s</option>
+        <option value="0.90">Answer 90% in 20s</option>
       </select>
       <button class="btn btn-outline" onclick="loadStaffing()">Refresh</button>
     </div>
   </div>
+
   <div style="padding:18px 26px 44px;">
-    <div class="payhint" style="margin-bottom:14px;">
-      How many agents each half hour actually needs, worked out from the calls that
-      arrived and how long they took, against how many were really clocked in.
-      Averaged over several weeks so one odd day doesn't drive a decision.
+    <div id="st-verdict" class="st-verdict"></div>
+
+    <div class="paygrid" style="grid-template-columns:1.15fr .85fr;margin-top:16px;">
+      <div class="card" style="padding:18px 20px;">
+        <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;">
+          <h2 class="payh" style="margin:0;">A day at a time</h2>
+          <div id="st-daytabs" class="st-daytabs"></div>
+        </div>
+        <div class="payhint" id="st-daynote">How many people the calls needed, against how many were there.</div>
+        <div id="st-chart" style="margin-top:10px;"></div>
+      </div>
+
+      <div class="card" style="padding:18px 20px;">
+        <h2 class="payh">What to change</h2>
+        <div class="payhint">Biggest problem first, measured by calls missed.</div>
+        <div id="st-advice" style="max-height:52vh;overflow:auto;"></div>
+      </div>
     </div>
-    <div id="st-head" class="payhead" style="padding-top:0;"></div>
-    <div class="card" style="padding:16px 20px;margin-top:14px;">
-      <h2 class="payh">What to change</h2>
-      <div id="st-advice"></div>
-    </div>
-    <div class="card" style="padding:16px 20px;margin-top:14px;">
-      <h2 class="payh">The week, half hour by half hour</h2>
-      <div class="payhint">Red is short, green has room to spare. Hover for the numbers.</div>
-      <div id="st-grid" style="overflow-x:auto;"></div>
-    </div>
-    <div class="card" style="padding:16px 20px;margin-top:14px;">
-      <h2 class="payh">Where you have more than you need</h2>
-      <div id="st-over"></div>
+
+    <div class="card" style="padding:18px 20px;margin-top:14px;">
+      <div style="display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;">
+        <h2 class="payh" style="margin:0;">The whole week</h2>
+        <div class="st-legend">
+          <span><i style="background:var(--red)"></i>2+ short</span>
+          <span><i style="background:rgba(242,78,78,.55)"></i>1 short</span>
+          <span><i style="background:rgba(16,212,142,.22)"></i>about right</span>
+          <span><i style="background:rgba(16,212,142,.5)"></i>2+ spare</span>
+          <span><i style="background:var(--surface2)"></i>closed</span>
+        </div>
+      </div>
+      <div id="st-grid" style="overflow-x:auto;margin-top:12px;"></div>
     </div>
   </div>
 </div>
@@ -3027,8 +3104,7 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
 
     <div class="cn-lab">Card number</div>
     <div class="ck-field" id="nc-hosted-number" style="display:none;">
-      <iframe data-ifields-id="card-number" data-ifields-placeholder="1234 5678 9012 3456"
-              src="https://cdn.cardknox.com/ifields/2.15.2503.2601/ifield.htm"></iframe>
+      <iframe data-ifields-id="card-number" data-ifields-placeholder="1234 5678 9012 3456"></iframe>
     </div>
     <input data-ifields-id="card-number-token" type="hidden">
     <input id="nc-number" class="cms-in" style="width:100%;display:none;"
@@ -3044,8 +3120,7 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
                maxlength="4" placeholder="YYYY"></div>
       <div><div class="cn-lab">Security code <span style="color:var(--text3)">optional</span></div>
         <div class="ck-field" id="nc-hosted-cvv" style="display:none;">
-          <iframe data-ifields-id="cvv" data-ifields-placeholder="CVV"
-                  src="https://cdn.cardknox.com/ifields/2.15.2503.2601/ifield.htm"></iframe>
+          <iframe data-ifields-id="cvv" data-ifields-placeholder="CVV"></iframe>
         </div>
         <input data-ifields-id="cvv-token" type="hidden">
         <input id="nc-cvv" class="cms-in" style="width:100%;display:none;"
@@ -4214,13 +4289,36 @@ async function loadCmsSettings(){
 
 function csFilter(){ if(csData) csRender(); }
 
+/* Eleven tables stacked one under the other meant scrolling past everything to
+   reach anything. They are now tabs: one table at a time, the rest a click
+   away. Searching still looks across all of them and shows every match, since
+   the point of a search is not knowing where the thing is. */
+let csTab = null;
+
 function csRender(){
   const q = (document.getElementById('cs-search').value || '').toLowerCase().trim();
   const box = document.getElementById('cs-body');
-  const blocks = csData.groups.map(g=>{
-    const rows = q ? g.rows.filter(r => r.join(' ').toLowerCase().includes(q) ||
-                                        g.title.toLowerCase().includes(q)) : g.rows;
-    if(q && !rows.length) return '';
+
+  const matching = csData.groups.map(g=>({
+    group: g,
+    rows: q ? g.rows.filter(r => r.join(' ').toLowerCase().includes(q) ||
+                                 g.title.toLowerCase().includes(q)) : g.rows,
+  }));
+
+  // the tab strip, with a count of matches on each while searching
+  const strip = `<div class="cs-tabs">` + matching.map(m=>{
+    const on = !q && (csTab === m.group.title || (!csTab && m === matching[0]));
+    const hits = q ? m.rows.length : m.group.count;
+    return `<button class="cs-tab ${on?'on':''} ${q && !m.rows.length ? 'empty':''}"
+              onclick="csPick('${m.group.title.replace(/'/g, "")}')">
+        ${esc(m.group.title)}<span class="n">${hits}</span></button>`;
+  }).join('') + `</div>`;
+
+  // while searching, show every table that has a match; otherwise just the one
+  const shown = q ? matching.filter(m=>m.rows.length)
+                  : matching.filter(m => csTab ? m.group.title === csTab : m === matching[0]);
+
+  const blocks = shown.map(({group: g, rows})=>{
     return `<div class="card" style="padding:0;margin-bottom:14px;">
       <div style="padding:14px 18px 10px;">
         <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;">
@@ -4240,7 +4338,15 @@ function csRender(){
         }).join('')}</tr>`).join('')}</tbody></table></div>` : ''}
     </div>`;
   }).filter(Boolean).join('');
-  box.innerHTML = blocks || '<div style="color:var(--text3);font-size:13px;">Nothing matches that.</div>';
+  box.innerHTML = strip + (blocks ||
+    '<div style="color:var(--text3);font-size:13px;padding:16px 2px;">Nothing matches that.</div>');
+}
+
+function csPick(title){
+  csTab = title;
+  const search = document.getElementById('cs-search');
+  if(search) search.value = '';      // a chosen tab and a search fight each other
+  csRender();
 }
 
 function csExport(){
@@ -4759,6 +4865,34 @@ document.addEventListener('click', e => {
   if(tile){ tile.classList.toggle('tapped'); if(tile.classList.contains('tapped')) lvPlacePopup(tile); }
 }, true);
 
+
+/* The QA pages get their data from the dashboard's own sign-in sequence, which
+   a portal sign-in never runs. So the first time one of those pages is opened
+   here, fetch what it needs. Doing it on open rather than at sign-in also
+   means a portal user who never visits them costs nothing. */
+let portalLoaded = {};
+
+async function portalLoadQaPage(which){
+  if(portalLoaded[which]) return;
+  portalLoaded[which] = true;
+  try{
+    if(which === 'calls'){
+      await loadStats().catch(()=>{});
+      await loadCalls();
+      renderCalls();
+      if(typeof renderPagination === 'function') renderPagination();
+      if(typeof updateBadges === 'function') updateBadges();
+    }else if(which === 'analytics'){
+      await loadAnalytics();
+      renderAnalytics();
+    }
+  }catch(e){
+    portalLoaded[which] = false;      // let a later attempt try again
+    console.error('Could not load ' + which, e);
+    if(typeof showToast === 'function') showToast('Could not load ' + which, true);
+  }
+}
+
 function showPage(id){
   // Access control: qa_users see only their own work; costs is admin-only
   const managerPages = ['analytics','billing','notes','rules','alerts','qa-users','manager-queue','time-report','skinblock'];
@@ -4775,11 +4909,19 @@ function showPage(id){
   const items=document.querySelectorAll('.nav-item');
   if(map[id]>=0 && items[map[id]]) items[map[id]].classList.add('active');
   if(id==='qa-users') loadQAUsers();
-  if(id==='analytics') renderAnalytics();
+  if(id==='analytics'){
+    if(!analytics) portalLoadQaPage('analytics'); else renderAnalytics();
+  }
   if(id==='costs'){ initCostsMonthSelector(); loadCosts(); }
   if(id==='human-review'){ mountHumanReviewDatePicker(); renderHumanReview(); }
   if(id==='alerts'){ mountAlertsDatePicker(); renderAlerts(); }
-  if(id==='calls') mountCallsDatePicker();
+  if(id==='calls'){
+    mountCallsDatePicker();
+    // The QA dashboard loads calls as part of its own sign-in sequence, which
+    // portal mode skips — so on the portal the table rendered empty and never
+    // asked the server for anything. Load them the first time the page opens.
+    if(!Array.isArray(calls) || !calls.length) portalLoadQaPage('calls');
+  }
   if(id==='skinblock'){
     const link = document.getElementById('sb-link');
     if(link) link.textContent = window.location.origin + '/skinblock';
@@ -6683,14 +6825,6 @@ function cfAutoToggle(){
 }
 
 
-/* ================= staffing =================
-   Two questions, answered from data already collected: how many agents does
-   each half hour actually need, and how many were there. The gap is what to
-   act on. */
-
-/* Reports what is actually in the clock-in table, so a third guess is not
-   needed. */
-
 /* Everyone on DND, for comparing against the CMS. */
 async function checkDnd(){
   const out = document.getElementById('dnd-out');
@@ -6714,20 +6848,18 @@ async function checkDnd(){
   }catch(e){ out.textContent = 'Failed: ' + e.message; }
 }
 
+/* What is actually in the clock-in table, so a guess is not needed. */
 async function checkClocker(){
-  const out = document.getElementById('st-clocker');
+  const out = document.getElementById('st-clocker') || document.getElementById('sb-status');
+  if(!out) return;
   out.textContent = 'Looking…';
   try{
     const r = await API.get('/api/staffing/clocker-check');
-    const lines = [];
     if(r.error){ out.textContent = '❌ ' + r.error; return; }
+    const lines = [];
     lines.push(`rows in the table: ${r.total_rows ?? '(could not count)'}`);
     if(r.oldest) lines.push(`covering ${String(r.oldest).slice(0,10)} to ${String(r.newest).slice(0,10)}`);
     lines.push(`rows in the last 4 weeks: ${r.rows_in_window ?? '(unknown)'}`);
-    if((r.inout_values||[]).length){
-      lines.push('', 'what the in/out column holds:');
-      r.inout_values.forEach(v => lines.push(`   ${v.value}  —  ${v.rows} rows`));
-    }
     if((r.columns||[]).length){
       lines.push('', 'columns in the table:');
       lines.push('   ' + r.columns.map(c => c.name + ' (' + c.type + ')').join(', '));
@@ -6738,7 +6870,7 @@ async function checkClocker(){
     });
     if((r.recent_full||[]).length){
       lines.push('', 'the most recent rows in full:');
-      r.recent_full.forEach((x,i) => {
+      r.recent_full.forEach(x => {
         lines.push('   ---');
         Object.keys(x).forEach(k => { if(x[k] !== null) lines.push(`   ${k}: ${x[k]}`); });
       });
@@ -6749,90 +6881,214 @@ async function checkClocker(){
   }catch(e){ out.textContent = 'Failed: ' + e.message; }
 }
 
+/* ================= staffing =================
+   Two questions, answered from data already collected: how many people did
+   each half hour actually need, and how many were there. Everything else on
+   this page is a way of seeing that one gap. */
+let stData = null, stDay = null;
+const ST_DAYS = {1:'Sunday',2:'Monday',3:'Tuesday',4:'Wednesday',5:'Thursday',6:'Friday',7:'Saturday'};
+
 async function loadStaffing(){
-  const advice = document.getElementById('st-advice');
-  advice.innerHTML = '<div style="color:var(--text3);font-size:12.5px;">Working it out…</div>';
+  const verdict = document.getElementById('st-verdict');
+  verdict.innerHTML = '<span style="color:var(--text3);font-size:13px;">Working it out…</span>';
   try{
     const r = await API.get('/api/staffing?weeks='
       + document.getElementById('st-weeks').value
       + '&service_level=' + document.getElementById('st-target').value);
-    if(r.error){ advice.innerHTML = `<div style="color:var(--red)">${r.error}</div>`; return; }
+    if(r.error){ verdict.innerHTML = `<span style="color:var(--red)">${r.error}</span>`; return; }
     if(r.coverage_warning){
-      advice.innerHTML = `<div class="alert-bar" style="background:rgba(242,88,95,.08);
-           border-color:rgba(242,88,95,.3);"><span style="font-size:15px;">⚠️</span>
-           <span style="font-size:12.5px;color:var(--text2);">${esc(r.coverage_warning)}
-             ${r.coverage_error ? '<br><span style="color:var(--text3);font-size:11.5px;">'
-                + esc(r.coverage_error) + '</span>' : ''}
-             <br><button class="cn-chip" style="margin-top:8px;" onclick="checkClocker()">
-               What is in the clock-in table?</button>
-             <pre id="st-clocker" style="white-space:pre-wrap;font-size:11px;color:var(--text3);
-                  margin:8px 0 0;line-height:1.7;"></pre>
-           </span></div>`;
-      document.getElementById('st-head').innerHTML = '';
-      document.getElementById('st-grid').innerHTML = '';
-      document.getElementById('st-over').innerHTML = '';
+      verdict.className = 'st-verdict bad';
+      verdict.innerHTML = `⚠️ ${esc(r.coverage_warning)}
+        ${r.coverage_error ? `<div class="sub">${esc(r.coverage_error)}</div>` : ''}
+        <div class="sub"><button class="cn-chip" onclick="checkClocker()">
+          What is in the clock-in table?</button></div>
+        <pre id="st-clocker" style="white-space:pre-wrap;font-size:11px;color:var(--text3);
+             margin:10px 0 0;line-height:1.7;"></pre>`;
+      ['st-daytabs','st-chart','st-advice','st-grid'].forEach(id=>{
+        const el = document.getElementById(id); if(el) el.innerHTML = '';
+      });
       return;
     }
+    stData = r;
+    stRenderVerdict();
+    stRenderDayTabs();
+    stRenderAdvice();
+    stRenderGrid();
+  }catch(e){ verdict.innerHTML = `<span style="color:var(--red)">${e.message}</span>`; }
+}
 
-    const card = (lab,val,sub,cls) => `<div class="paycard"><div class="lab">${lab}</div>
-      <div class="payfig paynum ${cls||''}">${val}</div><div class="sub">${sub||'&nbsp;'}</div></div>`;
-    document.getElementById('st-head').innerHTML =
-      card('Gaps found', r.shortfalls.length, 'stretches needing more people',
-           r.shortfalls.length ? 'neg' : 'pos') +
-      card('Agent-hours short', r.total_short_hours, 'across the week', 'warn') +
-      card('Calls missed', r.missed_a_day, 'a day in those gaps',
-           r.missed_a_day > 5 ? 'neg' : '') +
-      card('Aiming for', r.target.split(' ')[0], 'answered within 20 seconds', '');
+/* A sentence rather than a row of figures: the point of the page is what to do,
+   and a number nobody can interpret is not that. */
+function stRenderVerdict(){
+  const el = document.getElementById('st-verdict');
+  const r = stData;
+  const gaps = r.shortfalls.length;
+  if(!gaps){
+    el.className = 'st-verdict ok';
+    el.innerHTML = `✅ <b>Every hour of the week has enough people</b> to answer
+      ${esc(r.target)}.
+      <div class="sub">Based on the last ${r.weeks} weeks of calls against who was
+        actually clocked in.</div>`;
+    return;
+  }
+  const worst = r.shortfalls[0];
+  const movable = r.shortfalls.filter(a => a.can_move >= a.short_by).length;
+  el.className = 'st-verdict bad';
+  el.innerHTML = `
+    <b>${gaps} ${gaps === 1 ? 'stretch is' : 'stretches are'} short of people</b>,
+    costing about <b>${r.missed_a_day} calls a day</b>.
+    The worst is <b>${esc(worst.day)} ${esc(worst.from)}–${esc(worst.to)}</b>,
+    ${worst.short_by} short.
+    <div class="sub">
+      ${movable
+        ? `${movable} of them can be covered by moving people from quieter hours;
+           ${gaps - movable} ${gaps - movable === 1 ? 'needs' : 'need'} somebody extra.`
+        : `None can be covered by moving people — every one needs somebody extra.`}
+      &nbsp;·&nbsp; ${r.total_short_hours} agent-hours short across the week
+      &nbsp;·&nbsp; aiming to ${esc(r.target)}
+    </div>`;
+}
 
-    advice.innerHTML = r.shortfalls.length ? r.shortfalls.map(a=>`
-      <div class="payrow" style="cursor:default;align-items:flex-start;">
-        <span style="width:8px;height:8px;border-radius:50%;flex:none;margin-top:6px;
-              background:${a.can_move >= a.short_by ? 'var(--yellow)' : 'var(--red)'};"></span>
-        <div class="nm" style="white-space:normal;">
-          ${esc(a.day)} ${esc(a.from)}–${esc(a.to)}
-          <div class="mt" style="line-height:1.6;margin-top:3px;">${esc(a.suggestion)}</div>
-        </div>
-        <div style="text-align:right;font-size:11.5px;color:var(--text3);white-space:nowrap;">
-          short ${a.short_by}<div>${a.missed_per_day} missed/day</div></div>
-      </div>`).join('')
-      : '<div style="color:var(--green);font-size:12.5px;">Every hour has enough people.</div>';
+function stRenderDayTabs(){
+  const byDay = {};
+  stData.slots.forEach(s => { (byDay[s.day] = byDay[s.day] || []).push(s); });
+  const short = {};
+  stData.shortfalls.forEach(a => { short[a.day_number] = true; });
+  if(!stDay || !byDay[stDay]){
+    // open on the worst day, since that is the one worth looking at
+    stDay = stData.shortfalls.length ? stData.shortfalls[0].day_number
+          : Number(Object.keys(byDay)[0] || 2);
+  }
+  document.getElementById('st-daytabs').innerHTML = Object.keys(byDay)
+    .map(Number).sort((a,b)=>a-b).map(d=>`
+      <button class="st-daytab ${d===stDay?'on':''}" onclick="stPickDay(${d})">
+        ${ST_DAYS[d].slice(0,3)}${short[d] ? '<span class="dot"></span>' : ''}</button>`).join('');
+  stRenderChart();
+}
 
-    // the week as a grid
-    const days = {1:'Sunday',2:'Monday',3:'Tuesday',4:'Wednesday',5:'Thursday',6:'Friday',7:'Saturday'};
-    const byDay = {};
-    r.slots.forEach(s => { (byDay[s.day] = byDay[s.day] || {})[s.minute] = s; });
-    let grid = '<div class="st-hours">' +
-      Array.from({length:12}, (_,i)=>`<div class="st-hour">${String(i*2).padStart(2,'0')}</div>`).join('') +
-      '</div>';
-    for(let d=1; d<=7; d++){
-      if(!byDay[d]) continue;
-      grid += `<div class="st-row"><div class="st-day">${days[d]}</div>`;
-      for(let m=0; m<1440; m+=30){
-        const s = byDay[d][m];
-        let colour = 'var(--surface2)', title = `${String(Math.floor(m/60)).padStart(2,'0')}:${m%60===0?'00':'30'} — no calls`;
-        if(s){
-          colour = s.gap <= -2 ? 'var(--red)'
-                 : s.gap <= -1 ? 'rgba(242,78,78,.55)'
-                 : s.gap >= 2  ? 'rgba(16,212,142,.5)'
-                 : 'rgba(16,212,142,.22)';
-          title = `${s.time} · ${s.calls_per_day} calls · needs ${s.needed}, had ${s.staffed}`
-                + (s.gap < 0 ? ` · SHORT ${Math.abs(s.gap)}` : ` · ${s.gap} spare`);
-        }
-        grid += `<div class="st-cell" style="background:${colour}" title="${title}"></div>`;
+function stPickDay(d){ stDay = d; stRenderDayTabs(); }
+
+/* The chart is the heart of it: one line for what was needed, one for who was
+   there, and the gap between them shaded. Somebody can look at this and see
+   the problem without reading a single number. */
+function stRenderChart(){
+  const slots = stData.slots.filter(s => s.day === stDay).sort((a,b)=>a.minute-b.minute);
+  const box = document.getElementById('st-chart');
+  if(!slots.length){ box.innerHTML = '<div class="payhint">No calls that day.</div>'; return; }
+
+  const W = 720, H = 230, padL = 34, padR = 12, padT = 14, padB = 26;
+  const maxY = Math.max(4, ...slots.map(s => Math.max(s.needed, s.staffed))) + 1;
+  const x = m => padL + (m / 1440) * (W - padL - padR);
+  const y = v => H - padB - (v / maxY) * (H - padT - padB);
+
+  // stepped lines, because staffing is a count per half hour, not a curve
+  const step = (pick) => {
+    let d = '';
+    slots.forEach((s, i) => {
+      const x1 = x(s.minute), x2 = x(s.minute + 30), yv = y(pick(s));
+      d += (i ? ' L' : 'M') + x1 + ' ' + yv + ' L' + x2 + ' ' + yv;
+    });
+    return d;
+  };
+
+  // shade only where they were short
+  const shortBands = slots.filter(s => s.gap <= -1).map(s =>
+    `<rect x="${x(s.minute)}" y="${padT}" width="${x(s.minute+30)-x(s.minute)}"
+           height="${H-padT-padB}" fill="var(--red)" opacity=".10"></rect>`).join('');
+
+  const hourTicks = [0,3,6,9,12,15,18,21,24].map(hh =>
+    `<text x="${x(hh*60)}" y="${H-8}" fill="var(--text3)" font-size="10"
+           text-anchor="middle">${String(hh).padStart(2,'0')}</text>`).join('');
+  const yTicks = [0, Math.round(maxY/2), maxY].map(v =>
+    `<text x="${padL-6}" y="${y(v)+3}" fill="var(--text3)" font-size="10"
+           text-anchor="end">${v}</text>
+     <line x1="${padL}" y1="${y(v)}" x2="${W-padR}" y2="${y(v)}"
+           stroke="var(--border)" stroke-width="1" opacity=".5"></line>`).join('');
+
+  const hover = slots.map(s =>
+    `<rect x="${x(s.minute)}" y="${padT}" width="${x(s.minute+30)-x(s.minute)}"
+           height="${H-padT-padB}" fill="transparent">
+       <title>${s.time} · ${s.calls_per_day} calls · needed ${s.needed}, had ${s.staffed}${
+         s.gap < 0 ? ' · SHORT ' + Math.abs(s.gap) : ''}</title></rect>`).join('');
+
+  box.innerHTML = `
+    <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block;">
+      ${shortBands}${yTicks}${hourTicks}
+      <path d="${step(s=>s.needed)}" fill="none" stroke="var(--red)" stroke-width="2"></path>
+      <path d="${step(s=>s.staffed)}" fill="none" stroke="var(--green)" stroke-width="2"></path>
+      ${hover}
+    </svg>
+    <div style="display:flex;gap:16px;font-size:11.5px;color:var(--text3);margin-top:6px;">
+      <span><i style="display:inline-block;width:14px;height:2px;background:var(--red);
+        vertical-align:middle;margin-right:5px;"></i>people needed</span>
+      <span><i style="display:inline-block;width:14px;height:2px;background:var(--green);
+        vertical-align:middle;margin-right:5px;"></i>people there</span>
+      <span style="margin-left:auto;">hover for the numbers</span>
+    </div>`;
+
+  const dayGaps = stData.shortfalls.filter(a => a.day_number === stDay);
+  document.getElementById('st-daynote').innerHTML = dayGaps.length
+    ? `<b style="color:var(--text2)">${ST_DAYS[stDay]}</b> — short during `
+      + dayGaps.map(a => esc(a.from) + '–' + esc(a.to)).join(', ')
+    : `<b style="color:var(--text2)">${ST_DAYS[stDay]}</b> — enough people all day.`;
+}
+
+function stRenderAdvice(){
+  const box = document.getElementById('st-advice');
+  box.innerHTML = stData.shortfalls.length ? stData.shortfalls.map(a=>{
+    const canMove = a.can_move >= a.short_by;
+    return `<div class="st-fix">
+      <span class="tag ${canMove ? 'move' : 'hire'}">${canMove ? 'move' : 'add'}</span>
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:13px;font-weight:600;">
+          ${esc(a.day)} ${esc(a.from)}–${esc(a.to)}</div>
+        <div style="font-size:12px;color:var(--text2);line-height:1.6;margin-top:3px;">
+          ${esc(a.suggestion)}</div>
+        <div style="font-size:11px;color:var(--text3);margin-top:4px;">
+          about ${a.missed_per_day} calls missed a day here</div>
+      </div>
+    </div>`;
+  }).join('')
+    : '<div style="color:var(--green);font-size:12.5px;">Nothing to change.</div>';
+
+  if(stData.overstaffed.length){
+    box.innerHTML += `<div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border);">
+      <div style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+           color:var(--text3);margin-bottom:8px;">Quiet stretches you could draw from</div>
+      ${stData.overstaffed.map(o=>`
+        <div style="display:flex;gap:10px;font-size:12px;padding:5px 0;color:var(--text2);">
+          <span style="flex:1;">${esc(o.day)} ${esc(o.from)}–${esc(o.to)}</span>
+          <span style="color:var(--green);">${o.spare} spare</span>
+        </div>`).join('')}</div>`;
+  }
+}
+
+function stRenderGrid(){
+  const byDay = {};
+  stData.slots.forEach(s => { (byDay[s.day] = byDay[s.day] || {})[s.minute] = s; });
+  let grid = '<div class="st-hours">' +
+    Array.from({length:12}, (_,i)=>`<div class="st-hour">${String(i*2).padStart(2,'0')}</div>`).join('') +
+    '</div>';
+  for(let d=1; d<=7; d++){
+    if(!byDay[d]) continue;
+    grid += `<div class="st-row"><div class="st-day">${ST_DAYS[d]}</div>`;
+    for(let m=0; m<1440; m+=30){
+      const s = byDay[d][m];
+      let colour = 'var(--surface2)';
+      let title = `${String(Math.floor(m/60)).padStart(2,'0')}:${m%60===0?'00':'30'} — no calls`;
+      if(s){
+        colour = s.gap <= -2 ? 'var(--red)'
+               : s.gap <= -1 ? 'rgba(242,78,78,.55)'
+               : s.gap >= 2  ? 'rgba(16,212,142,.5)'
+               : 'rgba(16,212,142,.22)';
+        title = `${ST_DAYS[d]} ${s.time} · ${s.calls_per_day} calls · needed ${s.needed}, had ${s.staffed}`
+              + (s.gap < 0 ? ` · SHORT ${Math.abs(s.gap)}` : ` · ${s.gap} spare`);
       }
-      grid += '</div>';
+      grid += `<div class="st-cell" style="background:${colour}" title="${title}"></div>`;
     }
-    document.getElementById('st-grid').innerHTML = grid;
-
-    document.getElementById('st-over').innerHTML = r.overstaffed.length
-      ? r.overstaffed.map(o=>`
-        <div class="payrow" style="cursor:default;">
-          <div class="nm">${esc(o.day)} ${esc(o.from)}–${esc(o.to)}
-            <div class="mt">${o.calls_per_day} calls in that stretch</div></div>
-          <div style="font-size:13px;color:var(--green);">${o.spare} spare</div>
-        </div>`).join('')
-      : '<div style="color:var(--text3);font-size:12.5px;">Nothing obviously over-covered.</div>';
-  }catch(e){ advice.innerHTML = `<div style="color:var(--red)">${e.message}</div>`; }
+    grid += '</div>';
+  }
+  document.getElementById('st-grid').innerHTML = grid;
 }
 
 async function loadMissed(){
@@ -7717,7 +7973,7 @@ async function cuNewCard(){
     // Prefer the hosted fields, where the number never reaches our server.
     // Without that key, fall back to typing it here — which is how the old CMS
     // has always worked — rather than leaving the feature unusable.
-    ckHosted = !!cfg.ifields_key && typeof setAccount === 'function';
+    ckHosted = !!cfg.ifields_key;
 
     document.getElementById('nc-hosted-number').style.display = ckHosted ? '' : 'none';
     document.getElementById('nc-hosted-cvv').style.display = ckHosted ? '' : 'none';
@@ -7730,9 +7986,25 @@ async function cuNewCard(){
         + 'stored or logged here. Only a reference to the card is kept.';
 
     if(ckHosted && !ckReady){
-      setAccount(cfg.ifields_key, 'ProClick Portal', '1.0');
-      if(typeof enableAutoFormatting === 'function') enableAutoFormatting();
-      ckReady = true;
+      // fetch the library and point the frames at it only now, using the
+      // version the server reports rather than one hardcoded here
+      const version = cfg.version || '2.15.2503.2601';
+      const base = 'https://cdn.cardknox.com/ifields/' + version;
+      await new Promise((done, fail)=>{
+        if(window.setAccount){ done(); return; }
+        const tag = document.createElement('script');
+        tag.src = base + '/ifields.min.js';
+        tag.onload = done; tag.onerror = fail;
+        document.head.appendChild(tag);
+      }).catch(()=>{ ckHosted = false; });
+      document.querySelectorAll('iframe[data-ifields-id]').forEach(f=>{
+        if(!f.src) f.src = base + '/ifield.htm';
+      });
+      if(typeof setAccount === 'function'){
+        setAccount(cfg.ifields_key, 'ProClick Portal', '1.0');
+        if(typeof enableAutoFormatting === 'function') enableAutoFormatting();
+        ckReady = true;
+      }
     }
     if(!ckHosted) setTimeout(()=>{
       const f = document.getElementById('nc-number'); if(f) f.focus();
