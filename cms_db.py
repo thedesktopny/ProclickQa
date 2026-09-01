@@ -1167,34 +1167,58 @@ def staffing_picture(weeks=4, slot_minutes=30, target_seconds=20, target_answere
     # A clocker row is an event, so an agent covers every slot between clocking
     # in and clocking out. Counting only the slot they clocked in would make it
     # look as if nobody was there.
+    # EmployeeClocker stores EVENTS, not shifts: one row per clock-in and one
+    # per clock-out, in Created with InOut saying which. My first attempt read
+    # columns called InTime/OutTime, which do not exist — the query failed
+    # silently and every hour looked completely unstaffed, which is why it
+    # claimed 31 agents were needed at midnight.
     staffed = {}
+    coverage_source = 'clocker'
     try:
-        cu.execute("""SELECT DATEPART(weekday, c.InTime) AS dow,
-                             DATEPART(hour, c.InTime) * 60
-                               + (DATEPART(minute, c.InTime) / %d) * %d AS in_slot,
-                             DATEPART(hour, ISNULL(c.OutTime, c.InTime)) * 60
-                               + (DATEPART(minute, ISNULL(c.OutTime, c.InTime)) / %d) * %d AS out_slot,
-                             CAST(c.InTime AS date) AS day
-                      FROM EmployeeClocker c
-                      WHERE c.InTime >= DATEADD(week, -%d, GETDATE())
-                        AND c.OutTime IS NOT NULL"""
-                   % (per, per, per, per, int(weeks)))
-        seen_days = {}
+        cu.execute("""SELECT EmployeeId, Created, InOut
+                      FROM EmployeeClocker
+                      WHERE Created >= DATEADD(week, -%d, GETDATE())
+                      ORDER BY EmployeeId, Created""" % int(weeks))
+        events = []
         while True:
             r = cu.fetchone()
             if not r:
                 break
-            dow, a, b = int(r[0]), int(r[1]), int(r[2])
-            seen_days.setdefault(dow, set()).add(r[3])
-            if b < a:
-                b = 24 * 60          # a shift running past midnight
+            events.append((int(r[0] or 0), r[1], str(r[2] or '').strip().lower()))
+
+        # pair each clock-in with the next clock-out for that person
+        open_at = {}
+        shifts = []
+        for emp, when, io in events:
+            if not when:
+                continue
+            if io in ('in', '1', 'true'):
+                open_at[emp] = when
+            elif emp in open_at:
+                start = open_at.pop(emp)
+                if when > start and (when - start).total_seconds() <= 20 * 3600:
+                    shifts.append((start, when))
+
+        seen_days = {}
+        for start, end in shifts:
+            dow = start.isoweekday() % 7 + 1        # match SQL Server's weekday
+            seen_days.setdefault(dow, set()).add(start.date())
+            a = (start.hour * 60 + start.minute) // per * per
+            b = (end.hour * 60 + end.minute) // per * per
+            if end.date() > start.date():
+                b += 24 * 60                        # a shift running past midnight
             for slot in range(a, b + 1, per):
-                staffed[(dow, slot % (24 * 60))] = staffed.get((dow, slot % (24 * 60)), 0) + 1
+                key = (dow, slot % (24 * 60))
+                staffed[key] = staffed.get(key, 0) + 1
+
         for key in list(staffed):
             days = max(1, len(seen_days.get(key[0], set())))
             staffed[key] = staffed[key] / float(days)
+        if not staffed:
+            coverage_source = 'none'
     except Exception as e:
-        print('[cms] clocker coverage: ' + str(e)[:140])
+        coverage_source = 'failed'
+        print('[cms] clocker coverage: ' + str(e)[:160])
 
     conn.close()
 
@@ -1220,6 +1244,10 @@ def staffing_picture(weeks=4, slot_minutes=30, target_seconds=20, target_answere
                 'gap': round(have - need, 1),
             })
     return {'slots': slots, 'weeks': weeks, 'slot_minutes': per,
+            'coverage_source': coverage_source,
+            'coverage_warning': (None if coverage_source == 'clocker' else
+                                 'No clock-in records could be read, so every hour looks '
+                                 'unstaffed and the numbers below are meaningless.'),
             'target': '%d%% answered within %ds' % (target_answered * 100, target_seconds)}
 
 

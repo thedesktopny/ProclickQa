@@ -5906,7 +5906,10 @@ def staffing_route():
             missed = round(sum(s_['missed_per_day'] for s_ in run['slots']), 1)
             start = run['slots'][0]['time']
             end_min = run['slots'][-1]['minute'] + picture['slot_minutes']
-            end = '%02d:%02d' % (end_min // 60 % 24, end_min % 60)
+            # a stretch ending at midnight is the end of the day, not the start
+            # of it — "00:00–00:00" told us nothing
+            end = ('24:00' if end_min >= 24 * 60
+                   else '%02d:%02d' % (end_min // 60, end_min % 60))
             hours = len(run['slots']) * picture['slot_minutes'] / 60.0
 
             # can a quiet stretch on the same day cover it?
@@ -5959,12 +5962,21 @@ def staffing_route():
             over.append({
                 'day': days.get(dow, dow),
                 'from': run[0]['time'],
-                'to': '%02d:%02d' % (end_min // 60 % 24, end_min % 60),
+                'to': ('24:00' if end_min >= 24 * 60
+                       else '%02d:%02d' % (end_min // 60, end_min % 60)),
                 'spare': round(min(x['gap'] for x in run), 1),
                 'calls_per_day': round(sum(x['calls_per_day'] for x in run), 1),
             })
 
     advice.sort(key=lambda a: -a['priority'])
+    if picture.get('coverage_warning'):
+        # without knowing who was working, "you are short 31 agents" is not a
+        # finding, it is a broken query. Better to say nothing than to say that.
+        return jsonify({
+            'slots': picture['slots'], 'weeks': weeks, 'target': picture['target'],
+            'coverage_warning': picture['coverage_warning'],
+            'shortfalls': [], 'overstaffed': [],
+            'total_short_hours': 0, 'missed_a_day': 0})
     return jsonify({
         'slots': picture['slots'], 'weeks': weeks, 'target': picture['target'],
         'shortfalls': advice[:20], 'overstaffed': sorted(over, key=lambda x: -x['spare'])[:12],

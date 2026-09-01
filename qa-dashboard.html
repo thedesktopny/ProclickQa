@@ -6603,6 +6603,15 @@ async function loadStaffing(){
       + document.getElementById('st-weeks').value
       + '&service_level=' + document.getElementById('st-target').value);
     if(r.error){ advice.innerHTML = `<div style="color:var(--red)">${r.error}</div>`; return; }
+    if(r.coverage_warning){
+      advice.innerHTML = `<div class="alert-bar" style="background:rgba(242,88,95,.08);
+           border-color:rgba(242,88,95,.3);"><span style="font-size:15px;">⚠️</span>
+           <span style="font-size:12.5px;color:var(--text2);">${esc(r.coverage_warning)}</span></div>`;
+      document.getElementById('st-head').innerHTML = '';
+      document.getElementById('st-grid').innerHTML = '';
+      document.getElementById('st-over').innerHTML = '';
+      return;
+    }
 
     const card = (lab,val,sub,cls) => `<div class="paycard"><div class="lab">${lab}</div>
       <div class="payfig paynum ${cls||''}">${val}</div><div class="sub">${sub||'&nbsp;'}</div></div>`;
