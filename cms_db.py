@@ -1265,14 +1265,23 @@ def staffing_picture(weeks=4, slot_minutes=30, target_seconds=20, target_answere
     # columns called InTime/OutTime, which do not exist — the query failed
     # silently and every hour looked completely unstaffed, which is why it
     # claimed 31 agents were needed at midnight.
+    # ── supply: who was actually on the floor ───────────────────────────────
+    # EmployeeClocker is a log of events. The column that matters is Status,
+    # matching the enum in the CMS source: 1 = clocked in, 2 = on a break,
+    # 0 = clocked out. (InOut looks like the obvious one but is NULL on
+    # 318,000 of 376,000 rows — it is a dead column.)
+    #
+    # A break is not availability: someone with a five-minute break started is
+    # not answering calls, so those minutes are taken back off.
     staffed = {}
     coverage_source = 'clocker'
     coverage_error = None
     clocker_rows = 0
     try:
-        cu.execute("""SELECT EmployeeId, Created, InOut
+        cu.execute("""SELECT EmployeeId, Created, Status, ISNULL(BreakMinutes, 0)
                       FROM EmployeeClocker
                       WHERE Created >= DATEADD(week, -%d, GETDATE())
+                        AND Status IS NOT NULL
                       ORDER BY EmployeeId, Created""" % int(weeks))
         events = []
         while True:
@@ -1280,36 +1289,64 @@ def staffing_picture(weeks=4, slot_minutes=30, target_seconds=20, target_answere
             if not r:
                 break
             clocker_rows += 1
-            events.append((int(r[0] or 0), r[1], str(r[2] or '').strip().lower()))
+            events.append((int(r[0] or 0), r[1], int(r[2]), int(r[3] or 0)))
 
-        # pair each clock-in with the next clock-out for that person
+        shifts, breaks = [], []
         open_at = {}
-        shifts = []
-        for emp, when, io in events:
+        for emp, when, status, break_mins in events:
             if not when:
                 continue
-            if io in ('in', '1', 'true'):
-                open_at[emp] = when
-            elif emp in open_at:
-                start = open_at.pop(emp)
-                if when > start and (when - start).total_seconds() <= 20 * 3600:
-                    shifts.append((start, when))
+            if status == 1:
+                # already in? then this is coming back from a break or a
+                # repeated press, not a second shift
+                if emp not in open_at:
+                    open_at[emp] = when
+            elif status == 0:
+                start_at = open_at.pop(emp, None)
+                if start_at and when > start_at and (when - start_at).total_seconds() <= 20 * 3600:
+                    shifts.append((start_at, when))
+            elif status == 2 and break_mins > 0:
+                breaks.append((when, break_mins))
+
+        # anyone still clocked in right now is on the floor until now
+        import datetime as _dt
+        from datetime import timedelta as _timedelta
+        now = _dt.datetime.now()
+        for emp, start_at in open_at.items():
+            if (now - start_at).total_seconds() <= 20 * 3600:
+                shifts.append((start_at, now))
 
         seen_days = {}
-        for start, end in shifts:
-            dow = start.isoweekday() % 7 + 1        # match SQL Server's weekday
-            seen_days.setdefault(dow, set()).add(start.date())
-            a = (start.hour * 60 + start.minute) // per * per
-            b = (end.hour * 60 + end.minute) // per * per
-            if end.date() > start.date():
-                b += 24 * 60                        # a shift running past midnight
+        for start_at, end_at in shifts:
+            dow = start_at.isoweekday() % 7 + 1        # match SQL Server's weekday
+            seen_days.setdefault(dow, set()).add(start_at.date())
+            a = (start_at.hour * 60 + start_at.minute) // per * per
+            b = (end_at.hour * 60 + end_at.minute) // per * per
+            if end_at.date() > start_at.date():
+                b += 24 * 60                            # a shift running past midnight
             for slot in range(a, b + 1, per):
-                key = (dow, slot % (24 * 60))
+                # a shift running past midnight covers the NEXT day's early
+                # hours, not this one's — putting 02:00 of a Tuesday onto
+                # Monday made the night look unstaffed on both days
+                day = dow if slot < 24 * 60 else (dow % 7) + 1
+                key = (day, slot % (24 * 60))
                 staffed[key] = staffed.get(key, 0) + 1
+                if slot >= 24 * 60:
+                    seen_days.setdefault(day, set()).add(
+                        start_at.date() + _timedelta(days=1))
+
+        # take the breaks back off
+        for when, mins in breaks:
+            dow = when.isoweekday() % 7 + 1
+            a = (when.hour * 60 + when.minute) // per * per
+            for slot in range(a, a + max(per, mins), per):
+                key = (dow, slot % (24 * 60))
+                if key in staffed:
+                    staffed[key] = max(0, staffed[key] - 1)
 
         for key in list(staffed):
             days = max(1, len(seen_days.get(key[0], set())))
-            staffed[key] = staffed[key] / float(days)
+            staffed[key] = round(staffed[key] / float(days), 1)
         if not staffed:
             coverage_source = 'none'
             coverage_error = ('read %d clocker rows and built %d shifts from them'
