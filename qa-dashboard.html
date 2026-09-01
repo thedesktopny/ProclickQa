@@ -922,13 +922,8 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
              onkeydown="if(event.key==='Enter')portalVerifyCode()"
              style="width:100%;font-size:26px;padding:12px 14px;text-align:center;
                     letter-spacing:.32em;font-variant-numeric:tabular-nums;">
-      <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;
-             color:var(--text2);margin:14px 0 4px;cursor:pointer;">
-        <input type="checkbox" id="portal-remember" checked>
-        Remember this device for 30 days
-      </label>
-      <div style="font-size:11px;color:var(--text3);margin-bottom:8px;line-height:1.5;">
-        Only tick this on a machine that is yours. On a shared computer, leave it off.
+      <div style="font-size:11.5px;color:var(--text3);margin:14px 0 10px;line-height:1.6;">
+        A code is needed every time you sign in.
       </div>
       <button onclick="portalVerifyCode()" class="btn btn-primary"
               style="width:100%;padding:11px;">Sign in</button>
@@ -1445,6 +1440,16 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
         Also check Jobs/jobconfig.json on the CMS server — a scheduled export of whole tables
         (customers, personal info, payments, settings) is emailed to an outside address.
       </div>
+    </div>
+
+    <div class="card" style="padding:16px 20px;margin-top:14px;">
+      <h2 class="payh">Why calls are failing</h2>
+      <div class="payhint">Checks the model actually in use against the models this key is
+        allowed to use — a model name that does not exist fails every call and looks
+        exactly like a broken key.</div>
+      <button onclick="checkWhyFailing()" class="btn btn-outline" style="font-size:12px;">Check</button>
+      <pre id="wf-out" style="white-space:pre-wrap;font-size:11.5px;color:var(--text2);
+           margin:12px 0 0;line-height:1.8;"></pre>
     </div>
 
     <div class="card" style="padding:16px 20px;margin-top:14px;">
@@ -4428,9 +4433,9 @@ function portalHeaders(){
    security tiresome start working around it. */
 let portalChallenge = null;
 
-function portalDeviceToken(){
-  try{ return localStorage.getItem('portal_device') || null; }catch(e){ return null; }
-}
+/* Device trust was removed — a code is needed on every sign-in. Any token
+   left in a browser from the earlier version is cleared so it cannot linger. */
+try{ localStorage.removeItem('portal_device'); }catch(e){}
 
 async function portalLogin(){
   const u = document.getElementById('portal-user').value.trim();
@@ -4441,7 +4446,7 @@ async function portalLogin(){
   try{
     const res = await fetch('/api/portal/login', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({username:u, password:p, device_token: portalDeviceToken()})
+      body: JSON.stringify({username:u, password:p})
     });
     const r = await res.json();
     if(r.needs_code){
@@ -4471,14 +4476,10 @@ async function portalVerifyCode(){
   try{
     const res = await fetch('/api/portal/verify-code', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({challenge: portalChallenge, code,
-                            remember_device: document.getElementById('portal-remember').checked})
+      body: JSON.stringify({challenge: portalChallenge, code})
     });
     const r = await res.json();
     if(!r.ok){ err.textContent = r.error || 'That did not work.'; return; }
-    if(r.device_token){
-      try{ localStorage.setItem('portal_device', r.device_token); }catch(e){}
-    }
     portalFinishLogin(r);
   }catch(e){ err.textContent = 'Could not reach the server.'; }
 }
@@ -6250,6 +6251,42 @@ async function unlockPerson(employeeId, btn){
     showToast(e.message, true);
     btn.disabled = false; btn.textContent = 'Let them back in';
   }
+}
+
+
+/* Why calls are failing — the model, the key, and what the last day looked like. */
+async function checkWhyFailing(){
+  const out = document.getElementById('wf-out');
+  out.textContent = 'Checking…';
+  try{
+    const r = await API.get('/api/why-failing');
+    const lines = [];
+    lines.push('model in use : ' + r.model);
+    lines.push('scoring path : ' + r.pipeline);
+    lines.push('Gemini key   : ' + (r.gemini_key_set ? 'set' : 'NOT SET'));
+    if(r.model_is_available === false){
+      lines.push('');
+      lines.push('❌ THIS MODEL IS NOT AVAILABLE TO THIS KEY — that alone would fail every call.');
+      if((r.did_you_mean||[]).length) lines.push('   closest matches: ' + r.did_you_mean.join(', '));
+    }else if(r.model_is_available){
+      lines.push('✓  the model is available to this key');
+    }
+    if(r.last_24h){
+      lines.push('', 'calls in the last 24 hours:');
+      Object.entries(r.last_24h).forEach(([k,v]) => lines.push(`   ${k}: ${v}`));
+    }
+    if((r.recent_failures||[]).length){
+      lines.push('', 'the most recent failures:');
+      r.recent_failures.forEach(f => lines.push(
+        `   ${f.call_id}  ${f.agent||''}  ${String(f.when).slice(0,16).replace('T',' ')}`));
+    }
+    if((r.models_available||[]).length){
+      lines.push('', 'models this key may use:');
+      lines.push('   ' + r.models_available.join(', '));
+    }
+    if(r.models_error) lines.push('', 'could not ask Google: ' + r.models_error);
+    out.textContent = lines.join('\n');
+  }catch(e){ out.textContent = 'Failed: ' + e.message; }
 }
 
 async function loadAlerts(){

@@ -544,9 +544,17 @@ def init_db():
     try:
         c.execute('''CREATE TABLE IF NOT EXISTS portal_revocations (
             user_id TEXT PRIMARY KEY,
-            revoked_at TIMESTAMP DEFAULT NOW(),
+            revoked_epoch BIGINT NOT NULL DEFAULT 0,
             reason TEXT
         )''')
+        # an earlier version of this table used a timestamp; drop it rather
+        # than migrate, since it holds nothing worth keeping
+        try:
+            c.execute("ALTER TABLE portal_revocations ADD COLUMN IF NOT EXISTS "
+                      "revoked_epoch BIGINT NOT NULL DEFAULT 0")
+            c.execute("ALTER TABLE portal_revocations DROP COLUMN IF EXISTS revoked_at")
+        except Exception:
+            conn.rollback()
         conn.commit()
     except Exception as e:
         print('[init] portal_revocations: ' + str(e)[:140])
@@ -887,8 +895,13 @@ def _revocations(max_age=20):
         return _REVOKED['map']
     try:
         conn = get_db(); c = conn.cursor()
-        c.execute('SELECT user_id, revoked_at FROM portal_revocations')
-        _REVOKED['map'] = {str(r[0]): r[1] for r in c.fetchall()}
+        # EPOCH SECONDS, not a timestamp. Comparing a database timestamp to
+        # time.time() depends on whether the driver hands back a timezone, and
+        # if it lands even an hour ahead then EVERY ticket looks older than the
+        # revocation and everyone is signed out — which is exactly what
+        # happened.
+        c.execute('SELECT user_id, revoked_epoch FROM portal_revocations')
+        _REVOKED['map'] = {str(r[0]): int(r[1] or 0) for r in c.fetchall()}
         _REVOKED['at'] = _t.time()
         conn.close()
     except Exception as e:
@@ -900,11 +913,13 @@ def revoke_portal_sessions(user_id, reason=''):
     """Stops every ticket that person currently holds."""
     try:
         conn = get_db(); c = conn.cursor()
-        c.execute("""INSERT INTO portal_revocations (user_id, revoked_at, reason)
-                     VALUES (%s, NOW(), %s)
+        import time as _t
+        c.execute("""INSERT INTO portal_revocations (user_id, revoked_epoch, reason)
+                     VALUES (%s, %s, %s)
                      ON CONFLICT (user_id) DO UPDATE
-                     SET revoked_at = NOW(), reason = EXCLUDED.reason""",
-                  (str(user_id), (reason or '')[:200]))
+                     SET revoked_epoch = EXCLUDED.revoked_epoch,
+                         reason = EXCLUDED.reason""",
+                  (str(user_id), int(_t.time()), (reason or '')[:200]))
         conn.commit(); conn.close()
         _REVOKED['at'] = 0          # so the next request sees it immediately
         return True
@@ -933,15 +948,12 @@ def _portal_user(ticket):
         # otherwise signing out only cleared the browser and the ticket kept
         # working for up to ten hours, and locking somebody did not actually
         # remove them from the system they were already in.
-        revoked_at = _revocations().get(str(data.get('u', '')))
-        if revoked_at:
-            try:
-                issued = int(data.get('i', 0))
-                if issued and issued < revoked_at.timestamp():
-                    return None
-                if not issued:
-                    return None        # older ticket with no issue time — refuse
-            except Exception:
+        revoked_epoch = _revocations().get(str(data.get('u', '')))
+        if revoked_epoch:
+            issued = int(data.get('i', 0) or 0)
+            # a ticket minted at the same second as the revocation is the new
+            # sign-in, not the old session, so only strictly older is refused
+            if issued < revoked_epoch:
                 return None
         return data
     except Exception:
@@ -2449,6 +2461,66 @@ def analyze_call():
 # ─── RETRY STATUS LOG ─────────────────────────────────────────────────────────
 retry_log = []
 retry_running = False
+
+@app.route('/api/why-failing', methods=['GET'])
+@portal_or_manager
+def why_failing():
+    """What is actually going wrong with the calls that failed.
+
+    "Everything failed" is not a diagnosis. This reports the model in use, what
+    the scoring path is, and — the part that matters — asks Gemini which models
+    this key may actually use, since a model name that does not exist fails
+    every single call and looks identical to a broken key.
+    """
+    out = {'model': os.getenv('GEMINI_MODEL', 'gemini-3-flash'),
+           'pipeline': os.getenv('SCORING_PIPELINE', 'gemini-only'),
+           'gemini_key_set': bool(os.getenv('GEMINI_API_KEY', '').strip()),
+           'anthropic_key_set': bool(os.getenv('ANTHROPIC_API_KEY', '').strip())}
+
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute("""SELECT status, COUNT(*) FROM calls
+                     WHERE created_at > NOW() - INTERVAL '24 hours'
+                     GROUP BY status ORDER BY COUNT(*) DESC""")
+        out['last_24h'] = {r[0]: int(r[1]) for r in c.fetchall()}
+        c.execute("""SELECT call_id, agent_name, created_at, recording_url
+                     FROM calls WHERE status = 'Failed'
+                     ORDER BY created_at DESC LIMIT 5""")
+        out['recent_failures'] = [
+            {'call_id': r[0], 'agent': r[1],
+             'when': r[2].isoformat() if r[2] else None,
+             'recording': (r[3] or '')[:90]} for r in c.fetchall()]
+        conn.close()
+    except Exception as e:
+        out['db_error'] = str(e)[:200]
+
+    # ask the engine itself, so the check and the live path can never disagree
+    try:
+        from ai_engine import check_model_available
+        out['model_check'] = check_model_available()
+    except Exception as e:
+        out['model_check'] = {'ok': None, 'why': str(e)[:140]}
+
+    key = os.getenv('GEMINI_API_KEY', '').strip()
+    if key:
+        try:
+            req = urllib.request.Request(
+                'https://generativelanguage.googleapis.com/v1beta/models?key=' + key)
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                data = json.loads(resp.read().decode())
+            names = [m.get('name', '').replace('models/', '')
+                     for m in data.get('models', [])
+                     if 'generateContent' in (m.get('supportedGenerationMethods') or [])]
+            out['models_available'] = sorted(n for n in names if 'gemini' in n)
+            out['model_is_available'] = out['model'] in out['models_available']
+            if not out['model_is_available']:
+                close = [n for n in out['models_available']
+                         if n.startswith(out['model'].rsplit('-', 1)[0])]
+                out['did_you_mean'] = close[:6]
+        except Exception as e:
+            out['models_error'] = str(e)[:200]
+    return jsonify(out)
+
 
 @app.route('/api/retry-status', methods=['GET'])
 def retry_status():
@@ -5100,8 +5172,11 @@ def portal_login_route():
 
     # The password is right. Unless this device has been proved before, a code
     # goes to the person's own email and nothing is issued until it comes back.
+    # A code EVERY time. There used to be a "remember this device for 30 days"
+    # option; David wants it gone, so a password alone never opens the portal
+    # no matter how familiar the machine is.
     if os.getenv('PORTAL_2FA', 'on').lower() not in ('off', '0', 'false'):
-        if not _device_is_trusted(user['user_id'], d.get('device_token')):
+        if True:
             ok, detail = _start_code_challenge(user)
             if not ok:
                 return jsonify({'ok': False, 'error': detail}), 403
@@ -5152,7 +5227,11 @@ def _issue_portal_session(user, remember_device=False):
         try:
             vg_token = create_token({
                 'id': 'cms-%s' % (user.get('employee_id') or user.get('user_id')),
-                'role': 'manager' if user['is_manager'] else 'reviewer',
+                # A CMS admin was being minted as a mere manager, so anything
+                # needing admin — retrying a call, for one — refused them with
+                # "Unauthorized" on their own system.
+                'role': ('admin' if user.get('is_admin')
+                         else 'manager' if user['is_manager'] else 'reviewer'),
                 'username': user.get('username') or user['name'],
                 'full_name': user['name'],
             })
@@ -5165,7 +5244,7 @@ def _issue_portal_session(user, remember_device=False):
            'is_qa': bool(user.get('is_qa')), 'vg_token': vg_token,
            'extension': user.get('extension'), 'pages': pages}
 
-    if remember_device:
+    if False:          # remembering a device is deliberately not offered
         # 30 days, so an agent proves themselves about once a month on their
         # own machine rather than at the start of every shift
         import secrets
@@ -9136,7 +9215,7 @@ PORTAL_ALLOWED_PREFIXES = (
     '/api/customers/', '/api/card-fields', '/api/calls/', '/api/my-call', '/api/phone-event',
     '/api/media/', '/media/',
     '/api/phone-event/recent', '/api/phone-event/check',
-    '/api/missed-calls', '/api/call-flow', '/api/dnd-check', '/api/texts/',
+    '/api/missed-calls', '/api/call-flow', '/api/dnd-check', '/api/why-failing', '/api/texts/',
     '/api/cms-db/', '/api/connections', '/static/', '/favicon',
 )
 
