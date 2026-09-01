@@ -1161,19 +1161,55 @@ def clocker_check(weeks=4):
     except Exception as e:
         out['error_values'] = str(e)[:200]
 
+    # InOut turned out to be almost entirely NULL, so it is not the marker.
+    # Rather than guess at another column name, list every column and show
+    # whole rows.
+    columns = []
     try:
-        cu.execute("""SELECT TOP 6 EmployeeId, Created, InOut
-                      FROM EmployeeClocker ORDER BY Created DESC""")
+        cu.execute("""SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS
+                      WHERE TABLE_NAME = 'EmployeeClocker'
+                      ORDER BY ORDINAL_POSITION""")
+        while True:
+            r = cu.fetchone()
+            if not r:
+                break
+            columns.append({'name': r[0], 'type': r[1]})
+        out['columns'] = columns
+    except Exception as e:
+        out['error_columns'] = str(e)[:200]
+
+    try:
+        names = [c['name'] for c in columns] or ['EmployeeId', 'Created', 'InOut']
+        cu.execute('SELECT TOP 8 %s FROM EmployeeClocker ORDER BY Created DESC'
+                   % ', '.join('[%s]' % n for n in names))
         rows = []
         while True:
             r = cu.fetchone()
             if not r:
                 break
-            rows.append({'employee': r[0], 'when': _plain(r[1]),
-                         'inout': repr(r[2]), 'type': type(r[2]).__name__})
-        out['recent'] = rows
+            rows.append({names[i]: (_plain(v) if hasattr(v, 'isoformat') else
+                                    (repr(v) if v is not None else None))
+                         for i, v in enumerate(r)})
+        out['recent_full'] = rows
     except Exception as e:
         out['error_recent'] = str(e)[:200]
+
+    # whichever column carries the status, show what values it holds
+    for candidate in ('Status', 'ClockerStatus', 'EmployeeClockerStatus', 'Type', 'Action'):
+        if not any(c['name'].lower() == candidate.lower() for c in columns):
+            continue
+        try:
+            cu.execute('SELECT TOP 8 [%s], COUNT(*) FROM EmployeeClocker '
+                       'GROUP BY [%s] ORDER BY COUNT(*) DESC' % (candidate, candidate))
+            vals = []
+            while True:
+                r = cu.fetchone()
+                if not r:
+                    break
+                vals.append({'value': repr(r[0]), 'rows': int(r[1] or 0)})
+            out['values_' + candidate] = vals
+        except Exception as e:
+            out['error_' + candidate] = str(e)[:160]
 
     conn.close()
     return out

@@ -6645,10 +6645,20 @@ async function checkClocker(){
       lines.push('', 'what the in/out column holds:');
       r.inout_values.forEach(v => lines.push(`   ${v.value}  —  ${v.rows} rows`));
     }
-    if((r.recent||[]).length){
-      lines.push('', 'the most recent rows:');
-      r.recent.forEach(x => lines.push(
-        `   employee ${x.employee}  ${String(x.when).slice(0,16).replace('T',' ')}  ${x.inout} (${x.type})`));
+    if((r.columns||[]).length){
+      lines.push('', 'columns in the table:');
+      lines.push('   ' + r.columns.map(c => c.name + ' (' + c.type + ')').join(', '));
+    }
+    Object.keys(r).filter(k => k.startsWith('values_')).forEach(k=>{
+      lines.push('', 'what ' + k.replace('values_','') + ' holds:');
+      r[k].forEach(v => lines.push(`   ${v.value}  —  ${v.rows} rows`));
+    });
+    if((r.recent_full||[]).length){
+      lines.push('', 'the most recent rows in full:');
+      r.recent_full.forEach((x,i) => {
+        lines.push('   ---');
+        Object.keys(x).forEach(k => { if(x[k] !== null) lines.push(`   ${k}: ${x[k]}`); });
+      });
     }
     Object.keys(r).filter(k=>k.startsWith('error_')).forEach(k=>
       lines.push('', k + ': ' + r[k]));
