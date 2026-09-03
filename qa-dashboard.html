@@ -11696,19 +11696,14 @@ async function renderHumanReview(){
 
   let hr=[];
   try{
-    // Fetch large page to get all flagged calls, not just current 25
+    // The server now applies this test in SQL, so what comes back is only the
+    // calls that need reviewing — not 500 rows to sift through here.
     const dr = dateRangeState['humanreview'] || {from:'',to:''};
-    let url = '/api/calls?page=1&limit=500';
+    let url = '/api/calls?page=1&limit=200&needs_review=1';
     if(dr.from) url += `&date_from=${encodeURIComponent(dr.from)}`;
     if(dr.to) url += `&date_to=${encodeURIComponent(dr.to)}`;
     const res = await API.get(url);
-    const allCalls = Array.isArray(res) ? res : (res.calls||[]);
-    hr = allCalls.filter(c=>
-      c.overall_score>0 &&
-      c.status!=='Processing' &&
-      c.status!=='Failed' &&
-      (c.requires_human_review || c.status==='Critical' || (c.status==='Review'&&(c.flags||0)>0))
-    );
+    hr = Array.isArray(res) ? res : (res.calls||[]);
   }catch(e){
     tbody.innerHTML='<tr><td colspan="8" style="text-align:center;padding:32px;color:var(--red)">Failed to load. Refresh and try again.</td></tr>';
     return;

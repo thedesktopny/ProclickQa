@@ -603,6 +603,27 @@ def init_db():
     except Exception as e:
         print('[init] two-step tables: ' + str(e)[:140])
 
+    # Indexes for the lists people actually open. Without these the review page
+    # scans every call ever scored, which is what made it slow. Created on
+    # their own connection so a failure cannot abort the rest of startup.
+    for statement in (
+        "CREATE INDEX IF NOT EXISTS idx_calls_created ON calls(created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_calls_review ON calls(created_at DESC) "
+        "WHERE requires_human_review = TRUE OR status IN ('Critical', 'Review')",
+        "CREATE INDEX IF NOT EXISTS idx_calls_status ON calls(status)",
+        "CREATE INDEX IF NOT EXISTS idx_calls_agent ON calls(agent_name)",
+    ):
+        try:
+            ix = get_db(); xc = ix.cursor()
+            xc.execute(statement)
+            ix.commit(); ix.close()
+        except Exception as e:
+            print('[init] index: ' + str(e)[:120])
+            try:
+                ix.rollback(); ix.close()
+            except Exception:
+                pass
+
     # An earlier version of portal_revocations used a timestamp column. Adding
     # the new one runs on ITS OWN connection: in Postgres a failed statement
     # aborts the whole transaction, so one failing migration in the middle of
@@ -1998,6 +2019,17 @@ def get_calls():
         date_clause += ' AND calls.created_at <= %s'
         date_params.append(date_to)
 
+    # The Human Review page used to ask for 500 calls and throw most of them
+    # away in the browser. Doing the same test in SQL returns the twenty or so
+    # that actually need looking at, which is the difference between a slow
+    # page and an instant one.
+    if request.args.get('needs_review') in ('1', 'true', 'yes'):
+        date_clause += (" AND calls.overall_score > 0"
+                        " AND calls.status NOT IN ('Processing', 'Failed')"
+                        " AND (calls.requires_human_review = TRUE"
+                        "      OR calls.status = 'Critical'"
+                        "      OR (calls.status = 'Review' AND COALESCE(calls.flags, 0) > 0))")
+
     if user and user['role'] == 'qa_user':
         c.execute(f'SELECT COUNT(*) FROM calls JOIN agents ON agents.name = calls.agent_name WHERE agents.assigned_qa_user_id = %s{date_clause}',
                   [user['id']] + date_params)
@@ -2017,6 +2049,7 @@ def get_calls():
         ''', [user['id']] + date_params + [limit, offset])
     else:
         where_clause = date_clause.replace(' AND ', 'WHERE ', 1) if date_clause else ''
+        where_clause = where_clause.replace('calls.', '')
         c.execute(f'SELECT COUNT(*) FROM calls {where_clause}', date_params)
         total = c.fetchone()['count']
         c.execute(f'''
