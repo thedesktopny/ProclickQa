@@ -909,6 +909,21 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
   font-size:11.5px; padding:4px 10px; border-radius:8px; background:var(--surface2);
   border:1px solid var(--border); color:var(--text2); white-space:nowrap;
 }
+
+.ag-grid{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+@media (max-width:560px){ .ag-grid{ grid-template-columns:1fr; } }
+.ag-check{ display:flex; align-items:center; gap:7px; font-size:12.5px; color:var(--text2); cursor:pointer; }
+
+/* a small edit handle on each agent tile, for managers */
+.al-edit{
+  position:absolute; top:6px; right:6px; background:var(--surface2);
+  border:1px solid var(--border); color:var(--text3); border-radius:6px;
+  width:22px; height:22px; font-size:11px; cursor:pointer; line-height:1;
+  opacity:0; transition:opacity .12s; font-family:inherit;
+}
+.lvtile:hover .al-edit{ opacity:1; }
+.al-edit:hover{ color:var(--text); background:var(--surface); }
+@media (hover:none){ .al-edit{ opacity:.7; } }
 </style>
 </head>
 <body>
@@ -1839,9 +1854,62 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
         <input type="checkbox" id="al-former" onchange="loadAgentList()"> include former staff
       </label>
       <span id="al-count" style="font-size:11.5px;color:var(--text3);"></span>
+      <button class="btn btn-primary" id="al-add" style="display:none;"
+              onclick="newAgent()">+ Add agent</button>
     </div>
   </div>
   <div style="padding:18px 28px 44px;"><div id="al-body"></div></div>
+</div>
+
+<div class="modal" id="agent-modal">
+  <div class="modal-box" style="max-width:520px;">
+    <div class="modal-head">
+      <h2 id="ag-title">New agent</h2>
+      <button onclick="hideModal('agent-modal')" class="modal-x">&times;</button>
+    </div>
+    <div style="padding:20px 24px 24px;">
+      <div class="ag-grid">
+        <div><div class="cn-lab">First name</div>
+          <input id="ag-first" class="cms-in" style="width:100%;"></div>
+        <div><div class="cn-lab">Last name</div>
+          <input id="ag-last" class="cms-in" style="width:100%;"></div>
+      </div>
+      <div class="ag-grid" style="margin-top:12px;">
+        <div><div class="cn-lab">Extension</div>
+          <input id="ag-ext" class="cms-in" inputmode="numeric" style="width:100%;"></div>
+        <div><div class="cn-lab">Role</div>
+          <select id="ag-role" class="cms-in" style="width:100%;">
+            <option value="">No role (agent)</option>
+            <option value="Manager">Manager</option>
+            <option value="Admin">Admin</option>
+          </select></div>
+      </div>
+
+      <div id="ag-login-fields">
+        <div style="margin-top:12px;"><div class="cn-lab">Email — this is their user name</div>
+          <input id="ag-email" class="cms-in" type="email" style="width:100%;"
+                 placeholder="name@myhellodesk.com"></div>
+        <div style="margin-top:12px;"><div class="cn-lab">Password — at least 8 characters</div>
+          <input id="ag-pass" class="cms-in" type="text" style="width:100%;"
+                 placeholder="they can change it later">
+          <div style="font-size:11px;color:var(--text3);margin-top:4px;line-height:1.5;">
+            Their sign-in code goes to that email address, so it has to be one they can open.
+          </div></div>
+      </div>
+
+      <div style="display:flex;gap:16px;margin-top:14px;flex-wrap:wrap;">
+        <label class="ag-check"><input type="checkbox" id="ag-qa"> QA reviewer</label>
+        <label class="ag-check"><input type="checkbox" id="ag-cam"> Has a camera</label>
+      </div>
+
+      <div id="ag-out" style="font-size:12.5px;margin:14px 0 4px;min-height:20px;
+           line-height:1.6;"></div>
+      <button id="ag-go" onclick="saveAgent()" class="btn btn-primary"
+              style="width:100%;padding:11px;">Check first</button>
+      <button id="ag-confirm" onclick="saveAgent(true)" class="btn btn-primary"
+              style="width:100%;padding:11px;margin-top:8px;display:none;">Yes, create them</button>
+    </div>
+  </div>
 </div>
 
 <div class="page" id="page-packages">
@@ -4469,6 +4537,7 @@ function csExport(){
 const IS_PORTAL = (typeof IS_PORTAL_EARLY !== 'undefined') ? IS_PORTAL_EARLY
   : (document.body.getAttribute('data-portal') === '1' || location.pathname.startsWith('/portal'));
 let portalTicket = null, portalPages = [], portalIsAdmin = false;
+let portalIsManager = false;   // managers and admins may add or edit people
 
 function portalHeaders(){
   const h = {'Content-Type':'application/json'};
@@ -4546,6 +4615,7 @@ function portalBackToPassword(){
 
 function portalFinishLogin(r){
     portalTicket = r.ticket; portalPages = r.pages || [];
+    portalIsManager = !!(r.is_manager || r.is_admin);
     try{ sessionStorage.setItem('portal_ticket', r.ticket); }catch(e){}
     // a QA reviewer also gets a normal VoiceGuard session, so the review pages
     // work exactly as they do on the QA dashboard
@@ -4721,6 +4791,95 @@ async function qaSave(){
   }catch(e){ showToast(e.message, true); }
 }
 
+
+/* Creating and editing people. Creating writes three tables that must agree —
+   the login, their permissions and the employee record — so it rehearses
+   first and says exactly what it would do before anything is saved. */
+let agEditing = null;
+
+function newAgent(){
+  agEditing = null;
+  document.getElementById('ag-title').textContent = 'New agent';
+  ['ag-first','ag-last','ag-ext','ag-email','ag-pass'].forEach(id=>{
+    const el = document.getElementById(id); if(el) el.value = '';
+  });
+  document.getElementById('ag-role').value = '';
+  document.getElementById('ag-qa').checked = false;
+  document.getElementById('ag-cam').checked = false;
+  document.getElementById('ag-login-fields').style.display = '';
+  document.getElementById('ag-out').textContent = '';
+  document.getElementById('ag-go').textContent = 'Check first';
+  document.getElementById('ag-go').style.display = '';
+  document.getElementById('ag-confirm').style.display = 'none';
+  showModal('agent-modal');
+}
+
+function editAgent(id){
+  const a = (alData || []).find(x => x.id === id);
+  if(!a) return;
+  agEditing = id;
+  document.getElementById('ag-title').textContent = 'Edit ' + a.name;
+  const parts = (a.name || '').split(' ');
+  document.getElementById('ag-first').value = parts[0] || '';
+  document.getElementById('ag-last').value = parts.slice(1).join(' ');
+  document.getElementById('ag-ext').value = a.extension || '';
+  document.getElementById('ag-qa').checked = !!a.qa;
+  document.getElementById('ag-cam').checked = !!a.camera;
+  // an existing person's login is not changed from here
+  document.getElementById('ag-login-fields').style.display = 'none';
+  document.getElementById('ag-out').textContent = '';
+  document.getElementById('ag-go').textContent = 'Save changes';
+  document.getElementById('ag-go').style.display = '';
+  document.getElementById('ag-confirm').style.display = 'none';
+  showModal('agent-modal');
+}
+
+async function saveAgent(confirmed){
+  const out = document.getElementById('ag-out');
+  const btn = document.getElementById('ag-go');
+  const body = {
+    first_name: document.getElementById('ag-first').value.trim(),
+    last_name: document.getElementById('ag-last').value.trim(),
+    extension: document.getElementById('ag-ext').value.trim(),
+    is_qa: document.getElementById('ag-qa').checked,
+    with_camera: document.getElementById('ag-cam').checked,
+    confirm: !!confirmed,
+  };
+  if(!agEditing){
+    body.email = document.getElementById('ag-email').value.trim();
+    body.password = document.getElementById('ag-pass').value;
+    body.role = document.getElementById('ag-role').value;
+  }
+  btn.disabled = true;
+  out.style.color = 'var(--text3)';
+  out.textContent = confirmed ? 'Saving…' : 'Checking…';
+  try{
+    const r = agEditing
+      ? await API.patch('/api/agents/' + agEditing, body)
+      : await API.post('/api/agents', body);
+    if(r.error || r.ok === false){
+      out.style.color = 'var(--red)';
+      out.textContent = '❌ ' + (r.error || 'That did not work.');
+      document.getElementById('ag-confirm').style.display = 'none';
+      return;
+    }
+    if(r.committed){
+      out.style.color = 'var(--green)';
+      out.textContent = '✅ ' + r.meaning;
+      setTimeout(()=>{ hideModal('agent-modal'); loadAgentList(); }, 1000);
+    }else{
+      // the rehearsal — say what would happen, then let them confirm
+      out.style.color = 'var(--text2)';
+      out.textContent = r.meaning || 'Ready to save.';
+      document.getElementById('ag-go').style.display = 'none';
+      document.getElementById('ag-confirm').style.display = '';
+    }
+  }catch(e){
+    out.style.color = 'var(--red)';
+    out.textContent = 'Failed: ' + e.message;
+  }finally{ btn.disabled = false; }
+}
+
 async function loadAgentList(){
   const box = document.getElementById('al-body');
   box.innerHTML = '<div style="color:var(--text3);font-size:13px;">Loading…</div>';
@@ -4739,14 +4898,18 @@ function alRender(){
     a.name.toLowerCase().includes(q) || String(a.extension||'').includes(q));
   document.getElementById('al-count').textContent =
     `${list.length} of ${alData.agents.length}`;
+  const add = document.getElementById('al-add');
+  if(add) add.style.display = portalIsManager ? '' : 'none';
   document.getElementById('al-body').innerHTML = list.length ? `
     <div class="lvfloor">${list.map(a=>`
       <div class="lvtile ${a.left_firm?'off':'free'}" onclick="portalOpenAgent(${a.id})"
-           style="border-left-color:${a.left_firm?'var(--text3)':'var(--accent)'}">
+           style="border-left-color:${a.left_firm?'var(--text3)':'var(--accent)'};position:relative;">
         <div class="nm">${esc(a.name)}</div>
         <div class="ex">ext ${esc(a.extension)||'—'}</div>
         <div class="st" style="color:var(--text3)">
           ${a.left_firm?'former':(a.qa?'QA':'agent')}${a.camera?' · camera':''}</div>
+        ${portalIsManager ? `<button class="al-edit"
+            onclick="event.stopPropagation();editAgent(${a.id})" title="Edit">✎</button>` : ''}
       </div>`).join('')}</div>`
     : '<div style="color:var(--text3);font-size:13px;">Nobody matches that.</div>';
 }
@@ -4945,6 +5108,7 @@ async function portalBoot(){
         const me = await res.json();
         portalPages = me.pages || [];
         portalIsAdmin = !!me.is_admin;
+        portalIsManager = !!(me.is_manager || me.is_admin);
         if(me.is_qa){ isAdmin = !!me.is_admin;
                       currentRole = me.is_admin ? 'admin' : me.is_manager ? 'manager' : 'reviewer'; }
         document.getElementById('portal-login').style.display = 'none';
