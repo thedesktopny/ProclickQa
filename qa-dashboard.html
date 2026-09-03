@@ -1708,6 +1708,11 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
   </div>
 
   <div style="padding:18px 28px 44px;">
+    <div style="display:flex;justify-content:flex-end;margin-bottom:8px;">
+      <button class="cn-chip" onclick="whyNoPopup()">Why don't I see callers?</button>
+    </div>
+    <pre id="why-popup" style="white-space:pre-wrap;font-size:11.5px;color:var(--text2);
+         margin:0 0 12px;line-height:1.8;"></pre>
     <div id="lv-waiting" class="lv-waiting"></div>
     <div class="card" id="lv-callbacks-card" style="padding:16px 20px;margin-bottom:14px;display:none;">
       <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;">
@@ -7496,6 +7501,40 @@ async function loadMissedCount(){
 /* Who still needs ringing back. This is the list the old CMS had: a caller
    drops off it either by getting through on their own or by somebody marking
    it done, so it empties as the work is actually finished. */
+
+/* Why the caller popup is not appearing. Five different causes look identical
+   from a desk, so this says which one it is. */
+async function whyNoPopup(){
+  const out = document.getElementById('why-popup');
+  out.textContent = 'Checking…';
+  try{
+    const r = await API.get('/api/my-call/why');
+    const lines = [];
+    lines.push('signed in as: ' + (r.signed_in_as || '(unknown)')
+               + (r.employee_id ? '  (employee ' + r.employee_id + ')' : ''));
+    lines.push('their extension: ' + (r.extension || 'NONE ON RECORD'));
+    lines.push('');
+    if(r.problem){
+      lines.push('⚠️  ' + r.problem);
+    }else{
+      lines.push('✓  ' + (r.note || 'everything looks right'));
+    }
+    lines.push('');
+    lines.push('extensions the phone system says are on a call: '
+               + ((r.extensions_with_a_live_call || []).join(', ') || 'none'));
+    lines.push('calls being tracked right now: ' + (r.calls_tracked ?? 0));
+    if(r.last_event_seen) lines.push('last event from the phone system: ' + r.last_event_seen);
+    if((r.their_recent_calls || []).length){
+      lines.push('', 'their calls in the last 2 hours (from the call log):');
+      r.their_recent_calls.forEach(c => lines.push(
+        `   ${c.call_id}  ${c.phone}  picked up by ${c.picked_up_by || '—'}`
+        + `  ${String(c.started).slice(11,16)}${c.ended ? ' to ' + String(c.ended).slice(11,16) : ' (still open)'}`));
+    }
+    if(r.call_log_error) lines.push('', 'could not read the call log: ' + r.call_log_error);
+    out.textContent = lines.join('\n');
+  }catch(e){ out.textContent = 'Failed: ' + e.message; }
+}
+
 async function loadCallbacks(){
   const card = document.getElementById('lv-callbacks-card');
   const box = document.getElementById('lv-callbacks');

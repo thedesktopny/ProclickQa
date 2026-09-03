@@ -7275,6 +7275,79 @@ def my_current_call():
                     'extension': ext})
 
 
+def _plain_dt(v):
+    try:
+        return v.isoformat()
+    except Exception:
+        return (str(v) if v is not None else None)
+
+
+@app.route('/api/my-call/why', methods=['GET'])
+@portal_or_manager
+def why_no_popup():
+    """Why the caller popup is not appearing for this agent.
+
+    There are five separate reasons it can stay silent and they look identical
+    from the outside, so this reports which one it is rather than leaving it to
+    be guessed at.
+    """
+    import cms_db
+    p = _portal_user(request.headers.get('X-Portal-Ticket', ''))
+    out = {'signed_in_as': (p or {}).get('n'), 'employee_id': (p or {}).get('e')}
+    if not (p and p.get('e')):
+        out['problem'] = 'Signed in, but this account is not linked to a CMS employee record.'
+        return jsonify(out)
+
+    ext = _extension_for(p['e'])
+    out['extension'] = ext
+    if not ext:
+        out['problem'] = ('This employee record has no extension, so no call can be '
+                          'matched to them. Add one on the Agents page.')
+        return jsonify(out)
+
+    # what the phone system has told us, for anybody
+    by_ext = _LIVE_CALLS.get('by_ext', {})
+    out['extensions_with_a_live_call'] = sorted(by_ext.keys())
+    out['this_extension_has_a_call'] = ext in by_ext
+    out['calls_tracked'] = len(_LIVE_CALLS.get('by_uniq', {}))
+    out['last_event_seen'] = _LIVE_CALLS.get('last_event')
+
+    # and what the call log says, independently of the events
+    try:
+        cu = cms_db._connect().cursor()
+        cu.execute("""SELECT TOP 3 Id, Phone, Started, PickedUpBy, Agent, Ended
+                      FROM PhoneCallsLog
+                      WHERE (PickedUpBy = %s OR Agent = %s)
+                        AND Started >= DATEADD(hour, -2, GETDATE())
+                      ORDER BY Started DESC""", (ext, ext))
+        rows = []
+        while True:
+            r = cu.fetchone()
+            if not r:
+                break
+            rows.append({'call_id': int(r[0]), 'phone': r[1], 'started': _plain_dt(r[2]),
+                         'picked_up_by': r[3], 'agent': r[4],
+                         'ended': _plain_dt(r[5])})
+        out['their_recent_calls'] = rows
+    except Exception as e:
+        out['call_log_error'] = str(e)[:180]
+
+    if out['this_extension_has_a_call']:
+        out['problem'] = None
+        out['note'] = 'A call IS showing for this extension — the popup should be visible.'
+    elif not out['extensions_with_a_live_call']:
+        out['problem'] = ('The phone system has not reported ANY live call to us. Either no '
+                          'call is happening, or Igor is not posting queue/pickup events.')
+    elif out.get('their_recent_calls'):
+        out['problem'] = ('Calls exist for this extension in the log, but no live event has '
+                          'arrived for it. The pickup event may not be sent for this agent.')
+    else:
+        out['problem'] = ('Other extensions have live calls but this one does not — most '
+                          'likely the extension on the employee record does not match the '
+                          'one the phone system uses.')
+    return jsonify(out)
+
+
 @app.route('/api/calls/associate', methods=['POST'])
 @portal_or_manager
 def associate_caller_number():
@@ -9331,6 +9404,7 @@ PORTAL_ALLOWED_PREFIXES = (
     '/api/qa-users', '/api/qa-assignments', '/api/security-alerts', '/api/employees/', '/api/agents',
     '/api/credentials', '/api/credential-access', '/api/work',
     '/api/customers/', '/api/card-fields', '/api/calls/', '/api/my-call', '/api/phone-event',
+    '/api/my-call/why',
     '/api/media/', '/media/',
     '/api/phone-event/recent', '/api/phone-event/check',
     '/api/missed-calls', '/api/call-flow', '/api/dnd-check', '/api/why-failing',
