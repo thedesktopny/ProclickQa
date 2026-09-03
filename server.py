@@ -9539,6 +9539,15 @@ def skinblock_status():
                       'mb': round(size / 1048576.0, 1)})
     have = len([f for f in files if f['cached']])
     return jsonify({
+        'warm_up_errors': _SB_WARM['errors'][:6],
+        'warm_up_last_run': _SB_WARM['last_run'],
+        'what_this_means': (
+            None if total > 0 else
+            'None of the detector files are cached on the server, so every agent '
+            'downloads about 45 MB from the internet the first time they use it, '
+            'and again whenever their browser clears its cache. If the warm-up '
+            'errors below mention 403 or Forbidden, Azure is blocking the CDN and '
+            'those domains need adding to the allowed list.'),
         'cache_dir': SB_CACHE,
         'files': files,
         'files_cached': have, 'files_needed': len(wanted),
@@ -9792,6 +9801,9 @@ except Exception as e:
     print(f'⚠️ DB init warning: {e}')
 
 
+_SB_WARM = {'errors': [], 'last_run': None, 'fetched': 0}
+
+
 def _warm_skinblock_assets():
     """Fetch the detector files once at startup if they aren't already here.
 
@@ -9817,7 +9829,11 @@ def _warm_skinblock_assets():
                     have += 1
                 except Exception as e:
                     print('[skinblock] warm-up could not get %s: %s' % (name, str(e)[:140]))
+                    _SB_WARM['errors'].append('%s: %s' % (name, str(e)[:200]))
             print('[skinblock] detector files ready: %d of %d in %s' % (have, len(wanted), SB_CACHE))
+            import datetime as _d
+            _SB_WARM['last_run'] = _d.datetime.now().isoformat()
+            _SB_WARM['fetched'] = have
         except Exception as e:
             print('[skinblock] warm-up failed: ' + str(e)[:160])
 
