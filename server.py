@@ -5291,11 +5291,15 @@ def portal_verify_code():
 
     pending = _portal_user(d.get('challenge') or '')
     if not pending or pending.get('n') != 'PENDING-CODE':
-        return jsonify({'ok': False, 'error': 'That sign-in attempt has expired. '
-                                              'Start again.'}), 403
+        # the challenge ticket did not verify — expired, wrong signature, or
+        # refused by the revocation list
+        print('[2fa] challenge rejected: %r' % (pending,))
+        return jsonify({'ok': False, 'reason': 'challenge',
+                        'error': 'That sign-in attempt has expired. Start again. [challenge]'}), 403
     code = ''.join(ch for ch in str(d.get('code') or '') if ch.isdigit())
     if len(code) != 6:
-        return jsonify({'ok': False, 'error': 'Enter the six-digit code.'}), 400
+        return jsonify({'ok': False, 'reason': 'format',
+                        'error': 'Enter the six-digit code. [format]'}), 400
 
     user_id = str(pending['u'])
     try:
@@ -5306,8 +5310,10 @@ def portal_verify_code():
         row = c.fetchone()
         if not row:
             conn.close()
-            return jsonify({'ok': False,
-                            'error': 'That code has expired. Sign in again for a new one.'}), 403
+            print('[2fa] no live code row for user %s' % user_id)
+            return jsonify({'ok': False, 'reason': 'no-code',
+                            'error': 'That code has expired. Sign in again for a new one. '
+                                     '[no-code]'}), 403
         row_id, code_hash, attempts = int(row[0]), row[1], int(row[2] or 0)
 
         # five guesses, then the code is dead — otherwise six digits is only a
@@ -5315,15 +5321,16 @@ def portal_verify_code():
         if attempts >= 5:
             c.execute('UPDATE portal_2fa SET used = TRUE WHERE id = %s', (row_id,))
             conn.commit(); conn.close()
-            return jsonify({'ok': False,
-                            'error': 'Too many wrong tries. Sign in again for a new code.'}), 403
+            return jsonify({'ok': False, 'reason': 'too-many',
+                            'error': 'Too many wrong tries. Sign in again for a new code. '
+                                     '[too-many]'}), 403
 
         if _hash_secret(code) != code_hash:
             c.execute('UPDATE portal_2fa SET attempts = attempts + 1 WHERE id = %s', (row_id,))
             conn.commit(); conn.close()
             left = 4 - attempts
-            return jsonify({'ok': False,
-                            'error': 'That code is not right. %d %s left.'
+            return jsonify({'ok': False, 'reason': 'wrong-code',
+                            'error': 'That code is not right. %d %s left. [wrong-code]'
                                      % (left, 'try' if left == 1 else 'tries')}), 403
 
         c.execute('UPDATE portal_2fa SET used = TRUE WHERE id = %s', (row_id,))
@@ -6408,6 +6415,40 @@ def security_alerts_test():
     return jsonify({'ok': problem is None, 'error': problem,
                     'sent_to': to or '(nowhere — ALERT_EMAIL is not set)'}), \
            (200 if problem is None else 400)
+
+
+@app.route('/api/two-step-debug', methods=['GET'])
+def two_step_debug():
+    """Why a code is being refused. Needs the key, so it is not open to all."""
+    if request.args.get('key', '') != os.getenv('PHONE_EVENT_KEY', 'no-key-set'):
+        return jsonify({'error': 'wrong key'}), 403
+    out = {}
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute("SELECT to_regclass('public.portal_2fa') IS NOT NULL")
+        out['table_exists'] = bool((c.fetchone() or [False])[0])
+        c.execute("""SELECT COUNT(*), SUM(CASE WHEN used THEN 1 ELSE 0 END),
+                            SUM(CASE WHEN expires_at > NOW() THEN 1 ELSE 0 END)
+                     FROM portal_2fa WHERE created_at > NOW() - INTERVAL '1 hour'""")
+        r = c.fetchone()
+        out['last_hour'] = {'codes': int(r[0] or 0), 'used': int(r[1] or 0),
+                            'still_valid': int(r[2] or 0)}
+        c.execute("""SELECT user_id, attempts, used, expires_at > NOW(), created_at
+                     FROM portal_2fa ORDER BY id DESC LIMIT 5""")
+        out['recent'] = [{'user': x[0][:8] + '…', 'attempts': x[1], 'used': x[2],
+                          'still_valid': x[3],
+                          'when': x[4].isoformat() if x[4] else None}
+                         for x in c.fetchall()]
+        c.execute('SELECT user_id, revoked_epoch FROM portal_revocations LIMIT 10')
+        import time as _t
+        out['revocations'] = [{'user': x[0][:8] + '…', 'revoked_epoch': int(x[1] or 0),
+                               'seconds_ago': int(_t.time()) - int(x[1] or 0)}
+                              for x in c.fetchall()]
+        out['now_epoch'] = int(_t.time())
+        conn.close()
+    except Exception as e:
+        out['error'] = str(e)[:250]
+    return jsonify(out)
 
 
 @app.route('/api/two-step-check', methods=['GET', 'POST'])
