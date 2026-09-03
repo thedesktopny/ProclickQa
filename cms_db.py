@@ -2071,31 +2071,72 @@ def associate_number(account_id, phone):
 
 
 def customer_search(q, limit=40):
-    """Find an account by name, phone or email."""
+    """Find an account by name, phone or email.
+
+    Done in TWO steps on purpose. The obvious single query carried two
+    correlated subqueries against AccountWork — 1.19 million rows — evaluated
+    once per matching account, which is what made searching slow. Now the
+    accounts are found first (cheap), then one grouped query fetches the work
+    counts for just those forty ids.
+    """
     q = (q or '').strip()
     if len(q) < 2:
         return []
-    like = '%' + q + '%'
     conn = _connect(); cu = conn.cursor()
-    cu.execute("""SELECT TOP %d a.Id, a.FirstName, a.LastName, a.Phone, a.Email,
-                         a.MinutesLeft, a.isBusiness, a.Deleted,
-                         (SELECT COUNT(*) FROM AccountWork w WHERE w.AccountId = a.Id),
-                         (SELECT MAX(w2.StartTime) FROM AccountWork w2 WHERE w2.AccountId = a.Id)
-                  FROM Account a
-                  WHERE a.FirstName + ' ' + a.LastName LIKE %%s OR a.Phone LIKE %%s
-                     OR a.Email LIKE %%s OR a.HomePhone LIKE %%s OR a.Mobile LIKE %%s
-                  ORDER BY a.LastName, a.FirstName""" % int(limit),
-               (like, like, like, like, like))
-    out = []
+
+    digits = ''.join(ch for ch in q if ch.isdigit())
+    like = '%' + q + '%'
+
+    if len(digits) >= 6 and len(digits) >= len(q) - 4:
+        # they typed a phone number — match the last digits, which is both
+        # faster and finds a number however it happens to be punctuated
+        tail = '%' + digits[-7:]
+        cu.execute("""SELECT TOP %d a.Id, a.FirstName, a.LastName, a.Phone, a.Email,
+                             a.MinutesLeft, a.isBusiness, a.Deleted
+                      FROM Account a
+                      WHERE a.Phone LIKE %%s OR a.HomePhone LIKE %%s OR a.Mobile LIKE %%s
+                      ORDER BY a.LastName, a.FirstName""" % int(limit),
+                   (tail, tail, tail))
+    else:
+        cu.execute("""SELECT TOP %d a.Id, a.FirstName, a.LastName, a.Phone, a.Email,
+                             a.MinutesLeft, a.isBusiness, a.Deleted
+                      FROM Account a
+                      WHERE a.LastName LIKE %%s OR a.FirstName LIKE %%s
+                         OR a.Email LIKE %%s
+                      ORDER BY a.LastName, a.FirstName""" % int(limit),
+                   (like, like, like))
+
+    out, ids = [], []
     while True:
         r = cu.fetchone()
         if not r:
             break
+        ids.append(int(r[0]))
         out.append({'id': int(r[0]),
                     'name': ('%s %s' % (r[1] or '', r[2] or '')).strip() or '(no name)',
                     'phone': r[3], 'email': r[4], 'minutes_left': int(r[5] or 0),
                     'business': bool(r[6]), 'deleted': bool(r[7]),
-                    'work_count': int(r[8] or 0), 'last_worked': _plain(r[9])})
+                    'work_count': 0, 'last_worked': None})
+
+    # the work history for only the accounts actually being shown
+    if ids:
+        try:
+            marks = ', '.join(['%s'] * len(ids))
+            cu.execute("""SELECT AccountId, COUNT(*), MAX(StartTime)
+                          FROM AccountWork WHERE AccountId IN (%s)
+                          GROUP BY AccountId""" % marks, tuple(ids))
+            work = {}
+            while True:
+                r = cu.fetchone()
+                if not r:
+                    break
+                work[int(r[0])] = (int(r[1] or 0), _plain(r[2]))
+            for row in out:
+                if row['id'] in work:
+                    row['work_count'], row['last_worked'] = work[row['id']]
+        except Exception as e:
+            print('[cms] work counts: ' + str(e)[:120])
+
     conn.close()
     return out
 

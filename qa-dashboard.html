@@ -4906,9 +4906,31 @@ async function portalSignOut(){
 
 async function portalBoot(){
   if(!IS_PORTAL) return;
-  document.getElementById('portal-login').style.display = 'grid';
+  const screen = document.getElementById('portal-login');
   let saved = null;
   try{ saved = sessionStorage.getItem('portal_ticket'); }catch(e){}
+
+  // Only show the sign-in screen when there is nothing to check. Showing it
+  // first and hiding it a moment later meant somebody already signed in saw
+  // the login page flash on every single page load, which looks like being
+  // signed out.
+  if(saved){
+    screen.style.display = 'grid';
+    screen.querySelector('#portal-step-password').style.display = 'none';
+    screen.querySelector('#portal-step-code').style.display = 'none';
+    let hint = document.getElementById('portal-checking');
+    if(!hint){
+      hint = document.createElement('div');
+      hint.id = 'portal-checking';
+      hint.style.cssText = 'font-size:13px;color:var(--text3);text-align:center;padding:8px 0;';
+      hint.textContent = 'Signing you in…';
+      screen.querySelector('#portal-step-password').parentNode.appendChild(hint);
+    }
+    hint.style.display = '';
+  }else{
+    screen.style.display = 'grid';
+  }
+
   if(saved){
     portalTicket = saved;
     try{
@@ -4924,8 +4946,13 @@ async function portalBoot(){
         return;
       }
     }catch(e){}
+    // the saved sign-in is no good — now the login form is the right thing
     portalTicket = null;
     try{ sessionStorage.removeItem('portal_ticket'); }catch(e){}
+    const hint = document.getElementById('portal-checking');
+    if(hint) hint.style.display = 'none';
+    const pw = document.getElementById('portal-step-password');
+    if(pw) pw.style.display = '';
   }
   setTimeout(()=>document.getElementById('portal-user').focus(), 80);
 }
