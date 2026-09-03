@@ -4554,6 +4554,7 @@ function portalFinishLogin(r){
                     currentRole = r.is_admin ? 'admin' : r.is_manager ? 'manager' : 'reviewer'; }
     document.getElementById('portal-login').style.display = 'none';
     portalApply(r.name, r.is_manager);
+    openCallFromAddress();
 }
 
 /* Shows only the pages this person may open, and labels who they are. */
@@ -4948,6 +4949,7 @@ async function portalBoot(){
                       currentRole = me.is_admin ? 'admin' : me.is_manager ? 'manager' : 'reviewer'; }
         document.getElementById('portal-login').style.display = 'none';
         portalApply(me.name, me.is_manager);
+        openCallFromAddress();
         return;
       }
     }catch(e){}
@@ -11493,10 +11495,59 @@ function filterCalls(){
 }
 
 // ─── CALL DETAIL ──────────────────────────────────────────────────────────────
-async function openCallDetail(callId){
+/* Opening a call now puts it in the address bar, so the page can be linked to
+   and sent to somebody. Whoever opens it still has to sign in — the link says
+   which call to show, it does not grant access to it. */
+
+/* Puts a link to this call on the clipboard. */
+function copyCallLink(){
+  const url = location.origin + location.pathname + '#call/' + encodeURIComponent(currentCallId);
+  const done = () => showToast('Link copied — whoever opens it will need to sign in');
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(url).then(done).catch(()=>fallbackCopy(url, done));
+  }else{
+    fallbackCopy(url, done);
+  }
+}
+
+function fallbackCopy(text, done){
+  const box = document.createElement('textarea');
+  box.value = text;
+  box.style.cssText = 'position:fixed;opacity:0;';
+  document.body.appendChild(box);
+  box.select();
+  try{ document.execCommand('copy'); done(); }
+  catch(e){ prompt('Copy this link:', text); }
+  document.body.removeChild(box);
+}
+
+/* If the address carries a call, open it once somebody is signed in. Called
+   after sign-in rather than at load, since the page has to be usable first. */
+function openCallFromAddress(){
+  const m = (location.hash || '').match(/^#call\/(.+)$/);
+  if(!m) return false;
+  const callId = decodeURIComponent(m[1]);
+  setTimeout(()=>openCallDetail(callId, true), 150);
+  return true;
+}
+
+async function openCallDetail(callId, fromLink){
   currentCallId=callId;
   showPage('call-detail');
+  if(!fromLink){
+    try{ history.replaceState(null, '', '#call/' + encodeURIComponent(callId)); }catch(e){}
+  }
   set('detail-title',`Call #${callId}`);
+  const titleEl = document.getElementById('detail-title');
+  if(titleEl && !document.getElementById('copy-call-link')){
+    const btn = document.createElement('button');
+    btn.id = 'copy-call-link';
+    btn.className = 'cn-chip';
+    btn.style.cssText = 'margin-left:12px;vertical-align:middle;';
+    btn.textContent = '🔗 Copy link';
+    btn.onclick = copyCallLink;
+    titleEl.parentNode.appendChild(btn);
+  }
   const el=document.getElementById('call-detail-content');
   el.innerHTML='<div style="color:var(--text3);text-align:center;padding:48px;">Loading call details...</div>';
 
