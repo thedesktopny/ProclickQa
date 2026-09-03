@@ -612,6 +612,10 @@ def init_db():
         "WHERE requires_human_review = TRUE OR status IN ('Critical', 'Review')",
         "CREATE INDEX IF NOT EXISTS idx_calls_status ON calls(status)",
         "CREATE INDEX IF NOT EXISTS idx_calls_agent ON calls(agent_name)",
+        # rule_results holds 28 rows per call, so it is the biggest table here
+        # and the analytics page groups across all of it
+        "CREATE INDEX IF NOT EXISTS idx_rules_created ON rule_results(created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_rules_call ON rule_results(call_id)",
     ):
         try:
             ix = get_db(); xc = ix.cursor()
@@ -2200,88 +2204,134 @@ def get_trends():
     conn.close()
     return jsonify(trends)
 
+_ANALYTICS_CACHE = {}
+
+
+def _cached(key, seconds, build):
+    """Runs an expensive query at most once every few minutes.
+
+    These figures cover weeks of calls and barely move between one page load
+    and the next, so recomputing them on every visit is work nobody asked for.
+    """
+    import time as _t
+    hit = _ANALYTICS_CACHE.get(key)
+    if hit and (_t.time() - hit[0]) < seconds:
+        return hit[1]
+    value = build()
+    _ANALYTICS_CACHE[key] = (_t.time(), value)
+    return value
+
+
 @app.route('/api/analytics/rule-stats', methods=['GET'])
 def get_rule_stats():
-    conn = get_db()
-    c = conn.cursor(cursor_factory=RealDictCursor)
-    c.execute('''
-        SELECT rule_description, category, severity,
-               COUNT(*) as total_checks,
-               SUM(CASE WHEN passed THEN 1 ELSE 0 END) as passed_count,
-               SUM(CASE WHEN NOT passed THEN 1 ELSE 0 END) as failed_count,
-               ROUND(100.0 * SUM(CASE WHEN passed THEN 1 ELSE 0 END) / COUNT(*), 1) as pass_rate
-        FROM rule_results
-        GROUP BY rule_description, category, severity
-        ORDER BY failed_count DESC LIMIT 20
-    ''')
-    stats = [dict(s) for s in c.fetchall()]
-    conn.close()
-    return jsonify(stats)
+    # Bounded to 90 days and cached. This used to group over EVERY rule result
+    # ever written — 28 rules for every call ever scored — on each page load.
+    days = 90
+    try:
+        days = min(365, max(7, int(request.args.get('days') or 90)))
+    except Exception:
+        pass
+
+    def build():
+        conn = get_db()
+        c = conn.cursor(cursor_factory=RealDictCursor)
+        c.execute('''
+            SELECT rule_description, category, severity,
+                   COUNT(*) as total_checks,
+                   SUM(CASE WHEN passed THEN 1 ELSE 0 END) as passed_count,
+                   SUM(CASE WHEN NOT passed THEN 1 ELSE 0 END) as failed_count,
+                   ROUND(100.0 * SUM(CASE WHEN passed THEN 1 ELSE 0 END) / COUNT(*), 1) as pass_rate
+            FROM rule_results
+            WHERE created_at > NOW() - (%s || ' days')::interval
+            GROUP BY rule_description, category, severity
+            ORDER BY failed_count DESC LIMIT 20
+        ''', (str(days),))
+        stats = [dict(s) for s in c.fetchall()]
+        conn.close()
+        return stats
+
+    return jsonify(_cached('rule-stats-%d' % days, 300, build))
 
 @app.route('/api/analytics/agent-stats', methods=['GET'])
 def get_agent_stats():
-    conn = get_db()
-    c = conn.cursor(cursor_factory=RealDictCursor)
-    c.execute('''
-        SELECT agent_name, agent_extension,
-               COUNT(*) as total_calls,
-               AVG(overall_score) as avg_score,
-               AVG(notes_score) as avg_notes_score,
-               SUM(CASE WHEN status='Critical' THEN 1 ELSE 0 END) as critical_count,
-               SUM(CASE WHEN requires_human_review THEN 1 ELSE 0 END) as review_count,
-               SUM(CASE WHEN call_end_first='agent' THEN 1 ELSE 0 END) as agent_ended_count,
-               SUM(CASE WHEN line_issues='agent' THEN 1 ELSE 0 END) as line_issues_count
-        FROM calls WHERE overall_score > 0
-        GROUP BY agent_name, agent_extension
-        ORDER BY avg_score DESC
-    ''')
-    stats = [dict(s) for s in c.fetchall()]
-    conn.close()
-    return jsonify(stats)
+    # bounded to 90 days and cached for five minutes — these cover
+    # weeks of calls and barely move between page loads
+    def build():
+        conn = get_db()
+        c = conn.cursor(cursor_factory=RealDictCursor)
+        c.execute('''
+            SELECT agent_name, agent_extension,
+                   COUNT(*) as total_calls,
+                   AVG(overall_score) as avg_score,
+                   AVG(notes_score) as avg_notes_score,
+                   SUM(CASE WHEN status='Critical' THEN 1 ELSE 0 END) as critical_count,
+                   SUM(CASE WHEN requires_human_review THEN 1 ELSE 0 END) as review_count,
+                   SUM(CASE WHEN call_end_first='agent' THEN 1 ELSE 0 END) as agent_ended_count,
+                   SUM(CASE WHEN line_issues='agent' THEN 1 ELSE 0 END) as line_issues_count
+            FROM calls WHERE created_at > NOW() - INTERVAL '90 days' AND overall_score > 0
+            GROUP BY agent_name, agent_extension
+            ORDER BY avg_score DESC
+        ''')
+        stats = [dict(s) for s in c.fetchall()]
+        conn.close()
+        return (stats)
+
+    return jsonify(_cached('agent-stats', 300, build))
 
 @app.route('/api/analytics/billing', methods=['GET'])
 def get_billing():
-    conn = get_db()
-    c = conn.cursor(cursor_factory=RealDictCursor)
-    c.execute('''
-        SELECT agent_name, agent_extension,
-               COUNT(*) as total_calls,
-               SUM(call_duration_seconds) as total_seconds,
-               SUM(billed_minutes) as total_billed_minutes,
-               ROUND(SUM(call_duration_seconds) / 60.0, 1) as actual_minutes,
-               SUM(billed_minutes) - ROUND(SUM(call_duration_seconds) / 60.0, 1) as billing_difference
-        FROM calls WHERE call_duration_seconds > 0
-        GROUP BY agent_name, agent_extension
-        ORDER BY total_billed_minutes DESC
-    ''')
-    agents = [dict(r) for r in c.fetchall()]
-    c.execute('''
-        SELECT SUM(call_duration_seconds) as total_seconds,
-               SUM(billed_minutes) as total_billed_minutes,
-               COUNT(*) as total_calls
-        FROM calls WHERE call_duration_seconds > 0
-    ''')
-    totals = dict(c.fetchone())
-    conn.close()
-    return jsonify({'agents': agents, 'totals': totals})
+    # bounded to 90 days and cached for five minutes — these cover
+    # weeks of calls and barely move between page loads
+    def build():
+        conn = get_db()
+        c = conn.cursor(cursor_factory=RealDictCursor)
+        c.execute('''
+            SELECT agent_name, agent_extension,
+                   COUNT(*) as total_calls,
+                   SUM(call_duration_seconds) as total_seconds,
+                   SUM(billed_minutes) as total_billed_minutes,
+                   ROUND(SUM(call_duration_seconds) / 60.0, 1) as actual_minutes,
+                   SUM(billed_minutes) - ROUND(SUM(call_duration_seconds) / 60.0, 1) as billing_difference
+            FROM calls WHERE call_duration_seconds > 0
+                  AND created_at > NOW() - INTERVAL '90 days'
+            GROUP BY agent_name, agent_extension
+            ORDER BY total_billed_minutes DESC
+        ''')
+        agents = [dict(r) for r in c.fetchall()]
+        c.execute('''
+            SELECT SUM(call_duration_seconds) as total_seconds,
+                   SUM(billed_minutes) as total_billed_minutes,
+                   COUNT(*) as total_calls
+            FROM calls WHERE call_duration_seconds > 0
+        ''')
+        totals = dict(c.fetchone())
+        conn.close()
+        return ({'agents': agents, 'totals': totals})
+
+    return jsonify(_cached('billing', 300, build))
 
 @app.route('/api/analytics/notes-quality', methods=['GET'])
 def get_notes_quality():
-    conn = get_db()
-    c = conn.cursor(cursor_factory=RealDictCursor)
-    c.execute('''
-        SELECT agent_name,
-               COUNT(*) as total_calls,
-               SUM(CASE WHEN call_notes IS NULL OR call_notes = '' THEN 1 ELSE 0 END) as missing_notes,
-               AVG(notes_score) as avg_notes_score,
-               SUM(CASE WHEN notes_score < 60 THEN 1 ELSE 0 END) as poor_notes_count
-        FROM calls WHERE overall_score > 0
-        GROUP BY agent_name
-        ORDER BY avg_notes_score ASC
-    ''')
-    stats = [dict(s) for s in c.fetchall()]
-    conn.close()
-    return jsonify(stats)
+    # bounded and cached like the other analytics
+    def build():
+        conn = get_db()
+        c = conn.cursor(cursor_factory=RealDictCursor)
+        c.execute('''
+            SELECT agent_name,
+                   COUNT(*) as total_calls,
+                   SUM(CASE WHEN call_notes IS NULL OR call_notes = '' THEN 1 ELSE 0 END) as missing_notes,
+                   AVG(notes_score) as avg_notes_score,
+                   SUM(CASE WHEN notes_score < 60 THEN 1 ELSE 0 END) as poor_notes_count
+            FROM calls WHERE overall_score > 0
+                  AND created_at > NOW() - INTERVAL '90 days'
+            GROUP BY agent_name
+            ORDER BY avg_notes_score ASC
+        ''')
+        stats = [dict(s) for s in c.fetchall()]
+        conn.close()
+        return (stats)
+
+    return jsonify(_cached('notes-quality', 300, build))
 
 @app.route('/api/analytics/drops', methods=['GET'])
 def get_drops():
