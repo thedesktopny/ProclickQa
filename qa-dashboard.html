@@ -1725,6 +1725,7 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
   <div style="padding:18px 28px 44px;">
     <div style="display:flex;justify-content:flex-end;margin-bottom:8px;">
       <button class="cn-chip" onclick="whyNoPopup()">Why don't I see callers?</button>
+      <button class="cn-chip" onclick="resetPopup()" style="margin-left:6px;">Reset the popup</button>
     </div>
     <pre id="why-popup" style="white-space:pre-wrap;font-size:11.5px;color:var(--text2);
          margin:0 0 12px;line-height:1.8;"></pre>
@@ -7670,10 +7671,32 @@ async function loadMissedCount(){
 
 /* Why the caller popup is not appearing. Five different causes look identical
    from a desk, so this says which one it is. */
+
+/* Clears whatever is holding the popup back and starts it again. Dismissing a
+   call hides it until the next one, and a poller that stopped stays stopped —
+   both look identical from a desk. */
+function resetPopup(){
+  inDismissed = null;
+  inCallId = null;
+  const box = document.getElementById('incoming');
+  if(box) box.style.display = 'none';
+  try{ clearInterval(inTimer); }catch(e){}
+  inTimer = setInterval(inPoll, 1000);
+  inPoll();
+  showToast('Popup reset — it should appear on the next call');
+}
+
 async function whyNoPopup(){
   const out = document.getElementById('why-popup');
   out.textContent = 'Checking…';
   try{
+    // Also ask exactly what this browser gets from the live endpoint. The
+    // server side can be perfectly healthy while the popup still fails to
+    // appear, and those are different problems with different fixes.
+    let mine = null, mineError = null;
+    try{ mine = await API.get('/api/my-call'); }
+    catch(e){ mineError = e.message; }
+
     const r = await API.get('/api/my-call/why');
     const lines = [];
     lines.push('signed in as: ' + (r.signed_in_as || '(unknown)')
@@ -7697,6 +7720,37 @@ async function whyNoPopup(){
         + `  ${String(c.started).slice(11,16)}${c.ended ? ' to ' + String(c.ended).slice(11,16) : ' (still open)'}`));
     }
     if(r.call_log_error) lines.push('', 'could not read the call log: ' + r.call_log_error);
+
+    lines.push('', '--- what THIS browser is getting ---');
+    if(mineError){
+      lines.push('the live check failed: ' + mineError);
+    }else if(!mine){
+      lines.push('the live check returned nothing at all');
+    }else{
+      const call = mine.call;
+      lines.push('a call in the reply: ' + (call ? 'yes' : 'no'));
+      if(call){
+        lines.push('   number: ' + (call.phone || '(none)'));
+        lines.push('   marked live: ' + call.live + (call.live ? '' : '   <- the popup only shows live calls'));
+        lines.push('   answered: ' + (call.picked_up ? 'yes' : 'still ringing'));
+        lines.push('   call id: ' + call.call_id
+                   + (String(call.call_id) === String(inDismissed)
+                      ? '   <- THIS WAS DISMISSED, so it stays hidden' : ''));
+      }
+      if(mine.extension !== undefined)
+        lines.push('extension the live check used: ' + (mine.extension || '(none)'));
+    }
+
+    const box = document.getElementById('incoming');
+    lines.push('');
+    lines.push('the popup element exists: ' + !!box);
+    if(box){
+      lines.push('   its display is: ' + (box.style.display || '(default)'));
+      lines.push('   currently showing call: ' + (inCallId || 'none'));
+      lines.push('   dismissed call id: ' + (inDismissed || 'none'));
+    }
+    lines.push('polling is running: ' + (!!inTimer));
+
     out.textContent = lines.join('\n');
   }catch(e){ out.textContent = 'Failed: ' + e.message; }
 }
@@ -7997,6 +8051,46 @@ async function cuLoadRecent(){
   }catch(e){ w.innerHTML = `<div style="color:var(--red);font-size:12px;">${e.message}</div>`; }
 }
 
+
+/* Opens one old call from the search — the recording and the note, without
+   needing the account it belonged to. */
+async function cuShowCall(callId){
+  const box = document.getElementById('cu-results');
+  box.classList.remove('open');
+  const digits = (document.getElementById('cu-search').value || '').replace(/\D/g, '');
+  try{
+    const r = await API.get('/api/call-search?days=365&phone=' + encodeURIComponent(digits));
+    const c = (r.calls || []).find(x => String(x.call_id) === String(callId));
+    if(!c){ showToast('That call could not be found', true); return; }
+    const url = c.recording
+      ? (/^https?:\/\//i.test(c.recording) ? c.recording
+         : 'https://getremail.com/' + String(c.recording).replace(/^\/+/, ''))
+      : null;
+    document.getElementById('cu-empty').style.display = 'none';
+    const target = document.getElementById('cu-profile');
+    target.style.display = '';
+    target.innerHTML = `
+      <div class="card" style="padding:20px 22px;">
+        <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;">
+          <h2 class="payh" style="margin:0;">Call from ${esc(c.phone)}</h2>
+          <span style="font-size:12px;color:var(--text3);">${cuWhen(c.started)}</span>
+        </div>
+        <div class="payhint">
+          ${c.answered_by_name ? 'Answered by ' + esc(c.answered_by_name) : 'Nobody answered'}
+          ${c.seconds ? ' · ' + Math.floor(c.seconds/60) + 'm ' + (c.seconds%60) + 's' : ''}
+          ${c.status ? ' · ' + esc(c.status) : ''}
+          ${c.account_name ? ' · ' + esc(c.account_name) : ''}
+        </div>
+        ${url ? `<audio controls preload="none" style="width:100%;max-width:460px;
+                   height:36px;margin-top:12px;" src="${esc(url)}"></audio>`
+              : '<div style="color:var(--text3);font-size:12.5px;margin-top:12px;">No recording for this call.</div>'}
+        ${c.note ? `<div style="margin-top:14px;font-size:13px;line-height:1.6;">${fmtNote(c.note)}</div>` : ''}
+        ${c.account_id ? `<button class="btn btn-outline" style="margin-top:16px;font-size:12px;"
+            onclick="cuOpen(${c.account_id})">Open ${esc(c.account_name || 'the account')}</button>` : ''}
+      </div>`;
+  }catch(e){ showToast(e.message, true); }
+}
+
 function cuSearch(){
   clearTimeout(cuTimer);
   const q = document.getElementById('cu-search').value.trim();
@@ -8004,18 +8098,52 @@ function cuSearch(){
   if(q.length < 2){ box.classList.remove('open'); return; }
   cuTimer = setTimeout(async ()=>{
     try{
-      const r = await API.get('/api/customers/search?q=' + encodeURIComponent(q));
+      // A number is looked up in the CALL LOG as well as the customer list.
+      // Somebody searching a number usually wants "the call from that number",
+      // and until now a number with no matching account found nothing at all —
+      // even though the call was sitting in the log.
+      const digits = q.replace(/\D/g, '');
+      const looksLikeANumber = digits.length >= 6;
+
+      const [r, calls] = await Promise.all([
+        API.get('/api/customers/search?q=' + encodeURIComponent(q)),
+        looksLikeANumber
+          ? API.get('/api/call-search?days=365&phone=' + encodeURIComponent(digits)).catch(()=>({calls:[]}))
+          : Promise.resolve({calls:[]}),
+      ]);
       const items = r.items || [];
-      if(!items.length){
-        box.innerHTML = '<div style="color:var(--text3)">No account matches that.</div>';
+      const found = calls.calls || [];
+
+      if(!items.length && !found.length){
+        box.innerHTML = looksLikeANumber
+          ? '<div style="color:var(--text3)">No account and no calls from that number in the last year.</div>'
+          : '<div style="color:var(--text3)">No account matches that.</div>';
         box.classList.add('open'); return;
       }
-      box.innerHTML = items.map(a=>`<div onclick="cuOpen(${a.id})">
+
+      let html = items.map(a=>`<div onclick="cuOpen(${a.id})">
         <b>${a.name}</b>${a.business?' <span style="color:var(--text3);font-size:11px">business</span>':''}
         ${a.deleted?' <span style="color:var(--red);font-size:11px">deleted</span>':''}
         <div style="color:var(--text3);font-size:11px;">
           ${a.phone||''} ${a.email?'· '+a.email:''} · ${a.work_count} calls worked
           ${a.last_worked?'· last '+new Date(a.last_worked).toLocaleDateString():''}</div></div>`).join('');
+
+      if(found.length){
+        html += `<div style="padding:8px 12px;font-size:10.5px;letter-spacing:.08em;
+                   text-transform:uppercase;color:var(--text3);border-top:1px solid var(--border);
+                   margin-top:4px;">${found.length} call${found.length===1?'':'s'} from that number</div>`;
+        html += found.slice(0, 12).map(c=>`
+          <div onclick="cuShowCall('${esc(String(c.call_id))}')">
+            <b style="font-variant-numeric:tabular-nums;">${cuWhen(c.started)}</b>
+            ${c.missed ? '<span style="color:var(--red);font-size:11px;"> missed</span>'
+                       : c.outbound ? '<span style="color:var(--accent);font-size:11px;"> outbound</span>' : ''}
+            <div style="color:var(--text3);font-size:11px;">
+              ${c.answered_by_name ? esc(c.answered_by_name) : (c.answered_by ? 'ext ' + esc(c.answered_by) : 'nobody answered')}
+              ${c.seconds ? ' · ' + Math.floor(c.seconds/60) + 'm ' + (c.seconds%60) + 's' : ''}
+              ${c.account_name ? ' · ' + esc(c.account_name) : ''}
+              ${c.recording ? ' · recording' : ''}</div></div>`).join('');
+      }
+      box.innerHTML = html;
       box.classList.add('open');
     }catch(e){}
   }, 250);
