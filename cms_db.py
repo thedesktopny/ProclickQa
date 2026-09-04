@@ -1533,6 +1533,120 @@ def callback_list(hours=48, limit=100):
     return out
 
 
+def calls_since(since, limit=500):
+    """Every call across every extension that changed since a moment in time.
+
+    Built for a poller. The condition is deliberately "started OR ended since
+    X", not just "started since X": a call that began before the cursor and
+    finished after it is the normal case at any cycle boundary, and matching
+    only on Started would silently drop it — the caller would see the call
+    appear and never see it end.
+
+    Calls still in progress are included with ended = null, so a timeline can
+    show them live and fill in the end on a later pass.
+    """
+    conn = _connect(); cu = conn.cursor()
+    cu.execute("""SELECT TOP %d
+                    c.Id, c.Phone, c.Started, c.PickedUpTime, c.Ended,
+                    c.PickedUpBy, c.Agent, c.DialStatus, ISNULL(c.IsMissed, 0),
+                    ISNULL(c.IsOutbound, 0), c.CalledExtension, c.RecordingFileUrl,
+                    c.AstriskUniqId, c.Note,
+                    e.FirstName, e.LastName, e.Id,
+                    DATEDIFF(second, c.Started, c.Ended),
+                    DATEDIFF(second, c.PickedUpTime, c.Ended)
+                  FROM PhoneCallsLog c
+                  LEFT JOIN Employee e ON e.Extension = c.PickedUpBy
+                  WHERE c.Started >= %%s OR c.Ended >= %%s
+                  ORDER BY COALESCE(c.Ended, c.Started), c.Id""" % int(limit),
+               (since, since))
+    out = []
+    while True:
+        r = cu.fetchone()
+        if not r:
+            break
+        ext = (r[5] or '').strip() or None
+        out.append({
+            'call_id': int(r[0]),
+            'phone': r[1],
+            'started': _plain(r[2]),
+            'answered': _plain(r[3]),
+            'ended': _plain(r[4]),
+            'extension': ext,
+            'agent_extension': ext or ((r[6] or '').strip() or None),
+            'agent_name': ('%s %s' % (r[14] or '', r[15] or '')).strip() or None,
+            'employee_id': (int(r[16]) if r[16] else None),
+            'dial_status': (r[7] or '').strip() or None,
+            'is_missed': bool(r[8]),
+            'is_outbound': bool(r[9]),
+            'called_number': r[10],
+            'recording_file_url': r[11],
+            'asterisk_uniq_id': r[12],
+            'note': r[13],
+            'total_seconds': (int(r[17]) if r[17] is not None else None),
+            'talk_seconds': (int(r[18]) if r[18] is not None else None),
+            'in_progress': r[4] is None,
+        })
+    conn.close()
+    return out
+
+
+def call_search(phone=None, extension=None, days=90, limit=60):
+    """Find old calls by the number that rang, or by who took them.
+
+    Deliberately reads PhoneCallsLog rather than VoiceGuard's own table: that
+    one only holds calls we scored, and somebody looking for "the call from
+    that number last Tuesday" wants every call, scored or not.
+    """
+    conn = _connect(); cu = conn.cursor()
+    where, params = [], []
+    if phone:
+        digits = ''.join(ch for ch in str(phone) if ch.isdigit())
+        if len(digits) >= 6:
+            where.append('RIGHT(c.Phone, %d) = %%s' % min(10, len(digits)))
+            params.append(digits[-10:] if len(digits) >= 10 else digits)
+        else:
+            conn.close()
+            return {'calls': [], 'note': 'Type at least six digits of the number.'}
+    if extension:
+        where.append('(c.PickedUpBy = %s OR c.Agent = %s)')
+        params += [str(extension), str(extension)]
+    if not where:
+        conn.close()
+        return {'calls': [], 'note': 'Give a number or an extension to search for.'}
+
+    cu.execute("""SELECT TOP %d c.Id, c.Phone, c.Started, c.Ended, c.PickedUpBy,
+                         c.DialStatus, c.RecordingFileUrl, c.IsOutbound,
+                         c.CalledExtension, ISNULL(c.IsMissed, 0), c.Note,
+                         e.FirstName, e.LastName,
+                         DATEDIFF(second, c.Started, c.Ended),
+                         w.AccountId, a.FirstName, a.LastName
+                  FROM PhoneCallsLog c
+                  LEFT JOIN Employee e ON e.Extension = c.PickedUpBy
+                  LEFT JOIN AccountWork w ON w.Id = c.AccountWorkId
+                  LEFT JOIN Account a ON a.Id = w.AccountId
+                  WHERE %s AND c.Started >= DATEADD(day, -%d, GETDATE())
+                  ORDER BY c.Started DESC"""
+               % (int(limit), ' AND '.join(where), int(days)), tuple(params))
+    out = []
+    while True:
+        r = cu.fetchone()
+        if not r:
+            break
+        out.append({
+            'call_id': int(r[0]), 'phone': r[1],
+            'started': _plain(r[2]), 'ended': _plain(r[3]),
+            'answered_by': (r[4] or '').strip() or None,
+            'answered_by_name': ('%s %s' % (r[11] or '', r[12] or '')).strip() or None,
+            'status': (r[5] or '').strip(), 'recording': r[6],
+            'outbound': bool(r[7]), 'called': r[8], 'missed': bool(r[9]),
+            'note': r[10], 'seconds': int(r[13] or 0),
+            'account_id': (int(r[14]) if r[14] else None),
+            'account_name': ('%s %s' % (r[15] or '', r[16] or '')).strip() or None,
+        })
+    conn.close()
+    return {'calls': out, 'count': len(out), 'days': days}
+
+
 def waiting_now():
     """Callers holding right now — started, nobody has picked up, not ended.
 

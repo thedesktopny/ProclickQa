@@ -7138,6 +7138,118 @@ def callback_done(call_id):
     return jsonify(out), (200 if out.get('ok') else 400)
 
 
+@app.route('/api/agent-calls', methods=['GET'])
+def agent_calls_feed():
+    """Every call across every extension since a moment in time.
+
+    For AgentMonitor's poller. Machine-to-machine, so it takes a key rather
+    than a sign-in.
+
+    GET /api/agent-calls?since=2026-09-03T22:00:00Z&key=...
+
+    Returns calls whose START or END falls after `since`, so a call that began
+    before the cursor and finished after it is not missed — that is the normal
+    case at any cycle boundary. Calls still running come back with ended null
+    and in_progress true, and will appear again on a later pass once they end,
+    which makes the feed safe to replay: every row carries call_id, so the
+    receiving end can upsert rather than insert.
+
+    `next_since` is what to send on the following call. It is deliberately a
+    little BEHIND the newest row (by one second) because two calls can share a
+    timestamp — moving the cursor exactly to the newest would skip the second
+    one. Overlap is harmless when rows are upserted; a gap is not.
+    """
+    import cms_db
+    key = request.args.get('key', '')
+    expected = (os.getenv('AGENT_MONITOR_KEY', '').strip()
+                or os.getenv('PHONE_EVENT_KEY', '').strip())
+    if not expected or key != expected:
+        return jsonify({'error': 'wrong or missing key'}), 403
+
+    since = (request.args.get('since') or '').strip()
+    if not since:
+        return jsonify({'error': 'give a since timestamp, e.g. '
+                                 'since=2026-09-03T22:00:00Z'}), 400
+    try:
+        cleaned = since.replace('Z', '').replace('T', ' ').split('+')[0].strip()
+        datetime.strptime(cleaned[:19], '%Y-%m-%d %H:%M:%S')
+    except Exception:
+        return jsonify({'error': 'since must look like 2026-09-03T22:00:00Z'}), 400
+
+    try:
+        limit = min(2000, max(1, int(request.args.get('limit') or 500)))
+    except Exception:
+        limit = 500
+
+    try:
+        calls = cms_db.calls_since(cleaned[:19], limit=limit)
+    except Exception as e:
+        return jsonify({'error': str(e)[:200], 'calls': []}), 400
+
+    # recordings come back as a path; resolve them so the caller does not have
+    # to know where they live
+    base = RECORDING_BASE_DEFAULT
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute("SELECT value FROM app_settings WHERE key = 'recording_base_url'")
+        row = c.fetchone()
+        conn.close()
+        if row and row[0]:
+            base = row[0]
+    except Exception:
+        pass
+    for call in calls:
+        url = call.get('recording_file_url') or ''
+        call['recording_url'] = (
+            url if url.lower().startswith(('http://', 'https://'))
+            else (base.rstrip('/') + '/' + url.lstrip('/')) if url else None)
+
+    newest = None
+    for call in calls:
+        for field in ('ended', 'started'):
+            v = call.get(field)
+            if v and (newest is None or v > newest):
+                newest = v
+
+    next_since = since
+    if newest:
+        try:
+            t = datetime.strptime(str(newest)[:19], '%Y-%m-%dT%H:%M:%S')
+            next_since = (t - timedelta(seconds=1)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        except Exception:
+            next_since = str(newest)
+
+    return jsonify({
+        'calls': calls,
+        'count': len(calls),
+        'since': since,
+        'next_since': next_since,
+        'has_more': len(calls) >= limit,
+        'server_time': datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ'),
+        'note': ('More calls were waiting than the limit — poll again straight '
+                 'away with next_since before returning to your normal interval.'
+                 if len(calls) >= limit else None),
+    })
+
+
+@app.route('/api/call-search', methods=['GET'])
+@portal_or_manager
+def call_search_route():
+    """Find old calls by number or extension."""
+    import cms_db
+    try:
+        days = min(730, max(1, int(request.args.get('days') or 90)))
+    except Exception:
+        days = 90
+    try:
+        return jsonify(cms_db.call_search(
+            phone=(request.args.get('phone') or '').strip() or None,
+            extension=(request.args.get('extension') or '').strip() or None,
+            days=days))
+    except Exception as e:
+        return jsonify({'error': str(e)[:200], 'calls': []}), 400
+
+
 @app.route('/api/waiting', methods=['GET'])
 @portal_or_manager
 def waiting_route():
@@ -9491,7 +9603,7 @@ PORTAL_ALLOWED_PREFIXES = (
     '/api/media/', '/media/',
     '/api/phone-event/recent', '/api/phone-event/check',
     '/api/missed-calls', '/api/call-flow', '/api/dnd-check', '/api/why-failing',
-    '/api/waiting', '/api/queue-kinds', '/api/callbacks', '/api/texts/',
+    '/api/waiting', '/api/queue-kinds', '/api/callbacks', '/api/call-search', '/api/texts/',
     '/api/cms-db/', '/api/connections', '/static/', '/favicon',
 )
 
