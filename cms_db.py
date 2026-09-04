@@ -1481,6 +1481,65 @@ def our_sms_numbers():
     return out
 
 
+def callback_compare(hours=48):
+    """Counts the missed-call list under several readings of the same data.
+
+    My list did not match the old CMS's, and rather than guess again this
+    reports what each rule actually returns. The one that matches the old
+    screen is the rule to keep.
+
+    In particular MissedResolvedId: I read it as "the later call where they got
+    through", so NULL means still owed a call. The CMS's own job filters the
+    other way round, which would mean it holds something else entirely.
+    """
+    conn = _connect(); cu = conn.cursor()
+    out = {'hours': hours}
+    tests = {
+        'my_rule': """(ISNULL(IsMissed,0)=1 OR ISNULL(RequestedCallBack,0)=1)
+                      AND ISNULL(Resolved,0)=0 AND MissedResolvedId IS NULL""",
+        'missed_only': "ISNULL(IsMissed,0)=1",
+        'missed_unresolved_flag_only': "ISNULL(IsMissed,0)=1 AND ISNULL(Resolved,0)=0",
+        'missed_with_resolved_id': "ISNULL(IsMissed,0)=1 AND MissedResolvedId IS NOT NULL",
+        'missed_without_resolved_id': "ISNULL(IsMissed,0)=1 AND MissedResolvedId IS NULL",
+        'requested_callback_only': "ISNULL(RequestedCallBack,0)=1",
+        'cms_job_rule': """(ISNULL(IsMissed,0)=1 OR ISNULL(RequestedCallBack,0)=1)
+                           AND MissedResolvedId IS NOT NULL""",
+    }
+    for name, condition in tests.items():
+        try:
+            cu.execute("""SELECT COUNT(*), COUNT(DISTINCT RIGHT(Phone, 10))
+                          FROM PhoneCallsLog
+                          WHERE %s AND ISNULL(IsOutbound,0)=0
+                            AND Started >= DATEADD(hour, -%d, GETDATE())"""
+                       % (condition, int(hours)))
+            r = cu.fetchone()
+            out[name] = {'calls': int(r[0] or 0), 'distinct_callers': int(r[1] or 0)}
+        except Exception as e:
+            out[name] = {'error': str(e)[:140]}
+
+    # what MissedResolvedId actually holds, which decides everything above
+    try:
+        cu.execute("""SELECT TOP 6 Id, Phone, Started, MissedResolvedId,
+                             ISNULL(IsMissed,0), ISNULL(Resolved,0),
+                             ISNULL(RequestedCallBack,0)
+                      FROM PhoneCallsLog
+                      WHERE MissedResolvedId IS NOT NULL
+                      ORDER BY Started DESC""")
+        rows = []
+        while True:
+            r = cu.fetchone()
+            if not r:
+                break
+            rows.append({'call_id': int(r[0]), 'phone': r[1], 'started': _plain(r[2]),
+                         'missed_resolved_id': r[3], 'is_missed': bool(r[4]),
+                         'resolved': bool(r[5]), 'requested_callback': bool(r[6])})
+        out['examples_with_a_resolved_id'] = rows
+    except Exception as e:
+        out['examples_error'] = str(e)[:160]
+    conn.close()
+    return out
+
+
 def callback_list(hours=48, limit=100):
     """Missed callers who still need calling back.
 
@@ -1493,13 +1552,15 @@ def callback_list(hours=48, limit=100):
     try:
         cu.execute("""SELECT TOP %d c.Id, c.Phone, c.Started, c.DialStatus,
                              c.CalledExtension, c.CallersName, c.Note,
+                             ISNULL(c.RequestedCallBack, 0),
                              a.Id, a.FirstName, a.LastName, a.MinutesLeft,
                              DATEDIFF(minute, c.Started, GETDATE())
                       FROM PhoneCallsLog c
                       LEFT JOIN Account a
                         ON RIGHT(REPLACE(REPLACE(REPLACE(ISNULL(a.Phone,''),'-',''),' ',''),'(',''), 10)
                            = RIGHT(c.Phone, 10)
-                      WHERE ISNULL(c.IsMissed, 0) = 1
+                      WHERE (ISNULL(c.IsMissed, 0) = 1
+                             OR ISNULL(c.RequestedCallBack, 0) = 1)
                         AND ISNULL(c.Resolved, 0) = 0
                         AND c.MissedResolvedId IS NULL
                         AND ISNULL(c.IsOutbound, 0) = 0
@@ -1521,10 +1582,14 @@ def callback_list(hours=48, limit=100):
                 'call_id': int(r[0]), 'phone': phone, 'when': _plain(r[2]),
                 'why': (r[3] or '').strip(), 'called': r[4],
                 'caller_name': r[5], 'note': r[6],
-                'account_id': (int(r[7]) if r[7] else None),
-                'account_name': (('%s %s' % (r[8] or '', r[9] or '')).strip() or None),
-                'minutes_left': (int(r[10]) if r[10] is not None else None),
-                'minutes_ago': int(r[11] or 0),
+                # r[7] is the requested-callback flag, so everything after it
+                # moved along one — the kind of shift that silently reads the
+                # wrong column if the indexes are not moved with it
+                'requested_callback': bool(r[7]),
+                'account_id': (int(r[8]) if r[8] else None),
+                'account_name': (('%s %s' % (r[9] or '', r[10] or '')).strip() or None),
+                'minutes_left': (int(r[11]) if r[11] is not None else None),
+                'minutes_ago': int(r[12] or 0),
             })
         out['count'] = len(out['calls'])
     except Exception as e:
@@ -2201,15 +2266,24 @@ def customer_search(q, limit=40):
     digits = ''.join(ch for ch in q if ch.isdigit())
     like = '%' + q + '%'
 
-    if len(digits) >= 6 and len(digits) >= len(q) - 4:
-        # they typed a phone number — match the last digits, which is both
-        # faster and finds a number however it happens to be punctuated
-        tail = '%' + digits[-7:]
+    # Four digits is enough — reading the last four off a screen is how people
+    # actually search for a customer. Matched as a suffix, so "5989" finds
+    # numbers ENDING 5989 rather than every number containing it anywhere.
+    if len(digits) >= 4 and len(digits) >= len(q) - 4:
+        # A phone number is matched on its LAST digits exactly, not with a
+        # wildcard on both sides. "ends with 5989" is what somebody reading a
+        # number off a screen actually means, and a leading wildcard also
+        # matches 5989 in the middle of unrelated numbers — more results,
+        # slower, and less useful.
+        n = min(10, len(digits))
+        tail = digits[-n:]
         cu.execute("""SELECT TOP %d a.Id, a.FirstName, a.LastName, a.Phone, a.Email,
                              a.MinutesLeft, a.isBusiness, a.Deleted
                       FROM Account a
-                      WHERE a.Phone LIKE %%s OR a.HomePhone LIKE %%s OR a.Mobile LIKE %%s
-                      ORDER BY a.LastName, a.FirstName""" % int(limit),
+                      WHERE RIGHT(a.Phone, %d) = %%s
+                         OR RIGHT(a.HomePhone, %d) = %%s
+                         OR RIGHT(a.Mobile, %d) = %%s
+                      ORDER BY a.LastName, a.FirstName""" % (int(limit), n, n, n),
                    (tail, tail, tail))
     else:
         cu.execute("""SELECT TOP %d a.Id, a.FirstName, a.LastName, a.Phone, a.Email,

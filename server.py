@@ -7103,6 +7103,18 @@ def staffing_route():
     })
 
 
+@app.route('/api/callbacks/compare', methods=['GET'])
+@portal_manager_only
+def callbacks_compare():
+    """Counts under each possible rule, to find the one matching the old CMS."""
+    import cms_db
+    try:
+        return jsonify(cms_db.callback_compare(
+            int(request.args.get('hours') or 48)))
+    except Exception as e:
+        return jsonify({'error': str(e)[:200]}), 400
+
+
 @app.route('/api/callbacks', methods=['GET'])
 @portal_or_manager
 def callbacks_route():

@@ -595,17 +595,26 @@ td.agent{color:var(--text);font-weight:500;}
    once there is something to clear. Applied by wrapping the existing inputs,
    so each page keeps its own layout. */
 .srch{ position:relative; display:block; width:100%; }
+/* The icon used to be the SAME colour as the placeholder and sat a few pixels
+   from it, so the two read as one smudge. It is now brighter than the text
+   beside it, slightly larger, and separated by a hairline — the eye reads a
+   symbol, then a field, instead of one grey blur. */
 .srch > svg{
   position:absolute; left:12px; top:50%; transform:translateY(-50%);
-  width:15px; height:15px; pointer-events:none;
-  stroke:var(--text3); fill:none; stroke-width:2; stroke-linecap:round; transition:stroke .15s;
+  width:16px; height:16px; pointer-events:none;
+  stroke:var(--text2); fill:none; stroke-width:2.1; stroke-linecap:round;
+  transition:stroke .15s; opacity:.9;
+}
+.srch::before{
+  content:''; position:absolute; left:37px; top:50%; transform:translateY(-50%);
+  width:1px; height:16px; background:var(--border); pointer-events:none;
 }
 .srch > input{
   width:100%; background:var(--surface2); border:1px solid var(--border); color:var(--text);
-  border-radius:11px; padding:10px 32px 10px 34px; font-size:13.5px;
+  border-radius:11px; padding:10px 32px 10px 48px; font-size:13.5px;
   transition:border-color .15s, box-shadow .15s, background .15s;
 }
-.srch > input::placeholder{ color:var(--text3); }
+.srch > input::placeholder{ color:var(--text3); opacity:.85; }
 .srch > input:focus{
   outline:none; background:var(--surface); border-color:var(--accent);
   box-shadow:0 0 0 3px rgba(123,108,246,.16);
@@ -4617,6 +4626,7 @@ function portalBackToPassword(){
 function portalFinishLogin(r){
     portalTicket = r.ticket; portalPages = r.pages || [];
     portalIsManager = !!(r.is_manager || r.is_admin);
+    portalRemember(r);
     try{ sessionStorage.setItem('portal_ticket', r.ticket); }catch(e){}
     // a QA reviewer also gets a normal VoiceGuard session, so the review pages
     // work exactly as they do on the QA dashboard
@@ -5064,7 +5074,8 @@ async function portalSignOut(){
   portalTicket = null;
   portalPages = [];
   portalIsAdmin = false;
-  try{ sessionStorage.removeItem('portal_ticket'); }catch(e){}
+  try{ sessionStorage.removeItem('portal_ticket');
+       sessionStorage.removeItem('portal_me'); }catch(e){}
   try{ clearToken(); }catch(e){}      // the QA token a reviewer was given
   try{ sessionStorage.clear(); }catch(e){}
 
@@ -5074,17 +5085,58 @@ async function portalSignOut(){
   location.replace(location.pathname);
 }
 
+
+/* Keeps just enough beside the ticket to draw the page without asking the
+   server first — the name, which pages they may see, and their level. */
+function portalRemember(me){
+  try{
+    sessionStorage.setItem('portal_me', JSON.stringify({
+      name: me.name, pages: me.pages || [],
+      is_manager: !!me.is_manager, is_admin: !!me.is_admin, is_qa: !!me.is_qa,
+    }));
+  }catch(e){}
+}
+
 async function portalBoot(){
   if(!IS_PORTAL) return;
   const screen = document.getElementById('portal-login');
-  let saved = null;
-  try{ saved = sessionStorage.getItem('portal_ticket'); }catch(e){}
+  let saved = null, remembered = null;
+  try{
+    saved = sessionStorage.getItem('portal_ticket');
+    remembered = JSON.parse(sessionStorage.getItem('portal_me') || 'null');
+  }catch(e){}
 
-  // Only show the sign-in screen when there is nothing to check. Showing it
-  // first and hiding it a moment later meant somebody already signed in saw
-  // the login page flash on every single page load, which looks like being
-  // signed out.
+  // Somebody already signed in should land on their page immediately, not
+  // watch a spinner while we ask the server to confirm what we already know.
+  // So if there is a ticket AND the details saved alongside it, the app is
+  // shown at once and the ticket is checked in the background. If that check
+  // fails, the sign-in screen appears then — which is rare, and honest.
+  if(saved && remembered){
+    portalTicket = saved;
+    portalPages = remembered.pages || [];
+    portalIsAdmin = !!remembered.is_admin;
+    portalIsManager = !!(remembered.is_manager || remembered.is_admin);
+    if(remembered.is_qa){
+      isAdmin = !!remembered.is_admin;
+      currentRole = remembered.is_admin ? 'admin' : remembered.is_manager ? 'manager' : 'reviewer';
+    }
+    screen.style.display = 'none';
+    portalApply(remembered.name, remembered.is_manager);
+    openCallFromAddress();
+
+    // confirm quietly; only interrupt if the ticket is genuinely no good
+    fetch('/api/portal/me', {headers: portalHeaders()}).then(res=>{
+      if(res.ok) return res.json().then(me => portalRemember(me));
+      portalTicket = null;
+      try{ sessionStorage.removeItem('portal_ticket');
+           sessionStorage.removeItem('portal_me'); }catch(e){}
+      location.reload();
+    }).catch(()=>{ /* offline or a blip — leave them working */ });
+    return;
+  }
+
   if(saved){
+    // a ticket with no saved details — check before showing anything
     screen.style.display = 'grid';
     screen.querySelector('#portal-step-password').style.display = 'none';
     screen.querySelector('#portal-step-code').style.display = 'none';
@@ -5107,6 +5159,7 @@ async function portalBoot(){
       const res = await fetch('/api/portal/me', {headers: portalHeaders()});
       if(res.ok){
         const me = await res.json();
+        portalRemember(me);
         portalPages = me.pages || [];
         portalIsAdmin = !!me.is_admin;
         portalIsManager = !!(me.is_manager || me.is_admin);
@@ -8106,22 +8159,29 @@ function cuSearch(){
       // Somebody searching a number usually wants "the call from that number",
       // and until now a number with no matching account found nothing at all —
       // even though the call was sitting in the log.
+      // The call log holds 2.2 million rows and cannot be indexed for a
+      // "last digits" match, so searching it on every keystroke was the new
+      // slowness. It now runs only for a fairly complete number — seven digits
+      // or more — and over six months rather than a year. Accounts are still
+      // searched from the second character, which is the common case.
       const digits = q.replace(/\D/g, '');
-      const looksLikeANumber = digits.length >= 6;
+      const worthSearchingCalls = digits.length >= 7;
 
       const [r, calls] = await Promise.all([
         API.get('/api/customers/search?q=' + encodeURIComponent(q)),
-        looksLikeANumber
-          ? API.get('/api/call-search?days=365&phone=' + encodeURIComponent(digits)).catch(()=>({calls:[]}))
+        worthSearchingCalls
+          ? API.get('/api/call-search?days=180&phone=' + encodeURIComponent(digits)).catch(()=>({calls:[]}))
           : Promise.resolve({calls:[]}),
       ]);
       const items = r.items || [];
       const found = calls.calls || [];
 
       if(!items.length && !found.length){
-        box.innerHTML = looksLikeANumber
-          ? '<div style="color:var(--text3)">No account and no calls from that number in the last year.</div>'
-          : '<div style="color:var(--text3)">No account matches that.</div>';
+        box.innerHTML = worthSearchingCalls
+          ? '<div style="color:var(--text3)">No account, and no calls from that number in the last six months.</div>'
+          : '<div style="color:var(--text3)">No account matches that.'
+            + (digits.length >= 4 ? ' Type the whole number to search past calls too.' : '')
+            + '</div>';
         box.classList.add('open'); return;
       }
 
@@ -8150,7 +8210,7 @@ function cuSearch(){
       box.innerHTML = html;
       box.classList.add('open');
     }catch(e){}
-  }, 250);
+  }, 400);
 }
 
 const cuMoney = c => '$' + (Math.round(c||0)/100).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
