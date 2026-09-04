@@ -7892,6 +7892,28 @@ def live_route():
     try:
         out = cms_db.live_snapshot()
         out['as_of'] = datetime.now().isoformat()
+
+        # Money is for admins. Agents have no reason to see the day's takings,
+        # and hiding the card in the page would not do — the figure travels in
+        # this reply, and anybody can open it. So it is removed here, at the
+        # source, and the page simply has nothing to show.
+        p = _portal_user(request.headers.get('X-Portal-Ticket', ''))
+        is_admin = bool(p and p.get('a'))
+        if not is_admin:
+            user = current_user()
+            is_admin = bool(user and user.get('role') == 'admin')
+        out['can_see_money'] = is_admin
+        if not is_admin:
+            today = out.get('today')
+            if isinstance(today, dict):
+                today.pop('collected_cents', None)
+                today.pop('payments', None)
+            # the feed lists individual payments too, which is the same
+            # information one row at a time
+            if isinstance(out.get('feed'), list):
+                out['feed'] = [f for f in out['feed']
+                               if str(f.get('kind', '')).lower() not in
+                               ('payment', 'payments', 'package', 'sale')]
         return jsonify(out)
     except Exception as e:
         return jsonify({'error': str(e)[:240]}), 400

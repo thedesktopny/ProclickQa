@@ -7885,7 +7885,11 @@ function lvRenderToday(){
          t.missed ? `${t.missed} missed` : 'none missed', t.missed?'warn':'') +
     stat('Work today', (t.work_sessions||0).toLocaleString(),
          `${(t.minutes_billed||0).toLocaleString()} minutes on ${t.accounts_touched} accounts`) +
-    stat('Taken today', lvMoney(t.collected_cents), `${t.payments} payments`, 'pos');
+    // The money card is admins only, and the server does not send the figures
+    // to anybody else — so this is not the security, just the tidiness.
+    (lvData.can_see_money
+      ? stat('Taken today', lvMoney(t.collected_cents), `${t.payments} payments`, 'pos')
+      : '');
 }
 
 function lvRenderFloor(){
