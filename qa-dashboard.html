@@ -933,6 +933,15 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
 .lvtile:hover .al-edit{ opacity:1; }
 .al-edit:hover{ color:var(--text); background:var(--surface); }
 @media (hover:none){ .al-edit{ opacity:.7; } }
+
+/* a small turning ring, so a button that is working says so */
+.spin{
+  display:inline-block; width:13px; height:13px; margin-right:8px;
+  vertical-align:-2px; border:2px solid rgba(255,255,255,.35);
+  border-top-color:#fff; border-radius:50%; animation:spin .7s linear infinite;
+}
+@keyframes spin{ to{ transform:rotate(360deg); } }
+.btn:disabled{ opacity:.75; cursor:default; }
 </style>
 </head>
 <body>
@@ -1679,6 +1688,22 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
       </div>
       <div id="st-grid" style="overflow-x:auto;margin-top:12px;"></div>
     </div>
+  </div>
+</div>
+
+<div class="page" id="page-skin-block">
+  <div class="topbar">
+    <button class="navtoggle" onclick="toggleNav()" aria-label="Menu">☰</button>
+    <div class="page-title">🫥 Skin Block</div>
+    <div class="topbar-right">
+      <button class="btn btn-outline" onclick="sbReload()" style="font-size:12px;">Reload</button>
+      <a href="/skinblock" target="_blank" rel="noopener" class="btn btn-outline"
+         style="font-size:12px;text-decoration:none;">Open in its own tab</a>
+    </div>
+  </div>
+  <div style="padding:0;height:calc(100vh - 62px);">
+    <iframe id="sb-frame" title="Skin Block"
+            style="width:100%;height:100%;border:0;display:block;background:var(--bg);"></iframe>
   </div>
 </div>
 
@@ -4574,7 +4599,14 @@ async function portalLogin(){
   const p = document.getElementById('portal-pass').value;
   const err = document.getElementById('portal-err');
   if(!u || !p){ err.textContent = 'Enter your user name and password.'; return; }
-  err.textContent = 'Checking…';
+  const pwBtn = document.querySelector('#portal-step-password .btn-primary');
+  if(pwBtn){
+    pwBtn.disabled = true;
+    pwBtn.dataset.was = pwBtn.textContent;
+    pwBtn.innerHTML = '<span class="spin"></span>Sending you a code…';
+  }
+  err.style.color = 'var(--text3)';
+  err.textContent = '';
   try{
     const res = await fetch('/api/portal/login', {
       method:'POST', headers:{'Content-Type':'application/json'},
@@ -4586,9 +4618,19 @@ async function portalLogin(){
       portalShowCodeStep(r.sent_to, r.name);
       return;
     }
-    if(!r.ok){ err.textContent = r.error || 'Could not sign you in.'; return; }
+    if(!r.ok){
+      err.style.color = 'var(--red)';
+      err.textContent = r.error || 'Could not sign you in.';
+      return;
+    }
     portalFinishLogin(r);
-  }catch(e){ err.textContent = 'Could not reach the server.'; }
+  }catch(e){
+    err.style.color = 'var(--red)';
+    err.textContent = 'Could not reach the server.';
+  }finally{
+    const b = document.querySelector('#portal-step-password .btn-primary');
+    if(b && b.disabled){ b.disabled = false; b.textContent = b.dataset.was || 'Sign in'; }
+  }
 }
 
 function portalShowCodeStep(sentTo, name){
@@ -4604,16 +4646,37 @@ async function portalVerifyCode(){
   const err = document.getElementById('portal-err');
   const code = (document.getElementById('portal-code').value || '').replace(/\D/g, '');
   if(code.length !== 6){ err.textContent = 'Enter the six-digit code.'; return; }
-  err.textContent = 'Checking…';
+
+  // Pressing Sign in used to change nothing on screen while the server was
+  // checking, so it looked frozen and people pressed it again. The button now
+  // says what is happening and cannot be pressed twice.
+  const btn = document.querySelector('#portal-step-code .btn-primary');
+  if(btn){
+    btn.disabled = true;
+    btn.dataset.was = btn.textContent;
+    btn.innerHTML = '<span class="spin"></span>Signing in…';
+  }
+  err.style.color = 'var(--text3)';
+  err.textContent = '';
   try{
     const res = await fetch('/api/portal/verify-code', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({challenge: portalChallenge, code})
     });
     const r = await res.json();
-    if(!r.ok){ err.textContent = r.error || 'That did not work.'; return; }
+    if(!r.ok){
+      err.style.color = 'var(--red)';
+      err.textContent = r.error || 'That did not work.';
+      return;
+    }
     portalFinishLogin(r);
-  }catch(e){ err.textContent = 'Could not reach the server.'; }
+  }catch(e){
+    err.style.color = 'var(--red)';
+    err.textContent = 'Could not reach the server.';
+  }finally{
+    const b = document.querySelector('#portal-step-code .btn-primary');
+    if(b && b.disabled){ b.disabled = false; b.textContent = b.dataset.was || 'Sign in'; }
+  }
 }
 
 function portalBackToPassword(){
@@ -4635,7 +4698,7 @@ function portalFinishLogin(r){
                     currentRole = r.is_admin ? 'admin' : r.is_manager ? 'manager' : 'reviewer'; }
     document.getElementById('portal-login').style.display = 'none';
     portalApply(r.name, r.is_manager);
-    openCallFromAddress();
+    openFromAddress();
 }
 
 /* Shows only the pages this person may open, and labels who they are. */
@@ -5009,6 +5072,7 @@ function portalApply(name, isManager){
     'customers':    ['👤', 'Customers'],
     'agent-calls':  ['🎧', 'Agents & Calls'],
     'missed':       ['📵', 'Missed Calls'],
+    'skin-block':   ['🫥', 'Skin Block'],
     'staffing':     ['📊', 'Staffing'],
     'agent-list':   ['📇', 'Agents'],
     'packages':     ['📦', 'Packages'],
@@ -5122,7 +5186,7 @@ async function portalBoot(){
     }
     screen.style.display = 'none';
     portalApply(remembered.name, remembered.is_manager);
-    openCallFromAddress();
+    openFromAddress();
 
     // confirm quietly; only interrupt if the ticket is genuinely no good
     fetch('/api/portal/me', {headers: portalHeaders()}).then(res=>{
@@ -5167,7 +5231,7 @@ async function portalBoot(){
                       currentRole = me.is_admin ? 'admin' : me.is_manager ? 'manager' : 'reviewer'; }
         document.getElementById('portal-login').style.display = 'none';
         portalApply(me.name, me.is_manager);
-        openCallFromAddress();
+        openFromAddress();
         return;
       }
     }catch(e){}
@@ -5260,7 +5324,63 @@ async function portalLoadQaPage(which){
   }
 }
 
+/* Every page carries its own address, so a refresh returns you where you were
+   and Back behaves. Only the call detail had one before, which is why a
+   refresh from anywhere else went back to the last call you opened. */
+let addressLocked = false;
+
+function pageToAddress(id){
+  if(addressLocked) return;                     // we are restoring, not navigating
+  try{
+    const want = '#' + id;
+    if(location.hash !== want) history.replaceState(null, '', want);
+  }catch(e){}
+}
+
+function openFromAddress(){
+  const hash = (location.hash || '').replace(/^#/, '');
+  if(!hash) return false;
+  const call = hash.match(/^call\/(.+)$/);
+  if(call){
+    setTimeout(()=>openCallDetail(decodeURIComponent(call[1]), true), 150);
+    return true;
+  }
+  // only open a page this person is actually allowed to see
+  if(document.getElementById('page-' + hash)){
+    if(typeof portalPages !== 'undefined' && portalPages.length
+       && !portalPages.includes(hash) && !PORTAL_ALWAYS.includes(hash)) return false;
+    addressLocked = true;
+    try{ showPage(hash); } finally { addressLocked = false; }
+    return true;
+  }
+  return false;
+}
+
+const PORTAL_ALWAYS = ['call-detail'];
+
+/* Back and forward move between pages rather than leaving the app. */
+window.addEventListener('hashchange', ()=>{
+  if(addressLocked) return;
+  openFromAddress();
+});
+
+
+/* Skin Block runs its own page with its own detector, so it is shown in a
+   frame rather than rebuilt here. Loaded only when the page is opened —
+   the detector is around 45 MB and nobody who never covers a photo should
+   pay for it. */
+function sbOpen(){
+  const frame = document.getElementById('sb-frame');
+  if(frame && !frame.src) frame.src = '/skinblock?embedded=1';
+}
+
+function sbReload(){
+  const frame = document.getElementById('sb-frame');
+  if(frame) frame.src = '/skinblock?embedded=1&t=' + Date.now();
+}
+
 function showPage(id){
+  pageToAddress(id);
   // Access control: qa_users see only their own work; costs is admin-only
   const managerPages = ['analytics','billing','notes','rules','alerts','qa-users','manager-queue','time-report','skinblock'];
   const adminPages = ['costs'];
@@ -5304,6 +5424,7 @@ function showPage(id){
   if(id==='agent-calls'){ acLoadLive(); acAutoToggle(); }
   if(id==='live'){ loadLive(); loadWaiting(); loadCallbacks(); lvAutoToggle(); loadCallFlow(); cfAutoToggle(); }
   if(id==='missed') loadMissed();
+  if(id==='skin-block') sbOpen();
   if(id==='staffing') loadStaffing();
   if(id==='qa-assign') loadQaAssign();
   if(id==='cms-settings') loadCmsSettings();
@@ -6582,10 +6703,15 @@ async function checkWhyFailing(){
       lines.push('', 'calls in the last 24 hours:');
       Object.entries(r.last_24h).forEach(([k,v]) => lines.push(`   ${k}: ${v}`));
     }
+    if((r.failure_reasons||[]).length){
+      lines.push('', 'WHY they failed (last 48 hours):');
+      r.failure_reasons.forEach(f => lines.push(`   ${f.calls} calls — ${f.why}`));
+    }
     if((r.recent_failures||[]).length){
       lines.push('', 'the most recent failures:');
       r.recent_failures.forEach(f => lines.push(
-        `   ${f.call_id}  ${f.agent||''}  ${String(f.when).slice(0,16).replace('T',' ')}`));
+        `   ${f.call_id}  ${f.agent||''}  ${String(f.when).slice(0,16).replace('T',' ')}`
+        + `\n      ${f.why}`));
     }
     if((r.models_available||[]).length){
       lines.push('', 'models this key may use:');
@@ -7237,7 +7363,11 @@ async function loadCallFlow(){
     if(r.error){ box.innerHTML = `<div style="color:var(--red)">${r.error}</div>`; return; }
     cfData = r;
     document.getElementById('cf-live').textContent =
-      r.live_now ? r.live_now + ' happening now' : 'nothing live';
+      r.live_now
+        ? (r.ringing_now
+            ? `${r.live_now} happening now · ${r.ringing_now} still ringing`
+            : `${r.live_now} happening now`)
+        : 'nothing live';
     cfRender();
   }catch(e){ box.innerHTML = `<div style="color:var(--red)">${e.message}</div>`; }
 }
@@ -7245,7 +7375,9 @@ async function loadCallFlow(){
 function cfBadge(c){
   const s = (c.status || '').toUpperCase();
   if(c.live && c.answered_by) return ['IN PROGRESS', 'var(--green)', '#062'];
-  if(c.live) return ['RINGING', 'var(--yellow)', '#3a2600'];
+  // a call that has arrived and nobody has picked up yet — the one worth
+  // seeing first, so it says so plainly
+  if(c.live) return ['INCOMING — RINGING', 'var(--yellow)', '#3a2600'];
   if(c.outbound) return ['OUTBOUND', 'var(--accent)', '#fff'];
   if(s.startsWith('ANSWER')) return ['ANSWERED', 'var(--surface2)', 'var(--text)'];
   if(s === 'CANCEL') return [`CANCEL${c.seconds ? ' (' + c.seconds + 's)' : ''}`, 'var(--red)', '#fff'];
@@ -11877,22 +12009,12 @@ function fallbackCopy(text, done){
   document.body.removeChild(box);
 }
 
-/* If the address carries a call, open it once somebody is signed in. Called
-   after sign-in rather than at load, since the page has to be usable first. */
-function openCallFromAddress(){
-  const m = (location.hash || '').match(/^#call\/(.+)$/);
-  if(!m) return false;
-  const callId = decodeURIComponent(m[1]);
-  setTimeout(()=>openCallDetail(callId, true), 150);
-  return true;
-}
 
 async function openCallDetail(callId, fromLink){
   currentCallId=callId;
-  showPage('call-detail');
-  if(!fromLink){
-    try{ history.replaceState(null, '', '#call/' + encodeURIComponent(callId)); }catch(e){}
-  }
+  addressLocked = true;                 // showPage must not overwrite the call address
+  try{ showPage('call-detail'); } finally { addressLocked = false; }
+  try{ history.replaceState(null, '', '#call/' + encodeURIComponent(callId)); }catch(e){}
   set('detail-title',`Call #${callId}`);
   const titleEl = document.getElementById('detail-title');
   if(titleEl && !document.getElementById('copy-call-link')){

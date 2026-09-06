@@ -2002,6 +2002,9 @@ def delete_agent(agent_id):
     return jsonify({'success': True})
 
 # ─── CALLS ────────────────────────────────────────────────────────────────────
+_COUNT_CACHE = {}
+
+
 @app.route('/api/calls', methods=['GET'])
 def get_calls():
     conn = get_db()
@@ -2034,10 +2037,19 @@ def get_calls():
                         "      OR calls.status = 'Critical'"
                         "      OR (calls.status = 'Review' AND COALESCE(calls.flags, 0) > 0))")
 
+    # The page waits on this count, and counting every row on every visit is
+    # what made Call Review slow — the rows themselves are only 25. The exact
+    # figure only drives the page numbers, so a minute-old count is fine.
+    count_key = str(user and user.get('id')) + '|' + date_clause + '|' + str(date_params)
+    hit = _COUNT_CACHE.get(count_key)
+    total = hit[1] if (hit and (time.time() - hit[0]) < 60) else None
+
     if user and user['role'] == 'qa_user':
-        c.execute(f'SELECT COUNT(*) FROM calls JOIN agents ON agents.name = calls.agent_name WHERE agents.assigned_qa_user_id = %s{date_clause}',
-                  [user['id']] + date_params)
-        total = c.fetchone()['count']
+        if total is None:
+            c.execute(f'SELECT COUNT(*) FROM calls JOIN agents ON agents.name = calls.agent_name WHERE agents.assigned_qa_user_id = %s{date_clause}',
+                      [user['id']] + date_params)
+            total = c.fetchone()['count']
+            _COUNT_CACHE[count_key] = (time.time(), total)
         c.execute(f'''
             SELECT calls.call_id, calls.agent_name, calls.account_name, calls.customer_account_id,
                    calls.caller_id, calls.created_at, calls.duration, calls.billed_minutes,
@@ -2054,8 +2066,10 @@ def get_calls():
     else:
         where_clause = date_clause.replace(' AND ', 'WHERE ', 1) if date_clause else ''
         where_clause = where_clause.replace('calls.', '')
-        c.execute(f'SELECT COUNT(*) FROM calls {where_clause}', date_params)
-        total = c.fetchone()['count']
+        if total is None:
+            c.execute(f'SELECT COUNT(*) FROM calls {where_clause}', date_params)
+            total = c.fetchone()['count']
+            _COUNT_CACHE[count_key] = (time.time(), total)
         c.execute(f'''
             SELECT call_id, agent_name, account_name, customer_account_id, caller_id,
                    created_at, duration, billed_minutes, call_duration_seconds, overall_score,
@@ -2575,13 +2589,21 @@ def why_failing():
                      WHERE created_at > NOW() - INTERVAL '24 hours'
                      GROUP BY status ORDER BY COUNT(*) DESC""")
         out['last_24h'] = {r[0]: int(r[1]) for r in c.fetchall()}
-        c.execute("""SELECT call_id, agent_name, created_at, recording_url
+        # error_message has been recorded all along and nothing was reading it
+        c.execute("""SELECT call_id, agent_name, created_at, recording_url, error_message
                      FROM calls WHERE status = 'Failed'
-                     ORDER BY created_at DESC LIMIT 5""")
+                     ORDER BY created_at DESC LIMIT 8""")
         out['recent_failures'] = [
             {'call_id': r[0], 'agent': r[1],
              'when': r[2].isoformat() if r[2] else None,
-             'recording': (r[3] or '')[:90]} for r in c.fetchall()]
+             'recording': (r[3] or '')[:90],
+             'why': (r[4] or '')[:220] or '(nothing recorded)'} for r in c.fetchall()]
+        c.execute("""SELECT error_message, COUNT(*) FROM calls
+                     WHERE status = 'Failed'
+                       AND created_at > NOW() - INTERVAL '48 hours'
+                     GROUP BY error_message ORDER BY COUNT(*) DESC LIMIT 6""")
+        out['failure_reasons'] = [{'why': (r[0] or '(nothing recorded)')[:200],
+                                   'calls': int(r[1] or 0)} for r in c.fetchall()]
         conn.close()
     except Exception as e:
         out['db_error'] = str(e)[:200]
@@ -4989,7 +5011,8 @@ def _setting(key, default=''):
 # same pages but only the ones built on the CMS, and it signs people in with
 # their existing user name and password rather than a second set of logins.
 PORTAL_PAGES = ['live', 'missed', 'customers', 'agent-calls',
-                'agent-list', 'packages', 'company-info']   # everyone
+                'agent-list', 'packages', 'company-info',
+                'skin-block']   # everyone
 PORTAL_MANAGER_PAGES = ['cms-settings', 'qa-assign', 'staffing']           # managers and admins
 PORTAL_ADMIN_PAGES = ['payments']                            # admins only — real money
 # QA reviewers additionally get the monitoring side. They are doing QA work, so
@@ -7326,8 +7349,14 @@ def call_flow_route():
             'tried': [{'extension': e, 'result': 'ringing now'}
                       for e in (call.get('ringing_at') or [])],
         })
+    # Everything in ONE list sorted by time. Putting the memory-only calls in
+    # front meant a call ringing right now could appear below one that started
+    # two minutes earlier — the feed looked out of order because it was.
     out['calls'] = live + out['calls']
+    out['calls'].sort(key=lambda c: str(c.get('started') or ''), reverse=True)
     out['live_now'] = len([c for c in out['calls'] if c.get('live')])
+    out['ringing_now'] = len([c for c in out['calls']
+                              if c.get('live') and not c.get('answered_by')])
     return jsonify(out)
 
 
@@ -9637,7 +9666,10 @@ PORTAL_ALLOWED_PREFIXES = (
     '/api/media/', '/media/',
     '/api/phone-event/recent', '/api/phone-event/check',
     '/api/missed-calls', '/api/call-flow', '/api/dnd-check', '/api/why-failing',
-    '/api/waiting', '/api/queue-kinds', '/api/callbacks', '/api/call-search', '/api/texts/',
+    '/api/waiting', '/api/queue-kinds', '/api/callbacks', '/api/call-search',
+    # Skin Block is now a portal page for every agent, so its page, its model
+    # files and its endpoints have to be reachable on the CMS hostname too
+    '/skinblock', '/sbassets', '/api/skinblock', '/api/texts/',
     '/api/cms-db/', '/api/connections', '/static/', '/favicon',
 )
 
