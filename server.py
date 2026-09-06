@@ -9667,6 +9667,11 @@ PORTAL_ALLOWED_PREFIXES = (
     '/api/phone-event/recent', '/api/phone-event/check',
     '/api/missed-calls', '/api/call-flow', '/api/dnd-check', '/api/why-failing',
     '/api/waiting', '/api/queue-kinds', '/api/callbacks', '/api/call-search',
+    # AgentMonitor's poller calls this one. It carries its own key rather than
+    # a portal sign-in, so it is safe on this hostname — and being reachable
+    # here means the poller uses the same address people do, instead of needing
+    # to know about the Azure hostname underneath.
+    '/api/agent-calls',
     # Skin Block is now a portal page for every agent, so its page, its model
     # files and its endpoints have to be reachable on the CMS hostname too
     '/skinblock', '/sbassets', '/api/skinblock', '/api/texts/',
