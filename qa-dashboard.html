@@ -5485,7 +5485,14 @@ function showPage(id){
   if(map[id]>=0 && items[map[id]]) items[map[id]].classList.add('active');
   if(id==='qa-users') loadQAUsers();
   if(id==='analytics'){
-    if(!analytics) portalLoadQaPage('analytics'); else renderAnalytics();
+    // I previously tested a variable called `analytics` that does not exist,
+    // so this threw before doing anything and the page never loaded. The real
+    // data lives in ruleStats and agentStats.
+    if(!Array.isArray(agentStats) || !agentStats.length){
+      portalLoadQaPage('analytics');
+    }else{
+      renderAnalytics();
+    }
   }
   if(id==='costs'){ initCostsMonthSelector(); loadCosts(); }
   if(id==='human-review'){ mountHumanReviewDatePicker(); renderHumanReview(); }
