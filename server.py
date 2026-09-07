@@ -2256,7 +2256,11 @@ def get_rule_stats():
                    SUM(CASE WHEN NOT passed THEN 1 ELSE 0 END) as failed_count,
                    ROUND(100.0 * SUM(CASE WHEN passed THEN 1 ELSE 0 END) / COUNT(*), 1) as pass_rate
             FROM rule_results
-            WHERE created_at > NOW() - (%s || ' days')::interval
+            -- rows written before this column existed have NULL here, and a
+            -- plain "newer than 90 days" test silently drops every one of
+            -- them, which emptied the whole page
+            WHERE created_at IS NULL
+               OR created_at > NOW() - (%s || ' days')::interval
             GROUP BY rule_description, category, severity
             ORDER BY failed_count DESC LIMIT 20
         ''', (str(days),))
@@ -2264,7 +2268,22 @@ def get_rule_stats():
         conn.close()
         return stats
 
-    return jsonify(_cached('rule-stats-%d' % days, 300, build))
+    stats = _cached('rule-stats-%d' % days, 300, build)
+    if not stats:
+        # empty is a real answer, but an empty page is not — say which
+        try:
+            conn = get_db(); c = conn.cursor()
+            c.execute('SELECT COUNT(*) FROM rule_results')
+            total = (c.fetchone() or [0])[0]
+            conn.close()
+            return jsonify({'rules': [], 'empty_because':
+                            ('there are no rule results at all yet'
+                             if not total else
+                             'no rule results in the last %d days (%s exist in total)'
+                             % (days, total))})
+        except Exception:
+            pass
+    return jsonify(stats)
 
 @app.route('/api/analytics/agent-stats', methods=['GET'])
 def get_agent_stats():
@@ -2282,7 +2301,8 @@ def get_agent_stats():
                    SUM(CASE WHEN requires_human_review THEN 1 ELSE 0 END) as review_count,
                    SUM(CASE WHEN call_end_first='agent' THEN 1 ELSE 0 END) as agent_ended_count,
                    SUM(CASE WHEN line_issues='agent' THEN 1 ELSE 0 END) as line_issues_count
-            FROM calls WHERE created_at > NOW() - INTERVAL '90 days' AND overall_score > 0
+            FROM calls WHERE (created_at IS NULL OR created_at > NOW() - INTERVAL '90 days')
+              AND overall_score > 0
             GROUP BY agent_name, agent_extension
             ORDER BY avg_score DESC
         ''')
@@ -2307,7 +2327,7 @@ def get_billing():
                    ROUND(SUM(call_duration_seconds) / 60.0, 1) as actual_minutes,
                    SUM(billed_minutes) - ROUND(SUM(call_duration_seconds) / 60.0, 1) as billing_difference
             FROM calls WHERE call_duration_seconds > 0
-                  AND created_at > NOW() - INTERVAL '90 days'
+                  AND (created_at IS NULL OR created_at > NOW() - INTERVAL '90 days')
             GROUP BY agent_name, agent_extension
             ORDER BY total_billed_minutes DESC
         ''')
@@ -2337,7 +2357,7 @@ def get_notes_quality():
                    AVG(notes_score) as avg_notes_score,
                    SUM(CASE WHEN notes_score < 60 THEN 1 ELSE 0 END) as poor_notes_count
             FROM calls WHERE overall_score > 0
-                  AND created_at > NOW() - INTERVAL '90 days'
+                  AND (created_at IS NULL OR created_at > NOW() - INTERVAL '90 days')
             GROUP BY agent_name
             ORDER BY avg_notes_score ASC
         ''')
