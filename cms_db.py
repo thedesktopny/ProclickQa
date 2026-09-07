@@ -1540,6 +1540,61 @@ def callback_compare(hours=48):
     return out
 
 
+def work_note_shape(limit=400):
+    """Which of Note and TaskDescription actually holds the long text.
+
+    Both columns exist and the CMS assigns them the same way we do, so the
+    names alone do not settle it. What settles it is the data the old system
+    has been writing for years: whichever column is typically long is the one
+    users think of as "the note", and the short one is the title.
+    """
+    conn = _connect(); cu = conn.cursor()
+    out = {}
+    try:
+        cu.execute("""SELECT
+                        AVG(CAST(LEN(ISNULL(Note,'')) AS float)),
+                        AVG(CAST(LEN(ISNULL(TaskDescription,'')) AS float)),
+                        MAX(LEN(ISNULL(Note,''))),
+                        MAX(LEN(ISNULL(TaskDescription,''))),
+                        SUM(CASE WHEN LEN(ISNULL(Note,'')) > 0 THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN LEN(ISNULL(TaskDescription,'')) > 0 THEN 1 ELSE 0 END),
+                        COUNT(*)
+                      FROM (SELECT TOP %d Note, TaskDescription
+                            FROM AccountWork
+                            WHERE EndTime IS NOT NULL
+                            ORDER BY Id DESC) t""" % int(limit))
+        r = cu.fetchone()
+        out = {'note_avg_length': round(float(r[0] or 0), 1),
+               'task_avg_length': round(float(r[1] or 0), 1),
+               'note_longest': int(r[2] or 0), 'task_longest': int(r[3] or 0),
+               'rows_with_a_note': int(r[4] or 0),
+               'rows_with_a_task': int(r[5] or 0),
+               'rows_looked_at': int(r[6] or 0)}
+        out['long_text_lives_in'] = ('Note' if out['note_avg_length'] >= out['task_avg_length']
+                                     else 'TaskDescription')
+    except Exception as e:
+        out['error'] = str(e)[:200]
+
+    try:
+        cu.execute("""SELECT TOP 6 Id, Note, TaskDescription FROM AccountWork
+                      WHERE EndTime IS NOT NULL
+                        AND (LEN(ISNULL(Note,'')) > 0 OR LEN(ISNULL(TaskDescription,'')) > 0)
+                      ORDER BY Id DESC""")
+        rows = []
+        while True:
+            r = cu.fetchone()
+            if not r:
+                break
+            rows.append({'work_id': int(r[0]),
+                         'Note': (r[1] or '')[:110],
+                         'TaskDescription': (r[2] or '')[:110]})
+        out['examples'] = rows
+    except Exception as e:
+        out['examples_error'] = str(e)[:160]
+    conn.close()
+    return out
+
+
 def callback_list(hours=48, limit=100):
     """Missed callers who still need calling back.
 

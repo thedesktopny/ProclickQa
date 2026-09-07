@@ -7138,6 +7138,18 @@ def callbacks_compare():
         return jsonify({'error': str(e)[:200]}), 400
 
 
+@app.route('/api/work-note-shape', methods=['GET'])
+@portal_or_manager
+def work_note_shape_route():
+    """Which column the old system puts the long text in — settles whether our
+    note and title are the wrong way round."""
+    import cms_db
+    try:
+        return jsonify(cms_db.work_note_shape())
+    except Exception as e:
+        return jsonify({'error': str(e)[:200]}), 400
+
+
 @app.route('/api/callbacks', methods=['GET'])
 @portal_or_manager
 def callbacks_route():
@@ -9667,6 +9679,7 @@ PORTAL_ALLOWED_PREFIXES = (
     '/api/phone-event/recent', '/api/phone-event/check',
     '/api/missed-calls', '/api/call-flow', '/api/dnd-check', '/api/why-failing',
     '/api/waiting', '/api/queue-kinds', '/api/callbacks', '/api/call-search',
+    '/api/work-note-shape',
     # AgentMonitor's poller calls this one. It carries its own key rather than
     # a portal sign-in, so it is safe on this hostname — and being reachable
     # here means the poller uses the same address people do, instead of needing

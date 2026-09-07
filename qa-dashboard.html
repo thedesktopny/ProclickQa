@@ -3796,11 +3796,27 @@ async function loadCalls(page=1, dateFrom='', dateTo=''){
   }catch(e){calls=[];allCalls=[];totalPages=1;totalCalls=0;}
 }
 async function loadAgents(){try{agents=await API.get('/api/agents');}catch(e){agents=[];}}
+/* This used to swallow every failure into an empty catch, so a broken request
+   left the page blank for ever with nothing to read — "not loading even after
+   waiting" was a hidden error, not a slow one. */
 async function loadAnalytics(){
+  analyticsError = null;
   try{
-    ruleStats=await API.get('/api/analytics/rule-stats');
-    agentStats=await API.get('/api/analytics/agent-stats');
-  }catch(e){}
+    ruleStats = await API.get('/api/analytics/rule-stats');
+  }catch(e){
+    ruleStats = [];
+    analyticsError = 'Rule statistics: ' + e.message;
+  }
+  try{
+    agentStats = await API.get('/api/analytics/agent-stats');
+  }catch(e){
+    agentStats = [];
+    analyticsError = (analyticsError ? analyticsError + ' · ' : '')
+      + 'Agent statistics: ' + e.message;
+  }
+  // a reply that is not a list would break every render below it
+  if(!Array.isArray(ruleStats)) ruleStats = [];
+  if(!Array.isArray(agentStats)) agentStats = [];
 }
 async function loadBilling(){try{billingData=await API.get('/api/analytics/billing');}catch(e){billingData={};}}
 async function loadNotes(){try{notesData=await API.get('/api/analytics/notes-quality');}catch(e){notesData=[];}}
@@ -12438,12 +12454,37 @@ async function deleteAgent(id){
 }
 
 // ─── ANALYTICS ────────────────────────────────────────────────────────────────
+let analyticsError = null;
+
 function renderAnalytics(){
-  renderLeaderboard();
-  renderRuleStats();
-  renderCategoryChart();
-  renderScoreDistribution();
-  renderTeamSummary();
+  // say what went wrong rather than showing an empty page
+  const page = document.getElementById('page-analytics');
+  if(page){
+    let bar = document.getElementById('analytics-error');
+    if(analyticsError){
+      if(!bar){
+        bar = document.createElement('div');
+        bar.id = 'analytics-error';
+        bar.className = 'alert-bar';
+        bar.style.cssText = 'background:rgba(242,88,95,.08);border-color:rgba(242,88,95,.3);margin:16px 24px;';
+        const body = page.querySelector('div[style*="padding"]') || page;
+        body.insertBefore(bar, body.firstChild);
+      }
+      bar.innerHTML = '<span style="font-size:15px;">⚠️</span><span style="font-size:12.5px;'
+        + 'color:var(--text2);">Could not load this page: ' + esc(analyticsError)
+        + '</span>';
+      bar.style.display = '';
+    }else if(bar){
+      bar.style.display = 'none';
+    }
+  }
+  try{ renderLeaderboard(); }catch(e){ console.error('leaderboard', e); }
+  // each section is drawn on its own — one failing part used to take the whole
+  // page down with it
+  try{ renderRuleStats(); }catch(e){ console.error('rule stats', e); }
+  try{ renderCategoryChart(); }catch(e){ console.error('category chart', e); }
+  try{ renderScoreDistribution(); }catch(e){ console.error('score distribution', e); }
+  try{ renderTeamSummary(); }catch(e){ console.error('team summary', e); }
 }
 
 function renderLeaderboard(){
