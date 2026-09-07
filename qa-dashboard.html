@@ -3483,6 +3483,7 @@ function handleSignedOut(){
     [inTimer, cfTimer, lvTimer, acTimer, smsTimer].forEach(t => {
       try{ clearInterval(t); }catch(e){}
     });
+    pollStopAll();
     return;
   }
 
@@ -3506,6 +3507,66 @@ function handleSignedOut(){
     }
   }
 }
+
+
+/* ================= polling =================
+   A browser was sending 81 requests in 30 seconds — my-call every second,
+   plus call flow, waiting and callbacks every two. Each was taking 4 to 23
+   SECONDS because they were queuing behind one another, so roughly twenty
+   were in flight at any moment, per agent. Thirty agents saturated the server
+   and everything else waited behind them. That is what made the whole site
+   slow, not the individual pages.
+
+   Two rules fix it, and they are the same rules that should have applied from
+   the start:
+     1. Never send a request while the previous one is still out.
+     2. If the server is slow, ask less often until it recovers.
+*/
+const POLL = {};
+
+function pollStart(name, fn, baseMs){
+  pollStop(name);
+  const state = POLL[name] = {base: baseMs, wait: baseMs, busy: false, timer: null};
+
+  const tick = async () => {
+    // still waiting on the last one — skip this turn entirely
+    if(state.busy){
+      state.timer = setTimeout(tick, state.wait);
+      return;
+    }
+    state.busy = true;
+    const began = Date.now();
+    try{
+      await fn();
+      const took = Date.now() - began;
+      // back off when the server is struggling, recover gently when it is not
+      if(took > 3000)      state.wait = Math.min(30000, Math.max(state.wait * 2, took));
+      else if(took > 1200) state.wait = Math.min(15000, state.wait * 1.5);
+      else                 state.wait = Math.max(state.base, state.wait * 0.7);
+    }catch(e){
+      state.wait = Math.min(30000, state.wait * 2);
+    }finally{
+      state.busy = false;
+      state.timer = setTimeout(tick, Math.round(state.wait));
+    }
+  };
+  state.timer = setTimeout(tick, 0);
+  return state;
+}
+
+function pollStop(name){
+  const state = POLL[name];
+  if(state && state.timer){ try{ clearTimeout(state.timer); }catch(e){} }
+  delete POLL[name];
+}
+
+function pollStopAll(){ Object.keys(POLL).forEach(pollStop); }
+
+/* nothing polls while the tab is in the background */
+document.addEventListener('visibilitychange', ()=>{
+  if(document.hidden) Object.values(POLL).forEach(s => { s.wait = 60000; });
+  else Object.values(POLL).forEach(s => { s.wait = s.base; });
+});
 
 const API={
   async get(p){
@@ -5127,6 +5188,7 @@ async function portalSignOut(){
   [inTimer, cfTimer, lvTimer, acTimer, smsTimer].forEach(t => {
     try{ clearInterval(t); }catch(e){}
   });
+  pollStopAll();
   window.__saidSignedOut = true;      // and no expired-session bar on the way out
 
   // Tell the server, so the ticket stops working everywhere — not only in
@@ -5191,10 +5253,16 @@ async function portalBoot(){
     // confirm quietly; only interrupt if the ticket is genuinely no good
     fetch('/api/portal/me', {headers: portalHeaders()}).then(res=>{
       if(res.ok) return res.json().then(me => portalRemember(me));
-      portalTicket = null;
-      try{ sessionStorage.removeItem('portal_ticket');
-           sessionStorage.removeItem('portal_me'); }catch(e){}
-      location.reload();
+      // Only a genuine refusal signs somebody out. Any other failure — a
+      // restart, a slow moment, a 500 — used to reload the page underneath
+      // whatever they were doing, which is how Call Review ended up jumping
+      // back to Live mid-load.
+      if(res.status === 401 || res.status === 403){
+        portalTicket = null;
+        try{ sessionStorage.removeItem('portal_ticket');
+             sessionStorage.removeItem('portal_me'); }catch(e){}
+        location.reload();
+      }
     }).catch(()=>{ /* offline or a blip — leave them working */ });
     return;
   }
@@ -5356,7 +5424,11 @@ function openFromAddress(){
   return false;
 }
 
-const PORTAL_ALWAYS = ['call-detail'];
+// Pages that are reachable by address even though they are not in the portal
+// page list — the QA pages are granted separately, and refusing them here is
+// why a reload from Call Review landed back on Live.
+const PORTAL_ALWAYS = ['call-detail', 'calls', 'human-review', 'call-notes',
+                       'notes', 'analytics'];
 
 /* Back and forward move between pages rather than leaving the app. */
 window.addEventListener('hashchange', ()=>{
@@ -7500,16 +7572,24 @@ function cfRecordingUrl(stored){
 
 function cfAutoToggle(){
   clearInterval(cfTimer);
+  pollStop('live-panels'); pollStop('callbacks');
   const liveSwitch = document.getElementById('lv-auto');
   if(!liveSwitch || liveSwitch.checked){
-    cfTimer = setInterval(()=>{
-      // only while this page is open and being looked at
+    pollStart('live-panels', async ()=>{
       const page = document.getElementById('page-live');
       if(!page || page.style.display === 'none' || document.hidden) return;
       if(!portalSignedIn()) return;
-      loadCallFlow();
-      loadWaiting();
-    }, 2000);
+      // one after the other, not both at once — they hit the same database
+      await loadCallFlow();
+      await loadWaiting();
+    }, 4000);
+    // the callback list changes slowly and was the most expensive of the three
+    pollStart('callbacks', async ()=>{
+      const page = document.getElementById('page-live');
+      if(!page || page.style.display === 'none' || document.hidden) return;
+      if(!portalSignedIn()) return;
+      await loadCallbacks();
+    }, 30000);
   }
 }
 
@@ -7865,9 +7945,7 @@ function resetPopup(){
   inCallId = null;
   const box = document.getElementById('incoming');
   if(box) box.style.display = 'none';
-  try{ clearInterval(inTimer); }catch(e){}
-  inTimer = setInterval(inPoll, 1000);
-  inPoll();
+  pollStart('my-call', inPoll, 2000);
   showToast('Popup reset — it should appear on the next call');
 }
 
@@ -8501,14 +8579,11 @@ let inCallId = null, inDismissed = null, inTimer = null;
 function inConnect(){
   if(!IS_PORTAL && !portalTicket) return;
   inPoll();
-  clearInterval(inTimer);
-  inTimer = setInterval(inPoll, 1000);
+  // was every second; now it waits for the previous answer and backs off
+  pollStart('my-call', inPoll, 2000);
   // stop asking when the tab is in the background — nobody is looking, and
   // thirty idle tabs asking every second is thirty requests a second for nothing
-  document.addEventListener('visibilitychange', ()=>{
-    clearInterval(inTimer);
-    if(!document.hidden){ inPoll(); inTimer = setInterval(inPoll, 1000); }
-  });
+
 }
 
 async function inPoll(){
