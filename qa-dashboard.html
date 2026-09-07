@@ -5398,6 +5398,8 @@ async function portalLoadQaPage(which){
       if(typeof renderPagination === 'function') renderPagination();
       if(typeof updateBadges === 'function') updateBadges();
     }else if(which === 'analytics'){
+      // stats carries the category averages, worked out from the scorecards
+      await loadStats().catch(()=>{});
       await loadAnalytics();
       renderAnalytics();
     }
@@ -12548,8 +12550,31 @@ function renderRuleStats(){
 function renderCategoryChart(){
   const container=document.getElementById('category-chart');
   if(!container)return;
+
+  // The server already works these out from the scorecards, across every call
+  // rather than the 25 on the current page — and the calls list does not carry
+  // the scorecard at all, so reading it here could only ever find nothing.
+  const fromServer = (stats && stats.category_averages) || null;
+  if(fromServer && Object.keys(fromServer).length){
+    const rows = Object.entries(fromServer)
+      .filter(([, v]) => v !== null && v !== undefined)
+      .sort((a, b) => a[1] - b[1]);
+    container.innerHTML = rows.map(([name, value])=>{
+      const v = Math.round(value);
+      const colour = v >= 85 ? 'var(--green)' : v >= 70 ? 'var(--yellow)' : 'var(--red)';
+      return `<div style="margin-bottom:11px;">
+        <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;">
+          <span style="color:var(--text2)">${esc(name)}</span>
+          <span style="color:${colour};font-weight:600;">${v}%</span></div>
+        <div style="height:7px;background:var(--surface2);border-radius:4px;overflow:hidden;">
+          <div style="height:100%;width:${Math.max(2, Math.min(100, v))}%;background:${colour};"></div>
+        </div></div>`;
+    }).join('');
+    return;
+  }
+
   const scored=calls.filter(c=>c.overall_score>0&&c.scorecard);
-  if(scored.length===0){container.innerHTML='<div style="color:var(--text3);font-size:12px;padding:16px;text-align:center;">No scored calls yet.</div>';return;}
+  if(scored.length===0){container.innerHTML='<div style="color:var(--text3);font-size:12px;padding:16px;text-align:center;">No scored calls to work these out from yet.</div>';return;}
 
   const cats={
     'Accuracy & Info':[],'Customer Service':[],'Active Listening':[],'Compliance':[],'Emotion Mgmt':[],
@@ -12634,8 +12659,42 @@ function renderScoreDistribution(){
 function renderTeamSummary(){
   const wc=document.getElementById('weakness-container');
   if(!wc)return;
+
+  // agentStats covers every agent over 90 days; `calls` is whatever happens to
+  // be on the current page of the list, and on the portal it is often empty
+  if(Array.isArray(agentStats) && agentStats.length){
+    const totalCalls = agentStats.reduce((s,a)=>s+(Number(a.total_calls)||0),0);
+    const weighted = agentStats.reduce((s,a)=>s+((Number(a.avg_score)||0)*(Number(a.total_calls)||0)),0);
+    const teamAvg = totalCalls ? Math.round(weighted/totalCalls) : 0;
+    const critical = agentStats.reduce((s,a)=>s+(Number(a.critical_count)||0),0);
+    const needReview = agentStats.reduce((s,a)=>s+(Number(a.review_count)||0),0);
+    const weakest = [...agentStats]
+      .filter(a=>Number(a.total_calls)>=5)
+      .sort((a,b)=>(Number(a.avg_score)||0)-(Number(b.avg_score)||0))
+      .slice(0,5);
+    const cell=(lab,val,colour)=>`<div style="flex:1;min-width:120px;">
+      <div style="font-size:22px;font-weight:700;color:${colour||'var(--text)'};
+           font-family:'Space Grotesk',sans-serif;">${val}</div>
+      <div style="font-size:11px;color:var(--text3);margin-top:2px;">${lab}</div></div>`;
+    wc.innerHTML = `
+      <div style="display:flex;gap:18px;flex-wrap:wrap;margin-bottom:16px;">
+        ${cell('team average', teamAvg + '%', teamAvg>=85?'var(--green)':teamAvg>=70?'var(--yellow)':'var(--red)')}
+        ${cell('calls scored', totalCalls.toLocaleString())}
+        ${cell('critical', critical, critical?'var(--red)':'var(--text)')}
+        ${cell('need a human', needReview, needReview?'var(--yellow)':'var(--text)')}
+      </div>
+      ${weakest.length ? `<div style="font-size:11px;text-transform:uppercase;
+         letter-spacing:.08em;color:var(--text3);margin-bottom:8px;">Lowest scoring</div>`
+        + weakest.map(a=>`<div style="display:flex;justify-content:space-between;
+             font-size:12.5px;padding:6px 0;border-bottom:1px solid var(--border);">
+             <span>${esc(a.agent_name||'—')}</span>
+             <span style="color:var(--text3)">${Math.round(a.avg_score||0)}% ·
+               ${a.total_calls} calls</span></div>`).join('') : ''}`;
+    return;
+  }
+
   const scored=calls.filter(c=>c.overall_score>0);
-  if(scored.length===0){wc.innerHTML='<div style="color:var(--text3);font-size:12px;padding:16px;text-align:center;">No scored calls yet.</div>';return;}
+  if(scored.length===0){wc.innerHTML='<div style="color:var(--text3);font-size:12px;padding:16px;text-align:center;">Nothing scored yet to summarise.</div>';return;}
 
   const teamAvg=Math.round(scored.reduce((s,c)=>s+(c.overall_score||0),0)/scored.length);
   const passed=scored.filter(c=>c.status==='Passed').length;
