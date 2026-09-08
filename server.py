@@ -825,12 +825,26 @@ _token_cache = {}
 def create_token(user_data):
     token = secrets.token_urlsafe(32)
     _token_cache[token] = user_data
+
+    # A portal sign-in has an id like "cms-80" — it belongs to the CMS, not to
+    # our users table, whose user_id column is a whole number. Trying to store
+    # it failed on every single portal sign-in and wrote a stack trace to the
+    # log each time. The memory cache handles these perfectly well, so the
+    # database write is simply skipped for them.
+    raw_id = user_data.get('id')
+    try:
+        numeric_id = int(raw_id)
+    except (TypeError, ValueError):
+        print('[Auth] Token for %s held in memory only (its id is not ours: %r)'
+              % (user_data.get('username'), raw_id))
+        return token
+
     try:
         conn = get_db()
         c = conn.cursor()
         c.execute('''INSERT INTO auth_tokens (token, user_id, role, username, full_name, expires_at)
                      VALUES (%s, %s, %s, %s, %s, NOW() + INTERVAL '30 days')''',
-                  (token, user_data.get('id'), user_data.get('role','admin'),
+                  (token, numeric_id, user_data.get('role', 'admin'),
                    user_data.get('username'), user_data.get('full_name')))
         conn.commit()
         conn.close()

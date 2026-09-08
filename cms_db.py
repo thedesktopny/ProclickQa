@@ -1905,6 +1905,42 @@ def employee_context(employee_id, account_id=None):
     return out
 
 
+_QUEUE_LINK = {'name': None, 'checked': False}
+
+
+def _queue_link_column(cu):
+    """Which column in QueueInfo points at a call.
+
+    Looked up from the schema rather than assumed. Checked once per process —
+    a wrong guess here was writing an error line to the log on every poll,
+    several times a second, which buries everything worth reading.
+    """
+    if _QUEUE_LINK['checked']:
+        return _QUEUE_LINK['name']
+    _QUEUE_LINK['checked'] = True
+    try:
+        cu.execute("""SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+                      WHERE TABLE_NAME = 'QueueInfo'""")
+        names = []
+        while True:
+            r = cu.fetchone()
+            if not r:
+                break
+            names.append(r[0])
+        for wanted in ('PhoneCallLogId', 'PhoneCallsLogId', 'CallId', 'CallID',
+                       'PhoneCallId', 'LogId'):
+            for actual in names:
+                if actual.lower() == wanted.lower():
+                    _QUEUE_LINK['name'] = actual
+                    print('[cms] QueueInfo links to calls through %s' % actual)
+                    return actual
+        print('[cms] QueueInfo has no column linking to a call; columns are: %s'
+              % ', '.join(names[:12]))
+    except Exception as e:
+        print('[cms] could not read QueueInfo columns: ' + str(e)[:140])
+    return None
+
+
 def call_flow(minutes=180, limit=40):
     """Calls as they happen — who called, where it rang, who took it.
 
@@ -1947,14 +1983,18 @@ def call_flow(minutes=180, limit=40):
             'tried': [],
         })
 
-    # who it rang on the way — the queue log holds one line per attempt
-    if ids:
+    # Who it rang on the way. I guessed the column name as PhoneCallLogId and
+    # it does not exist — that error was logged on every single poll. The name
+    # is now looked up once from the schema, and if there is no such column the
+    # trail is simply left empty rather than failing loudly for ever.
+    link = _queue_link_column(cu)
+    if ids and link:
         try:
             marks = ', '.join(['%s'] * len(ids[:40]))
-            cu.execute("""SELECT PhoneCallLogId, Info, Created
+            cu.execute("""SELECT [%s], Info, Created
                           FROM QueueInfo
-                          WHERE PhoneCallLogId IN (%s)
-                          ORDER BY Id""" % marks, tuple(ids[:40]))
+                          WHERE [%s] IN (%s)
+                          ORDER BY Id""" % (link, link, marks), tuple(ids[:40]))
             by_call = {}
             while True:
                 q = cu.fetchone()
