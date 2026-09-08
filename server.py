@@ -6520,20 +6520,50 @@ def sms_number_check(number):
     and still appear missing.
     """
     digits = ''.join(ch for ch in number if ch.isdigit())[-10:]
-    for candidate in ('1' + digits, digits):
-        answer, problem = _bulkvs('GET', '/tnRecord?TN=' + candidate)
-        if answer:
-            record = answer[0] if isinstance(answer, list) and answer else answer
-            return jsonify({'found': True, 'as': candidate, 'record': record,
-                            'webhook': (record or {}).get('Webhook')
-                                       if isinstance(record, dict) else None,
-                            'trunk_group': (record or {}).get('Trunk Group')
-                                       if isinstance(record, dict) else None})
-    return jsonify({'found': False,
-                    'meaning': ('BulkVS does not return this number in either format. If the '
-                                'CMS shows it active, it was probably added to the pool by '
-                                'hand rather than ordered — messages to it would go nowhere.'),
-                    'error': problem})
+
+    # The filter is ?Number=, not ?TN= — the CMS's own DisableSMS uses that.
+    # With the wrong parameter BulkVS IGNORES it and hands back the first
+    # record in the account, which looked like a successful match for a number
+    # that was not even the one asked about. So whatever comes back is now
+    # checked against the number requested before it is believed.
+    tried = []
+    for path, candidate in (('/tnRecord?Number=1' + digits, '1' + digits),
+                            ('/tnRecord?Number=' + digits, digits),
+                            ('/tnRecord?TN=1' + digits, '1' + digits)):
+        answer, problem = _bulkvs('GET', path)
+        tried.append({'asked': path, 'error': problem})
+        if not answer:
+            continue
+        records = answer if isinstance(answer, list) else [answer]
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            got = ''.join(ch for ch in str(record.get('TN', '')) if ch.isdigit())
+            if got[-10:] != digits:
+                continue                      # a different number — not a match
+            messaging = record.get('Messaging') or {}
+            routing = record.get('Routing') or {}
+            return jsonify({
+                'found': True, 'as': got, 'record': record,
+                'webhook': messaging.get('Webhook') or record.get('Webhook'),
+                'trunk_group': routing.get('Trunk Group') or record.get('Trunk Group'),
+                'sms_enabled': messaging.get('Sms'),
+                'mms_enabled': messaging.get('Mms'),
+                'status': record.get('Status'),
+                'warning': (None if messaging.get('Sms') else
+                            'SMS is switched OFF for this number at BulkVS — messages '
+                            'from it will not send, whatever the CMS believes.'),
+            })
+        # something came back but it was not this number
+        first = records[0] if records and isinstance(records[0], dict) else None
+        if first:
+            tried[-1]['returned_instead'] = first.get('TN')
+
+    return jsonify({'found': False, 'tried': tried,
+                    'meaning': ('BulkVS did not return a record for this number. If some '
+                                'other number came back instead, their filter was ignored '
+                                'rather than matched. If the CMS shows it active, it may '
+                                'have been added to the pool by hand rather than ordered.')})
 
 
 @app.route('/api/sms-numbers/<number>/webhook', methods=['POST'])
