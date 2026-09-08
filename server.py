@@ -5034,7 +5034,7 @@ PORTAL_PAGES = ['live', 'missed', 'customers', 'agent-calls',
                 'agent-list', 'packages', 'company-info',
                 'skin-block']   # everyone
 PORTAL_MANAGER_PAGES = ['cms-settings', 'qa-assign', 'staffing']           # managers and admins
-PORTAL_ADMIN_PAGES = ['payments']                            # admins only — real money
+PORTAL_ADMIN_PAGES = ['payments', 'sms-numbers']                            # admins only — real money
 # QA reviewers additionally get the monitoring side. They are doing QA work, so
 # they need the same call review tools the QA dashboard has.
 PORTAL_QA_PAGES = ['calls', 'human-review', 'call-notes', 'notes', 'analytics']
@@ -6472,6 +6472,204 @@ def unlock_employee(employee_id):
                               {'employee_id': employee_id}, _who(),
                               severity='info')
     return jsonify(out), (200 if out.get('ok') else 400)
+
+
+def _bulkvs(method, path, body=None):
+    """One place that talks to BulkVS, so the credential and the shape of the
+    request are not repeated four times."""
+    auth = os.getenv('BULKVS_AUTH', '').strip()
+    if not auth:
+        return None, 'BULKVS_AUTH is not set'
+    try:
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(
+            'https://portal.bulkvs.com/api/v1.0' + path, data=data,
+            headers={'Authorization': 'Basic ' + auth,
+                     'Content-Type': 'application/json'},
+            method=method)
+        with urllib.request.urlopen(req, timeout=25) as resp:
+            text = resp.read().decode()
+        try:
+            return (json.loads(text) if text.strip() else {}), None
+        except Exception:
+            return text[:500], None
+    except Exception as e:
+        return None, str(e)[:200]
+
+
+@app.route('/api/sms-numbers', methods=['GET'])
+@portal_admin_only
+def sms_numbers_route():
+    """Every SMS number we hold, with what the CMS knows about each."""
+    import cms_db
+    try:
+        out = cms_db.sms_numbers_all()
+        out['bulkvs_configured'] = bool(os.getenv('BULKVS_AUTH', '').strip())
+        return jsonify(out)
+    except Exception as e:
+        return jsonify({'error': str(e)[:200], 'numbers': []}), 400
+
+
+@app.route('/api/sms-numbers/<number>/check', methods=['GET'])
+@portal_admin_only
+def sms_number_check(number):
+    """Does BulkVS actually have this number, and how is it set up.
+
+    Asked for by the number itself with no other filter — their portal list
+    filters by trunk group and webhook, so a number can be perfectly present
+    and still appear missing.
+    """
+    digits = ''.join(ch for ch in number if ch.isdigit())[-10:]
+    for candidate in ('1' + digits, digits):
+        answer, problem = _bulkvs('GET', '/tnRecord?TN=' + candidate)
+        if answer:
+            record = answer[0] if isinstance(answer, list) and answer else answer
+            return jsonify({'found': True, 'as': candidate, 'record': record,
+                            'webhook': (record or {}).get('Webhook')
+                                       if isinstance(record, dict) else None,
+                            'trunk_group': (record or {}).get('Trunk Group')
+                                       if isinstance(record, dict) else None})
+    return jsonify({'found': False,
+                    'meaning': ('BulkVS does not return this number in either format. If the '
+                                'CMS shows it active, it was probably added to the pool by '
+                                'hand rather than ordered — messages to it would go nowhere.'),
+                    'error': problem})
+
+
+@app.route('/api/sms-numbers/<number>/webhook', methods=['POST'])
+@portal_admin_only
+def sms_number_webhook(number):
+    """Move a number between webhook profiles."""
+    d = request.json or {}
+    webhook = (d.get('webhook') or '').strip()
+    if webhook not in ('WebHook1', 'WebHook2'):
+        return jsonify({'ok': False,
+                        'error': 'The webhook must be WebHook1 or WebHook2.'}), 400
+    digits = ''.join(ch for ch in number if ch.isdigit())[-10:]
+    body = {'TN': '1' + digits, 'Webhook': webhook,
+            'Lidb': (d.get('lidb') or 'PROCLICK')}
+    answer, problem = _bulkvs('POST', '/tnRecord', body)
+    if problem:
+        return jsonify({'ok': False, 'error': problem}), 400
+    _log_admin_action('sms_webhook', {'number': digits, 'webhook': webhook})
+    return jsonify({'ok': True, 'answer': answer,
+                    'meaning': 'That number is now on %s.' % webhook})
+
+
+@app.route('/api/sms-numbers/<number>/test', methods=['POST'])
+@portal_admin_only
+def sms_number_test(number):
+    """Send a real message from this number, to prove it works end to end."""
+    d = request.json or {}
+    to = ''.join(ch for ch in (d.get('to') or '') if ch.isdigit())
+    if len(to) < 10:
+        return jsonify({'ok': False, 'error': 'Give a number to send the test to.'}), 400
+    text = (d.get('message') or 'ProClick test message — please ignore.')[:300]
+    frm = ''.join(ch for ch in number if ch.isdigit())[-10:]
+
+    auth = os.getenv('BULKVS_AUTH', '').strip()
+    if not auth:
+        return jsonify({'ok': False, 'error': 'BULKVS_AUTH is not set'}), 400
+    answer, problem = _bulkvs('POST', '/messageSend',
+                              {'From': '1' + frm, 'To': ['1' + to[-10:]], 'Message': text})
+    if problem:
+        return jsonify({'ok': False, 'error': problem}), 400
+    results = (answer or {}).get('Results') or []
+    ok = any(str(x.get('Status', '')).upper() in ('SUCCESS', 'OK', 'QUEUED', 'ACCEPTED')
+             for x in results if isinstance(x, dict)) or bool(
+                 (answer or {}).get('RefId') or (answer or {}).get('RefID'))
+    return jsonify({'ok': ok, 'answer': answer,
+                    'meaning': ('Sent from %s to %s.' % (frm, to[-10:])) if ok
+                               else 'The texting service did not accept it.'})
+
+
+def _log_admin_action(what, detail):
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute("""INSERT INTO cms_audit (who, employee_id, action, table_name,
+                                            row_id, before_json, after_json, committed)
+                     VALUES (%s, %s, %s, 'BulkVS', 0, NULL, %s, TRUE)""",
+                  ((_who() or {}).get('name'), (_who() or {}).get('employee_id'),
+                   what, json.dumps(detail)))
+        conn.commit(); conn.close()
+    except Exception as e:
+        print('[audit] ' + str(e)[:120])
+
+
+@app.route('/api/sms-number-lookup', methods=['GET'])
+@portal_manager_only
+def sms_number_lookup():
+    """Ask BulkVS directly about one number, and the CMS about the same one.
+
+    A number can look missing at BulkVS simply because their list view filters
+    by trunk group and webhook — a number on WebHook2 will not appear in a
+    WebHook1 list. This asks for the number itself, with no filter, and shows
+    what the CMS believes alongside it.
+    """
+    import cms_db
+    digits = ''.join(ch for ch in (request.args.get('number') or '') if ch.isdigit())
+    if len(digits) < 10:
+        return jsonify({'error': 'Give the full ten-digit number.'}), 400
+    ten = digits[-10:]
+    out = {'number': ten}
+
+    # what our own database says
+    try:
+        conn = cms_db._connect(); cu = conn.cursor()
+        cu.execute("""SELECT TOP 3 Id, FirstName, LastName, smsNumber,
+                             ISNULL(smsActivate, 0), SMSDateEnd
+                      FROM Account
+                      WHERE RIGHT(ISNULL(smsNumber,''), 10) = %s""", (ten,))
+        rows = []
+        while True:
+            r = cu.fetchone()
+            if not r:
+                break
+            rows.append({'account_id': int(r[0]),
+                         'customer': ('%s %s' % (r[1] or '', r[2] or '')).strip(),
+                         'sms_number': r[3], 'active': bool(r[4]),
+                         'ends': str(r[5])[:10] if r[5] else None})
+        out['on_accounts'] = rows
+        cu.execute("SELECT COUNT(*) FROM SMSNumberTable WHERE RIGHT(Number, 10) = %s", (ten,))
+        out['still_in_the_spare_pool'] = int((cu.fetchone() or [0])[0] or 0) > 0
+        conn.close()
+    except Exception as e:
+        out['cms_error'] = str(e)[:180]
+
+    # what BulkVS says, asked for by number with no other filter
+    auth = os.getenv('BULKVS_AUTH', '').strip()
+    if not auth:
+        out['bulkvs_error'] = 'BULKVS_AUTH is not set, so BulkVS cannot be asked'
+        return jsonify(out)
+    for candidate in (ten, '1' + ten):
+        try:
+            req = urllib.request.Request(
+                'https://portal.bulkvs.com/api/v1.0/tnRecord?TN=' + candidate,
+                headers={'Authorization': 'Basic ' + auth,
+                         'Content-Type': 'application/json'})
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                body = resp.read().decode()
+            try:
+                answer = json.loads(body or 'null')
+            except Exception:
+                answer = body[:400]
+            if answer:
+                out['bulkvs_found_as'] = candidate
+                out['bulkvs'] = answer
+                break
+        except Exception as e:
+            out.setdefault('bulkvs_tries', []).append('%s: %s' % (candidate, str(e)[:120]))
+
+    if 'bulkvs' not in out:
+        out['meaning'] = ('BulkVS does not return this number on either format. If the CMS '
+                          'shows it active, the number may have been added to the pool by '
+                          'hand rather than ordered, or it sits under a different BulkVS '
+                          'account.')
+    else:
+        out['meaning'] = ('BulkVS has it. If it is not visible in their portal list, the '
+                          'list is filtered — check the Trunk Group and WebHook columns '
+                          'below against the filter you are using.')
+    return jsonify(out)
 
 
 @app.route('/api/our-sms-numbers', methods=['GET'])
@@ -9699,7 +9897,7 @@ PORTAL_ALLOWED_PREFIXES = (
     '/api/phone-event/recent', '/api/phone-event/check',
     '/api/missed-calls', '/api/call-flow', '/api/dnd-check', '/api/why-failing',
     '/api/waiting', '/api/queue-kinds', '/api/callbacks', '/api/call-search',
-    '/api/work-note-shape',
+    '/api/work-note-shape', '/api/sms-number-lookup', '/api/sms-numbers',
     # AgentMonitor's poller calls this one. It carries its own key rather than
     # a portal sign-in, so it is safe on this hostname — and being reachable
     # here means the poller uses the same address people do, instead of needing

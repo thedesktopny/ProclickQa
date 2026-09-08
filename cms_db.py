@@ -1436,6 +1436,87 @@ def staffing_picture(weeks=4, slot_minutes=30, target_seconds=20, target_answere
             'target': '%d%% answered within %ds' % (target_answered * 100, target_seconds)}
 
 
+def sms_numbers_all(limit=400):
+    """Every SMS number we hold, whether spare or given to a customer.
+
+    A number lives in exactly one of two places — the spare pool, or on an
+    account — so both are read and merged. Anything appearing in neither is not
+    ours; anything in both is a fault worth seeing.
+    """
+    conn = _connect(); cu = conn.cursor()
+    out = {'numbers': []}
+    found = {}
+    try:
+        cu.execute("""SELECT TOP %d Number, Created FROM SMSNumberTable
+                      ORDER BY Created DESC""" % int(limit))
+        while True:
+            r = cu.fetchone()
+            if not r:
+                break
+            n = (r[0] or '').strip()
+            found[n[-10:]] = {'number': n, 'where': 'spare pool',
+                              'added': _plain(r[1]), 'account_id': None,
+                              'customer': None, 'active': None, 'ends': None,
+                              'messages_30d': 0}
+    except Exception as e:
+        out['pool_error'] = str(e)[:180]
+
+    try:
+        cu.execute("""SELECT TOP %d a.Id, a.FirstName, a.LastName, a.smsNumber,
+                             ISNULL(a.smsActivate, 0), a.SMSDateEnd
+                      FROM Account a
+                      WHERE a.smsNumber IS NOT NULL AND a.smsNumber <> ''
+                      ORDER BY a.Id DESC""" % int(limit))
+        while True:
+            r = cu.fetchone()
+            if not r:
+                break
+            n = (r[3] or '').strip()
+            key = n[-10:]
+            entry = {'number': n,
+                     'where': 'on an account',
+                     'added': None,
+                     'account_id': int(r[0]),
+                     'customer': ('%s %s' % (r[1] or '', r[2] or '')).strip() or None,
+                     'active': bool(r[4]),
+                     'ends': str(r[5])[:10] if r[5] else None,
+                     'messages_30d': 0}
+            if key in found:
+                # in the pool AND on an account — should never happen
+                entry['where'] = 'BOTH — in the pool and on an account'
+                entry['added'] = found[key]['added']
+            found[key] = entry
+    except Exception as e:
+        out['account_error'] = str(e)[:180]
+
+    # how busy each one has been, so a dead number is obvious
+    try:
+        keys = list(found.keys())
+        if keys:
+            marks = ', '.join(['%s'] * len(keys))
+            cu.execute("""SELECT RIGHT(AccountSMSNumber, 10), COUNT(*)
+                          FROM SMSLog
+                          WHERE smsDate >= DATEADD(day, -30, GETDATE())
+                            AND RIGHT(AccountSMSNumber, 10) IN (%s)
+                          GROUP BY RIGHT(AccountSMSNumber, 10)""" % marks, tuple(keys))
+            while True:
+                r = cu.fetchone()
+                if not r:
+                    break
+                if r[0] in found:
+                    found[r[0]]['messages_30d'] = int(r[1] or 0)
+    except Exception as e:
+        out['message_count_error'] = str(e)[:180]
+
+    conn.close()
+    out['numbers'] = sorted(found.values(),
+                            key=lambda x: (x['where'] != 'BOTH — in the pool and on an account',
+                                           -(x['messages_30d'] or 0)))
+    out['count'] = len(out['numbers'])
+    out['spare'] = len([n for n in out['numbers'] if n['where'] == 'spare pool'])
+    return out
+
+
 def our_sms_numbers():
     """Numbers we can text from.
 

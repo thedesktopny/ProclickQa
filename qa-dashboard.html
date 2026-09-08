@@ -1707,6 +1707,27 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
   </div>
 </div>
 
+<div class="page" id="page-sms-numbers">
+  <div class="topbar">
+    <button class="navtoggle" onclick="toggleNav()" aria-label="Menu">☰</button>
+    <div class="page-title">💬 SMS Numbers</div>
+    <div class="topbar-right">
+      <input id="sn-search" class="cms-in" style="width:200px;"
+             placeholder="number or customer…" oninput="snRender()">
+      <span id="sn-count" style="font-size:11.5px;color:var(--text3);"></span>
+      <button class="btn btn-outline" onclick="loadSmsNumbers()">Refresh</button>
+    </div>
+  </div>
+  <div style="padding:18px 26px 44px;">
+    <div class="payhint" style="margin-bottom:14px;">
+      Every number we hold — spare ones and ones given to a customer. "Check at BulkVS"
+      asks them about that number directly, with no filters, which is the only way to know
+      whether they really have it.
+    </div>
+    <div id="sn-body"></div>
+  </div>
+</div>
+
 <div class="page" id="page-missed">
   <div class="topbar">
     <button class="navtoggle" onclick="toggleNav()" aria-label="Menu">☰</button>
@@ -5149,6 +5170,7 @@ function portalApply(name, isManager){
     'customers':    ['👤', 'Customers'],
     'agent-calls':  ['🎧', 'Agents & Calls'],
     'missed':       ['📵', 'Missed Calls'],
+    'sms-numbers':  ['💬', 'SMS Numbers'],
     'skin-block':   ['🫥', 'Skin Block'],
     'staffing':     ['📊', 'Staffing'],
     'agent-list':   ['📇', 'Agents'],
@@ -5469,6 +5491,111 @@ function sbReload(){
   if(frame) frame.src = '/skinblock?embedded=1&t=' + Date.now();
 }
 
+
+/* Every SMS number in one place, with what BulkVS says about each. The two
+   systems can disagree — the CMS can believe it owns a number BulkVS never
+   assigned — and until now there was no way to see that. */
+let snData = null;
+
+async function loadSmsNumbers(){
+  const box = document.getElementById('sn-body');
+  box.innerHTML = '<div style="color:var(--text3);font-size:12.5px;">Reading…</div>';
+  try{
+    const r = await API.get('/api/sms-numbers');
+    if(r.error){ box.innerHTML = `<div style="color:var(--red)">${esc(r.error)}</div>`; return; }
+    snData = r;
+    if(!r.bulkvs_configured){
+      box.innerHTML = `<div class="alert-bar" style="background:rgba(245,166,35,.1);
+        border-color:rgba(245,166,35,.35);margin-bottom:14px;">
+        <span>⚠️</span><span style="font-size:12.5px;">BULKVS_AUTH is not set, so numbers
+        cannot be checked against BulkVS — only what the CMS believes is shown.</span></div>`;
+    }
+    snRender();
+  }catch(e){ box.innerHTML = `<div style="color:var(--red)">${esc(e.message)}</div>`; }
+}
+
+function snRender(){
+  if(!snData) return;
+  const q = (document.getElementById('sn-search').value || '').toLowerCase().trim();
+  const list = snData.numbers.filter(n => !q
+    || String(n.number).includes(q)
+    || (n.customer || '').toLowerCase().includes(q));
+  document.getElementById('sn-count').textContent =
+    `${snData.count} numbers · ${snData.spare} spare`;
+
+  document.getElementById('sn-body').innerHTML = list.map(n=>{
+    const key = String(n.number).replace(/\D/g, '').slice(-10);
+    const clash = n.where.startsWith('BOTH');
+    return `<div class="card" id="sn-${key}" style="padding:14px 18px;margin-bottom:10px;
+              ${clash ? 'border-color:var(--red);' : ''}">
+      <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;">
+        <span style="font-size:16px;font-variant-numeric:tabular-nums;">${esc(n.number)}</span>
+        <span style="font-size:11.5px;color:${clash ? 'var(--red)' : 'var(--text3)'};">
+          ${esc(n.where)}</span>
+        ${n.customer ? `<span style="font-size:12.5px;color:var(--text2);">${esc(n.customer)}</span>` : ''}
+        ${n.active === false ? '<span style="font-size:11.5px;color:var(--yellow);">not active</span>' : ''}
+        <span style="margin-left:auto;font-size:11.5px;color:var(--text3);">
+          ${n.messages_30d} messages in 30 days</span>
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px;">
+        <button class="cn-chip" onclick="snCheck('${key}')">Check at BulkVS</button>
+        <button class="cn-chip" onclick="snWebhook('${key}','WebHook1')">Set WebHook1</button>
+        <button class="cn-chip" onclick="snWebhook('${key}','WebHook2')">Set WebHook2</button>
+        <button class="cn-chip" onclick="snTest('${key}')">Send a test</button>
+        ${n.account_id ? `<button class="cn-chip" onclick="cuOpen(${n.account_id})">Open customer</button>` : ''}
+      </div>
+      <pre id="sn-out-${key}" style="white-space:pre-wrap;font-size:11.5px;color:var(--text2);
+           margin:10px 0 0;line-height:1.7;"></pre>
+    </div>`;
+  }).join('') || '<div style="color:var(--text3);font-size:12.5px;">Nothing matches that.</div>';
+}
+
+function snSay(key, text, colour){
+  const el = document.getElementById('sn-out-' + key);
+  if(el){ el.textContent = text; el.style.color = colour || 'var(--text2)'; }
+}
+
+async function snCheck(key){
+  snSay(key, 'Asking BulkVS…');
+  try{
+    const r = await API.get('/api/sms-numbers/' + key + '/check');
+    if(!r.found){
+      snSay(key, '❌ ' + (r.meaning || 'BulkVS does not have this number.')
+            + (r.error ? '\n' + r.error : ''), 'var(--red)');
+      return;
+    }
+    const lines = ['✅ BulkVS has it, as ' + r.as];
+    if(r.webhook) lines.push('   webhook: ' + r.webhook);
+    if(r.trunk_group) lines.push('   trunk group: ' + r.trunk_group);
+    if(r.record) lines.push('', JSON.stringify(r.record, null, 2));
+    snSay(key, lines.join('\n'), 'var(--text2)');
+  }catch(e){ snSay(key, 'Failed: ' + e.message, 'var(--red)'); }
+}
+
+async function snWebhook(key, webhook){
+  if(!confirm('Move ' + key + ' to ' + webhook + ' at BulkVS?')) return;
+  snSay(key, 'Changing…');
+  try{
+    const r = await API.post('/api/sms-numbers/' + key + '/webhook', {webhook});
+    snSay(key, (r.ok ? '✅ ' : '❌ ') + (r.meaning || r.error || ''),
+          r.ok ? 'var(--green)' : 'var(--red)');
+  }catch(e){ snSay(key, 'Failed: ' + e.message, 'var(--red)'); }
+}
+
+async function snTest(key){
+  const to = prompt('Send a test message from ' + key + ' to which number?');
+  if(!to) return;
+  snSay(key, 'Sending…');
+  try{
+    const r = await API.post('/api/sms-numbers/' + key + '/test', {to});
+    snSay(key, (r.ok ? '✅ ' : '❌ ') + (r.meaning || '')
+          + (r.answer ? '\n' + JSON.stringify(r.answer) : ''),
+          r.ok ? 'var(--green)' : 'var(--red)');
+  }catch(e){ snSay(key, 'Failed: ' + e.message, 'var(--red)'); }
+}
+
+async function loadSmsNumbers2(){}
+
 function showPage(id){
   pageToAddress(id);
   // Access control: qa_users see only their own work; costs is admin-only
@@ -5521,6 +5648,7 @@ function showPage(id){
   if(id==='agent-calls'){ acLoadLive(); acAutoToggle(); }
   if(id==='live'){ loadLive(); loadWaiting(); loadCallbacks(); lvAutoToggle(); loadCallFlow(); cfAutoToggle(); }
   if(id==='missed') loadMissed();
+  if(id==='sms-numbers') loadSmsNumbers();
   if(id==='skin-block') sbOpen();
   if(id==='staffing') loadStaffing();
   if(id==='qa-assign') loadQaAssign();
