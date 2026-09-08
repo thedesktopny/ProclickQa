@@ -6559,11 +6559,42 @@ def sms_number_check(number):
         if first:
             tried[-1]['returned_instead'] = first.get('TN')
 
+    # No filter worked — BulkVS appears to ignore them on this endpoint and
+    # hand back the first record regardless. So ask for the whole list and find
+    # the number in it ourselves. Slower, but it cannot report a match on
+    # somebody else's record, which is what the filtered version was doing.
+    everything, problem = _bulkvs('GET', '/tnRecord')
+    records = everything if isinstance(everything, list) else (
+        [everything] if isinstance(everything, dict) else [])
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        got = ''.join(ch for ch in str(record.get('TN', '')) if ch.isdigit())
+        if got[-10:] == digits:
+            messaging = record.get('Messaging') or {}
+            routing = record.get('Routing') or {}
+            return jsonify({
+                'found': True, 'as': got, 'record': record,
+                'found_by': 'searching the whole list — their filters are ignored',
+                'webhook': messaging.get('Webhook') or record.get('Webhook'),
+                'trunk_group': routing.get('Trunk Group') or record.get('Trunk Group'),
+                'sms_enabled': messaging.get('Sms'),
+                'mms_enabled': messaging.get('Mms'),
+                'status': record.get('Status'),
+                'warning': (None if messaging.get('Sms') else
+                            'SMS is switched OFF for this number at BulkVS — messages '
+                            'from it will not send, whatever the CMS believes.'),
+            })
+
     return jsonify({'found': False, 'tried': tried,
-                    'meaning': ('BulkVS did not return a record for this number. If some '
-                                'other number came back instead, their filter was ignored '
-                                'rather than matched. If the CMS shows it active, it may '
-                                'have been added to the pool by hand rather than ordered.')})
+                    'numbers_in_the_account': len(records),
+                    'error': problem,
+                    'meaning': ('This number is not in your BulkVS account. Their filters '
+                                'are ignored on this endpoint — a filtered request returns '
+                                'the first record whatever you ask for — so the whole list '
+                                'was searched and it is not there. If the CMS shows it '
+                                'active, it was added to the pool by hand rather than '
+                                'ordered, and messages from it cannot send.')})
 
 
 @app.route('/api/sms-numbers/<number>/webhook', methods=['POST'])
