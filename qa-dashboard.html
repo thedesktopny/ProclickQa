@@ -942,6 +942,27 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
 }
 @keyframes spin{ to{ transform:rotate(360deg); } }
 .btn:disabled{ opacity:.75; cursor:default; }
+
+/* ---------- filters on the review pages ---------- */
+.qf-bar{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
+.qf-bar select{ width:auto; min-width:150px; font-size:12.5px; }
+.qf-note{ font-size:11.5px; color:var(--text3); }
+.qf-summary{ margin-bottom:14px; }
+.qf-tot{
+  display:flex; gap:20px; flex-wrap:wrap; padding:12px 16px; margin-bottom:10px;
+  background:var(--surface); border:1px solid var(--border); border-radius:11px;
+}
+.qf-tot b{ font-size:20px; font-weight:700; font-family:'Space Grotesk',sans-serif; }
+.qf-tot span{ font-size:11px; color:var(--text3); display:block; margin-top:2px; }
+.qf-rows{ border:1px solid var(--border); border-radius:11px; overflow:hidden; }
+.qf-row{
+  display:flex; align-items:center; gap:12px; padding:8px 16px; font-size:12.5px;
+  border-bottom:1px solid var(--border); cursor:pointer;
+}
+.qf-row:last-child{ border-bottom:0; }
+.qf-row:hover{ background:var(--surface2); }
+.qf-row .nm{ flex:1; min-width:0; }
+.qf-row .sc{ font-weight:600; font-variant-numeric:tabular-nums; }
 </style>
 </head>
 <body>
@@ -1259,6 +1280,23 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
     </div>
   </div>
   <div style="padding:28px;">
+    <div class="qf-bar" id="qf-calls">
+      <select class="cms-in qf-agent" onchange="qfChanged('calls')">
+        <option value="">All agents</option>
+      </select>
+      <select class="cms-in qf-score" onchange="qfChanged('calls')">
+        <option value="">Any score</option>
+        <option value="0-59">Under 60</option>
+        <option value="60-69">60 to 69</option>
+        <option value="70-84">70 to 84</option>
+        <option value="85-100">85 and above</option>
+      </select>
+      <button class="btn btn-outline qf-clear" onclick="qfClear('calls')"
+              style="font-size:12px;">Clear</button>
+      <span class="qf-note"></span>
+    </div>
+    <div class="qf-summary" id="qf-sum-calls"></div>
+
     <div class="card">
       <div class="table-wrap">
         <table>
@@ -1312,6 +1350,23 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
     </div>
   </div>
   <div style="padding:28px;">
+    <div class="qf-bar" id="qf-humanreview">
+      <select class="cms-in qf-agent" onchange="qfChanged('humanreview')">
+        <option value="">All agents</option>
+      </select>
+      <select class="cms-in qf-score" onchange="qfChanged('humanreview')">
+        <option value="">Any score</option>
+        <option value="0-59">Under 60</option>
+        <option value="60-69">60 to 69</option>
+        <option value="70-84">70 to 84</option>
+        <option value="85-100">85 and above</option>
+      </select>
+      <button class="btn btn-outline qf-clear" onclick="qfClear('humanreview')"
+              style="font-size:12px;">Clear</button>
+      <span class="qf-note"></span>
+    </div>
+    <div class="qf-summary" id="qf-sum-humanreview"></div>
+
     <div class="alert-bar" style="margin-bottom:20px;">
       <span style="font-size:18px;">⚠️</span>
       <span style="font-size:12px;color:var(--text2);flex:1;">These calls had low AI confidence or triggered special flags. Review before taking any action against agents.</span>
@@ -5609,6 +5664,116 @@ async function snTest(key){
 
 async function loadSmsNumbers2(){}
 
+
+/* ================= filters on the review pages =================
+   Agent, score band and the date picker already there — all applied in SQL, so
+   they filter every call in the period rather than the page on screen. The
+   summary answers the question the filters are usually asked in service of:
+   how is each agent doing over this stretch. */
+const QF = {calls: {agent:'', score:''}, humanreview: {agent:'', score:''}};
+
+async function qfInit(page){
+  const bar = document.getElementById('qf-' + page);
+  if(!bar || bar.dataset.ready) return;
+  bar.dataset.ready = '1';
+  try{
+    const r = await API.get('/api/agent-names');
+    const sel = bar.querySelector('.qf-agent');
+    (r.agents || []).forEach(name=>{
+      const o = document.createElement('option');
+      o.value = name; o.textContent = name;
+      sel.appendChild(o);
+    });
+  }catch(e){}
+}
+
+function qfParams(page){
+  const f = QF[page] || {};
+  let out = '';
+  if(f.agent) out += '&agent=' + encodeURIComponent(f.agent);
+  if(f.score){
+    const [lo, hi] = f.score.split('-');
+    out += '&min_score=' + lo + '&max_score=' + hi;
+  }
+  return out;
+}
+
+function qfChanged(page){
+  const bar = document.getElementById('qf-' + page);
+  QF[page] = {
+    agent: bar.querySelector('.qf-agent').value,
+    score: bar.querySelector('.qf-score').value,
+  };
+  qfReload(page);
+}
+
+function qfClear(page){
+  const bar = document.getElementById('qf-' + page);
+  bar.querySelector('.qf-agent').value = '';
+  bar.querySelector('.qf-score').value = '';
+  QF[page] = {agent:'', score:''};
+  qfReload(page);
+}
+
+function qfReload(page){
+  qfSummary(page);
+  if(page === 'calls'){
+    const dr = dateRangeState['calls'] || {from:'',to:''};
+    loadCalls(1, _toUtcParam(dr.from), _toUtcParam(dr.to)).then(()=>{
+      renderCalls();
+      if(typeof renderPagination === 'function') renderPagination();
+    });
+  }else{
+    renderHumanReview();
+  }
+}
+
+/* Each agent's totals for whatever period and filters are showing. */
+async function qfSummary(page){
+  const box = document.getElementById('qf-sum-' + page);
+  if(!box) return;
+  const dr = dateRangeState[page === 'calls' ? 'calls' : 'humanreview'] || {from:'',to:''};
+  let url = '/api/calls/summary?1=1' + qfParams(page);
+  if(dr.from) url += '&date_from=' + encodeURIComponent(_toUtcParam(dr.from));
+  if(dr.to) url += '&date_to=' + encodeURIComponent(_toUtcParam(dr.to));
+  if(page === 'humanreview') url += '&needs_review=1';
+  box.innerHTML = '<div style="color:var(--text3);font-size:12px;">Adding it up…</div>';
+  try{
+    const r = await API.get(url);
+    if(r.error){ box.innerHTML = ''; return; }
+    const o = r.overall || {};
+    if(!o.calls){ box.innerHTML = '<div style="color:var(--text3);font-size:12px;">'
+      + 'Nothing scored in this period.</div>'; return; }
+    const avg = Math.round(o.avg_score || 0);
+    box.innerHTML = `
+      <div class="qf-tot">
+        <div><b>${(o.calls||0).toLocaleString()}</b><span>calls scored</span></div>
+        <div><b style="color:${avg>=85?'var(--green)':avg>=70?'var(--yellow)':'var(--red)'}">
+          ${avg}%</b><span>average score</span></div>
+        <div><b style="color:${o.critical?'var(--red)':'var(--text)'}">${o.critical||0}</b>
+          <span>critical</span></div>
+        <div><b>${r.agent_count}</b><span>agents</span></div>
+      </div>
+      <div class="qf-rows">${(r.agents||[]).map(a=>{
+        const s = Math.round(a.avg_score||0);
+        return `<div class="qf-row" onclick="qfPickAgent('${page}','${esc(a.agent_name||'')}')">
+          <span class="nm">${esc(a.agent_name||'—')}</span>
+          <span style="color:var(--text3)">${a.calls} calls · ${a.minutes} min</span>
+          ${a.critical ? `<span style="color:var(--red)">${a.critical} critical</span>` : ''}
+          <span class="sc" style="color:${s>=85?'var(--green)':s>=70?'var(--yellow)':'var(--red)'}">
+            ${s}%</span>
+          <span style="color:var(--text3);font-size:11px;">worst ${a.worst}</span>
+        </div>`;
+      }).join('')}</div>`;
+  }catch(e){ box.innerHTML = ''; }
+}
+
+function qfPickAgent(page, name){
+  const bar = document.getElementById('qf-' + page);
+  bar.querySelector('.qf-agent').value = name;
+  qfChanged(page);
+}
+
 function showPage(id){
   pageToAddress(id);
   // Access control: qa_users see only their own work; costs is admin-only
@@ -5637,10 +5802,12 @@ function showPage(id){
     }
   }
   if(id==='costs'){ initCostsMonthSelector(); loadCosts(); }
-  if(id==='human-review'){ mountHumanReviewDatePicker(); renderHumanReview(); }
+  if(id==='human-review'){ mountHumanReviewDatePicker(); qfInit('humanreview');
+                           qfSummary('humanreview'); renderHumanReview(); }
   if(id==='alerts'){ mountAlertsDatePicker(); renderAlerts(); }
   if(id==='calls'){
     mountCallsDatePicker();
+    qfInit('calls'); qfSummary('calls');
     // The QA dashboard loads calls as part of its own sign-in sequence, which
     // portal mode skips — so on the portal the table rendered empty and never
     // asked the server for anything. Load them the first time the page opens.
@@ -12472,7 +12639,7 @@ async function renderHumanReview(){
     // 200 was a silent ceiling — anything older simply vanished with no
     // indication, which reads as "the old ones are gone" rather than "there
     // are more than fit here"
-    let url = '/api/calls?page=1&limit=500&needs_review=1';
+    let url = '/api/calls?page=1&limit=500&needs_review=1' + qfParams('humanreview');
     if(dr.from) url += `&date_from=${encodeURIComponent(_toUtcParam(dr.from))}`;
     if(dr.to) url += `&date_to=${encodeURIComponent(_toUtcParam(dr.to))}`;
     const res = await API.get(url);

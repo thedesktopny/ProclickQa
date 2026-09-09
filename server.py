@@ -2019,6 +2019,83 @@ def delete_agent(agent_id):
 _COUNT_CACHE = {}
 
 
+@app.route('/api/calls/summary', methods=['GET'])
+def calls_summary():
+    """Each agent's totals for a chosen period.
+
+    The question behind the filters is usually "how is everyone doing this
+    week", and answering it by counting rows in the browser would only ever
+    cover the page on screen.
+    """
+    conn = get_db()
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    where, params = ['overall_score > 0'], []
+    for arg, clause in (('date_from', 'created_at >= %s'), ('date_to', 'created_at <= %s')):
+        v = (request.args.get(arg) or '').strip()
+        if v:
+            where.append(clause)
+            params.append(v)
+    agent = (request.args.get('agent') or '').strip()
+    if agent:
+        where.append('agent_name = %s')
+        params.append(agent)
+    if request.args.get('needs_review') in ('1', 'true', 'yes'):
+        where.append("(requires_human_review = TRUE OR status = 'Critical'"
+                     " OR (status = 'Review' AND COALESCE(flags, 0) > 0))")
+
+    clause = ' AND '.join(where)
+    try:
+        c.execute(f'''
+            SELECT agent_name,
+                   COUNT(*) AS calls,
+                   ROUND(AVG(overall_score)::numeric, 1) AS avg_score,
+                   MIN(overall_score) AS worst,
+                   MAX(overall_score) AS best,
+                   SUM(CASE WHEN status = 'Critical' THEN 1 ELSE 0 END) AS critical,
+                   SUM(CASE WHEN requires_human_review THEN 1 ELSE 0 END) AS needs_review,
+                   ROUND(AVG(COALESCE(notes_score, 0))::numeric, 1) AS avg_notes,
+                   SUM(COALESCE(call_duration_seconds, 0)) AS seconds
+            FROM calls WHERE {clause}
+            GROUP BY agent_name
+            ORDER BY AVG(overall_score) ASC
+        ''', params)
+        rows = [dict(r) for r in c.fetchall()]
+
+        c.execute(f'''SELECT COUNT(*) AS calls,
+                            ROUND(AVG(overall_score)::numeric, 1) AS avg_score,
+                            SUM(CASE WHEN status = 'Critical' THEN 1 ELSE 0 END) AS critical
+                     FROM calls WHERE {clause}''', params)
+        overall = dict(c.fetchone() or {})
+        conn.close()
+        for r in rows:
+            r['avg_score'] = float(r['avg_score'] or 0)
+            r['avg_notes'] = float(r['avg_notes'] or 0)
+            r['minutes'] = round((r.pop('seconds') or 0) / 60)
+        return jsonify({'agents': rows, 'overall': overall,
+                        'agent_count': len(rows)})
+    except Exception as e:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return jsonify({'error': str(e)[:200], 'agents': []}), 400
+
+
+@app.route('/api/agent-names', methods=['GET'])
+def agent_names():
+    """Agents who actually have scored calls — for the filter list."""
+    def build():
+        conn = get_db(); c = conn.cursor()
+        c.execute("""SELECT DISTINCT agent_name FROM calls
+                     WHERE agent_name IS NOT NULL AND agent_name <> ''
+                       AND overall_score > 0
+                     ORDER BY agent_name""")
+        names = [r[0] for r in c.fetchall()]
+        conn.close()
+        return names
+    return jsonify({'agents': _cached('agent-names', 300, build)})
+
+
 @app.route('/api/calls', methods=['GET'])
 def get_calls():
     conn = get_db()
@@ -2044,6 +2121,22 @@ def get_calls():
     # away in the browser. Doing the same test in SQL returns the twenty or so
     # that actually need looking at, which is the difference between a slow
     # page and an instant one.
+    # Filtering by agent and by score, done in SQL. Doing it in the browser
+    # would only filter the page you can already see, which is the opposite of
+    # what somebody wants when they ask "show me this agent's low scores".
+    agent = (request.args.get('agent') or '').strip()
+    if agent:
+        date_clause += ' AND calls.agent_name = %s'
+        date_params.append(agent)
+    for arg, comparison in (('min_score', '>='), ('max_score', '<=')):
+        raw = request.args.get(arg)
+        if raw not in (None, ''):
+            try:
+                date_clause += ' AND calls.overall_score %s %%s' % comparison
+                date_params.append(int(raw))
+            except Exception:
+                pass
+
     if request.args.get('needs_review') in ('1', 'true', 'yes'):
         date_clause += (" AND calls.overall_score > 0"
                         " AND calls.status NOT IN ('Processing', 'Failed')"
@@ -9973,6 +10066,7 @@ PORTAL_ALLOWED_PREFIXES = (
     '/api/missed-calls', '/api/call-flow', '/api/dnd-check', '/api/why-failing',
     '/api/waiting', '/api/queue-kinds', '/api/callbacks', '/api/call-search',
     '/api/work-note-shape', '/api/sms-number-lookup', '/api/sms-numbers',
+    '/api/calls/summary', '/api/agent-names',
     # AgentMonitor's poller calls this one. It carries its own key rather than
     # a portal sign-in, so it is safe on this hostname — and being reachable
     # here means the poller uses the same address people do, instead of needing
