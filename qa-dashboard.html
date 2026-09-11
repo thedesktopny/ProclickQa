@@ -1284,6 +1284,10 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
       <select class="cms-in qf-agent" onchange="qfChanged('calls')">
         <option value="">All agents</option>
       </select>
+      <input type="date" class="cms-in qf-from" onchange="qfChanged('calls')"
+             style="width:auto;font-size:12.5px;" title="from">
+      <input type="date" class="cms-in qf-to" onchange="qfChanged('calls')"
+             style="width:auto;font-size:12.5px;" title="to">
       <select class="cms-in qf-score" onchange="qfChanged('calls')">
         <option value="">Any score</option>
         <option value="0-59">Under 60</option>
@@ -1354,6 +1358,10 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
       <select class="cms-in qf-agent" onchange="qfChanged('humanreview')">
         <option value="">All agents</option>
       </select>
+      <input type="date" class="cms-in qf-from" onchange="qfChanged('humanreview')"
+             style="width:auto;font-size:12.5px;" title="from">
+      <input type="date" class="cms-in qf-to" onchange="qfChanged('humanreview')"
+             style="width:auto;font-size:12.5px;" title="to">
       <select class="cms-in qf-score" onchange="qfChanged('humanreview')">
         <option value="">Any score</option>
         <option value="0-59">Under 60</option>
@@ -5703,23 +5711,29 @@ function qfChanged(page){
   QF[page] = {
     agent: bar.querySelector('.qf-agent').value,
     score: bar.querySelector('.qf-score').value,
+    from: bar.querySelector('.qf-from').value,
+    to: bar.querySelector('.qf-to').value,
   };
   qfReload(page);
 }
 
 function qfClear(page){
   const bar = document.getElementById('qf-' + page);
-  bar.querySelector('.qf-agent').value = '';
-  bar.querySelector('.qf-score').value = '';
-  QF[page] = {agent:'', score:''};
+  ['.qf-agent', '.qf-score', '.qf-from', '.qf-to'].forEach(sel=>{
+    const el = bar.querySelector(sel); if(el) el.value = '';
+  });
+  QF[page] = {agent:'', score:'', from:'', to:''};
   qfReload(page);
 }
 
 function qfReload(page){
   qfSummary(page);
   if(page === 'calls'){
+    const f = QF[page] || {};
     const dr = dateRangeState['calls'] || {from:'',to:''};
-    loadCalls(1, _toUtcParam(dr.from), _toUtcParam(dr.to)).then(()=>{
+    const from = f.from ? f.from + 'T00:00:00' : dr.from;
+    const to = f.to ? f.to + 'T23:59:59' : dr.to;
+    loadCalls(1, _toUtcParam(from), _toUtcParam(to)).then(()=>{
       renderCalls();
       if(typeof renderPagination === 'function') renderPagination();
     });
@@ -5732,18 +5746,33 @@ function qfReload(page){
 async function qfSummary(page){
   const box = document.getElementById('qf-sum-' + page);
   if(!box) return;
+  // A range chosen in this bar wins over the page's own picker — it is the
+  // one the person just set, and two date controls disagreeing is how you end
+  // up being told nothing was scored when plenty was.
+  const f = QF[page] || {};
   const dr = dateRangeState[page === 'calls' ? 'calls' : 'humanreview'] || {from:'',to:''};
+  const from = f.from ? f.from + 'T00:00:00' : dr.from;
+  const to = f.to ? f.to + 'T23:59:59' : dr.to;
   let url = '/api/calls/summary?1=1' + qfParams(page);
-  if(dr.from) url += '&date_from=' + encodeURIComponent(_toUtcParam(dr.from));
-  if(dr.to) url += '&date_to=' + encodeURIComponent(_toUtcParam(dr.to));
+  if(from) url += '&date_from=' + encodeURIComponent(_toUtcParam(from));
+  if(to) url += '&date_to=' + encodeURIComponent(_toUtcParam(to));
   if(page === 'humanreview') url += '&needs_review=1';
   box.innerHTML = '<div style="color:var(--text3);font-size:12px;">Adding it up…</div>';
   try{
     const r = await API.get(url);
     if(r.error){ box.innerHTML = ''; return; }
     const o = r.overall || {};
-    if(!o.calls){ box.innerHTML = '<div style="color:var(--text3);font-size:12px;">'
-      + 'Nothing scored in this period.</div>'; return; }
+    if(!o.calls){
+      const bits = [];
+      if(f.agent) bits.push('agent ' + f.agent);
+      if(from || to) bits.push('between ' + (from||'the beginning').slice(0,10)
+                               + ' and ' + (to||'now').slice(0,10));
+      if(f.score) bits.push('scores ' + f.score.replace('-', ' to '));
+      box.innerHTML = `<div style="color:var(--text3);font-size:12px;">
+        Nothing scored${bits.length ? ' for ' + esc(bits.join(', ')) : ' in this period'}.
+        ${bits.length ? ' Try widening the dates or pressing Clear.' : ''}</div>`;
+      return;
+    }
     const avg = Math.round(o.avg_score || 0);
     box.innerHTML = `
       <div class="qf-tot">

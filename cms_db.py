@@ -1070,6 +1070,22 @@ def _extension_names(cu, max_age=600):
     return _EXT_NAMES['map']
 
 
+def _longer_note(*values):
+    """Whichever of these holds the actual writing."""
+    best = ''
+    for v in values:
+        text = (v or '').strip()
+        if len(text) > len(best):
+            best = text
+    return best
+
+
+def _shorter_note(*values):
+    """The other one, when there is one."""
+    texts = sorted([(v or '').strip() for v in values if (v or '').strip()], key=len)
+    return texts[0] if len(texts) > 1 else ''
+
+
 def finished_calls_for_qa(minutes=180, limit=100, min_seconds=20):
     """Answered calls with a recording, ready to be scored.
 
@@ -1120,7 +1136,13 @@ def finished_calls_for_qa(minutes=180, limit=100, min_seconds=20):
             'recording_url': r[6],
             'call_duration_seconds': seconds,
             'billed_minutes': int(r[16] or 0),
-            'call_notes': (r[15] or r[11] or ''),
+            # The long note and the short title live in two columns whose
+            # names do not say which is which, and the CMS fills them
+            # inconsistently. Rather than pick one and be wrong half the time,
+            # take whichever actually holds the writing — that is what an agent
+            # means by "the note" — and keep the other as the title.
+            'call_notes': _longer_note(r[15], r[11]),
+            'call_title': _shorter_note(r[15], r[11]),
             'outbound': bool(r[8]),
             'called': r[9],
             'ended': _plain(r[3]),
