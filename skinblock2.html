@@ -1,0 +1,457 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Skin Block</title>
+<style>
+  :root{ --bg:#0B0D14; --surface:#131623; --surface2:#1B1F2E; --border:#262B3D;
+         --text:#F2F4FF; --text2:#AEB6E4; --text3:#7A84B8; --accent:#7B6CF6;
+         --green:#10D48E; --red:#F24E4E; --yellow:#F5A623; }
+  *{ box-sizing:border-box; }
+  body{ margin:0; background:var(--bg); color:var(--text);
+        font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+  .wrap{ max-width:1100px; margin:0 auto; padding:22px 20px 60px; }
+  h1{ font-size:20px; margin:0 0 4px; }
+  .sub{ color:var(--text3); font-size:12.5px; margin-bottom:18px; }
+  .drop{
+    border:2px dashed var(--border); border-radius:14px; padding:38px 20px; text-align:center;
+    color:var(--text2); cursor:pointer; transition:border-color .15s, background .15s;
+  }
+  .drop.over{ border-color:var(--accent); background:rgba(123,108,246,.08); }
+  .drop input{ display:none; }
+  .bar{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:14px 0; }
+  .btn{ background:var(--accent); color:#fff; border:0; border-radius:9px; padding:9px 16px;
+        font-size:13px; cursor:pointer; font-family:inherit; }
+  .btn.outline{ background:transparent; border:1px solid var(--border); color:var(--text2); }
+  .btn:disabled{ opacity:.5; cursor:default; }
+  .stat{ font-size:12px; color:var(--text3); }
+  .grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:12px; }
+  .card{ background:var(--surface); border:1px solid var(--border); border-radius:12px; overflow:hidden; }
+  .card canvas, .card img{ width:100%; display:block; background:#000; }
+  .card .meta{ padding:8px 10px; font-size:11.5px; color:var(--text3);
+               display:flex; justify-content:space-between; gap:8px; }
+  .card .meta b{ color:var(--text2); font-weight:500; }
+  .card.busy .meta b{ color:var(--yellow); }
+  .card.done .meta b{ color:var(--green); }
+  .card.fail .meta b{ color:var(--red); }
+  .opts{ display:flex; gap:14px; flex-wrap:wrap; font-size:12.5px; color:var(--text2); }
+  .opts label{ display:flex; gap:6px; align-items:center; cursor:pointer; }
+  .status{ font-size:12px; color:var(--text3); min-height:18px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Skin Block</h1>
+  <div class="sub">Drop photos in. Every patch of skin is covered and the pictures download
+    themselves. Nothing leaves this computer — the detector runs in your browser.</div>
+
+  <label class="drop" id="drop">
+    <input type="file" id="files" multiple accept="image/*">
+    Drop photos here, or click to choose. As many as you like.
+  </label>
+
+  <div class="bar">
+    <div class="opts">
+      <label><input type="checkbox" id="opt-hair"> also cover hair</label>
+      <label><input type="checkbox" id="opt-face" checked> cover faces</label>
+      <label>grow by <input type="range" id="opt-grow" min="0" max="30" value="8"
+             style="width:90px;vertical-align:middle;"> <span id="grow-v">8</span>px</label>
+      <label>style
+        <select id="opt-style">
+          <option value="solid">solid block</option>
+          <option value="blur">heavy blur</option>
+          <option value="pixel">pixelate</option>
+        </select></label>
+    </div>
+    <span style="flex:1"></span>
+    <button class="btn outline" id="dl-all" disabled>Download all</button>
+    <button class="btn outline" id="clear">Clear</button>
+  </div>
+  <div class="status" id="status">Loading the detector…</div>
+  <div class="grid" id="grid"></div>
+</div>
+
+<script type="module">
+/* ===========================================================================
+   SKIN BLOCK, rebuilt around one idea: skin is something the model was TAUGHT
+   to recognise, not a colour range somebody typed in.
+
+   MediaPipe's multiclass selfie model labels every pixel as one of six things:
+     0 background · 1 hair · 2 body skin · 3 face skin · 4 clothes · 5 other
+   Covering people is then: take classes 2 and 3 (and 1 if asked) and paint
+   over them. There is no tolerance to tune and no colour to configure, and it
+   has seen every skin tone in training. Everything the old page did to grow,
+   extend and second-guess its detector is gone, because the detector no
+   longer needs second-guessing.
+
+   The model is 256x256, so on a big photo its mask is coarse. Two things deal
+   with that: the image is cut into overlapping tiles so each tile gets the
+   model's full attention, and the mask is grown outward by a few pixels so
+   the edge of an arm is never left showing. Over-covering by a sliver is
+   fine; under-covering is the failure that matters.
+   =========================================================================== */
+import { FilesetResolver, ImageSegmenter, FaceDetector }
+  from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21";
+const FACE_MODEL = "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/latest/blaze_face_short_range.tflite";
+let faceDetector = null;
+
+const MODEL = "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite";
+const BODY = 2, FACE = 3, HAIR = 1;
+const TILE = 512, OVERLAP = 96;      // tile size in pixels, and how much tiles overlap
+
+const $ = id => document.getElementById(id);
+const status = t => { $("status").textContent = t; };
+let segmenter = null, queue = [], working = false, results = [];
+
+/* ---- load ------------------------------------------------------------- */
+async function boot(){
+  try{
+    const files = await FilesetResolver.forVisionTasks(
+      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/wasm");
+    let delegate = "GPU";
+    try{
+      segmenter = await ImageSegmenter.createFromOptions(files, {
+        baseOptions: { modelAssetPath: MODEL, delegate },
+        runningMode: "IMAGE", outputCategoryMask: true, outputConfidenceMasks: false,
+      });
+    }catch(e){
+      delegate = "CPU";
+      segmenter = await ImageSegmenter.createFromOptions(files, {
+        baseOptions: { modelAssetPath: MODEL, delegate },
+        runningMode: "IMAGE", outputCategoryMask: true, outputConfidenceMasks: false,
+      });
+    }
+    // The face detector is belt and braces. Testing on a crowd of small
+    // figures showed the skin model can label a face as clothes, or miss a
+    // person entirely when a headscarf hides the hair it uses as a cue. A
+    // face detector is a far more mature thing, and every face it finds is
+    // covered whatever the skin model thought.
+    try{
+      faceDetector = await FaceDetector.createFromOptions(files, {
+        baseOptions: { modelAssetPath: FACE_MODEL, delegate },
+        runningMode: "IMAGE", minDetectionConfidence: 0.45,
+      });
+    }catch(e){ faceDetector = null; }
+    status("Ready — detector running on " + (delegate === "GPU" ? "the graphics card" : "the processor")
+           + (faceDetector ? ", with face detection" : ", face detection unavailable") + ".");
+  }catch(e){
+    status("The detector could not load: " + e.message);
+  }
+}
+
+/* ---- the mask --------------------------------------------------------- */
+/* Three passes, each fixing a failure the previous one showed on real photos.
+
+   1. The WHOLE image first, so the model sees people in context. From that:
+      where the people are (which tiles are worth asking at all), and where it
+      is sure a pixel is clothes or background (a tile is not believed when it
+      says skin there — a tile has less context than the full picture).
+   2. Overlapping 512px tiles over the person regions, so a 256-pixel model
+      sees an arm as an arm rather than a smudge. Partial tiles at the edge are
+      PADDED, not stretched — stretching a thin strip into a square produced
+      shapes the model had never seen and misread as skin.
+   3. Grow the result a few pixels, then drop specks.
+
+   Before pass 1 existed, a tile of blurred sofa with nobody in it was labelled
+   skin: a selfie model expects a person, and finds one. */
+const BG = 0, CLOTHES = 4;
+
+function readCategories(source, size){
+  const out = segmenter.segment(source);
+  const cat = out.categoryMask.getAsUint8Array();
+  const mw = out.categoryMask.width, mh = out.categoryMask.height;
+  out.close();
+  return { cat, mw, mh };
+}
+
+function skinMask(img, w, h, opts){
+  // ---- pass 1: the whole picture, scaled to fit the model comfortably
+  const whole = document.createElement("canvas");
+  whole.width = 512; whole.height = 512;
+  whole.getContext("2d").drawImage(img, 0, 0, 512, 512);
+  const g = readCategories(whole);
+  const person = new Uint8Array(w * h), plausible = new Uint8Array(w * h);
+  for(let y = 0; y < h; y++){
+    const gy = Math.floor(y * g.mh / h);
+    for(let x = 0; x < w; x++){
+      const c = g.cat[gy * g.mw + Math.floor(x * g.mw / w)];
+      const i = y * w + x;
+      if(c !== BG) person[i] = 1;
+      if(c !== BG && c !== CLOTHES) plausible[i] = 1;
+    }
+  }
+  const gateR = Math.max(3, Math.round(40 * Math.max(w, h) / 2000));
+  const gate = dilate(person, w, h, gateR);
+  const okHere = dilate(plausible, w, h, opts.grow);
+
+  // ---- pass 2: tiles, only where somebody is
+  const mask = new Uint8Array(w * h);
+  const tile = document.createElement("canvas");
+  tile.width = TILE; tile.height = TILE;
+  const tctx = tile.getContext("2d", { willReadFrequently: true });
+  const step = TILE - OVERLAP;
+  for(let y = 0; y < h; y += step){
+    for(let x = 0; x < w; x += step){
+      const sw = Math.min(TILE, w - x), sh = Math.min(TILE, h - y);
+      let anyone = false;
+      for(let ty = 0; ty < sh && !anyone; ty += 8)
+        for(let tx = 0; tx < sw; tx += 8)
+          if(gate[(y + ty) * w + (x + tx)]){ anyone = true; break; }
+      if(anyone){
+        tctx.fillStyle = "#000"; tctx.fillRect(0, 0, TILE, TILE);
+        tctx.drawImage(img, x, y, sw, sh, 0, 0, sw, sh);      // padded, not stretched
+        const t = readCategories(tile);
+        for(let ty = 0; ty < sh; ty++){
+          const my = Math.floor(ty * t.mh / TILE);
+          for(let tx = 0; tx < sw; tx++){
+            const c = t.cat[my * t.mw + Math.floor(tx * t.mw / TILE)];
+            const hit = c === BODY || (opts.face && c === FACE) || (opts.hair && c === HAIR);
+            const i = (y + ty) * w + (x + tx);
+            if(hit && gate[i] && okHere[i]) mask[i] = 1;
+          }
+        }
+      }
+      if(x + sw >= w) break;
+    }
+    if(y + Math.min(TILE, h - y) >= h) break;
+  }
+
+  // ---- pass 3: grow, then drop specks
+  const grown = opts.grow > 0 ? dilate(mask, w, h, opts.grow) : mask;
+  return dropSpecks(grown, w, h, Math.round(0.0004 * w * h));
+}
+
+/* Removes patches smaller than a fingernail — the growth step can turn a few
+   stray pixels into a visible blob. A simple flood fill. */
+function dropSpecks(mask, w, h, minPx){
+  const seen = new Uint8Array(w * h), out = new Uint8Array(w * h);
+  const stack = [];
+  for(let s = 0; s < w * h; s++){
+    if(!mask[s] || seen[s]) continue;
+    const members = [];
+    stack.push(s); seen[s] = 1;
+    while(stack.length){
+      const i = stack.pop(); members.push(i);
+      const x = i % w, y = (i - x) / w;
+      const nb = [i - 1, i + 1, i - w, i + w];
+      if(x === 0) nb[0] = -1; if(x === w - 1) nb[1] = -1;
+      for(const n of nb){
+        if(n >= 0 && n < w * h && mask[n] && !seen[n]){ seen[n] = 1; stack.push(n); }
+      }
+    }
+    if(members.length >= minPx) for(const i of members) out[i] = 1;
+  }
+  return out;
+}
+
+/* Faces, found per tile at two scales. A whole 1900-pixel screenshot shrunk
+   to the detector's input makes a face five pixels wide; a 512-pixel tile
+   makes it forty. A "face" wider than a third of its tile is the detector
+   grabbing a region, not a face, and is thrown away. Each face becomes a
+   generous ellipse that takes the neck and the edge of the hair. */
+function faceMask(img, w, h){
+  const mask = new Uint8Array(w * h);
+  if(!faceDetector) return mask;
+  const c = document.createElement("canvas");
+  const boxes = [];
+  for(const tile of [512, 384]){
+    c.width = tile; c.height = tile;
+    const ctx = c.getContext("2d");
+    const step = tile - 128;
+    for(let y = 0; y < h; y += step){
+      for(let x = 0; x < w; x += step){
+        const sw = Math.min(tile, w - x), sh = Math.min(tile, h - y);
+        ctx.fillStyle = "#000"; ctx.fillRect(0, 0, tile, tile);
+        ctx.drawImage(img, x, y, sw, sh, 0, 0, sw, sh);
+        const r = faceDetector.detect(c);
+        for(const d of (r.detections || [])){
+          const b = d.boundingBox;
+          if(b.width < tile * 0.34 && b.height < tile * 0.34)
+            boxes.push({ x: b.originX + x, y: b.originY + y, w: b.width, h: b.height });
+        }
+        if(x + sw >= w) break;
+      }
+      if(y + Math.min(tile, h - y) >= h) break;
+    }
+  }
+  // the same face seen from two tiles is one face
+  const kept = [];
+  boxes.sort((a, b) => b.w * b.h - a.w * a.h);
+  for(const b of boxes){
+    const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+    if(!kept.some(k => cx >= k.x && cx <= k.x + k.w && cy >= k.y && cy <= k.y + k.h)) kept.push(b);
+  }
+  // paint ellipses onto the mask
+  const m = document.createElement("canvas");
+  m.width = w; m.height = h;
+  const mc = m.getContext("2d", { willReadFrequently: true });
+  mc.fillStyle = "#fff";
+  for(const b of kept){
+    const gx = b.w * 0.35, gy = b.h * 0.45;
+    mc.beginPath();
+    mc.ellipse(b.x + b.w / 2, b.y + b.h / 2 + gy * 0.3,
+               b.w / 2 + gx, b.h / 2 + gy * 1.3, 0, 0, Math.PI * 2);
+    mc.fill();
+  }
+  const px = mc.getImageData(0, 0, w, h).data;
+  for(let i = 0; i < w * h; i++) if(px[i * 4] > 127) mask[i] = 1;
+  return { mask, faces: kept.length };
+}
+
+/* Grows the mask outward — a cheap box dilation in two passes. The edge of a
+   hand is where a thin sliver of skin gets left behind, so a few pixels of
+   growth is the difference between "covered" and "almost covered". */
+function dilate(mask, w, h, r){
+  const tmp = new Uint8Array(w * h), out = new Uint8Array(w * h);
+  for(let y = 0; y < h; y++){
+    let run = 0;
+    for(let x = 0; x < w + r; x++){
+      if(x < w && mask[y * w + x]) run = 2 * r + 1;
+      if(run > 0 && x - r >= 0 && x - r < w) tmp[y * w + (x - r)] = 1;
+      if(run > 0) run--;
+    }
+  }
+  for(let x = 0; x < w; x++){
+    let run = 0;
+    for(let y = 0; y < h + r; y++){
+      if(y < h && tmp[y * w + x]) run = 2 * r + 1;
+      if(run > 0 && y - r >= 0 && y - r < h) out[(y - r) * w + x] = 1;
+      if(run > 0) run--;
+    }
+  }
+  return out;
+}
+
+/* ---- covering --------------------------------------------------------- */
+function cover(img, w, h, mask, style){
+  const c = document.createElement("canvas");
+  c.width = w; c.height = h;
+  const ctx = c.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0, w, h);
+
+  if(style === "solid"){
+    const px = ctx.getImageData(0, 0, w, h);
+    const d = px.data;
+    for(let i = 0; i < w * h; i++){
+      if(mask[i]){ d[i*4] = 38; d[i*4+1] = 40; d[i*4+2] = 52; }
+    }
+    ctx.putImageData(px, 0, 0);
+    return c;
+  }
+
+  // blur / pixelate: make a treated copy of the whole image, then paste only
+  // the masked pixels from it
+  const treated = document.createElement("canvas");
+  treated.width = w; treated.height = h;
+  const t = treated.getContext("2d");
+  if(style === "blur"){
+    t.filter = "blur(" + Math.max(12, Math.round(w / 40)) + "px)";
+    t.drawImage(img, 0, 0, w, h);
+  }else{
+    const block = Math.max(10, Math.round(w / 45));
+    t.imageSmoothingEnabled = false;
+    t.drawImage(img, 0, 0, w, h, 0, 0, Math.ceil(w / block), Math.ceil(h / block));
+    t.drawImage(treated, 0, 0, Math.ceil(w / block), Math.ceil(h / block), 0, 0, w, h);
+  }
+  const src = ctx.getImageData(0, 0, w, h), alt = t.getImageData(0, 0, w, h);
+  for(let i = 0; i < w * h; i++){
+    if(mask[i]){
+      src.data[i*4] = alt.data[i*4]; src.data[i*4+1] = alt.data[i*4+1]; src.data[i*4+2] = alt.data[i*4+2];
+    }
+  }
+  ctx.putImageData(src, 0, 0);
+  return c;
+}
+
+/* ---- one file --------------------------------------------------------- */
+async function processFile(file, card){
+  const url = URL.createObjectURL(file);
+  const img = await new Promise((ok, no) => {
+    const i = new Image(); i.onload = () => ok(i); i.onerror = no; i.src = url;
+  });
+  // work at a sensible size — nothing is gained from masking a 6000px photo
+  const scale = Math.min(1, 2000 / Math.max(img.naturalWidth, img.naturalHeight));
+  const w = Math.round(img.naturalWidth * scale), h = Math.round(img.naturalHeight * scale);
+
+  const opts = { face: $("opt-face").checked, hair: $("opt-hair").checked,
+                 grow: Number($("opt-grow").value) };
+  const began = performance.now();
+  const mask = skinMask(img, w, h, opts);
+  let faces = 0;
+  if(opts.face){
+    const f = faceMask(img, w, h);
+    if(f && f.mask){ for(let i = 0; i < mask.length; i++) if(f.mask[i]) mask[i] = 1; faces = f.faces; }
+  }
+  let covered = 0; for(let i = 0; i < mask.length; i++) covered += mask[i];
+  const out = cover(img, w, h, mask, $("opt-style").value);
+  const ms = Math.round(performance.now() - began);
+  URL.revokeObjectURL(url);
+
+  const pct = Math.round(100 * covered / mask.length);
+  return { canvas: out, ms, pct, faces, name: file.name };
+}
+
+/* ---- queue ------------------------------------------------------------ */
+function addFiles(list){
+  for(const f of list){
+    if(!f.type.startsWith("image/")) continue;
+    const card = document.createElement("div");
+    card.className = "card busy";
+    card.innerHTML = '<div style="aspect-ratio:4/3;background:var(--surface2);"></div>'
+      + '<div class="meta"><span>' + esc(f.name) + '</span><b>waiting</b></div>';
+    $("grid").prepend(card);
+    queue.push({ file: f, card });
+  }
+  pump();
+}
+
+async function pump(){
+  if(working) return;
+  working = true;
+  while(queue.length){
+    const { file, card } = queue.shift();
+    if(!segmenter){ card.querySelector("b").textContent = "detector not loaded"; card.className = "card fail"; continue; }
+    card.querySelector("b").textContent = "covering…";
+    try{
+      const r = await processFile(file, card);
+      card.replaceChild(r.canvas, card.firstChild);
+      card.querySelector("b").textContent = r.pct + "% covered · " + r.faces + " face" + (r.faces === 1 ? "" : "s") + " · " + r.ms + " ms";
+      card.className = "card done";
+      results.push(r);
+      autoDownload(r);
+    }catch(e){
+      card.querySelector("b").textContent = "failed: " + e.message;
+      card.className = "card fail";
+    }
+    status(results.length + " done" + (queue.length ? ", " + queue.length + " waiting" : ""));
+  }
+  $("dl-all").disabled = results.length === 0;
+  working = false;
+}
+
+function autoDownload(r){
+  r.canvas.toBlob(blob => {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = r.name.replace(/\.[^.]+$/, "") + "-covered.jpg";
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  }, "image/jpeg", 0.92);
+}
+
+function esc(s){ return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+/* ---- wiring ----------------------------------------------------------- */
+$("files").addEventListener("change", e => addFiles(e.target.files));
+$("drop").addEventListener("dragover", e => { e.preventDefault(); $("drop").classList.add("over"); });
+$("drop").addEventListener("dragleave", () => $("drop").classList.remove("over"));
+$("drop").addEventListener("drop", e => { e.preventDefault(); $("drop").classList.remove("over"); addFiles(e.dataTransfer.files); });
+document.addEventListener("paste", e => { if(e.clipboardData?.files?.length) addFiles(e.clipboardData.files); });
+$("opt-grow").addEventListener("input", e => { $("grow-v").textContent = e.target.value; });
+$("clear").addEventListener("click", () => { $("grid").innerHTML = ""; results = []; $("dl-all").disabled = true; });
+$("dl-all").addEventListener("click", () => results.forEach(autoDownload));
+boot();
+</script>
+</body>
+</html>

@@ -2039,9 +2039,11 @@ def calls_summary():
     if agent:
         where.append('agent_name = %s')
         params.append(agent)
-    if request.args.get('needs_review') in ('1', 'true', 'yes'):
-        where.append("(requires_human_review = TRUE OR status = 'Critical'"
-                     " OR (status = 'Review' AND COALESCE(flags, 0) > 0))")
+    # Deliberately NOT filtered to calls awaiting review. The question is "what
+    # is this agent's score for the month", and answering it from the review
+    # queue alone would report a number drawn from their worst calls. How many
+    # need reviewing is a separate column below.
+    needs_only = request.args.get('needs_review') in ('1', 'true', 'yes')
 
     clause = ' AND '.join(where)
     try:
@@ -2052,7 +2054,8 @@ def calls_summary():
                    MIN(overall_score) AS worst,
                    MAX(overall_score) AS best,
                    SUM(CASE WHEN status = 'Critical' THEN 1 ELSE 0 END) AS critical,
-                   SUM(CASE WHEN requires_human_review THEN 1 ELSE 0 END) AS needs_review,
+                   SUM(CASE WHEN requires_human_review OR status = 'Critical'
+                            THEN 1 ELSE 0 END) AS needs_review,
                    ROUND(AVG(COALESCE(notes_score, 0))::numeric, 1) AS avg_notes,
                    SUM(COALESCE(call_duration_seconds, 0)) AS seconds
             FROM calls WHERE {clause}
@@ -2079,6 +2082,47 @@ def calls_summary():
         except Exception:
             pass
         return jsonify({'error': str(e)[:200], 'agents': []}), 400
+
+
+@app.route('/api/date-coverage', methods=['GET'])
+def date_coverage():
+    """What dates the calls actually carry.
+
+    A row with no created_at can never match a date filter — not "greater
+    than", not "less than" — so it disappears the moment anyone picks a range,
+    while showing up perfectly well with no filter. That is exactly what
+    "August comes up with nothing" looks like.
+    """
+    conn = get_db(); c = conn.cursor()
+    out = {}
+    try:
+        c.execute("""SELECT COUNT(*),
+                            SUM(CASE WHEN created_at IS NULL THEN 1 ELSE 0 END),
+                            MIN(created_at), MAX(created_at)
+                     FROM calls WHERE overall_score > 0""")
+        r = c.fetchone()
+        out = {'scored_calls': int(r[0] or 0),
+               'with_no_date': int(r[1] or 0),
+               'earliest': r[2].isoformat() if r[2] else None,
+               'latest': r[3].isoformat() if r[3] else None}
+        c.execute("""SELECT TO_CHAR(created_at, 'YYYY-MM') AS month, COUNT(*)
+                     FROM calls WHERE overall_score > 0 AND created_at IS NOT NULL
+                     GROUP BY 1 ORDER BY 1 DESC LIMIT 8""")
+        out['by_month'] = [{'month': x[0], 'calls': int(x[1] or 0)} for x in c.fetchall()]
+        conn.close()
+        if out['with_no_date']:
+            out['meaning'] = ('%d scored calls have no date at all. Those can never appear '
+                              'when a date range is chosen, however wide — which is why a '
+                              'month can look empty while the unfiltered list is full.'
+                              % out['with_no_date'])
+        elif not any(m['month'].startswith('2026-08') for m in out['by_month']):
+            out['meaning'] = ('Every call has a date, but none of them fall in August — so '
+                              'the filter is right and those calls were never scored.')
+        else:
+            out['meaning'] = 'Dates look complete; August has calls.'
+        return jsonify(out)
+    except Exception as e:
+        return jsonify({'error': str(e)[:200]}), 400
 
 
 @app.route('/api/agent-names', methods=['GET'])
@@ -10016,6 +10060,14 @@ def sb_hf(hfpath):
     r.headers['Cache-Control'] = 'public, max-age=31536000'
     return r
 
+@app.route('/skinblock2')
+def skinblock2_page():
+    """The rebuilt Skin Block — MediaPipe's multiclass model, where skin is a
+    class the model learned rather than a colour range. Served beside the old
+    page so the same photos can be put through both and compared."""
+    return _serve_page('skinblock2.html')
+
+
 @app.route('/skinblock')
 def skinblock_page():
     """Public — no login required so any agent can use it directly.
@@ -10066,7 +10118,7 @@ PORTAL_ALLOWED_PREFIXES = (
     '/api/missed-calls', '/api/call-flow', '/api/dnd-check', '/api/why-failing',
     '/api/waiting', '/api/queue-kinds', '/api/callbacks', '/api/call-search',
     '/api/work-note-shape', '/api/sms-number-lookup', '/api/sms-numbers',
-    '/api/calls/summary', '/api/agent-names',
+    '/api/calls/summary', '/api/agent-names', '/api/date-coverage',
     # AgentMonitor's poller calls this one. It carries its own key rather than
     # a portal sign-in, so it is safe on this hostname — and being reachable
     # here means the poller uses the same address people do, instead of needing
@@ -10074,7 +10126,7 @@ PORTAL_ALLOWED_PREFIXES = (
     '/api/agent-calls',
     # Skin Block is now a portal page for every agent, so its page, its model
     # files and its endpoints have to be reachable on the CMS hostname too
-    '/skinblock', '/sbassets', '/api/skinblock', '/api/texts/',
+    '/skinblock', '/skinblock2', '/sbassets', '/api/skinblock', '/api/texts/',
     '/api/cms-db/', '/api/connections', '/static/', '/favicon',
 )
 
