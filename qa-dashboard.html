@@ -1705,7 +1705,7 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
 <div class="page" id="page-cms-settings">
   <div class="topbar">
     <button class="navtoggle" onclick="toggleNav()" aria-label="Menu">☰</button>
-    <div class="page-title">⚙️ CMS Settings</div>
+    <div class="page-title">⚙️ CMS Tables</div>
     <div class="topbar-right">
       <input id="cs-search" placeholder="Find a setting…" oninput="csFilter()" style="width:220px;">
       <span id="cs-count" style="font-size:11.5px;color:var(--text3);"></span>
@@ -5590,13 +5590,13 @@ function portalApply(name, isManager){
     'sms-numbers':  ['💬', 'SMS Numbers'],
     'skin-block':   ['🫥', 'Skin Block'],
     'staffing':     ['📊', 'Staffing'],
-    'teams':        ['👥', 'Teams'],
+    'teams':        ['👥', 'Team Leaders'],
     'time-report':  ['⏰', 'Time Report'],
     'agent-list':   ['📇', 'Agents'],
     'packages':     ['📦', 'Packages'],
     'company-info': ['🔑', 'Info & Logins'],
     'payments':     ['💳', 'Payments'],
-    'cms-settings': ['⚙️', 'Settings'],
+    'cms-settings': ['⚙️', 'CMS Tables'],
     'qa-assign':    ['🛡️', 'QA Assignments'],
     'calls':        ['📞', 'Call Review'],
     'human-review': ['👁', 'Human Review'],
@@ -5604,24 +5604,49 @@ function portalApply(name, isManager){
     'notes':        ['📝', 'Note Quality'],
     'analytics':    ['📈', 'Analytics'],
   };
-  const QA_SET = ['calls','human-review','call-notes','notes','analytics','qa-assign'];
+  /* The menu grew to twenty entries in one flat list, which is how you end up
+     hunting for a page you used yesterday. Four sections instead, each
+     answering a different question: what is happening now, who and what we
+     have, how good the work was, and how the place is set up. Anything an
+     admin configures lives under Settings — that is where people look for it.
+
+     Order within a section is deliberate, not alphabetical: the page you open
+     most sits at the top. */
+  const SECTIONS = [
+    ['Today',    ['live', 'agent-calls', 'missed', 'staffing']],
+    ['Work',     ['customers', 'agent-list', 'packages', 'company-info',
+                  'skin-block', 'payments']],
+    ['Quality',  ['calls', 'human-review', 'call-notes', 'notes', 'analytics',
+                  'time-report']],
+    ['Settings', ['cms-settings', 'teams', 'qa-assign', 'sms-numbers']],
+  ];
   const item = (p, active) =>
     `<div class="nav-item${active?' active':''}" data-page="${p}" onclick="showPage('${p}')">`
     + `<span class="icon">${PAGES[p][0]}</span>${PAGES[p][1]}</div>`;
-  const cmsPages = portalPages.filter(p => PAGES[p] && !QA_SET.includes(p));
-  const qaPages  = portalPages.filter(p => PAGES[p] && QA_SET.includes(p));
 
   const scroll = document.querySelector('.sidebar-scroll');
   if(scroll){
-    scroll.innerHTML = '<div class="nav-section">'
-      + '<div class="nav-label">ProClick</div>'
-      + cmsPages.map((p, i) => item(p, i === 0)).join('')
-      + '</div>'
-      + (qaPages.length ? '<div class="nav-section"><div class="nav-label">Quality</div>'
-          + qaPages.map(p => item(p, false)).join('') + '</div>' : '')
-      + '<div class="nav-section"><div class="nav-label">Account</div>'
-      + '<div class="nav-item" onclick="portalSignOut()"><span class="icon">↩︎</span>Sign out</div>'
-      + '</div>';
+    // only pages this person may see, and only sections that still have any
+    let first = true, html = '';
+    const placed = new Set();
+    for(const [label, pages] of SECTIONS){
+      const mine = pages.filter(p => PAGES[p] && portalPages.includes(p));
+      mine.forEach(p => placed.add(p));
+      if(!mine.length) continue;
+      html += '<div class="nav-section"><div class="nav-label">' + label + '</div>'
+            + mine.map(p => { const el = item(p, first); first = false; return el; }).join('')
+            + '</div>';
+    }
+    // anything granted but not listed above still appears, rather than vanishing
+    const rest = portalPages.filter(p => PAGES[p] && !placed.has(p));
+    if(rest.length){
+      html += '<div class="nav-section"><div class="nav-label">More</div>'
+            + rest.map(p => item(p, false)).join('') + '</div>';
+    }
+    html += '<div class="nav-section"><div class="nav-label">Account</div>'
+          + '<div class="nav-item" onclick="portalSignOut()"><span class="icon">↩︎</span>Sign out</div>'
+          + '</div>';
+    scroll.innerHTML = html;
   }
   // banners about QA call processing mean nothing here
   ['processing-paused-banner','ot-active-banner','retry-log-panel'].forEach(id=>{
