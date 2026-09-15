@@ -10060,6 +10060,26 @@ def sb_hf(hfpath):
     r.headers['Cache-Control'] = 'public, max-age=31536000'
     return r
 
+@app.route('/skinblock3')
+def skinblock3_page():
+    """Skin Block, third design: person outlines from YOLO, skin inside them
+    from MediaPipe. The one built and tested on David's own samples."""
+    return _serve_page('skinblock3.html')
+
+
+@app.route('/models/<path:name>')
+def model_file(name):
+    """The person-segmentation model, served from the repo. The browser fetches
+    it once and caches it for a month."""
+    from flask import send_from_directory
+    if not name.endswith('.onnx') or '/' in name or name.startswith('.'):
+        return jsonify({'error': 'not found'}), 404
+    folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
+    resp = send_from_directory(folder, name, mimetype='application/octet-stream')
+    resp.headers['Cache-Control'] = 'public, max-age=2592000'
+    return resp
+
+
 @app.route('/skinblock2')
 def skinblock2_page():
     """The rebuilt Skin Block — MediaPipe's multiclass model, where skin is a
@@ -10126,7 +10146,7 @@ PORTAL_ALLOWED_PREFIXES = (
     '/api/agent-calls',
     # Skin Block is now a portal page for every agent, so its page, its model
     # files and its endpoints have to be reachable on the CMS hostname too
-    '/skinblock', '/skinblock2', '/sbassets', '/api/skinblock', '/api/texts/',
+    '/skinblock', '/skinblock2', '/skinblock3', '/models/', '/sbassets', '/api/skinblock', '/api/texts/',
     '/api/cms-db/', '/api/connections', '/static/', '/favicon',
 )
 

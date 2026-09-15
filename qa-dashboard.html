@@ -1760,7 +1760,7 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
     <div class="page-title">🫥 Skin Block</div>
     <div class="topbar-right">
       <button class="btn btn-outline" onclick="sbReload()" style="font-size:12px;">Reload</button>
-      <a href="/skinblock" target="_blank" rel="noopener" class="btn btn-outline"
+      <a href="/skinblock3" target="_blank" rel="noopener" class="btn btn-outline"
          style="font-size:12px;text-decoration:none;">Open in its own tab</a>
     </div>
   </div>
@@ -2853,7 +2853,7 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
   <div class="topbar">
     <button class="navtoggle" onclick="toggleNav()" aria-label="Menu">☰</button><div class="page-title">🖼️ Skin Block</div>
     <div class="topbar-right">
-      <a href="/skinblock" target="_blank" class="btn btn-outline" style="text-decoration:none;">Open tool ↗</a>
+      <a href="/skinblock3" target="_blank" class="btn btn-outline" style="text-decoration:none;">Open tool ↗</a>
       <button class="btn btn-outline" onclick="openSkinblockSettings()">⚙️ Settings</button>
     </div>
   </div>
@@ -5559,12 +5559,12 @@ window.addEventListener('hashchange', ()=>{
    pay for it. */
 function sbOpen(){
   const frame = document.getElementById('sb-frame');
-  if(frame && !frame.src) frame.src = '/skinblock?embedded=1';
+  if(frame && !frame.src) frame.src = '/skinblock3';
 }
 
 function sbReload(){
   const frame = document.getElementById('sb-frame');
-  if(frame) frame.src = '/skinblock?embedded=1&t=' + Date.now();
+  if(frame) frame.src = '/skinblock3?t=' + Date.now();
 }
 
 
