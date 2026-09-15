@@ -59,6 +59,14 @@ WRITABLE = {
         {'Resolved', 'ResolvedBy', 'Modified'},
         set(),
     ),
+    # Settings tables an admin may edit from the portal. Deliberately narrow:
+    # AdminSettings is NOT here, because it holds the live payment key and
+    # editing credentials from a web page is a different class of risk.
+    'PaymentType': ({'Name', 'Description', 'Active'}, set()),
+    'CallStatusSelection': ({'Name', 'Description', 'Color', 'Active', 'SortOrder'}, set()),
+    'Question': ({'QuestionText', 'Active', 'SortOrder'}, set()),
+    'TableCompanies': ({'Name', 'PhoneNumber', 'Email', 'Active'}, set()),
+    'FeedbackConfig': ({'Name', 'Value', 'Active'}, set()),
     # The refill options customers buy. Price is in cents and Currency decides
     # what is actually charged, so both are checked before saving.
     'Packages': (

@@ -645,6 +645,30 @@ def init_db():
         except Exception:
             pass
 
+    # TEAM LEADERS. Not in the CMS at all — it knows about QA reviewers but has
+    # no notion of who leads a team, so this lives with us.
+    #
+    # Deliberately different from QA assignment. A QA reviewer covers agents
+    # OUTSIDE their own team, and an agent can have several, because the point
+    # is an outside eye. A team leader is the agent's actual manager: ONE per
+    # agent, and the same person usually leads a team AND reviews other teams.
+    try:
+        c.execute("""CREATE TABLE IF NOT EXISTS team_leaders (
+            employee_id INTEGER PRIMARY KEY,
+            added_at TIMESTAMP DEFAULT NOW(),
+            added_by TEXT
+        )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS team_members (
+            agent_employee_id INTEGER PRIMARY KEY,
+            leader_employee_id INTEGER NOT NULL,
+            assigned_at TIMESTAMP DEFAULT NOW(),
+            assigned_by TEXT
+        )""")
+        c.execute('CREATE INDEX IF NOT EXISTS idx_team_leader ON team_members(leader_employee_id)')
+        conn.commit()
+    except Exception as e:
+        print('[init] team tables: ' + str(e)[:140])
+
     # Who reviews whom. Both sides are people who already exist in the CMS —
     # QA reviewers carry the QA flag and agents are the rest — so nothing is
     # created here, only the pairing, which is ours rather than the CMS's.
@@ -5184,7 +5208,7 @@ def _setting(key, default=''):
 PORTAL_PAGES = ['live', 'missed', 'customers', 'agent-calls',
                 'agent-list', 'packages', 'company-info',
                 'skin-block']   # everyone
-PORTAL_MANAGER_PAGES = ['cms-settings', 'qa-assign', 'staffing']           # managers and admins
+PORTAL_MANAGER_PAGES = ['cms-settings', 'qa-assign', 'staffing', 'time-report', 'teams']           # managers and admins
 PORTAL_ADMIN_PAGES = ['payments', 'sms-numbers']                            # admins only — real money
 # QA reviewers additionally get the monitoring side. They are doing QA work, so
 # they need the same call review tools the QA dashboard has.
@@ -6064,6 +6088,122 @@ def employee_set_qa(employee_id):
     return jsonify(out), (200 if out.get('ok') else 400)
 
 
+@app.route('/api/teams', methods=['GET'])
+@portal_manager_only
+def teams_route():
+    """Who leads which team, and who has no leader yet."""
+    import cms_db
+    try:
+        agents = cms_db.agent_list(include_left=False)['agents']
+    except Exception as e:
+        return jsonify({'error': str(e)[:200], 'leaders': []}), 400
+
+    leaders, members = set(), {}
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute('SELECT employee_id FROM team_leaders')
+        leaders = {int(r[0]) for r in c.fetchall()}
+        c.execute('SELECT agent_employee_id, leader_employee_id FROM team_members')
+        members = {int(a): int(l) for a, l in c.fetchall()}
+        conn.close()
+    except Exception as e:
+        return jsonify({'error': str(e)[:200], 'leaders': []}), 400
+
+    by_id = {int(a['id']): a for a in agents}
+    out_leaders = []
+    for lid in sorted(leaders):
+        person = by_id.get(lid)
+        team = [by_id[a] for a, l in members.items() if l == lid and a in by_id]
+        out_leaders.append({
+            'id': lid,
+            'name': (person or {}).get('name') or '(no longer here)',
+            'extension': (person or {}).get('extension'),
+            'still_here': person is not None,
+            'team': sorted([{'id': t['id'], 'name': t['name'], 'extension': t['extension']}
+                            for t in team], key=lambda x: x['name']),
+        })
+    out_leaders.sort(key=lambda x: (-len(x['team']), x['name']))
+
+    unassigned = [{'id': a['id'], 'name': a['name'], 'extension': a['extension']}
+                  for a in agents
+                  if int(a['id']) not in members and int(a['id']) not in leaders]
+    return jsonify({
+        'leaders': out_leaders,
+        'unassigned': sorted(unassigned, key=lambda x: x['name']),
+        'all_agents': sorted([{'id': a['id'], 'name': a['name'],
+                               'extension': a['extension'],
+                               'leader_id': members.get(int(a['id'])),
+                               'is_leader': int(a['id']) in leaders}
+                              for a in agents], key=lambda x: x['name']),
+        'note': ('A team leader is the agent\'s own manager — one each. QA reviewers are '
+                 'assigned separately and deliberately cover people outside their team.'),
+    })
+
+
+@app.route('/api/team-leaders/<int:employee_id>', methods=['POST', 'DELETE'])
+@portal_manager_only
+def set_team_leader(employee_id):
+    """Make somebody a team leader, or stop them being one."""
+    who = (_who() or {}).get('name')
+    try:
+        conn = get_db(); c = conn.cursor()
+        if request.method == 'POST':
+            c.execute("""INSERT INTO team_leaders (employee_id, added_by)
+                         VALUES (%s, %s) ON CONFLICT (employee_id) DO NOTHING""",
+                      (employee_id, who))
+            message = 'They are now a team leader.'
+        else:
+            c.execute('SELECT COUNT(*) FROM team_members WHERE leader_employee_id = %s',
+                      (employee_id,))
+            had = int((c.fetchone() or [0])[0] or 0)
+            # their agents are freed rather than left pointing at nobody
+            c.execute('DELETE FROM team_members WHERE leader_employee_id = %s', (employee_id,))
+            c.execute('DELETE FROM team_leaders WHERE employee_id = %s', (employee_id,))
+            message = ('They are no longer a team leader'
+                       + ('; their %d agents now have none.' % had if had else '.'))
+        conn.commit(); conn.close()
+        return jsonify({'ok': True, 'meaning': message})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)[:200]}), 400
+
+
+@app.route('/api/teams/<int:agent_id>', methods=['POST'])
+@portal_manager_only
+def set_agent_team(agent_id):
+    """Put an agent on a leader's team, or take them off one."""
+    leader = (request.json or {}).get('leader_id')
+    who = (_who() or {}).get('name')
+    try:
+        conn = get_db(); c = conn.cursor()
+        if leader in (None, '', 0, '0'):
+            c.execute('DELETE FROM team_members WHERE agent_employee_id = %s', (agent_id,))
+            message = 'That agent is no longer on a team.'
+        else:
+            leader = int(leader)
+            if leader == agent_id:
+                conn.close()
+                return jsonify({'ok': False,
+                                'error': 'Somebody cannot lead their own team.'}), 400
+            c.execute('SELECT 1 FROM team_leaders WHERE employee_id = %s', (leader,))
+            if not c.fetchone():
+                conn.close()
+                return jsonify({'ok': False,
+                                'error': 'That person is not a team leader yet.'}), 400
+            # one leader per agent — a second assignment replaces the first
+            c.execute("""INSERT INTO team_members
+                         (agent_employee_id, leader_employee_id, assigned_by, assigned_at)
+                         VALUES (%s, %s, %s, NOW())
+                         ON CONFLICT (agent_employee_id) DO UPDATE
+                         SET leader_employee_id = EXCLUDED.leader_employee_id,
+                             assigned_by = EXCLUDED.assigned_by, assigned_at = NOW()""",
+                      (agent_id, leader, who))
+            message = 'Team updated.'
+        conn.commit(); conn.close()
+        return jsonify({'ok': True, 'meaning': message})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)[:200]}), 400
+
+
 @app.route('/api/qa-assignments', methods=['GET'])
 @portal_manager_only
 def qa_assignments_get():
@@ -6289,6 +6429,80 @@ def update_agent_route(employee_id):
         return jsonify({'ok': False, 'error': 'Could not save the change.',
                         'raw_error': str(e)[:300]}), 400
     return jsonify(out), (200 if out.get('ok') else 400)
+
+
+EDITABLE_SETTINGS = {'PaymentType', 'CallStatusSelection', 'Question',
+                     'TableCompanies', 'FeedbackConfig', 'Packages'}
+
+
+@app.route('/api/cms-settings/<table>/<int:row_id>', methods=['PATCH'])
+@portal_admin_only
+def edit_setting(table, row_id):
+    """Change one row in a settings table.
+
+    Only the tables in EDITABLE_SETTINGS, and within those only the columns the
+    write layer allows. AdminSettings is deliberately absent — it holds the
+    live payment key, and editing credentials from a web page is a different
+    class of risk from renaming a payment type.
+    """
+    import cms_write
+    if table not in EDITABLE_SETTINGS:
+        return jsonify({'ok': False,
+                        'error': '%s cannot be edited from here.' % table}), 400
+    values = {k: v for k, v in (request.json or {}).items()
+              if k not in ('confirm',) and v is not None}
+    if not values:
+        return jsonify({'ok': False, 'error': 'Nothing to change.'}), 400
+    try:
+        if table == 'Packages':
+            values = cms_write._check_package(values)
+        out = cms_write.update(table, row_id, values, _who(),
+                               dry_run=not (request.json or {}).get('confirm'))
+    except cms_write.WriteRefused as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'Could not save that.',
+                        'raw_error': str(e)[:300]}), 400
+    return jsonify(out), (200 if out.get('ok') else 400)
+
+
+@app.route('/api/cms-settings/<table>', methods=['POST'])
+@portal_admin_only
+def add_setting(table):
+    """Add a row to a settings table."""
+    import cms_write
+    if table not in EDITABLE_SETTINGS:
+        return jsonify({'ok': False, 'error': '%s cannot be added to here.' % table}), 400
+    values = {k: v for k, v in (request.json or {}).items()
+              if k not in ('confirm',) and v not in (None, '')}
+    if not values:
+        return jsonify({'ok': False, 'error': 'Fill in at least one field.'}), 400
+    try:
+        if table == 'Packages':
+            values = cms_write._check_package(values)
+        out = cms_write.create(table, values, _who(),
+                               dry_run=not (request.json or {}).get('confirm'))
+    except cms_write.WriteRefused as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'Could not add that.',
+                        'raw_error': str(e)[:300]}), 400
+    return jsonify(out), (200 if out.get('ok') else 400)
+
+
+@app.route('/api/cms-settings/editable', methods=['GET'])
+@portal_or_manager
+def editable_settings():
+    """Which settings tables can be changed, and which columns in each — so the
+    page shows an edit button only where one would work."""
+    import cms_write
+    out = {}
+    for table in sorted(EDITABLE_SETTINGS):
+        allowed = cms_write.WRITABLE.get(table)
+        if allowed:
+            out[table] = sorted(allowed[0])
+    return jsonify({'tables': out,
+                    'note': 'AdminSettings is not editable here — it holds live keys.'})
 
 
 @app.route('/api/packages', methods=['POST'])
@@ -10139,6 +10353,7 @@ PORTAL_ALLOWED_PREFIXES = (
     '/api/waiting', '/api/queue-kinds', '/api/callbacks', '/api/call-search',
     '/api/work-note-shape', '/api/sms-number-lookup', '/api/sms-numbers',
     '/api/calls/summary', '/api/agent-names', '/api/date-coverage',
+    '/api/time-report', '/api/cms-settings', '/api/teams', '/api/team-leaders',
     # AgentMonitor's poller calls this one. It carries its own key rather than
     # a portal sign-in, so it is safe on this hostname — and being reachable
     # here means the poller uses the same address people do, instead of needing
