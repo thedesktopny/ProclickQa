@@ -669,6 +669,28 @@ def init_db():
     except Exception as e:
         print('[init] team tables: ' + str(e)[:140])
 
+    # The monthly review sample. Two real calls per agent per month, picked at
+    # random, recorded here so the same call is not drawn twice and so a
+    # reviewer can be held to a list rather than choosing their own.
+    try:
+        c.execute("""CREATE TABLE IF NOT EXISTS review_sample (
+            id SERIAL PRIMARY KEY,
+            period TEXT NOT NULL,                -- '2026-09'
+            agent_name TEXT NOT NULL,
+            call_id TEXT NOT NULL,
+            reviewer_employee_id INTEGER,
+            picked_at TIMESTAMP DEFAULT NOW(),
+            scored BOOLEAN DEFAULT FALSE,
+            reviewed_at TIMESTAMP,
+            reviewed_by TEXT,
+            UNIQUE (period, call_id)
+        )""")
+        c.execute("""CREATE INDEX IF NOT EXISTS idx_sample_period
+                     ON review_sample(period, agent_name)""")
+        conn.commit()
+    except Exception as e:
+        print('[init] review_sample: ' + str(e)[:140])
+
     # Who reviews whom. Both sides are people who already exist in the CMS —
     # QA reviewers carry the QA flag and agents are the rest — so nothing is
     # created here, only the pairing, which is ours rather than the CMS's.
@@ -1746,28 +1768,86 @@ def get_qa_user_assignments(user_id):
 @app.route('/api/qa-users/performance', methods=['GET'])
 @portal_manager_only
 def qa_user_performance():
-    """Admin view: how each QA user is performing."""
+    """How each QA reviewer is doing.
+
+    This used to count through agents.assigned_qa_user_id — the single-reviewer
+    column from before an agent could have several reviewers. Nothing writes to
+    it any more, so the page showed nobody assigned to anybody. It now reads
+    qa_assignments, which is where assignments actually live, and matches
+    reviewers to calls by EMPLOYEE ID rather than by name.
+    """
     conn = get_db()
     c = conn.cursor(cursor_factory=RealDictCursor)
-    c.execute('''
-        SELECT
-            u.id, u.username, u.full_name, u.last_login,
-            COUNT(DISTINCT a.id) as assigned_agents,
-            COUNT(DISTINCT CASE WHEN c.status IN ('Review','Critical') AND c.overall_score > 0 THEN c.id END) as flagged_calls,
-            COUNT(DISTINCT r.call_id) as resolved_calls,
-            ROUND(AVG(r.ai_resolution_score)) as avg_resolution_score,
-            COUNT(DISTINCT CASE WHEN c.overall_score > 0 THEN c.id END) as total_scored_calls
-        FROM users u
-        LEFT JOIN agents a ON a.assigned_qa_user_id = u.id
-        LEFT JOIN calls c ON c.agent_name = a.name
-        LEFT JOIN resolutions r ON r.qa_user_id = u.id
-        WHERE u.role IN ('qa_user', 'manager')
-        GROUP BY u.id
-        ORDER BY u.full_name ASC
-    ''')
-    perf = [dict(p) for p in c.fetchall()]
-    conn.close()
-    return jsonify(perf)
+    try:
+        c.execute("""
+            WITH mine AS (
+                SELECT qa.reviewer_employee_id AS reviewer,
+                       qa.agent_employee_id    AS agent_id,
+                       ag.name                 AS agent_name
+                FROM qa_assignments qa
+                LEFT JOIN agents ag ON ag.employee_id = qa.agent_employee_id
+            )
+            SELECT m.reviewer                                   AS employee_id,
+                   COUNT(DISTINCT m.agent_id)                   AS assigned_agents,
+                   COUNT(DISTINCT CASE WHEN c.overall_score > 0
+                                       THEN c.id END)           AS total_scored_calls,
+                   COUNT(DISTINCT CASE WHEN c.status IN ('Review','Critical')
+                                        AND c.overall_score > 0
+                                       THEN c.id END)           AS flagged_calls,
+                   COUNT(DISTINCT r.call_id)                    AS resolved_calls,
+                   ROUND(AVG(r.ai_resolution_score))            AS avg_resolution_score,
+                   ROUND(AVG(c.overall_score))                  AS avg_agent_score
+            FROM mine m
+            LEFT JOIN calls c
+                   ON c.agent_name = m.agent_name
+                  AND c.created_at > NOW() - INTERVAL '90 days'
+            LEFT JOIN resolutions r
+                   ON r.call_id = c.call_id
+            GROUP BY m.reviewer
+        """)
+        rows = [dict(r) for r in c.fetchall()]
+
+        # names come from the CMS, not from our users table
+        names = {}
+        try:
+            import cms_db
+            for a in cms_db.agent_list(include_left=True)['agents']:
+                names[int(a['id'])] = a['name']
+        except Exception as e:
+            print('[qa] could not read names: ' + str(e)[:120])
+
+        out = []
+        for r in rows:
+            eid = r.get('employee_id')
+            if eid is None:
+                continue
+            flagged = int(r.get('flagged_calls') or 0)
+            resolved = int(r.get('resolved_calls') or 0)
+            out.append({
+                'employee_id': int(eid),
+                'name': names.get(int(eid), 'Employee %s' % eid),
+                'assigned_agents': int(r.get('assigned_agents') or 0),
+                'total_scored_calls': int(r.get('total_scored_calls') or 0),
+                'flagged_calls': flagged,
+                'resolved_calls': resolved,
+                'still_waiting': max(0, flagged - resolved),
+                'avg_resolution_score': (int(r['avg_resolution_score'])
+                                         if r.get('avg_resolution_score') is not None else None),
+                'avg_agent_score': (int(r['avg_agent_score'])
+                                    if r.get('avg_agent_score') is not None else None),
+            })
+        conn.close()
+        out.sort(key=lambda x: -x['still_waiting'])
+        return jsonify({'reviewers': out, 'window': 'last 90 days',
+                        'note': ('Counted from the QA assignments table. An agent can have '
+                                 'several reviewers, so a call can appear for more than one.')})
+    except Exception as e:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return jsonify({'error': str(e)[:220], 'reviewers': []}), 400
+
 
 # ─── RESOLUTIONS ──────────────────────────────────────────────────────────────
 @app.route('/api/resolutions', methods=['POST'])
@@ -6204,6 +6284,119 @@ def set_agent_team(agent_id):
         return jsonify({'ok': False, 'error': str(e)[:200]}), 400
 
 
+MIN_SAMPLE_SECONDS = 120        # a one-minute call is not a call worth reviewing
+PER_AGENT_PER_MONTH = 2
+
+
+@app.route('/api/review-sample', methods=['GET'])
+@portal_or_manager
+def review_sample():
+    """This month's review list — two calls per agent, drawn at random.
+
+    Drawn from calls of real length, so a thirty-second wrong number cannot be
+    somebody's monthly review. Held in a table rather than picked fresh each
+    time, so the list does not change under a reviewer halfway through, and so
+    nobody can quietly choose their own easiest calls.
+    """
+    period = (request.args.get('period') or datetime.now().strftime('%Y-%m'))
+    try:
+        conn = get_db(); c = conn.cursor(cursor_factory=RealDictCursor)
+        c.execute("""SELECT s.*, c.overall_score, c.status, c.call_duration_seconds,
+                            c.created_at AS call_at, c.recording_url
+                     FROM review_sample s
+                     LEFT JOIN calls c ON c.call_id = s.call_id
+                     WHERE s.period = %s
+                     ORDER BY s.agent_name, s.picked_at""", (period,))
+        rows = [dict(r) for r in c.fetchall()]
+        conn.close()
+    except Exception as e:
+        return jsonify({'error': str(e)[:200], 'calls': []}), 400
+
+    done = len([r for r in rows if r.get('reviewed_at')])
+    agents = sorted({r['agent_name'] for r in rows})
+    return jsonify({
+        'period': period, 'calls': rows, 'count': len(rows),
+        'reviewed': done, 'still_to_do': len(rows) - done,
+        'agents_covered': len(agents),
+        'per_agent': PER_AGENT_PER_MONTH,
+    })
+
+
+@app.route('/api/review-sample/draw', methods=['POST'])
+@portal_manager_only
+def draw_review_sample():
+    """Pick this month's calls. Safe to press twice — it only tops up what is
+    missing, so an agent who has already been drawn keeps their calls."""
+    period = ((request.json or {}).get('period')
+              or datetime.now().strftime('%Y-%m'))
+    try:
+        start = datetime.strptime(period + '-01', '%Y-%m-%d')
+    except Exception:
+        return jsonify({'ok': False, 'error': 'Give a month like 2026-09.'}), 400
+    finish = (start.replace(day=28) + timedelta(days=5)).replace(day=1)
+
+    try:
+        conn = get_db(); c = conn.cursor()
+        # who already has calls drawn for this month
+        c.execute("""SELECT agent_name, COUNT(*) FROM review_sample
+                     WHERE period = %s GROUP BY agent_name""", (period,))
+        have = {r[0]: int(r[1]) for r in c.fetchall()}
+
+        # every agent with real calls in the period
+        c.execute("""SELECT DISTINCT agent_name FROM calls
+                     WHERE created_at >= %s AND created_at < %s
+                       AND agent_name IS NOT NULL AND agent_name <> ''
+                       AND COALESCE(call_duration_seconds, 0) >= %s""",
+                  (start, finish, MIN_SAMPLE_SECONDS))
+        agents = [r[0] for r in c.fetchall()]
+
+        picked = 0
+        for agent in agents:
+            need = PER_AGENT_PER_MONTH - have.get(agent, 0)
+            if need <= 0:
+                continue
+            # random, but only from calls long enough to be worth reviewing
+            c.execute("""SELECT call_id FROM calls
+                         WHERE agent_name = %s
+                           AND created_at >= %s AND created_at < %s
+                           AND COALESCE(call_duration_seconds, 0) >= %s
+                           AND call_id NOT IN (SELECT call_id FROM review_sample
+                                               WHERE period = %s)
+                         ORDER BY RANDOM() LIMIT %s""",
+                      (agent, start, finish, MIN_SAMPLE_SECONDS, period, need))
+            for (call_id,) in c.fetchall():
+                c.execute("""INSERT INTO review_sample (period, agent_name, call_id)
+                             VALUES (%s, %s, %s) ON CONFLICT DO NOTHING""",
+                          (period, agent, call_id))
+                picked += 1
+        conn.commit(); conn.close()
+        return jsonify({'ok': True, 'period': period, 'added': picked,
+                        'agents': len(agents),
+                        'meaning': ('Picked %d call%s across %d agents for %s.'
+                                    % (picked, '' if picked == 1 else 's',
+                                       len(agents), period))
+                                   if picked else
+                                   ('Everyone already has their %d calls for %s.'
+                                    % (PER_AGENT_PER_MONTH, period))})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)[:220]}), 400
+
+
+@app.route('/api/review-sample/<path:call_id>/done', methods=['POST'])
+@portal_or_manager
+def review_sample_done(call_id):
+    """Mark a sampled call as reviewed."""
+    who = (_who() or {}).get('name')
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute("""UPDATE review_sample SET reviewed_at = NOW(), reviewed_by = %s
+                     WHERE call_id = %s AND reviewed_at IS NULL""", (who, call_id))
+        conn.commit(); conn.close()
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)[:200]}), 400
+
+
 @app.route('/api/qa-assignments', methods=['GET'])
 @portal_manager_only
 def qa_assignments_get():
@@ -10354,6 +10547,7 @@ PORTAL_ALLOWED_PREFIXES = (
     '/api/work-note-shape', '/api/sms-number-lookup', '/api/sms-numbers',
     '/api/calls/summary', '/api/agent-names', '/api/date-coverage',
     '/api/time-report', '/api/cms-settings', '/api/teams', '/api/team-leaders',
+    '/api/review-sample',
     # AgentMonitor's poller calls this one. It carries its own key rather than
     # a portal sign-in, so it is safe on this hostname — and being reachable
     # here means the poller uses the same address people do, instead of needing
