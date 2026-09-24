@@ -3061,8 +3061,36 @@ def get_pipeline_comparisons():
     conn.close()
     return jsonify({'comparisons': comparisons})
 
+def reviewer_or_above(f):
+    """A QA reviewer, manager or admin — however they signed in.
+
+    Scoring a call costs money, so an ordinary agent should not be able to set
+    it off, but everyone whose job involves reviewing calls must. The first
+    version accepted only the old VoiceGuard sign-in, so anybody working from
+    the portal — which is everybody now — was told "Unauthorized".
+    """
+    from functools import wraps
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        # signed in through the portal: the ticket carries their level
+        p = _portal_user(request.headers.get('X-Portal-Ticket')
+                         or request.args.get('t') or '')
+        if p and (p.get('q') or p.get('m') or p.get('a')):
+            return f(*args, **kwargs)
+        # signed in to the original QA dashboard: any reviewer role there
+        user = get_token_user(get_request_token())
+        if user and user.get('role') in ('admin', 'manager', 'qa_user', 'reviewer'):
+            return f(*args, **kwargs)
+        if session.get('logged_in') or session.get('admin'):
+            return f(*args, **kwargs)
+        if p:
+            return jsonify({'error': 'Scoring a call is for QA reviewers, managers and admins.'}), 403
+        return jsonify({'error': 'Sign in first'}), 401
+    return decorated
+
+
 @app.route('/api/calls/<call_id>/score-now', methods=['POST'])
-@require_login
+@reviewer_or_above
 def score_call_now(call_id):
     """Score one call on request — for a reviewer who has opened it.
 
@@ -10600,7 +10628,7 @@ PORTAL_ALLOWED_PREFIXES = (
     '/api/work-note-shape', '/api/sms-number-lookup', '/api/sms-numbers',
     '/api/calls/summary', '/api/agent-names', '/api/date-coverage',
     '/api/time-report', '/api/cms-settings', '/api/teams', '/api/team-leaders',
-    '/api/review-sample',
+    '/api/review-sample', '/api/calls/',
     # AgentMonitor's poller calls this one. It carries its own key rather than
     # a portal sign-in, so it is safe on this hostname — and being reachable
     # here means the poller uses the same address people do, instead of needing
