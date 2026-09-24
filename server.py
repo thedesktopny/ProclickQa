@@ -4325,7 +4325,10 @@ def _resolve_schedules(date_from, date_to, employee=''):
     conn.close()
 
     generated = []
-    if recurring and date_from and date_to:
+    # Run when EITHER source has rows. Requiring recurring rows meant an agent
+    # scheduled only through customised weeks — no default pattern — had no
+    # schedule at all, and every shift they worked showed as unscheduled.
+    if (recurring or weekrows) and date_from and date_to:
         start = _dt.strptime(date_from, '%Y-%m-%d').date()
         end = _dt.strptime(date_to, '%Y-%m-%d').date()
         by_dow = {}
@@ -4341,6 +4344,13 @@ def _resolve_schedules(date_from, date_to, employee=''):
                 emp = r['employee_name']
                 # if this agent's week was customised, the week's own rows are the truth
                 if (emp, wk) in week_defined:
+                    # Emit the week's rows ONCE per agent per day. This loop runs
+                    # once for every recurring row on this weekday, so an agent
+                    # with a split shift (two recurring blocks) had every day of a
+                    # customised week produced twice. by_dow_seen was always meant
+                    # to stop that — it was recorded but never checked.
+                    if (emp, wk, dow) in by_dow_seen:
+                        continue
                     for wrow in by_week.get((emp, wk, dow), []):
                         wblk = wrow.get('block_no') or 1
                         if (emp, str(cur), wblk) in override_keys:
