@@ -6534,7 +6534,16 @@ function renderCalls(list){
 function buildExpandContent(c){
   const sc=c.scorecard?JSON.parse(typeof c.scorecard==='string'?c.scorecard:'{}'):{};
   const flags=sc.flags||[];
-  const isPending=c.status==='Processing'||!c.transcript;
+  // Three different states used to share one spinner. A call is only
+  // RUNNING if it is marked Processing and started within the last twenty
+  // minutes; anything else without a transcript is NOT SCORED — failed, or
+  // never started — and says so, with a button, rather than promising results
+  // in 1-2 minutes that are never coming.
+  const startedAt = c.processing_started_at || c.created_at;
+  const minutesSince = startedAt ? (Date.now() - new Date(startedAt).getTime()) / 60000 : 9999;
+  const isRunning = c.status === 'Processing' && minutesSince < 20;
+  const notScored = !c.transcript && !isRunning;
+  const isPending = isRunning;
   let emo={};
   try{emo=c.emotion_delta?JSON.parse(typeof c.emotion_delta==='string'?c.emotion_delta:'{}'):{};}catch(e){}
 
@@ -6569,8 +6578,16 @@ function buildExpandContent(c){
         <div style="font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--text3);">🤖 AI Summary</div>
         ${c.overall_score>0?`<span style="font-size:14px;font-weight:700;font-family:'Space Grotesk',sans-serif;color:${c.overall_score>=80?'var(--green)':c.overall_score>=70?'var(--yellow)':'var(--red)'}">${c.overall_score}%</span>`:''}
       </div>
-      ${isPending
-        ?`<div style="text-align:center;padding:12px 0;"><div style="font-size:20px;margin-bottom:6px;">⏳</div><div style="font-size:11px;color:var(--text3)">Analyzing call...<br>Results in 1-2 min</div></div>`
+      ${notScored
+        ?`<div style="text-align:center;padding:10px 0;">
+            <div style="font-size:12.5px;color:var(--text2);margin-bottom:4px;">This call has not been scored.</div>
+            <div style="font-size:11px;color:var(--text3);margin-bottom:10px;line-height:1.5;">
+              ${c.error_message ? 'The last attempt failed. ' : ''}Scoring runs the AI once, on request.</div>
+            <button class="btn btn-primary" style="font-size:12px;padding:7px 14px;"
+                    onclick="scoreCallNow('${esc(String(c.call_id))}', this)">Score this call now</button>
+          </div>`
+        : isPending
+        ?`<div style="text-align:center;padding:12px 0;"><div style="font-size:20px;margin-bottom:6px;">⏳</div><div style="font-size:11px;color:var(--text3)">Scoring now…<br>usually under two minutes</div></div>`
         :`<div style="font-size:12px;color:var(--text2);line-height:1.6;margin-bottom:10px;">${c.summary||'—'}</div>
           ${emo.start?`<div style="display:flex;align-items:center;gap:6px;font-size:11px;background:var(--surface2);padding:7px 10px;border-radius:7px;">
             <span>${emotionEmoji(emo.start)}</span><span style="color:var(--text3)">${emo.start}</span>
@@ -12818,6 +12835,30 @@ function fallbackCopy(text, done){
   document.body.removeChild(box);
 }
 
+
+
+/* Scores one call on request. Watches for the result rather than asking the
+   person to come back, and gives up honestly after a few minutes. */
+async function scoreCallNow(callId, btn){
+  btn.disabled = true; btn.textContent = 'Starting…';
+  try{
+    const r = await API.post('/api/calls/' + encodeURIComponent(callId) + '/score-now', {});
+    if(r.error){ showToast(r.error, true); btn.disabled = false; btn.textContent = 'Score this call now'; return; }
+    btn.textContent = 'Scoring… usually under two minutes';
+    const began = Date.now();
+    const check = async () => {
+      if(currentCallId !== callId) return;          // they moved on; stop watching
+      try{
+        const call = await API.get('/api/calls/' + encodeURIComponent(callId));
+        if(call && call.transcript){ renderCallDetail(call); showToast('Scored'); return; }
+        if(call && call.status === 'Failed'){ renderCallDetail(call); showToast('Scoring failed', true); return; }
+      }catch(e){}
+      if(Date.now() - began < 5 * 60000) setTimeout(check, 8000);
+      else{ btn.disabled = false; btn.textContent = 'Taking longer than usual — try again'; }
+    };
+    setTimeout(check, 8000);
+  }catch(e){ showToast(e.message, true); btn.disabled = false; btn.textContent = 'Score this call now'; }
+}
 
 async function openCallDetail(callId, fromLink){
   currentCallId=callId;

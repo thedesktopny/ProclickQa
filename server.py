@@ -691,6 +691,16 @@ def init_db():
     except Exception as e:
         print('[init] review_sample: ' + str(e)[:140])
 
+    # When scoring of a call actually began. The page used to show "analysing"
+    # for any call without a transcript, so a call that failed in August looked
+    # identical to one being scored this minute.
+    try:
+        mig = get_db(); mc = mig.cursor()
+        mc.execute("ALTER TABLE calls ADD COLUMN IF NOT EXISTS processing_started_at TIMESTAMP")
+        mig.commit(); mig.close()
+    except Exception as e:
+        print('[init] processing_started_at: ' + str(e)[:120])
+
     # Who reviews whom. Both sides are people who already exist in the CMS —
     # QA reviewers carry the QA flag and agents are the rest — so nothing is
     # created here, only the pairing, which is ours rather than the CMS's.
@@ -3051,6 +3061,36 @@ def get_pipeline_comparisons():
     conn.close()
     return jsonify({'comparisons': comparisons})
 
+@app.route('/api/calls/<call_id>/score-now', methods=['POST'])
+@require_login
+def score_call_now(call_id):
+    """Score one call on request — for a reviewer who has opened it.
+
+    Scoring every call as it arrives is what costs the most, so a call that was
+    never scored (or failed) is scored only when somebody actually wants to
+    look at it. Any signed-in reviewer may press this; the admin-only retry
+    left QA staff looking at a spinner with no way to move it.
+    """
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute("""SELECT status, processing_started_at, transcript IS NOT NULL
+                     FROM calls WHERE call_id = %s""", (call_id,))
+        row = c.fetchone(); conn.close()
+    except Exception as e:
+        return jsonify({'error': str(e)[:200]}), 400
+    if not row:
+        return jsonify({'error': 'Call not found'}), 404
+    status, started, has_transcript = row
+    # do not start a second run of something already running
+    if status == 'Processing' and started and \
+       (datetime.now() - started).total_seconds() < 20 * 60:
+        return jsonify({'ok': True, 'already_running': True,
+                        'meaning': 'This call is already being scored.'})
+    # hand over to the same machinery the admin retry uses — the undecorated
+    # function, since the permission check here is deliberately wider
+    return retry_single_call.__wrapped__(call_id)
+
+
 @app.route('/api/retry-call/<call_id>', methods=['POST'])
 @require_admin
 def retry_single_call(call_id):
@@ -3073,8 +3113,11 @@ def retry_single_call(call_id):
         conn.close()
         return jsonify({'error': 'Call not found'}), 404
 
-    # Reset status to Processing immediately so UI reflects it
-    c.execute("UPDATE calls SET status='Processing', error_message=NULL, overall_score=0 WHERE call_id=%s", (call_id,))
+    # Reset status to Processing immediately so UI reflects it, and note when —
+    # that is what lets the page tell a running call from a stuck one
+    c.execute("""UPDATE calls SET status='Processing', error_message=NULL, overall_score=0,
+                                   processing_started_at=NOW()
+                 WHERE call_id=%s""", (call_id,))
     conn.commit()
     conn.close()
 
