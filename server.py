@@ -3660,27 +3660,79 @@ def _mult_at(t, ot_periods):
             mult = float(p['multiplier'])
     return mult
 
-def _compute_pay(segments, sched_window, rate_history, ot_periods):
+# Breaks are paid up to an allowance, and only the time past it comes off pay:
+# 5 minutes for every hour clocked, so a 10-hour shift carries 50 paid minutes.
+PAID_BREAK_MINUTES_PER_HOUR = 5.0
+
+
+def _overlaps_any(a_start, a_end, intervals):
+    """True when (a_start, a_end) shares any time with one of the intervals."""
+    for s_, e_ in intervals or []:
+        if s_ is None:
+            continue
+        e2 = e_ or s_
+        if s_ < a_end and e2 > a_start:
+            return True
+        if s_ == e2 and a_start <= s_ <= a_end:
+            return True
+    return False
+
+
+def _compute_pay(segments, sched_window, rate_history, ot_periods, opts=None):
     """
     Splits actual worked time into regular vs overtime and prices it, honouring
     both effective-dated pay-rate changes and manager-declared overtime periods.
-    sched_window: (sched_in, sched_out) or None for unscheduled work (all overtime).
+    sched_window: (sched_in, sched_out) or None for unscheduled work.
+
+    opts (all optional):
+      unscheduled_is_ot  False for an agent who has no schedule anywhere — with
+                         nothing to be "outside of", their hours are ordinary
+                         hours, not overtime. Default True.
+      calls              list of (start, end) the agent was on a call, or None
+                         when there is no call data for them. Overtime is only
+                         paid for a stretch in which they actually took a call.
+      break_per_hour     paid break minutes per hour clocked.
     """
+    opts = opts or {}
+    unscheduled_is_ot = opts.get('unscheduled_is_ot', True)
+    calls = opts.get('calls')
+    per_hour = float(opts.get('break_per_hour', PAID_BREAK_MINUTES_PER_HOUR))
+
+    # ---- breaks: paid up to the allowance, unpaid past it ------------------
+    clocked_secs = 0.0
+    for seg in segments:
+        if seg['logout']:
+            clocked_secs += max(0.0, (seg['logout'] - seg['login']).total_seconds())
+    allowance_secs = clocked_secs * per_hour / 60.0
+    remaining = allowance_secs
+    break_secs = unpaid_secs = 0.0
+
     worked = []
     for seg in segments:
         if not seg['logout']:
             continue
-        breaks = []
-        for b in seg['breaks']:
+        unpaid = []
+        for b in sorted(seg['breaks'], key=lambda x: x.get('start') or seg['login']):
             b_start = b.get('start')
             b_end = b.get('end')
-            if b_start and b_end:
-                breaks.append((b_start, b_end))          # measured from timestamps
-            elif b_start:
+            if b_start and not b_end:
                 mins = float(b.get('minutes') or 0)      # unclosed break — fall back to declared
-                if mins > 0:
-                    breaks.append((b_start, b_start + timedelta(minutes=mins)))
-        worked.extend(_subtract_intervals((seg['login'], seg['logout']), breaks))
+                b_end = b_start + timedelta(minutes=mins) if mins > 0 else None
+            if not b_start or not b_end or b_end <= b_start:
+                continue
+            # a break cannot be longer than the session it sits in
+            b_start = max(b_start, seg['login']); b_end = min(b_end, seg['logout'])
+            length = (b_end - b_start).total_seconds()
+            if length <= 0:
+                continue
+            break_secs += length
+            paid_part = min(remaining, length)
+            remaining -= paid_part
+            if length - paid_part > 0.5:
+                # the paid minutes come first; whatever runs past them is unpaid
+                unpaid.append((b_start + timedelta(seconds=paid_part), b_end))
+                unpaid_secs += length - paid_part
+        worked.extend(_subtract_intervals((seg['login'], seg['logout']), unpaid))
 
     # Every point where the rate or the overtime multiplier could change
     boundaries = [e['effective_from'] for e in rate_history]
@@ -3691,8 +3743,10 @@ def _compute_pay(segments, sched_window, rate_history, ot_periods):
         boundaries.extend([sched_window[0], sched_window[1]])
 
     reg_secs = reg_pay = 0.0
-    ot_secs = ot_pay = 0.0
-    by_mult, rates_used = {}, set()
+    rates_used = set()
+    # overtime is collected per stretch — before the shift, after it, or a whole
+    # unscheduled shift — so each stretch can be checked for calls as one unit
+    stretches = {}
 
     for w in worked:
         for piece in _split_at(w, boundaries):
@@ -3701,15 +3755,37 @@ def _compute_pay(segments, sched_window, rate_history, ot_periods):
             hours = secs / 3600
             rate = _rate_at(piece[0], rate_history)
             rates_used.add(rate)
-            in_schedule = sched_window and sched_window[0] <= piece[0] < sched_window[1]
+            if sched_window:
+                in_schedule = sched_window[0] <= piece[0] < sched_window[1]
+                where = 'before' if piece[0] < sched_window[0] else 'after'
+            else:
+                in_schedule = not unscheduled_is_ot
+                where = 'unscheduled'
             if in_schedule:
                 reg_secs += secs
                 reg_pay += hours * rate
             else:
                 mult = _mult_at(piece[0], ot_periods)
-                ot_secs += secs
-                ot_pay += hours * rate * mult
-                by_mult[mult] = by_mult.get(mult, 0) + hours
+                st = stretches.setdefault(where, {'secs': 0.0, 'pay': 0.0, 'by_mult': {},
+                                                  'start': piece[0], 'end': piece[1]})
+                st['secs'] += secs
+                st['pay'] += hours * rate * mult
+                st['by_mult'][mult] = st['by_mult'].get(mult, 0) + hours
+                st['start'] = min(st['start'], piece[0]); st['end'] = max(st['end'], piece[1])
+
+    ot_secs = ot_pay = dropped_secs = 0.0
+    by_mult, dropped, unverified = {}, [], False
+    for where, st in stretches.items():
+        if calls is None:
+            unverified = True                 # no call data — paid, but flagged
+        elif not _overlaps_any(st['start'], st['end'], calls):
+            dropped_secs += st['secs']
+            dropped.append({'where': where, 'hours': round(st['secs'] / 3600, 2),
+                            'from': st['start'].isoformat(), 'to': st['end'].isoformat()})
+            continue
+        ot_secs += st['secs']; ot_pay += st['pay']
+        for m, h in st['by_mult'].items():
+            by_mult[m] = by_mult.get(m, 0) + h
 
     return {
         'regular_hours': round(reg_secs/3600, 2),
@@ -3719,6 +3795,14 @@ def _compute_pay(segments, sched_window, rate_history, ot_periods):
         'total_pay': round(reg_pay + ot_pay, 2),
         'ot_breakdown': {str(k): round(v, 2) for k, v in sorted(by_mult.items())},
         'hourly_rate': max(rates_used) if rates_used else 0,
+        'clocked_hours': round(clocked_secs/3600, 2),
+        'break_allowance_minutes': round(allowance_secs/60, 1),
+        'break_paid_minutes': round((break_secs - unpaid_secs)/60, 1),
+        'break_unpaid_minutes': round(unpaid_secs/60, 1),
+        'paid_hours': round((reg_secs + ot_secs)/3600, 2),
+        'ot_dropped_hours': round(dropped_secs/3600, 2),
+        'ot_dropped': dropped,
+        'ot_unverified': bool(unverified and ot_secs > 0),
     }
 
 # ─── SKIN BLOCK (photo people-cover tool) ─────────────────────────────────────
@@ -5369,7 +5453,7 @@ def _setting(key, default=''):
 PORTAL_PAGES = ['live', 'missed', 'customers', 'agent-calls',
                 'agent-list', 'packages', 'company-info',
                 'skin-block']   # everyone
-PORTAL_MANAGER_PAGES = ['cms-settings', 'qa-assign', 'staffing', 'time-report', 'teams']           # managers and admins
+PORTAL_MANAGER_PAGES = ['cms-settings', 'qa-assign', 'staffing', 'time-report', 'payroll', 'teams']           # managers and admins
 PORTAL_ADMIN_PAGES = ['payments', 'sms-numbers']                            # admins only — real money
 # QA reviewers additionally get the monitoring side. They are doing QA work, so
 # they need the same call review tools the QA dashboard has.
@@ -9269,6 +9353,510 @@ def phone_status_status():
     return jsonify(out)
 
 
+# ─── PAYROLL: live CMS data, name links, pay runs ────────────────────────────
+def _local_now():
+    """The call centre's own clock (New York), as a plain datetime — the same
+    kind of value clock-ins are stored in. The server itself runs on UTC."""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo('America/New_York')).replace(tzinfo=None)
+    except Exception:
+        return datetime.utcnow() - timedelta(hours=4)
+
+
+_PAYROLL_TABLES_READY = {'ok': False}
+
+
+def _payroll_tables():
+    """Created on their own connection, once — a failure here must never take
+    the rest of start-up down with it."""
+    if _PAYROLL_TABLES_READY['ok']:
+        return
+    conn = get_db()
+    try:
+        c = conn.cursor()
+        c.execute("""CREATE TABLE IF NOT EXISTS payroll_people (
+                        employee_id INTEGER PRIMARY KEY,
+                        employee_name TEXT,
+                        first_name TEXT, last_name TEXT, extension TEXT,
+                        hourly_rate NUMERIC(10,4), payment_type TEXT,
+                        left_firm BOOLEAN DEFAULT FALSE,
+                        link_source TEXT,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS clocker_live (
+                        seq BIGSERIAL,
+                        employee_id INTEGER NOT NULL,
+                        event_time TIMESTAMP NOT NULL,
+                        status TEXT NOT NULL,
+                        break_minutes NUMERIC, break_reason TEXT,
+                        UNIQUE (employee_id, event_time, status))""")
+        c.execute("CREATE INDEX IF NOT EXISTS clocker_live_time_idx ON clocker_live (event_time)")
+        c.execute("""CREATE TABLE IF NOT EXISTS pay_runs (
+                        id SERIAL PRIMARY KEY,
+                        period_start DATE NOT NULL, period_end DATE NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'approved',
+                        total_pay NUMERIC(12,2), paid_hours NUMERIC(12,2), agents INTEGER,
+                        snapshot TEXT,
+                        approved_by TEXT, approved_at TIMESTAMP,
+                        paid_by TEXT, paid_at TIMESTAMP, paid_note TEXT,
+                        UNIQUE (period_start, period_end))""")
+        conn.commit()
+        _PAYROLL_TABLES_READY['ok'] = True
+    finally:
+        conn.close()
+
+
+def _known_report_names(c):
+    """Every name the report already knows a person by — from uploaded clock
+    data, schedules and rates. A live CMS employee is tied to one of these
+    wherever possible, so their schedule and rate carry straight over."""
+    names = set()
+    for sql in ('SELECT DISTINCT employee_name FROM clocker_events',
+                'SELECT DISTINCT employee_name FROM recurring_schedules',
+                'SELECT DISTINCT employee_name FROM week_schedules',
+                'SELECT DISTINCT employee_name FROM agent_schedules',
+                'SELECT DISTINCT employee_name FROM agent_rates'):
+        try:
+            c.execute(sql)
+            names.update(r[0] for r in c.fetchall() if r[0])
+        except Exception:
+            try: c.connection.rollback()
+            except Exception: pass
+    return names
+
+
+def _link_people(conn, people, match_events):
+    """Give every CMS employee the name the report uses for them.
+
+    The safest evidence is the clock data itself: if employee 41's clock-ins in
+    the CMS land on the same minutes as "Alfredo"'s in the uploaded file, then
+    41 IS Alfredo, whatever the CMS calls him. Names are only compared when
+    there is no overlap to go on. A link, once made, is never changed here.
+    """
+    c = conn.cursor()
+    c.execute('SELECT employee_id, employee_name FROM payroll_people')
+    linked = {r[0]: r[1] for r in c.fetchall() if r[1]}
+    taken = {v.lower() for v in linked.values()}
+    known = _known_report_names(c)
+    known_lower = {n.lower(): n for n in known}
+
+    by_emp = {}
+    for e in match_events or []:
+        by_emp.setdefault(e['employee_id'], []).append(e)
+    todo = [p for p in people if p['employee_id'] not in linked
+            and (p['employee_id'] in by_emp or not p['left_firm'])]
+
+    # uploaded events, bucketed to the minute, for the overlap test
+    uploaded = {}
+    if any(p['employee_id'] in by_emp for p in todo):
+        times = [e['event_time'] for evs in by_emp.values() for e in evs]
+        try:
+            c.execute("""SELECT employee_name, event_time, status FROM clocker_events
+                         WHERE event_time >= %s AND event_time <= %s""",
+                      (min(times) - timedelta(minutes=2), max(times) + timedelta(minutes=2)))
+            for nm, t, st in c.fetchall():
+                uploaded.setdefault((st, t.replace(second=0, microsecond=0)), set()).add(nm)
+        except Exception:
+            conn.rollback()
+
+    matched_any = False
+    result = {}
+    # 1) by overlap of the clock data
+    for p in todo:
+        evs = by_emp.get(p['employee_id']) or []
+        if not evs or not uploaded:
+            continue
+        votes = {}
+        for e in evs:
+            base = e['event_time'].replace(second=0, microsecond=0)
+            seen = set()
+            for d in (-1, 0, 1):
+                seen |= uploaded.get((e['status'], base + timedelta(minutes=d)), set())
+            for nm in seen:
+                votes[nm] = votes.get(nm, 0) + 1
+        ranked = sorted(votes.items(), key=lambda x: -x[1])
+        if ranked and ranked[0][1] >= 3 and (len(ranked) == 1 or ranked[0][1] >= 2 * ranked[1][1]) \
+                and ranked[0][0].lower() not in taken:
+            result[p['employee_id']] = (ranked[0][0], 'matched by clock-ins')
+            taken.add(ranked[0][0].lower()); matched_any = True
+
+    # 2) by name, 3) a new name
+    firsts = {}
+    for p in people:
+        if not p['left_firm']:
+            firsts[p['first_name'].lower()] = firsts.get(p['first_name'].lower(), 0) + 1
+    for p in todo:
+        if p['employee_id'] in result:
+            continue
+        first, last = p['first_name'], p['last_name']
+        full = ('%s %s' % (first, last)).strip()
+        choice = None
+        for cand in (full, first, last):
+            if cand and cand.lower() in known_lower and cand.lower() not in taken:
+                choice = (known_lower[cand.lower()], 'matched by name'); break
+        if not choice:
+            cand = first if (first and firsts.get(first.lower(), 0) <= 1
+                             and first.lower() not in taken) else full
+            if not cand or cand.lower() in taken:
+                cand = '%s #%d' % (full or 'Employee', p['employee_id'])
+            choice = (cand, 'new')
+        result[p['employee_id']] = choice
+        taken.add(choice[0].lower())
+
+    for p in people:
+        eid = p['employee_id']
+        name, src = result.get(eid, (linked.get(eid), None))
+        c.execute("""INSERT INTO payroll_people
+                        (employee_id, employee_name, first_name, last_name, extension,
+                         hourly_rate, payment_type, left_firm, link_source, updated_at)
+                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+                     ON CONFLICT (employee_id) DO UPDATE SET
+                        employee_name = COALESCE(payroll_people.employee_name, EXCLUDED.employee_name),
+                        first_name = EXCLUDED.first_name, last_name = EXCLUDED.last_name,
+                        extension = EXCLUDED.extension, hourly_rate = EXCLUDED.hourly_rate,
+                        payment_type = EXCLUDED.payment_type, left_firm = EXCLUDED.left_firm,
+                        link_source = COALESCE(payroll_people.link_source, EXCLUDED.link_source),
+                        updated_at = NOW()""",
+                  (eid, name, p['first_name'], p['last_name'], p['extension'],
+                   p['hourly_rate'], p['payment_type'], p['left_firm'], src))
+    conn.commit()
+    # uploaded data covered these clock-ins, yet nobody lined up — the two
+    # sources disagree about times, and that must be said rather than hidden
+    return {'new_links': len(result), 'overlap_possible': bool(uploaded), 'matched_any': matched_any}
+
+
+_LIVE_SYNC_AT = {}
+
+
+def _payroll_live_sync(date_from, date_to, force=False):
+    """Bring the CMS's clock events for a period into clocker_live.
+
+    The period's rows are replaced, not added to, so a correction made in the
+    CMS shows up here and nothing is ever held twice. Returns {'ok', 'note'};
+    any failure leaves the report to fall back on the uploaded file.
+    """
+    import time as _time
+    if not date_from or not date_to:
+        return {'ok': False, 'note': 'Choose both dates to read live from the CMS.'}
+    try:
+        import cms_db
+        if not cms_db.configured():
+            return {'ok': False, 'note': 'The CMS database is not connected — using the uploaded Clocker file.'}
+    except Exception as e:
+        return {'ok': False, 'note': 'CMS reader unavailable (%s) — using the uploaded Clocker file.' % str(e)[:80]}
+
+    key = (date_from, date_to)
+    last = _LIVE_SYNC_AT.get(key)
+    if last and not force and _time.time() - last['at'] < 120:
+        return last['result']
+
+    try:
+        _payroll_tables()
+        d0 = datetime.strptime(date_from, '%Y-%m-%d') - timedelta(days=1)
+        d1 = datetime.strptime(date_to, '%Y-%m-%d') + timedelta(days=3)
+        people = cms_db.payroll_people()
+        events = cms_db.clocker_between(d0, d1)
+
+        conn = get_db()
+        try:
+            c = conn.cursor()
+            c.execute('SELECT employee_id FROM payroll_people WHERE employee_name IS NOT NULL')
+            have = {r[0] for r in c.fetchall()}
+            unlinked = {e['employee_id'] for e in events} - have
+            match_events = events
+            if unlinked:
+                # a wider look back, once, so someone whose uploaded history is
+                # older than this period can still be recognised by it
+                try:
+                    wide = cms_db.clocker_between(_local_now() - timedelta(days=75), _local_now())
+                    match_events = [e for e in wide if e['employee_id'] in unlinked] + events
+                except Exception as e:
+                    print('[payroll] wide match read failed: ' + str(e)[:120])
+            link = _link_people(conn, people, match_events)
+
+            c.execute('DELETE FROM clocker_live WHERE event_time >= %s AND event_time < %s', (d0, d1))
+            for e in events:
+                c.execute("""INSERT INTO clocker_live (employee_id, event_time, status, break_minutes, break_reason)
+                             VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+                          (e['employee_id'], e['event_time'], e['status'],
+                           e['break_minutes'], e['break_reason']))
+            conn.commit()
+        finally:
+            conn.close()
+
+        note = 'Live from the CMS — %d clock events.' % len(events)
+        if link.get('new_links') and link.get('overlap_possible') and not link.get('matched_any'):
+            note += (' Check names: the CMS clock times did not line up with the uploaded file, '
+                     'so new people were linked by name only.')
+        result = {'ok': True, 'note': note, 'events': len(events)}
+    except Exception as e:
+        print('[payroll] live sync failed: ' + str(e)[:200])
+        result = {'ok': False,
+                  'note': 'Could not read the CMS (%s) — showing the uploaded Clocker file instead.' % str(e)[:120]}
+    _LIVE_SYNC_AT[key] = {'at': _time.time(), 'result': result}
+    return result
+
+
+def _payroll_people_by_name():
+    out = {}
+    try:
+        _payroll_tables()
+        conn = get_db(); c = conn.cursor(cursor_factory=RealDictCursor)
+        c.execute('SELECT * FROM payroll_people WHERE employee_name IS NOT NULL')
+        for r in c.fetchall():
+            d = dict(r)
+            d['hourly_rate'] = float(d['hourly_rate']) if d.get('hourly_rate') is not None else None
+            out[d['employee_name']] = d
+        conn.close()
+    except Exception as e:
+        print('[payroll] people unavailable: ' + str(e)[:120])
+    return out
+
+
+_CALLS_CACHE = {}
+
+
+def _payroll_calls_by_name(date_from, date_to):
+    """{report name: [(start, end)]} of calls taken, or None if it can't be read."""
+    import time as _time
+    key = (date_from, date_to)
+    hit = _CALLS_CACHE.get(key)
+    if hit and _time.time() - hit['at'] < 120:
+        return hit['data']
+    data = None
+    try:
+        import cms_db
+        d0 = datetime.strptime(date_from, '%Y-%m-%d') - timedelta(days=1)
+        d1 = datetime.strptime(date_to, '%Y-%m-%d') + timedelta(days=3)
+        by_id = cms_db.calls_between(d0, d1)
+        names = {p['employee_id']: n for n, p in _payroll_people_by_name().items()}
+        data = {}
+        for eid, spans in by_id.items():
+            if eid in names:
+                data.setdefault(names[eid], []).extend(spans)
+    except Exception as e:
+        print('[payroll] calls unavailable: ' + str(e)[:160])
+        data = None
+    _CALLS_CACHE[key] = {'at': _time.time(), 'data': data}
+    return data
+
+
+# ── pay runs ────────────────────────────────────────────────────────────────
+PAY_RUN_DAYS = 14
+PAY_RUN_ANCHOR_DEFAULT = '2026-08-31'       # a Monday; runs are two weeks, Mon–Sun
+
+
+def _pay_run_anchor():
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute("SELECT value FROM app_settings WHERE key = 'payroll_anchor'")
+        r = c.fetchone(); conn.close()
+        if r and r[0]:
+            return datetime.strptime(r[0][:10], '%Y-%m-%d').date()
+    except Exception:
+        pass
+    return datetime.strptime(PAY_RUN_ANCHOR_DEFAULT, '%Y-%m-%d').date()
+
+
+def _payroll_who():
+    try:
+        return (_who() or {}).get('name') or 'manager'
+    except Exception:
+        return 'manager'
+
+
+@app.route('/api/payroll/runs', methods=['GET'])
+@portal_manager_only
+def payroll_runs():
+    """Every two-week pay run from the first one to the current one, newest
+    first. A run that has been approved carries its locked totals; an open one
+    is calculated when it is opened."""
+    _payroll_tables()
+    anchor = _pay_run_anchor()
+    today = _local_now().date()
+    saved = {}
+    conn = get_db(); c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute("""SELECT id, period_start, period_end, status, total_pay, paid_hours, agents,
+                        approved_by, approved_at, paid_by, paid_at, paid_note FROM pay_runs""")
+    for r in c.fetchall():
+        saved[(str(r['period_start']), str(r['period_end']))] = dict(r)
+    conn.close()
+
+    runs = []
+    start = anchor
+    while start <= today:
+        end = start + timedelta(days=PAY_RUN_DAYS - 1)
+        row = saved.pop((str(start), str(end)), None)
+        runs.append(_pay_run_row(start, end, row, today))
+        start += timedelta(days=PAY_RUN_DAYS)
+    for (_s, _e), row in saved.items():          # any run saved with other dates
+        runs.append(_pay_run_row(row['period_start'], row['period_end'], row, today))
+    runs.sort(key=lambda r: r['period_start'], reverse=True)
+    return jsonify({'runs': runs, 'period_days': PAY_RUN_DAYS, 'anchor': str(anchor)})
+
+
+def _pay_run_row(start, end, row, today):
+    out = {'period_start': str(start), 'period_end': str(end),
+           'in_progress': str(start) <= str(today) <= str(end),
+           'status': 'open', 'total_pay': None, 'paid_hours': None, 'agents': None}
+    if row:
+        out.update({
+            'status': row['status'],
+            'total_pay': float(row['total_pay']) if row['total_pay'] is not None else None,
+            'paid_hours': float(row['paid_hours']) if row['paid_hours'] is not None else None,
+            'agents': row['agents'],
+            'approved_by': row['approved_by'],
+            'approved_at': row['approved_at'].isoformat() if row['approved_at'] else None,
+            'paid_by': row['paid_by'],
+            'paid_at': row['paid_at'].isoformat() if row['paid_at'] else None,
+            'paid_note': row['paid_note'],
+        })
+    return out
+
+
+@app.route('/api/payroll/run', methods=['GET'])
+@portal_manager_only
+def payroll_run():
+    """One pay run. Open: calculated now. Approved or paid: the figures exactly
+    as they were when it was approved, however the data has changed since."""
+    _payroll_tables()
+    start = (request.args.get('start') or '')[:10]
+    end = (request.args.get('end') or '')[:10]
+    if not start or not end:
+        return jsonify({'error': 'Choose a pay run'}), 400
+    conn = get_db(); c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute('SELECT * FROM pay_runs WHERE period_start = %s AND period_end = %s', (start, end))
+    row = c.fetchone(); conn.close()
+    if row and row['status'] in ('approved', 'paid') and row.get('snapshot'):
+        try:
+            data = json.loads(row['snapshot'])
+            data['run'] = _pay_run_row(row['period_start'], row['period_end'], dict(row), _local_now().date())
+            data['locked'] = True
+            return jsonify(data)
+        except Exception as e:
+            print('[payroll] snapshot unreadable: ' + str(e)[:120])
+    try:
+        data = _time_report_data(start, end, '', int(request.args.get('grace_minutes', 5) or 5),
+                                 request.args.get('source', 'auto'))
+    except Exception as e:
+        import traceback
+        print('[payroll] run failed:\n' + traceback.format_exc())
+        return jsonify({'error': 'Could not calculate this pay run: ' + str(e)[:240]}), 500
+    data['run'] = _pay_run_row(start, end, None, _local_now().date())
+    data['locked'] = False
+    return jsonify(data)
+
+
+@app.route('/api/payroll/run/approve', methods=['POST'])
+@portal_manager_only
+def payroll_run_approve():
+    """Lock a pay run. It is recalculated on the server at this moment — never
+    taken from what a browser sends — and stored whole, so what was approved
+    can always be shown again exactly."""
+    _payroll_tables()
+    d = request.json or {}
+    start, end = (d.get('start') or '')[:10], (d.get('end') or '')[:10]
+    if not start or not end:
+        return jsonify({'error': 'Choose a pay run'}), 400
+    if end >= str(_local_now().date()) and not d.get('confirm_unfinished'):
+        return jsonify({'error': 'This pay period has not finished yet.', 'unfinished': True}), 409
+    conn = get_db(); c = conn.cursor()
+    c.execute('SELECT status FROM pay_runs WHERE period_start = %s AND period_end = %s', (start, end))
+    r = c.fetchone()
+    if r and r[0] == 'paid':
+        conn.close()
+        return jsonify({'error': 'This pay run is already marked paid.'}), 409
+    data = _time_report_data(start, end, '', int(d.get('grace_minutes') or 5), 'auto')
+    t = data.get('totals') or {}
+    total = t.get('adjusted_total_pay', t.get('total_pay') or 0)
+    hours = round((t.get('regular_hours') or 0) + (t.get('overtime_hours') or 0), 2)
+    c.execute("""INSERT INTO pay_runs (period_start, period_end, status, total_pay, paid_hours,
+                                       agents, snapshot, approved_by, approved_at)
+                 VALUES (%s,%s,'approved',%s,%s,%s,%s,%s,%s)
+                 ON CONFLICT (period_start, period_end) DO UPDATE SET
+                    status='approved', total_pay=EXCLUDED.total_pay, paid_hours=EXCLUDED.paid_hours,
+                    agents=EXCLUDED.agents, snapshot=EXCLUDED.snapshot,
+                    approved_by=EXCLUDED.approved_by, approved_at=EXCLUDED.approved_at""",
+              (start, end, total, hours, len(data.get('per_agent') or []),
+               json.dumps(data, default=str), _payroll_who(), _local_now()))
+    conn.commit(); conn.close()
+    return jsonify({'approved': True, 'total_pay': total})
+
+
+@app.route('/api/payroll/run/reopen', methods=['POST'])
+@portal_admin_only
+def payroll_run_reopen():
+    """Unlock an approved run so it recalculates. A paid run stays as it is."""
+    _payroll_tables()
+    d = request.json or {}
+    conn = get_db(); c = conn.cursor()
+    c.execute("""DELETE FROM pay_runs WHERE period_start = %s AND period_end = %s
+                 AND status = 'approved'""", ((d.get('start') or '')[:10], (d.get('end') or '')[:10]))
+    n = c.rowcount
+    conn.commit(); conn.close()
+    if not n:
+        return jsonify({'error': 'Only an approved, unpaid run can be reopened.'}), 409
+    return jsonify({'reopened': True})
+
+
+@app.route('/api/payroll/run/mark-paid', methods=['POST'])
+@portal_admin_only
+def payroll_run_mark_paid():
+    """Record that an approved run has been paid. This moves no money — it is a
+    record, so the same run cannot be paid twice by mistake."""
+    _payroll_tables()
+    d = request.json or {}
+    conn = get_db(); c = conn.cursor()
+    c.execute("""UPDATE pay_runs SET status='paid', paid_by=%s, paid_at=%s, paid_note=%s
+                 WHERE period_start = %s AND period_end = %s AND status = 'approved'""",
+              (_payroll_who(), _local_now(), (d.get('note') or '')[:300],
+               (d.get('start') or '')[:10], (d.get('end') or '')[:10]))
+    n = c.rowcount
+    conn.commit(); conn.close()
+    if not n:
+        return jsonify({'error': 'Approve the run first — only an approved run can be marked paid.'}), 409
+    return jsonify({'paid': True})
+
+
+@app.route('/api/payroll/people', methods=['GET', 'POST'])
+@portal_manager_only
+def payroll_people_links():
+    """Who the CMS says each person is, and the name the report uses for them.
+    POST {employee_id, employee_name} re-points one person — for the rare case
+    where the automatic match picked the wrong name."""
+    _payroll_tables()
+    conn = get_db(); c = conn.cursor(cursor_factory=RealDictCursor)
+    if request.method == 'POST':
+        d = request.json or {}
+        name = (d.get('employee_name') or '').strip()
+        try:
+            eid = int(d.get('employee_id'))
+        except Exception:
+            conn.close(); return jsonify({'error': 'Which person?'}), 400
+        if not name:
+            conn.close(); return jsonify({'error': 'Type the name the report should use'}), 400
+        c.execute('SELECT employee_id FROM payroll_people WHERE LOWER(employee_name) = LOWER(%s) AND employee_id <> %s',
+                  (name, eid))
+        if c.fetchone():
+            conn.close()
+            return jsonify({'error': '"%s" is already used for someone else.' % name}), 409
+        c.execute("UPDATE payroll_people SET employee_name = %s, link_source = 'set by hand' WHERE employee_id = %s",
+                  (name, eid))
+        conn.commit(); conn.close()
+        _LIVE_SYNC_AT.clear(); _CALLS_CACHE.clear()
+        return jsonify({'saved': True})
+    c.execute("""SELECT employee_id, employee_name, first_name, last_name, extension,
+                        hourly_rate, payment_type, left_firm, link_source
+                 FROM payroll_people ORDER BY left_firm, employee_name""")
+    people = []
+    for r in c.fetchall():
+        d = dict(r); d['hourly_rate'] = float(d['hourly_rate']) if d['hourly_rate'] is not None else None
+        people.append(d)
+    names = sorted(_known_report_names(conn.cursor()))
+    conn.close()
+    return jsonify({'people': people, 'known_names': names})
+
+
 @app.route('/api/time-report', methods=['GET'])
 @require_manager
 def time_report():
@@ -9381,8 +9969,8 @@ def _phone_grace_minutes():
 
 
 def _phone_min_gap_minutes():
-    """Gaps shorter than this are ignored as snapshot noise rather than treated
-    as real time off the phone."""
+    """Time off the phone only counts from this many minutes up. Anything
+    shorter — under a minute by default — is never taken off pay."""
     try:
         conn = get_db(); c = conn.cursor()
         c.execute("SELECT value FROM app_settings WHERE key = 'phone_min_gap_minutes'")
@@ -9391,7 +9979,7 @@ def _phone_min_gap_minutes():
             return max(0.0, min(30.0, float(r[0])))
     except Exception:
         pass
-    return 2.0
+    return 1.0
 
 
 def _phone_identity_map():
@@ -9428,29 +10016,61 @@ def _phone_identity_map():
 
 
 def _time_report_impl():
+    """Query params: date_from, date_to (YYYY-MM-DD), employee (optional),
+    grace_minutes, source (auto | cms | upload)."""
+    return jsonify(_time_report_data(
+        request.args.get('date_from', ''), request.args.get('date_to', ''),
+        request.args.get('employee', ''), int(request.args.get('grace_minutes', 5) or 5),
+        request.args.get('source', 'auto')))
+
+
+def _time_report_data(date_from, date_to, employee='', grace=5, source='auto'):
     """
-    Builds the attendance report: reconstructs actual shifts from clocker_events and
-    compares each against the matching agent_schedules row.
-    Query params: date_from, date_to (YYYY-MM-DD), employee (optional), grace_minutes.
+    Builds the attendance report: reconstructs actual shifts from clock events and
+    compares each against the matching schedule, then prices them.
+
+    Clock events come live from the CMS when it can be reached (source 'cms'),
+    and from the uploaded Clocker file otherwise ('upload'). The two are never
+    mixed inside one report, so an event can never be counted twice.
     """
-    date_from = request.args.get('date_from', '')
-    date_to = request.args.get('date_to', '')
-    employee = request.args.get('employee', '')
-    grace = int(request.args.get('grace_minutes', 5))
+    grace = int(grace or 0)
+    live = _payroll_live_sync(date_from, date_to) if source in ('auto', 'cms') else \
+        {'ok': False, 'note': 'Using the uploaded Clocker file, as chosen.'}
+    use_live = bool(live.get('ok'))
+    people_by_name = _payroll_people_by_name() if use_live else {}
 
     conn = get_db()
     c = conn.cursor(cursor_factory=RealDictCursor)
 
     # Pull events with a 1-day pad so shifts crossing midnight are complete
-    q = 'SELECT employee_name, event_time, status, break_minutes FROM clocker_events'
+    if use_live:
+        q = """SELECT p.employee_name, l.event_time, l.status, l.break_minutes, l.seq AS ord
+               FROM clocker_live l JOIN payroll_people p ON p.employee_id = l.employee_id"""
+        col = 'l.event_time'; namecol = 'p.employee_name'
+    else:
+        q = 'SELECT employee_name, event_time, status, break_minutes, id AS ord FROM clocker_events'
+        col = 'event_time'; namecol = 'employee_name'
     params, where = [], []
-    if date_from: where.append("event_time >= %s::date - INTERVAL '1 day'"); params.append(date_from)
-    if date_to: where.append("event_time <= %s::date + INTERVAL '2 days'"); params.append(date_to)
-    if employee: where.append('employee_name = %s'); params.append(employee)
+    if date_from: where.append(col + " >= %s::date - INTERVAL '1 day'"); params.append(date_from)
+    if date_to: where.append(col + " <= %s::date + INTERVAL '2 days'"); params.append(date_to)
+    if employee: where.append(namecol + ' = %s'); params.append(employee)
     if where: q += ' WHERE ' + ' AND '.join(where)
-    q += ' ORDER BY employee_name, event_time'
+    # two events in the same second keep the order they were recorded in, so
+    # the same data always builds the same shifts
+    q += ' ORDER BY 1, 2, 5'
     c.execute(q, params)
     all_events = [dict(r) for r in c.fetchall()]
+
+    # Who has a schedule at all. Someone with none has nothing to be "outside
+    # of", so their hours are ordinary hours rather than overtime.
+    scheduled_names = set()
+    for _t in ('recurring_schedules', 'week_schedules', 'agent_schedules'):
+        try:
+            c.execute('SELECT DISTINCT employee_name FROM ' + _t)
+            scheduled_names.update(r['employee_name'] for r in c.fetchall())
+        except Exception:
+            try: conn.rollback()
+            except Exception: pass
 
     # Pull schedules for the window — specific dates plus expanded recurring patterns
     schedules = _resolve_schedules(date_from, date_to, employee)
@@ -9492,6 +10112,37 @@ def _time_report_impl():
         try: conn.rollback()
         except Exception: pass
     conn.close()
+
+    # A rate set here (with its effective date) wins. Anyone without one falls
+    # back to the rate the CMS already holds, so nobody is priced at zero just
+    # because the rate was never typed in a second time.
+    rate_source, rate_mismatch = {}, {}
+    for _name, _p in people_by_name.items():
+        _cms_rate = _p.get('hourly_rate')
+        # a rate row of zero is "never filled in", not a decision to pay nothing
+        if rates.get(_name) and float(rates[_name][-1]['hourly_rate'] or 0) > 0:
+            rate_source[_name] = 'set here'
+            _cur = rates[_name][-1]['hourly_rate']
+            if _cms_rate and abs(float(_cms_rate) - _cur) > 0.004:
+                rate_mismatch[_name] = float(_cms_rate)
+        elif _cms_rate:
+            rates[_name] = [{'hourly_rate': float(_cms_rate), 'effective_from': datetime(2000, 1, 1)}]
+            rate_source[_name] = 'CMS'
+
+    # When each agent was on a call — overtime is only paid where they took one.
+    # None means "no call data for this person", which is reported, not guessed.
+    calls_by_name = _payroll_calls_by_name(date_from, date_to) if use_live else None
+    now_local = _local_now()
+
+    def _pay_opts(_name):
+        _calls = None
+        if calls_by_name is not None:
+            _calls = calls_by_name.get(_name)
+            # someone with no calls at all in the period is far more likely to
+            # be unmatched (or not a phone agent) than to have taken none
+            if not _calls:
+                _calls = None
+        return {'unscheduled_is_ot': _name in scheduled_names, 'calls': _calls}
 
     # Group events per employee and reconstruct shifts
     by_emp = {}
@@ -9547,18 +10198,22 @@ def _time_report_impl():
             'break_allowed': break_allowed,
             'block_no': s.get('block_no') or 1,
             'from_recurring': s.get('from_recurring', False),
-            'scheduled_net_hours': round(((sched_out - sched_in).total_seconds()/3600) - break_allowed/60, 2),
+            # breaks are paid up to the allowance, so the scheduled paid time is
+            # the whole block
+            'scheduled_net_hours': round((sched_out - sched_in).total_seconds()/3600, 2),
         }
 
         if not best:
-            row.update({'status': 'No Show', 'actual_in': None, 'actual_out': None,
+            # A shift that has not started yet is not an absence.
+            _upcoming = sched_in > now_local
+            row.update({'status': 'Upcoming' if _upcoming else 'No Show', 'actual_in': None, 'actual_out': None,
                         'break_taken': 0, 'break_count': 0, 'gross_hours': None,
                         'net_hours': None, 'late_minutes': None, 'early_out_minutes': None,
                         'net_variance': None, 'away_minutes': 0, 'segment_count': 0,
                         'regular_hours': 0, 'overtime_hours': 0, 'regular_pay': 0,
                         'overtime_pay': 0, 'total_pay': 0, 'ot_breakdown': {},
                         'hourly_rate': (rates.get(name) or [{}])[-1].get('hourly_rate', 0),
-                        'issues': ['No clock-in found for this scheduled shift']})
+                        'issues': [] if _upcoming else ['No clock-in found for this scheduled shift']})
             rows.append(row); continue
 
         # Mark every merged segment as consumed so it isn't double-reported as unscheduled
@@ -9643,25 +10298,36 @@ def _time_report_impl():
             if early_out_min > grace: issues.append(f'Left early by {early_out_min:.0f} min')
             elif early_out_min < -grace: issues.append(f'Stayed late by {abs(early_out_min):.0f} min')
             gross = (logout - login).total_seconds()/3600           # full span of the shift
-            net = worked_seconds/3600 - break_taken/60              # actual paid time
         else:
-            issues.append('Never clocked out')
+            # still clocked in right now is normal; only an old open shift is a problem
+            if (now_local - login).total_seconds() > 20 * 3600:
+                issues.append('Never clocked out')
+            else:
+                issues.append('Still clocked in')
 
-        break_over = break_taken - break_allowed
-        if break_over > grace: issues.append(f'Break over by {break_over:.0f} min')
         if any(seg.get('partial') for seg in segments):
-            issues.append('Login not captured in uploaded report')
+            issues.append('Login not captured in the clock data')
 
-        pay = _compute_pay(segments, (sched_in, sched_out), rates.get(name, []), ot_periods)
+        pay = _compute_pay(segments, (sched_in, sched_out), rates.get(name, []), ot_periods, _pay_opts(name))
+        if logout:
+            # paid time: everything clocked, less only the break time past the allowance
+            net = worked_seconds/3600 - pay['break_unpaid_minutes']/60
+        row['break_allowed'] = round(pay['break_allowance_minutes'])
+        if pay['break_unpaid_minutes'] >= 1:
+            issues.append(f"Break {break_taken:.0f}m is over the {pay['break_allowance_minutes']:.0f}m paid allowance — "
+                          f"{pay['break_unpaid_minutes']:.0f} min unpaid")
         if pay['overtime_hours'] > 0:
             mults = ', '.join(f"{h}h @{m}x" for m, h in pay['ot_breakdown'].items())
-            issues.append(f"Overtime {pay['overtime_hours']}h ({mults})")
+            issues.append(f"Overtime {pay['overtime_hours']}h ({mults})"
+                          + (' — calls could not be checked' if pay['ot_unverified'] else ''))
+        if pay['ot_dropped_hours'] > 0:
+            issues.append(f"Outside scheduled hours for {pay['ot_dropped_hours']}h with no calls taken — not paid")
 
         if adj:
             issues.append(f"⚠️ Times adjusted by {adj.get('adjusted_by_name','manager')}: {adj.get('reason','')}")
 
         row.update({
-            'status': 'OK' if not issues else 'Variance',
+            'status': 'OK' if not [i for i in issues if i != 'Still clocked in'] else 'Variance',
             'actual_in': login.isoformat(),
             'actual_out': logout.isoformat() if logout else None,
             'is_adjusted': bool(adj),
@@ -9698,20 +10364,34 @@ def _time_report_impl():
             if date_to and str(d) > date_to: continue
             break_taken = sum(b['minutes'] for b in sh['breaks'])
             gross = net = None
+            # For an agent who HAS a schedule, working outside it is overtime.
+            # For someone with no schedule at all it is simply their hours.
+            unsched_pay = _compute_pay([sh], None, rates.get(name, []), ot_periods, _pay_opts(name))
             if sh['logout']:
                 gross = (sh['logout'] - sh['login']).total_seconds()/3600
-                net = gross - break_taken/60
-            # Unscheduled work is entirely overtime by policy
-            unsched_pay = _compute_pay([sh], None, rates.get(name, []), ot_periods)
-            unsched_issues = ['No schedule entered for this shift'] + (['Never clocked out'] if not sh['logout'] else [])
+                net = gross - unsched_pay['break_unpaid_minutes']/60
+            _has_sched = name in scheduled_names
+            unsched_issues = ['Worked on a day with no scheduled shift' if _has_sched
+                              else 'No schedule set for this agent']
+            if not sh['logout']:
+                unsched_issues.append('Never clocked out' if (now_local - sh['login']).total_seconds() > 20 * 3600
+                                      else 'Still clocked in')
+            if unsched_pay['break_unpaid_minutes'] >= 1:
+                unsched_issues.append(f"Break {break_taken:.0f}m is over the {unsched_pay['break_allowance_minutes']:.0f}m paid allowance — "
+                                      f"{unsched_pay['break_unpaid_minutes']:.0f} min unpaid")
             if unsched_pay['overtime_hours'] > 0:
                 mults = ', '.join(f"{h}h @{m}x" for m, h in unsched_pay['ot_breakdown'].items())
-                unsched_issues.append(f"All overtime — {unsched_pay['overtime_hours']}h ({mults})")
+                unsched_issues.append(f"All overtime — {unsched_pay['overtime_hours']}h ({mults})"
+                                      + (' — calls could not be checked' if unsched_pay['ot_unverified'] else ''))
+            if unsched_pay['ot_dropped_hours'] > 0:
+                unsched_issues.append(f"Outside scheduled hours for {unsched_pay['ot_dropped_hours']}h with no calls taken — not paid")
             rows.append({
                 'employee_name': name, 'shift_date': str(d),
-                'scheduled_in': None, 'scheduled_out': None, 'break_allowed': None,
+                'scheduled_in': None, 'scheduled_out': None,
+                'break_allowed': round(unsched_pay['break_allowance_minutes']),
                 'block_no': 1, 'from_recurring': False,
-                'scheduled_net_hours': None, 'status': 'Unscheduled',
+                'scheduled_net_hours': None,
+                'status': 'Unscheduled' if _has_sched else 'No schedule',
                 'actual_in': sh['login'].isoformat(),
                 'actual_out': sh['logout'].isoformat() if sh['logout'] else None,
                 'break_taken': round(break_taken), 'break_count': len(sh['breaks']),
@@ -9739,7 +10419,20 @@ def _time_report_impl():
             'employee_name': r['employee_name'], 'hourly_rate': r.get('hourly_rate', 0),
             'regular_hours': 0, 'overtime_hours': 0, 'regular_pay': 0,
             'overtime_pay': 0, 'total_pay': 0, 'ot_breakdown': {},
+            'clocked_hours': 0, 'break_minutes': 0, 'break_unpaid_minutes': 0,
+            'ot_dropped_hours': 0, 'ot_unverified': False,
+            'days_worked': 0, 'no_shows': 0, 'upcoming': 0,
         })
+        if not a['hourly_rate'] and r.get('hourly_rate'):
+            a['hourly_rate'] = r['hourly_rate']
+        a['clocked_hours'] += r.get('clocked_hours') or 0
+        a['break_minutes'] += r.get('break_taken') or 0
+        a['break_unpaid_minutes'] += r.get('break_unpaid_minutes') or 0
+        a['ot_dropped_hours'] += r.get('ot_dropped_hours') or 0
+        a['ot_unverified'] = a['ot_unverified'] or bool(r.get('ot_unverified'))
+        if r.get('actual_in'): a['days_worked'] += 1
+        if r.get('status') == 'No Show': a['no_shows'] += 1
+        if r.get('status') == 'Upcoming': a['upcoming'] += 1
         a['regular_hours'] += r.get('regular_hours') or 0
         a['overtime_hours'] += r.get('overtime_hours') or 0
         a['regular_pay'] += r.get('regular_pay') or 0
@@ -9748,8 +10441,35 @@ def _time_report_impl():
         for m, h in (r.get('ot_breakdown') or {}).items():
             a['ot_breakdown'][m] = round(a['ot_breakdown'].get(m, 0) + h, 2)
     for a in per_agent.values():
-        for k in ('regular_hours','overtime_hours','regular_pay','overtime_pay','total_pay'):
+        for k in ('regular_hours','overtime_hours','regular_pay','overtime_pay','total_pay',
+                  'clocked_hours','ot_dropped_hours'):
             a[k] = round(a[k], 2)
+        a['break_minutes'] = round(a['break_minutes'])
+        a['break_unpaid_minutes'] = round(a['break_unpaid_minutes'])
+        a['paid_hours'] = round(a['regular_hours'] + a['overtime_hours'], 2)
+        _nm = a['employee_name']
+        _person = people_by_name.get(_nm) or {}
+        # the rate in force now, so an agent with nothing worked yet still shows one
+        if not a['hourly_rate'] and rates.get(_nm):
+            a['hourly_rate'] = rates[_nm][-1]['hourly_rate']
+        a['pay_group'] = _person.get('payment_type') or 'Not set'
+        a['employee_id'] = _person.get('employee_id')
+        a['full_name'] = (('%s %s' % (_person.get('first_name') or '', _person.get('last_name') or '')).strip()
+                          or _nm)
+        a['rate_source'] = rate_source.get(_nm) or ('none' if not a['hourly_rate'] else 'set here')
+        a['cms_rate'] = rate_mismatch.get(_nm)
+        a['has_schedule'] = _nm in scheduled_names
+        # What the old CMS would have paid: every clocked hour at the base
+        # rate, nothing else. Shown beside the new figure for checking.
+        a['old_cms_pay'] = round(a['clocked_hours'] * float(a['hourly_rate'] or 0), 2)
+    totals['clocked_hours'] = round(sum(a['clocked_hours'] for a in per_agent.values()), 2)
+    totals['break_unpaid_minutes'] = round(sum(a['break_unpaid_minutes'] for a in per_agent.values()))
+    totals['ot_dropped_hours'] = round(sum(a['ot_dropped_hours'] for a in per_agent.values()), 2)
+    totals['old_cms_pay'] = round(sum(a['old_cms_pay'] for a in per_agent.values()), 2)
+    totals['agents'] = len(per_agent)
+    totals['no_rate'] = sorted(a['employee_name'] for a in per_agent.values()
+                               if not a['hourly_rate'] and a['clocked_hours'] > 0)
+    totals['ot_unverified'] = sorted(a['employee_name'] for a in per_agent.values() if a['ot_unverified'])
 
     # ---- phone availability -------------------------------------------
     # Per shift: how much of it the agent was actually reachable — phone online
@@ -9759,6 +10479,10 @@ def _time_report_impl():
         import phone_status as _PS
         from datetime import datetime as _dtx
         _ext_by_name, _id_by_ext = _phone_identity_map()
+        for _pn, _pp in people_by_name.items():
+            if _pp.get('extension'):
+                _ext_by_name.setdefault(_pn.strip().lower(), str(_pp['extension']))
+                _id_by_ext.setdefault(str(_pp['extension']), _pp.get('employee_id'))
         _conn2 = get_db()
         try:
             _interval = _PS.detect_interval(_conn2)
@@ -9872,13 +10596,19 @@ def _time_report_impl():
     totals['adjusted_total_pay'] = round((totals.get('total_pay') or 0) - _tot_ded_pay, 2)
 
     # Any special overtime rate currently in force
-    now = datetime.now()
+    now = now_local
     active_ot = [p for p in ot_periods if p['starts_at'] <= now and (p['ends_at'] is None or p['ends_at'] >= now)]
 
-    return jsonify({
+    return ({
         'report': rows, 'count': len(rows),
         'totals': totals,
         'per_agent': sorted(per_agent.values(), key=lambda x: x['employee_name']),
+        'date_from': date_from, 'date_to': date_to,
+        'data_source': 'cms' if use_live else 'upload',
+        'source_note': live.get('note') or '',
+        'calls_checked': calls_by_name is not None,
+        'break_minutes_per_hour': PAID_BREAK_MINUTES_PER_HOUR,
+        'phone_min_gap_minutes': _phone_min_gap_minutes(),
         'default_ot_multiplier': DEFAULT_OT_MULTIPLIER,
         'active_ot_periods': [
             {'id': p['id'], 'multiplier': float(p['multiplier']),
@@ -10627,7 +11357,7 @@ PORTAL_ALLOWED_PREFIXES = (
     '/api/waiting', '/api/queue-kinds', '/api/callbacks', '/api/call-search',
     '/api/work-note-shape', '/api/sms-number-lookup', '/api/sms-numbers',
     '/api/calls/summary', '/api/agent-names', '/api/date-coverage',
-    '/api/time-report', '/api/cms-settings', '/api/teams', '/api/team-leaders',
+    '/api/time-report', '/api/payroll', '/api/cms-settings', '/api/teams', '/api/team-leaders',
     '/api/review-sample', '/api/calls/',
     # AgentMonitor's poller calls this one. It carries its own key rather than
     # a portal sign-in, so it is safe on this hostname — and being reachable

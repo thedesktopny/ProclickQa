@@ -3894,3 +3894,126 @@ def _plain(v):
     if isinstance(v, (bytes, bytearray)):
         return v.decode('utf-8', 'replace')
     return v
+
+
+# ───────────────────────── payroll: live reads ─────────────────────────────
+# Three plain reads the Timesheet and Payroll pages are built on. Everything is
+# keyed by Employee.Id, never by a name, so two people with the same first name
+# — or one person the CMS shows under a nickname — cannot be mixed up.
+
+def _all_rows(cu):
+    out = []
+    while True:
+        r = cu.fetchone()
+        if not r:
+            break
+        out.append(r)
+    return out
+
+
+def _rate_dollars(v):
+    """Employee.HourlyRate as dollars. The column is a whole number, and the CMS
+    shows rates like 6.25, so it is held in cents — but a value under 100 can
+    only be dollars, so that is honoured too rather than turned into pennies."""
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except Exception:
+        return None
+    if f <= 0:
+        return None
+    return round(f / 100.0, 4) if f >= 100 else round(f, 4)
+
+
+def payroll_people():
+    """Everyone in Employee with what payroll needs: name, extension, hourly
+    rate, how they are paid (PaymentType), and whether they have left."""
+    conn = _connect(); cu = conn.cursor()
+    try:
+        cu.execute("""SELECT e.Id, e.FirstName, e.LastName, e.Extension, e.HourlyRate,
+                             ISNULL(e.LeftFirm, 0), p.Type
+                      FROM Employee e
+                      LEFT JOIN PaymentType p ON p.Id = e.PaymentTypeID""")
+        rows = _all_rows(cu)
+    finally:
+        conn.close()
+    out = []
+    for r in rows:
+        out.append({
+            'employee_id': int(r[0]),
+            'first_name': (r[1] or '').strip(),
+            'last_name': (r[2] or '').strip(),
+            'extension': (str(r[3]).strip() if r[3] not in (None, '') else None),
+            'hourly_rate': _rate_dollars(r[4]),
+            'left_firm': bool(r[5]),
+            'payment_type': ((r[6] or '').strip() or None),
+        })
+    return out
+
+
+_CLOCK_STATUS = {0: 'Out', 1: 'In', 2: 'OnBreak'}
+
+
+def clocker_between(dt_from, dt_to):
+    """Raw clock events between two moments, oldest first.
+
+    Status is the column that matters (0 out, 1 in, 2 on a break). InOut is a
+    dead column on most rows, but a few old rows carry only that, so it is read
+    as a fallback rather than dropping them."""
+    conn = _connect(); cu = conn.cursor()
+    try:
+        cu.execute("""SELECT EmployeeId, Created, Status, InOut,
+                             BreakMinutes, BreakReason
+                      FROM EmployeeClocker
+                      WHERE Created >= %s AND Created < %s
+                      ORDER BY EmployeeId, Created, Id""", (dt_from, dt_to))
+        rows = _all_rows(cu)
+    finally:
+        conn.close()
+    out = []
+    for emp, created, status, inout, bm, br in rows:
+        if emp is None or created is None:
+            continue
+        st = None
+        if status is not None:
+            try:
+                st = _CLOCK_STATUS.get(int(status))
+            except Exception:
+                st = None
+        if st is None and inout:
+            low = str(inout).strip().lower().replace(' ', '')
+            st = {'in': 'In', 'out': 'Out', 'onbreak': 'OnBreak', 'break': 'OnBreak'}.get(low)
+        if st is None:
+            continue
+        out.append({'employee_id': int(emp), 'event_time': created, 'status': st,
+                    'break_minutes': (float(bm) if bm not in (None, '') else None),
+                    'break_reason': (str(br).strip() if br not in (None, '') else None)})
+    return out
+
+
+def calls_between(dt_from, dt_to):
+    """When each employee was actually on a call: {employee_id: [(start, end)]}.
+
+    Used for one rule only — overtime is paid for a stretch in which the agent
+    took a call. Missed calls do not count; an outbound call does."""
+    conn = _connect(); cu = conn.cursor()
+    try:
+        cu.execute("""SELECT e.Id, COALESCE(c.PickedUpTime, c.Started), c.Ended
+                      FROM PhoneCallsLog c
+                      JOIN Employee e
+                        ON CAST(e.Extension AS varchar(32)) =
+                           COALESCE(NULLIF(LTRIM(RTRIM(c.PickedUpBy)), ''),
+                                                  NULLIF(LTRIM(RTRIM(c.Agent)), ''))
+                      WHERE c.Started >= %s AND c.Started < %s
+                        AND (ISNULL(c.IsMissed, 0) = 0 OR ISNULL(c.IsOutbound, 0) = 1)""",
+                   (dt_from, dt_to))
+        rows = _all_rows(cu)
+    finally:
+        conn.close()
+    out = {}
+    for emp, start, end in rows:
+        if emp is None or start is None:
+            continue
+        out.setdefault(int(emp), []).append((start, end or start))
+    return out

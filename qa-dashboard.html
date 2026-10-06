@@ -213,6 +213,58 @@ td.agent{color:var(--text);font-weight:500;}
    evidence is tucked behind tabs instead of stacked below, and money always
    sits in the same right-hand column in tabular figures, the way a ledger
    reads. Nothing here scrolls unless it is a list of people or days. */
+/* A wide table scrolls inside its own card instead of pushing the whole page
+   (and the buttons in the top bar) off the right edge. */
+.main{ min-width:0; }
+#page-time-report, #page-payroll{ min-width:0; max-width:100%; }
+/* ---- Payroll ---- */
+.src-note{ font-size:12px; color:var(--text3); padding:8px 28px 0; }
+.src-note:empty{ display:none; }
+.src-note b{ color:var(--text2); font-weight:600; }
+.pr-wrap{ padding:22px 28px 60px; }
+.pr-intro{ font-size:13px; color:var(--text3); margin-bottom:14px; max-width:720px; }
+.pr-table th.num, .pr-table td.num{ text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.pr-empty{ text-align:center; padding:28px; color:var(--text3); }
+.pr-run{ cursor:pointer; }
+.pr-run:hover td{ background:var(--surface2); }
+.pr-run td{ padding-top:14px; padding-bottom:14px; }
+.pr-run .when{ font-weight:700; font-size:14px; }
+.pr-run .when small{ display:block; font-weight:400; font-size:11px; color:var(--text3); margin-top:2px; }
+.pr-pill{ display:inline-block; padding:3px 10px; border-radius:20px; font-size:11px; font-weight:700; }
+.pr-pill.open{ background:rgba(79,88,128,.25); color:var(--text2); }
+.pr-pill.now{ background:rgba(79,110,247,.16); color:var(--accent); }
+.pr-pill.approved{ background:rgba(245,166,35,.15); color:var(--yellow); }
+.pr-pill.paid{ background:rgba(16,212,142,.14); color:var(--green); }
+.pr-head{ display:flex; gap:24px; align-items:flex-start; flex-wrap:wrap; margin-bottom:6px; }
+.pr-period{ font-size:22px; font-weight:700; margin:2px 0 8px; }
+.pr-actions{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; padding-top:18px; }
+.pr-total{ margin-left:auto; text-align:right; }
+.pr-tiles{ display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin:16px 0 18px; }
+.pr-tile{ background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:13px 15px; }
+.pr-tile b{ display:block; font-size:20px; font-weight:700; font-variant-numeric:tabular-nums; }
+.pr-tile span{ font-size:11px; color:var(--text3); }
+.pr-warnbox{ background:rgba(245,166,35,.09); border:1px solid rgba(245,166,35,.35); border-radius:10px;
+             padding:11px 14px; margin-top:12px; font-size:12.5px; color:var(--text2); }
+.pr-warnbox b{ color:var(--yellow); }
+.pr-warnbox div + div{ margin-top:6px; }
+.pr-group td{ background:var(--surface2); font-weight:700; font-size:12px; letter-spacing:.4px;
+              text-transform:uppercase; color:var(--text2); border-top:2px solid var(--border); }
+.pr-agent{ cursor:pointer; }
+.pr-agent:hover td{ background:rgba(123,108,246,.06); }
+.pr-agent .nm{ font-weight:600; }
+.pr-agent .nm small{ display:block; font-weight:400; font-size:11px; color:var(--text3); }
+.pr-agent .caret{ display:inline-block; width:13px; color:var(--accent); font-size:10px; }
+.pr-sub{ display:block; font-size:10.5px; color:var(--text3); font-weight:400; }
+.pr-sub.bad{ color:var(--red); } .pr-sub.warn{ color:var(--yellow); }
+.pr-days td{ background:var(--bg); padding:0 !important; }
+.pr-days table{ width:100%; border-collapse:collapse; }
+.pr-days th{ font-size:10px; text-transform:uppercase; letter-spacing:.5px; color:var(--text3);
+             text-align:left; padding:8px 10px; font-weight:600; }
+.pr-days td td{ padding:7px 10px !important; font-size:12px; border-top:1px solid var(--border); background:transparent; vertical-align:top; }
+.pr-days .num{ text-align:right; font-variant-numeric:tabular-nums; }
+.pr-days .notes{ color:var(--text3); font-size:11px; max-width:340px; }
+.pr-totalrow td{ border-top:2px solid var(--border); font-weight:700; }
+@media (max-width:700px){ .pr-wrap{ padding:14px 14px 50px; } .src-note{ padding:8px 14px 0; } .pr-total{ margin-left:0; text-align:left; } }
 .runbar{
   position:sticky; top:0; z-index:30;
   display:flex; align-items:flex-end; gap:26px; flex-wrap:wrap;
@@ -1079,7 +1131,8 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
   <div class="nav-section manager-plus" style="margin-top:12px;display:none;">
     <div class="nav-label">Manager</div>
     <div class="nav-item" onclick="showPage('manager-queue')"><span class="icon">🧑‍⚖️</span>AI Mistake Review<span class="nav-badge" id="nb-manager">0</span></div>
-    <div class="nav-item" onclick="showPage('time-report')"><span class="icon">⏰</span>Time Report</div>
+    <div class="nav-item" onclick="showPage('time-report')"><span class="icon">⏰</span>Timesheet</div>
+    <div class="nav-item" onclick="showPage('payroll')"><span class="icon">💵</span>Payroll</div>
     <div class="nav-item" onclick="showPage('cms-pull')"><span class="icon">🔗</span>CMS Pull <span style="font-size:9px;opacity:.6;">test</span></div>
     <div class="nav-item" onclick="showPage('skinblock')"><span class="icon">🖼️</span>Skin Block</div>
   </div>
@@ -2627,11 +2680,11 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
 
 <div class="page" id="page-time-report">
   <div class="topbar">
-    <button class="navtoggle" onclick="toggleNav()" aria-label="Menu">☰</button><div class="page-title">⏰ Time Report</div>
+    <button class="navtoggle" onclick="toggleNav()" aria-label="Menu">☰</button><div class="page-title">⏰ Timesheet</div>
     <div class="topbar-right">
+      <button class="btn btn-outline" onclick="showPage('payroll')">💵 Payroll</button>
       <button class="btn btn-outline" onclick="exportTimeReport('xlsx')">⬇️ Excel</button>
-      <button class="btn btn-outline" onclick="exportTimeReport('csv')">CSV</button>
-      <label class="btn btn-primary" style="cursor:pointer;margin:0;">
+      <label class="btn btn-outline" style="cursor:pointer;margin:0;" title="Only needed when the CMS cannot be read live">
         📤 Upload Clocker
         <input type="file" id="clocker-file-input" accept=".xlsx,.xls,.csv" style="display:none;" onchange="handleClockerUpload(event)">
       </label>
@@ -2642,7 +2695,7 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
        you work, because every other figure on the page is an argument about it. -->
   <div class="runbar">
     <div class="runbar-period">
-      <div class="runbar-label">Pay period</div>
+      <div class="runbar-label">Period</div>
       <div class="runbar-dates">
         <input type="date" id="tr-date-from" onchange="loadTimeReport()">
         <span class="runbar-dash">→</span>
@@ -2666,15 +2719,15 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
     </div>
 
     <div class="runbar-total">
-      <div class="runbar-label">Total to pay</div>
-      <div class="runbar-money" id="run-total">—</div>
+      <div class="runbar-label">Paid hours</div>
+      <div class="runbar-money" id="run-total" style="color:var(--text);">—</div>
       <div class="runbar-sub" id="run-sub"></div>
     </div>
   </div>
+  <div id="tr-source" class="src-note"></div>
 
   <div class="runtabs">
-    <button class="runtab on" data-tab="pay" onclick="showTimeTab('pay')">Pay run</button>
-    <button class="runtab" data-tab="days" onclick="showTimeTab('days')">Every shift</button>
+    <button class="runtab on" data-tab="days" onclick="showTimeTab('days')">Every shift</button>
     <button class="runtab" data-tab="schedules" onclick="showTimeTab('schedules')">Schedules</button>
     <span class="runtabs-spacer"></span>
     <span class="runtab-tools" id="pay-tools">
@@ -2682,6 +2735,7 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
       <button class="btn btn-outline" onclick="expandAllAgents(false)">Collapse</button>
     </span>
     <span class="runtab-tools" id="sched-tools" style="display:none;">
+      <button class="btn btn-outline" onclick="prOpenPeople()">👤 CMS names</button>
       <button class="btn btn-outline" onclick="openOtPeriodsModal()">⚡ Overtime rate</button>
       <button class="btn btn-outline" onclick="openWeeklyScheduleModal()">📅 Weekly schedule</button>
       <button class="btn btn-outline" onclick="showModal('add-schedule-modal')">+ One-off</button>
@@ -2689,33 +2743,27 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
   </div>
 
   <div class="runbody">
-    <!-- PAY RUN: one line per agent, the money column on the right -->
-    <section class="runpanel" id="tab-pay">
+    <!-- EVERY SHIFT: the day-by-day evidence behind the money -->
+    <section class="runpanel" id="tab-days">
       <!-- shows when a manager has declared a special overtime rate -->
       <div id="ot-active-banner"></div>
-      <div id="tr-summary" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px;margin-bottom:20px;"></div>
-
-    
-      <div id="tr-payroll-summary" style="margin-bottom:20px;"></div>
-
-    
-    </section>
-
-    <!-- EVERY SHIFT: the day-by-day evidence behind the money -->
-    <section class="runpanel" id="tab-days" style="display:none;">
+      <div id="tr-summary" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:18px;"></div>
       <div class="card">
       <div class="card-header"><span class="card-title">Attendance vs Schedule</span><span id="tr-count" style="font-size:11px;color:var(--text3)"></span></div>
       <div style="overflow-x:auto;">
-        <table class="data-table" style="min-width:1620px;">
+        <table class="data-table" style="min-width:1280px;">
           <thead><tr>
-            <th>Agent</th><th>Date</th><th>Scheduled</th><th>Actual In</th><th>Actual Out</th>
-            <th>Break</th><th>Gross</th><th>Net</th><th>Variance</th>
-            <th>Regular</th><th>Overtime</th><th>Rate</th><th>Pay</th>
-            <th title="Time clocked in but unable to take calls">Off Phone</th><th>Payable Pay</th>
-            <th>Status</th><th>Issues</th><th></th>
+            <th>Agent</th><th>Date</th><th>Scheduled</th><th>In</th><th>Out</th>
+            <th title="Paid up to 5 minutes for every hour clocked; anything past that is unpaid">Break</th>
+            <th title="Clock-in to clock-out">Clocked</th>
+            <th title="Clocked time, less break time past the paid allowance">Paid hrs</th>
+            <th title="Paid hours against the scheduled shift">Variance</th>
+            <th>Regular</th><th>Overtime</th>
+            <th title="Time clocked in but unable to take calls (a minute or more)">Off Phone</th>
+            <th>Status</th><th>Notes</th><th></th>
           </tr></thead>
           <tbody id="tr-tbody">
-            <tr><td colspan="18" style="text-align:center;padding:32px;color:var(--text3)">Upload a Clocker report and add schedules to see the report.</td></tr>
+            <tr><td colspan="15" style="text-align:center;padding:32px;color:var(--text3)">Loading…</td></tr>
           </tbody>
         </table>
       </div>
@@ -2767,6 +2815,67 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
       </div>
     </div>
     </section>
+  </div>
+</div>
+
+<div class="page" id="page-payroll">
+  <div class="topbar">
+    <button class="navtoggle" onclick="toggleNav()" aria-label="Menu">☰</button><div class="page-title">💵 Payroll</div>
+    <div class="topbar-right">
+      <button class="btn btn-outline" id="pr-back" onclick="prShowList()" style="display:none;">← All pay runs</button>
+      <button class="btn btn-outline" id="pr-excel" onclick="prExport()" style="display:none;">⬇️ Excel</button>
+      <button class="btn btn-outline" onclick="showPage('time-report')">⏰ Timesheet</button>
+    </div>
+  </div>
+
+  <!-- every pay run, newest first -->
+  <div class="pr-wrap" id="pr-list">
+    <div class="pr-intro">One line for each two-week pay run. Open a run to see what everyone is owed and why.
+      An approved run is locked — its figures no longer change.</div>
+    <div class="card"><div style="overflow-x:auto;">
+      <table class="data-table pr-table">
+        <thead><tr><th>Pay period</th><th>Status</th><th class="num">Agents</th><th class="num">Paid hours</th><th class="num">Total</th><th></th></tr></thead>
+        <tbody id="pr-runs"><tr><td colspan="6" class="pr-empty">Loading…</td></tr></tbody>
+      </table>
+    </div></div>
+  </div>
+
+  <!-- one pay run -->
+  <div class="pr-wrap" id="pr-detail" style="display:none;">
+    <div class="pr-head">
+      <div>
+        <div class="runbar-label">Pay period</div>
+        <div class="pr-period" id="pr-period">—</div>
+        <div id="pr-status"></div>
+      </div>
+      <div class="pr-actions" id="pr-actions"></div>
+      <div class="pr-total">
+        <div class="runbar-label">Total to pay</div>
+        <div class="runbar-money" id="pr-total">—</div>
+        <div class="runbar-sub" id="pr-total-sub"></div>
+      </div>
+    </div>
+    <div id="pr-source" class="src-note"></div>
+    <div id="pr-warn"></div>
+    <div id="pr-tiles" class="pr-tiles"></div>
+    <div class="card">
+      <div class="card-header"><span class="card-title">Who is owed what</span>
+        <span style="font-size:11px;color:var(--text3)">Click a name to see each day</span></div>
+      <div style="overflow-x:auto;">
+        <table class="data-table pr-table" style="min-width:1080px;">
+          <thead><tr>
+            <th>Agent</th><th class="num">Days</th>
+            <th class="num" title="Clock-in to clock-out, all days">Clocked</th>
+            <th class="num" title="Paid up to 5 minutes for every hour clocked; anything past that is unpaid">Break</th>
+            <th class="num">Paid hrs</th><th class="num">Overtime</th>
+            <th class="num" title="Clocked in but unable to take calls, a minute or more at a time">Off phone</th>
+            <th class="num">Rate</th><th class="num">Pay</th>
+            <th class="num" title="What the old CMS pays: every clocked hour at the base rate, nothing else">Old CMS way</th>
+          </tr></thead>
+          <tbody id="pr-agents"></tbody>
+        </table>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -5600,7 +5709,8 @@ function portalApply(name, isManager){
     'skin-block':   ['🫥', 'Skin Block'],
     'staffing':     ['📊', 'Staffing'],
     'teams':        ['👥', 'Team Leaders'],
-    'time-report':  ['⏰', 'Time Report'],
+    'time-report':  ['⏰', 'Timesheet'],
+    'payroll':      ['💵', 'Payroll'],
     'agent-list':   ['📇', 'Agents'],
     'packages':     ['📦', 'Packages'],
     'company-info': ['🔑', 'Info & Logins'],
@@ -5624,9 +5734,9 @@ function portalApply(name, isManager){
   const SECTIONS = [
     ['Today',    ['live', 'agent-calls', 'missed', 'staffing']],
     ['Work',     ['customers', 'agent-list', 'packages', 'company-info',
-                  'skin-block', 'payments']],
-    ['Quality',  ['calls', 'human-review', 'call-notes', 'notes', 'analytics',
-                  'time-report']],
+                  'skin-block']],
+    ['Pay',      ['time-report', 'payroll', 'payments']],
+    ['Quality',  ['calls', 'human-review', 'call-notes', 'notes', 'analytics']],
     ['Settings', ['cms-settings', 'teams', 'qa-assign', 'sms-numbers']],
   ];
   const item = (p, active) =>
@@ -5906,6 +6016,14 @@ function openFromAddress(){
     setTimeout(()=>openCallDetail(decodeURIComponent(call[1]), true), 150);
     return true;
   }
+  const run = hash.match(/^payroll\/(\d{4}-\d\d-\d\d)_(\d{4}-\d\d-\d\d)$/);
+  if(run){
+    if(typeof portalPages !== 'undefined' && portalPages.length && !portalPages.includes('payroll')) return false;
+    addressLocked = true;
+    try{ prRun = {}; showPage('payroll'); } finally { addressLocked = false; }
+    prOpenRun(run[1], run[2]);
+    return true;
+  }
   // only open a page this person is actually allowed to see
   if(document.getElementById('page-' + hash)){
     if(typeof portalPages !== 'undefined' && portalPages.length
@@ -6183,7 +6301,7 @@ function qfPickAgent(page, name){
 function showPage(id){
   pageToAddress(id);
   // Access control: qa_users see only their own work; costs is admin-only
-  const managerPages = ['analytics','billing','notes','rules','alerts','qa-users','manager-queue','time-report','skinblock'];
+  const managerPages = ['analytics','billing','notes','rules','alerts','qa-users','manager-queue','time-report','payroll','skinblock'];
   const adminPages = ['costs'];
   const isManager = currentRole==='manager' || isAdmin;
   if(adminPages.includes(id) && !isAdmin){ showToast('Admin access only', true); return; }
@@ -6263,6 +6381,7 @@ function showPage(id){
     if(!document.getElementById('cn-from').value) cnRange(7); else loadCallNotes();
   }
   if(id==='manager-queue') renderManagerQueue();
+  if(id==='payroll'){ if(!prRun) prShowList(); }
   if(id==='time-report'){
     // Recurring schedules expand across a date range, so ensure one is set
     const f = document.getElementById('tr-date-from'), t = document.getElementById('tr-date-to');
@@ -11264,14 +11383,14 @@ async function loadNotesContent(){
 }
 
 function showTimeTab(name){
-  ['pay','days','schedules'].forEach(t=>{
+  ['days','schedules'].forEach(t=>{
     const panel = document.getElementById('tab-'+t);
     if(panel) panel.style.display = (t===name) ? '' : 'none';
   });
   document.querySelectorAll('.runtab').forEach(b=>
     b.classList.toggle('on', b.dataset.tab===name));
   const pay = document.getElementById('pay-tools'), sch = document.getElementById('sched-tools');
-  if(pay) pay.style.display = name==='pay' ? '' : 'none';
+  if(pay) pay.style.display = name==='days' ? '' : 'none';
   if(sch) sch.style.display = name==='schedules' ? '' : 'none';
 }
 
@@ -11298,19 +11417,17 @@ function setPayPeriod(which){
   loadTimeReport();
 }
 
-/* Keeps the pinned total honest: it always shows what this pay run costs. */
+/* The Timesheet's pinned figure is hours — the money lives on the Payroll page. */
 function updateRunTotal(res){
   const t = (res && res.totals) || {};
   const el = document.getElementById('run-total'), sub = document.getElementById('run-sub');
   if(!el) return;
-  const payable = t.adjusted_total_pay != null ? t.adjusted_total_pay : (t.total_pay || 0);
-  el.textContent = '$' + Number(payable).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
+  const hrs = (t.regular_hours||0) + (t.overtime_hours||0);
+  el.textContent = hrs.toLocaleString(undefined, {minimumFractionDigits:1, maximumFractionDigits:1}) + 'h';
   const bits = [];
   const agents = (res.per_agent||[]).length;
-  if(agents) bits.push(agents + ' agent' + (agents===1?'':'s'));
-  const hrs = (t.regular_hours||0) + (t.overtime_hours||0);
-  if(hrs) bits.push(hrs.toFixed(1) + 'h');
-  if(t.overtime_hours) bits.push(t.overtime_hours.toFixed(1) + 'h OT');
+  if(agents) bits.push(agents + (agents===1?' person':' people'));
+  if(t.overtime_hours) bits.push(t.overtime_hours.toFixed(1) + 'h overtime');
   if(t.phone_deducted_minutes) bits.push('−' + Math.round(t.phone_deducted_minutes) + 'm off phone');
   sub.textContent = bits.join(' · ');
 }
@@ -11786,9 +11903,9 @@ async function exportTimeReport(format){
     return;
   }
   const res = lastTimeReportData;
-  const from = document.getElementById('tr-date-from')?.value || '';
-  const to = document.getElementById('tr-date-to')?.value || '';
-  const emp = document.getElementById('tr-employee')?.value || '';
+  const from = res.date_from || document.getElementById('tr-date-from')?.value || '';
+  const to = res.date_to || document.getElementById('tr-date-to')?.value || '';
+  const emp = res === prRun ? '' : (document.getElementById('tr-employee')?.value || '');
   const stamp = `${from||'all'}_to_${to||'all'}${emp?'_'+emp.replace(/[^a-z0-9]/gi,''):''}`;
 
   const fmtDT = iso => iso ? new Date(iso).toLocaleString('en-US',
@@ -11882,6 +11999,10 @@ async function exportTimeReport(format){
       'Period': dates.length ? dates[0] + ' to ' + dates[dates.length-1] : '',
       'Days': days,
       'Shifts': shifts.length,
+      'Paid As': a.pay_group || '',
+      'Clocked Hours': a.clocked_hours ?? '',
+      'Break (min)': a.break_minutes ?? '',
+      'Unpaid Break (min)': a.break_unpaid_minutes ?? '',
       'Net Hours': +shifts.reduce((s,x)=>s+(x.net_hours||0),0).toFixed(2),
       'Regular Hours': a.regular_hours ?? '',
       'Overtime Hours': a.overtime_hours ?? '',
@@ -11890,6 +12011,7 @@ async function exportTimeReport(format){
       'Original Pay': +Number(origPay).toFixed(2),
       'Deduction': +Number(origPay - payable).toFixed(2),
       'PAYABLE PAY': +Number(payable).toFixed(2),
+      'Old CMS Way': a.old_cms_pay ?? '',
     });
     rowLevels.push({});                        // the agent line stays visible
     shifts.forEach(r => {
@@ -11899,6 +12021,10 @@ async function exportTimeReport(format){
         'Period': r.shift_date,
         'Days': fmtT(r.scheduled_in) + '-' + fmtT(r.scheduled_out),
         'Shifts': fmtDT(r.actual_in) + ' → ' + fmtDT(r.actual_out),
+        'Paid As': '',
+        'Clocked Hours': r.clocked_hours ?? '',
+        'Break (min)': r.break_taken ?? '',
+        'Unpaid Break (min)': r.break_unpaid_minutes ?? '',
         'Net Hours': r.net_hours ?? '',
         'Regular Hours': r.regular_hours ?? '',
         'Overtime Hours': r.overtime_hours ?? '',
@@ -11947,8 +12073,10 @@ async function exportTimeReport(format){
     {Field:'Agent filter', Value: emp || 'All agents'},
     {Field:'Grace window (min)', Value: document.getElementById('tr-grace')?.value || 5},
     {Field:'Standard OT multiplier', Value: `${res.default_ot_multiplier}x`},
-    {Field:'Overtime definition', Value:'Any time worked outside the scheduled block'},
-    {Field:'Break measurement', Value:'Actual time between OnBreak and return, not declared minutes'},
+    {Field:'Overtime definition', Value:'Time worked outside the scheduled block, paid only where the agent took calls. Someone with no schedule at all has no overtime.'},
+    {Field:'Breaks', Value:`Paid up to ${res.break_minutes_per_hour||5} minutes per hour clocked; break time past that is unpaid. Measured from the clock, not the declared minutes.`},
+    {Field:'Off the phone', Value:`Deducted from ${res.phone_min_gap_minutes||1} minute up`},
+    {Field:'Clock-ins from', Value: res.data_source === 'cms' ? 'CMS, live' : 'Uploaded Clocker file'},
     {Field:'Generated', Value: new Date().toLocaleString()},
   ];
   (res.active_ot_periods||[]).forEach(p=>{
@@ -12178,6 +12306,316 @@ async function loadSkinblockHistory(){
   }
 }
 
+/* ───────────────────────── PAYROLL ─────────────────────────────────────
+   The Timesheet shows what happened; this page shows what it costs. One line
+   per two-week pay run, a run opens to one line per person, a person opens to
+   their days. An approved run is shown from its stored figures, so it reads
+   the same next month as it did the day it was approved. */
+let prRun = null;          // the run on screen: the server's reply
+const prMoney = v => '$' + (Number(v)||0).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
+const prHrs = v => (Number(v)||0).toFixed(2) + 'h';
+const prIsAdmin = () => (typeof isAdmin !== 'undefined' && isAdmin) || (typeof portalIsAdmin !== 'undefined' && portalIsAdmin);
+
+function prPeriodText(a, b){
+  const A = new Date(a + 'T00:00:00'), B = new Date(b + 'T00:00:00');
+  const md = d => d.toLocaleDateString('en-US', {month:'short', day:'numeric'});
+  return md(A) + ' – ' + md(B) + ', ' + B.getFullYear();
+}
+
+function prPill(run){
+  if(run.status === 'paid') return '<span class="pr-pill paid">Paid</span>';
+  if(run.status === 'approved') return '<span class="pr-pill approved">Approved · not paid</span>';
+  if(run.in_progress) return '<span class="pr-pill now">In progress</span>';
+  return '<span class="pr-pill open">Open</span>';
+}
+
+/* Where the clock-ins came from, in one line — on both pages. */
+function prSourceLine(res){
+  if(!res) return '';
+  const live = res.data_source === 'cms';
+  let line = live ? '<b>Clock-ins: live from the CMS.</b>' : '<b>Clock-ins: from the uploaded Clocker file.</b>';
+  const note = (res.source_note || '').replace(/^Live from the CMS — /, '');
+  if(note) line += ' ' + esc(note);
+  if(live && res.calls_checked === false) line += ' Calls could not be read, so overtime is not checked against calls.';
+  return line;
+}
+
+async function prLoadRuns(){
+  const body = document.getElementById('pr-runs');
+  if(!body) return;
+  try{
+    const r = await API.get('/api/payroll/runs');
+    if(r.error) throw new Error(r.error);
+    const runs = r.runs || [];
+    body.innerHTML = runs.length ? runs.map(x => {
+      const locked = x.status === 'approved' || x.status === 'paid';
+      const sub = x.status === 'paid' ? `Paid ${x.paid_at ? new Date(x.paid_at).toLocaleDateString() : ''}${x.paid_by ? ' by ' + esc(x.paid_by) : ''}`
+                : x.status === 'approved' ? `Approved ${x.approved_at ? new Date(x.approved_at).toLocaleDateString() : ''}${x.approved_by ? ' by ' + esc(x.approved_by) : ''}`
+                : x.in_progress ? 'Still being worked' : 'Not approved yet';
+      return `<tr class="pr-run" onclick="prOpenRun('${x.period_start}','${x.period_end}')">
+        <td class="when">${prPeriodText(x.period_start, x.period_end)}<small>${sub}</small></td>
+        <td>${prPill(x)}</td>
+        <td class="num">${locked && x.agents != null ? x.agents : '—'}</td>
+        <td class="num">${locked && x.paid_hours != null ? prHrs(x.paid_hours) : '—'}</td>
+        <td class="num" style="font-weight:700;color:${locked?'var(--green)':'var(--text3)'};">${locked && x.total_pay != null ? prMoney(x.total_pay) : 'open to calculate'}</td>
+        <td class="num"><span style="color:var(--accent);font-size:12px;">Open →</span></td>
+      </tr>`;
+    }).join('') : '<tr><td colspan="6" class="pr-empty">No pay runs yet.</td></tr>';
+  }catch(e){
+    body.innerHTML = `<tr><td colspan="6" class="pr-empty" style="color:var(--red);">Could not load pay runs: ${esc(e.message)}</td></tr>`;
+  }
+}
+
+function prShowList(){
+  prRun = null;
+  document.getElementById('pr-list').style.display = '';
+  document.getElementById('pr-detail').style.display = 'none';
+  document.getElementById('pr-back').style.display = 'none';
+  document.getElementById('pr-excel').style.display = 'none';
+  try{ if(location.hash.indexOf('#payroll') === 0) history.replaceState(null, '', '#payroll'); }catch(e){}
+  prLoadRuns();
+}
+
+async function prOpenRun(start, end){
+  document.getElementById('pr-list').style.display = 'none';
+  document.getElementById('pr-detail').style.display = '';
+  document.getElementById('pr-back').style.display = '';
+  document.getElementById('pr-period').textContent = prPeriodText(start, end);
+  document.getElementById('pr-status').innerHTML = '';
+  document.getElementById('pr-actions').innerHTML = '';
+  document.getElementById('pr-total').textContent = '…';
+  document.getElementById('pr-total-sub').textContent = 'calculating';
+  document.getElementById('pr-warn').innerHTML = '';
+  document.getElementById('pr-source').innerHTML = '';
+  document.getElementById('pr-tiles').innerHTML = '';
+  document.getElementById('pr-agents').innerHTML = '<tr><td colspan="10" class="pr-empty">Working out this pay run…</td></tr>';
+  try{ history.replaceState(null, '', '#payroll/' + start + '_' + end); }catch(e){}
+  try{
+    const r = await API.get(`/api/payroll/run?start=${start}&end=${end}`);
+    if(r.error) throw new Error(r.error);
+    prRun = r;
+    prRender();
+  }catch(e){
+    document.getElementById('pr-total').textContent = '—';
+    document.getElementById('pr-total-sub').textContent = '';
+    document.getElementById('pr-agents').innerHTML =
+      `<tr><td colspan="10" class="pr-empty" style="color:var(--red);">${esc(e.message)}</td></tr>`;
+  }
+}
+
+function prRender(){
+  const res = prRun; if(!res) return;
+  const run = res.run || {}, t = res.totals || {}, people = res.per_agent || [];
+  const total = t.adjusted_total_pay != null ? t.adjusted_total_pay : (t.total_pay || 0);
+  document.getElementById('pr-excel').style.display = '';
+  document.getElementById('pr-status').innerHTML = prPill(run) +
+    (res.locked ? ` <span style="font-size:11px;color:var(--text3);margin-left:6px;">Locked${run.approved_by?' — approved by '+esc(run.approved_by):''}</span>` : '');
+  document.getElementById('pr-total').textContent = prMoney(total);
+  const paidH = (t.regular_hours||0) + (t.overtime_hours||0);
+  document.getElementById('pr-total-sub').textContent =
+    people.filter(a => (a.clocked_hours||0) > 0).length + ' people · ' + paidH.toFixed(1) + 'h paid';
+  document.getElementById('pr-source').innerHTML = prSourceLine(res);
+
+  // what you can do with this run
+  const acts = [];
+  if(!res.locked) acts.push(`<button class="btn btn-primary" onclick="prApprove()">✓ Approve this pay run</button>`);
+  if(run.status === 'approved' && prIsAdmin()){
+    acts.push(`<button class="btn btn-primary" onclick="prMarkPaid()">Mark as paid</button>`);
+    acts.push(`<button class="btn btn-outline" onclick="prReopen()">Reopen</button>`);
+  }
+  if(run.status === 'approved' && !prIsAdmin())
+    acts.push(`<span style="font-size:12px;color:var(--text3);">Approved — an admin marks it paid.</span>`);
+  if(run.status === 'paid')
+    acts.push(`<span style="font-size:12px;color:var(--text3);">Paid${run.paid_at?' on '+new Date(run.paid_at).toLocaleDateString():''}${run.paid_by?' by '+esc(run.paid_by):''}${run.paid_note?' — '+esc(run.paid_note):''}</span>`);
+  document.getElementById('pr-actions').innerHTML = acts.join('');
+
+  // things worth a look before approving
+  const warn = [];
+  const noRate = t.no_rate || [];
+  if(noRate.length) warn.push(`<div><b>${noRate.length} with hours but no hourly rate</b> — they show $0.00: ${noRate.map(esc).join(', ')}</div>`);
+  const bigOt = people.filter(a => (a.overtime_hours||0) >= 8).sort((a,b)=>b.overtime_hours-a.overtime_hours);
+  if(bigOt.length) warn.push(`<div><b>${bigOt.length} with 8 or more overtime hours</b> — if that looks wrong, their schedule is probably missing days: ${bigOt.map(a=>esc(a.employee_name)+' '+a.overtime_hours.toFixed(1)+'h').join(', ')}</div>`);
+  const dropped = people.filter(a => (a.ot_dropped_hours||0) >= 1).sort((a,b)=>b.ot_dropped_hours-a.ot_dropped_hours);
+  if(dropped.length) warn.push(`<div><b>Time outside the schedule not paid for ${dropped.length}</b> — no calls were taken in it. If someone really worked, their schedule needs correcting: ${dropped.map(a=>esc(a.employee_name)+' '+a.ot_dropped_hours.toFixed(1)+'h').join(', ')}</div>`);
+  const unv = t.ot_unverified || [];
+  if(unv.length) warn.push(`<div><b>Overtime paid without a call check for ${unv.length}</b> — no calls could be found for them at all: ${unv.map(esc).join(', ')}</div>`);
+  const diffRate = people.filter(a => a.cms_rate);
+  if(diffRate.length) warn.push(`<div><b>Rate differs from the CMS for ${diffRate.length}</b>: ${diffRate.map(a=>esc(a.employee_name)+' '+prMoney(a.hourly_rate)+' here, '+prMoney(a.cms_rate)+' in CMS').join('; ')}</div>`);
+  document.getElementById('pr-warn').innerHTML = warn.length ? `<div class="pr-warnbox">${warn.join('')}</div>` : '';
+
+  const tile = (v, label, color) => `<div class="pr-tile"><b style="color:${color||'var(--text)'};">${v}</b><span>${label}</span></div>`;
+  document.getElementById('pr-tiles').innerHTML =
+    tile(prHrs(t.clocked_hours), 'Clocked in') +
+    tile(Math.round(t.break_unpaid_minutes||0) + 'm', 'Break time over the paid allowance', (t.break_unpaid_minutes||0)>0?'var(--red)':'') +
+    tile(prHrs(t.regular_hours), 'Regular hours', 'var(--accent)') +
+    tile(prHrs(t.overtime_hours), 'Overtime hours' + ((t.ot_dropped_hours||0)>0 ? ' · ' + t.ot_dropped_hours.toFixed(1) + 'h not paid, no calls' : ''), 'var(--yellow)') +
+    tile((t.phone_deducted_minutes||0) > 0 ? '−' + prMoney(t.phone_pay_reduction) : '$0.00', 'Taken off for time off the phone' + ((t.phone_deducted_minutes||0)>0 ? ' · ' + Math.round(t.phone_deducted_minutes) + 'm' : ''), (t.phone_deducted_minutes||0)>0?'var(--red)':'') +
+    tile(prMoney(t.old_cms_pay), 'The old CMS way, for comparison') +
+    tile(prMoney(total), 'Total to pay', 'var(--green)');
+
+  // one line per person, grouped by how they are paid
+  const byShift = new Map();
+  (res.report || []).forEach(r => {
+    if(!byShift.has(r.employee_name)) byShift.set(r.employee_name, []);
+    byShift.get(r.employee_name).push(r);
+  });
+  const groups = new Map();
+  people.forEach(a => {
+    const g = a.pay_group || 'Not set';
+    if(!groups.has(g)) groups.set(g, []);
+    groups.get(g).push(a);
+  });
+  const order = [...groups.keys()].sort((a,b) => (a==='Not set') - (b==='Not set') || a.localeCompare(b));
+  const pay = a => a.adjusted_total_pay != null ? a.adjusted_total_pay : (a.total_pay||0);
+  const fmtT = iso => iso ? new Date(iso).toLocaleTimeString([], {hour:'numeric', minute:'2-digit'}) : '—';
+
+  let html = '';
+  order.forEach(g => {
+    const list = groups.get(g).sort((a,b) => a.employee_name.localeCompare(b.employee_name));
+    const gPay = list.reduce((s,a) => s + pay(a), 0), gHrs = list.reduce((s,a) => s + (a.paid_hours||0), 0);
+    const worked = list.filter(a => (a.clocked_hours||0) > 0).length;
+    html += `<tr class="pr-group"><td colspan="4">${esc(g)} <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--text3);">· ${worked} ${worked===1?'person':'people'}</span></td>
+      <td class="num">${prHrs(gHrs)}</td><td colspan="3"></td><td class="num">${prMoney(gPay)}</td><td></td></tr>`;
+    list.forEach(a => {
+      const key = 'pr_' + String(a.employee_name).replace(/[^a-z0-9]/gi, '_');
+      const p = pay(a), off = a.deducted_minutes || 0;
+      const diff = p - (a.old_cms_pay || 0);
+      const full = a.full_name && a.full_name !== a.employee_name ? a.full_name : '';
+      const flags = [];
+      if(a.no_shows) flags.push(`${a.no_shows} no-show${a.no_shows===1?'':'s'}`);
+      if(!a.has_schedule && (a.clocked_hours||0) > 0) flags.push('no schedule set');
+      html += `<tr class="pr-agent" onclick="prToggle('${key}')">
+        <td class="nm"><span class="caret" id="${key}_c">▶</span>${esc(a.employee_name)}<small>${[esc(full)].concat(flags).filter(Boolean).join(' · ')}</small></td>
+        <td class="num">${a.days_worked||0}</td>
+        <td class="num">${prHrs(a.clocked_hours)}</td>
+        <td class="num">${a.break_minutes||0}m${(a.break_unpaid_minutes||0)>0?`<span class="pr-sub bad">${a.break_unpaid_minutes}m unpaid</span>`:''}</td>
+        <td class="num" style="font-weight:600;">${prHrs(a.paid_hours)}</td>
+        <td class="num" style="color:${(a.overtime_hours||0)>0?'var(--yellow)':'var(--text3)'};">${prHrs(a.overtime_hours)}${(a.ot_dropped_hours||0)>0?`<span class="pr-sub">${a.ot_dropped_hours.toFixed(2)}h not paid</span>`:''}</td>
+        <td class="num" style="color:${off>0?'var(--red)':'var(--text3)'};">${off>0?'−'+Math.round(off)+'m<span class="pr-sub bad">−'+prMoney(a.pay_reduction)+'</span>':'—'}</td>
+        <td class="num">${a.hourly_rate?prMoney(a.hourly_rate):'<span style="color:var(--red);font-size:11px;">no rate</span>'}${a.rate_source==='CMS'?'<span class="pr-sub">from CMS</span>':''}</td>
+        <td class="num" style="font-weight:700;color:var(--green);">${prMoney(p)}</td>
+        <td class="num" style="color:var(--text3);">${prMoney(a.old_cms_pay)}${Math.abs(diff)>=0.01?`<span class="pr-sub ${diff<0?'bad':'warn'}">${diff>0?'+':'−'}${prMoney(Math.abs(diff))}</span>`:''}</td>
+      </tr>`;
+      const days = (byShift.get(a.employee_name) || []).slice().sort((x,y) => String(x.shift_date).localeCompare(String(y.shift_date)));
+      html += `<tr class="pr-days ${key}" style="display:none;"><td colspan="10"><table>
+        <thead><tr><th>Date</th><th>Scheduled</th><th>In – Out</th><th class="num">Clocked</th><th class="num">Break</th><th class="num">Regular</th><th class="num">Overtime</th><th class="num">Off phone</th><th class="num">Pay</th><th>Notes</th></tr></thead>
+        <tbody>${days.map(r => {
+          const pd = r.phone_deduction, dp = pd && pd.adjusted_pay != null ? pd.adjusted_pay : r.total_pay;
+          const d = new Date(r.shift_date + 'T00:00:00').toLocaleDateString('en-US', {weekday:'short', month:'short', day:'numeric'});
+          const none = !r.actual_in;
+          return `<tr>
+            <td style="white-space:nowrap;">${d}</td>
+            <td style="white-space:nowrap;color:var(--text3);">${r.scheduled_in ? fmtT(r.scheduled_in) + ' – ' + fmtT(r.scheduled_out) : '—'}</td>
+            <td style="white-space:nowrap;">${none ? `<span style="color:${r.status==='No Show'?'var(--red)':'var(--text3)'};">${r.status==='Upcoming'?'Not started':esc(r.status)}</span>` : fmtT(r.actual_in) + ' – ' + fmtT(r.actual_out)}</td>
+            <td class="num">${r.gross_hours != null ? prHrs(r.clocked_hours != null ? r.clocked_hours : r.gross_hours) : '—'}</td>
+            <td class="num">${none ? '—' : (r.break_taken||0) + 'm'}${(r.break_unpaid_minutes||0) >= 1 ? `<span class="pr-sub bad">${Math.round(r.break_unpaid_minutes)}m unpaid</span>` : ''}</td>
+            <td class="num">${none ? '—' : prHrs(r.regular_hours)}</td>
+            <td class="num" style="color:${(r.overtime_hours||0)>0?'var(--yellow)':'var(--text3)'};">${none ? '—' : prHrs(r.overtime_hours)}${(r.ot_dropped_hours||0)>0?`<span class="pr-sub">${r.ot_dropped_hours}h not paid</span>`:''}</td>
+            <td class="num" style="color:${pd && pd.total_minutes>0?'var(--red)':'var(--text3)'};">${pd && pd.total_minutes>0 ? '−' + Math.round(pd.total_minutes) + 'm' : '—'}</td>
+            <td class="num" style="font-weight:600;">${none ? '—' : prMoney(dp)}</td>
+            <td class="notes">${(r.issues||[]).map(esc).join('; ')}</td>
+          </tr>`;
+        }).join('') || '<tr><td colspan="10" style="color:var(--text3);">Nothing in this period.</td></tr>'}</tbody></table></td></tr>`;
+    });
+  });
+  html += `<tr class="pr-totalrow"><td colspan="2">Total</td><td class="num">${prHrs(t.clocked_hours)}</td><td class="num">${(t.break_unpaid_minutes||0)>0?Math.round(t.break_unpaid_minutes)+'m unpaid':''}</td>
+    <td class="num">${prHrs(paidH)}</td><td class="num">${prHrs(t.overtime_hours)}</td>
+    <td class="num">${(t.phone_deducted_minutes||0)>0?'−'+prMoney(t.phone_pay_reduction):''}</td><td></td>
+    <td class="num" style="color:var(--green);font-size:14px;">${prMoney(total)}</td><td class="num" style="color:var(--text3);">${prMoney(t.old_cms_pay)}</td></tr>`;
+  document.getElementById('pr-agents').innerHTML = people.length ? html
+    : '<tr><td colspan="10" class="pr-empty">Nobody clocked in during this period.</td></tr>';
+}
+
+function prToggle(key){
+  const row = document.querySelector('.pr-days.' + key), caret = document.getElementById(key + '_c');
+  if(!row) return;
+  const show = row.style.display === 'none';
+  row.style.display = show ? '' : 'none';
+  if(caret) caret.textContent = show ? '▼' : '▶';
+}
+
+async function prApprove(force){
+  if(!prRun) return;
+  const run = prRun.run, t = prRun.totals || {};
+  const total = t.adjusted_total_pay != null ? t.adjusted_total_pay : (t.total_pay || 0);
+  if(!force && !confirm(`Approve ${prPeriodText(run.period_start, run.period_end)}?\n\nTotal to pay: ${prMoney(total)}\n\nApproving locks these figures. The run is worked out again on the server at this moment, so the locked total can differ slightly if anything changed since the page loaded.`)) return;
+  const r = await API.post('/api/payroll/run/approve', {start: run.period_start, end: run.period_end, confirm_unfinished: !!force});
+  if(r.unfinished){
+    if(confirm('This pay period has not finished yet — people may still work hours in it.\n\nApprove it anyway?')) return prApprove(true);
+    return;
+  }
+  if(r.error){ showToast(r.error, true); return; }
+  showToast('✅ Pay run approved — ' + prMoney(r.total_pay));
+  prOpenRun(run.period_start, run.period_end);
+}
+
+async function prReopen(){
+  if(!prRun) return;
+  const run = prRun.run;
+  if(!confirm('Reopen this pay run?\n\nIts locked figures are thrown away and it is worked out again from the current data.')) return;
+  const r = await API.post('/api/payroll/run/reopen', {start: run.period_start, end: run.period_end});
+  if(r.error){ showToast(r.error, true); return; }
+  showToast('Pay run reopened');
+  prOpenRun(run.period_start, run.period_end);
+}
+
+async function prMarkPaid(){
+  if(!prRun) return;
+  const run = prRun.run;
+  const note = prompt('Mark this pay run as paid.\n\nThis only records that you paid it — it does not send any money.\n\nNote (optional), e.g. how it was paid:', '');
+  if(note === null) return;
+  const r = await API.post('/api/payroll/run/mark-paid', {start: run.period_start, end: run.period_end, note});
+  if(r.error){ showToast(r.error, true); return; }
+  showToast('✅ Marked as paid');
+  prOpenRun(run.period_start, run.period_end);
+}
+
+function prExport(){
+  if(!prRun) return;
+  lastTimeReportData = prRun;
+  exportTimeReport('xlsx');
+}
+
+/* Who the CMS says each person is, and the name the Timesheet uses for them.
+   Nearly always right on its own; this is for the one that isn't. */
+async function prOpenPeople(){
+  document.getElementById('pr-people-modal')?.remove();
+  let r;
+  try{ r = await API.get('/api/payroll/people'); }catch(e){ showToast('Could not load: ' + e.message, true); return; }
+  if(r.error){ showToast(r.error, true); return; }
+  const people = (r.people || []).filter(p => p.employee_name);
+  const rows = people.map(p => `<tr>
+      <td style="padding:6px 8px;">${esc(((p.first_name||'') + ' ' + (p.last_name||'')).trim())}${p.left_firm?' <span style="color:var(--text3);font-size:10px;">left</span>':''}</td>
+      <td style="padding:6px 8px;color:var(--text3);">${esc(p.extension||'')}</td>
+      <td style="padding:6px 8px;"><input id="prp_${p.employee_id}" list="prp-names" value="${String(p.employee_name).replace(/"/g,'&quot;')}" style="width:150px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 8px;font-size:12px;"></td>
+      <td style="padding:6px 8px;color:var(--text3);font-size:11px;">${esc(p.link_source||'')}</td>
+      <td style="padding:6px 8px;"><button class="btn btn-outline" style="padding:3px 9px;font-size:11px;" onclick="prSavePerson(${p.employee_id})">Save</button></td>
+    </tr>`).join('');
+  document.body.insertAdjacentHTML('beforeend', `
+    <div class="modal" id="pr-people-modal" style="display:flex;">
+      <div class="modal-box" style="width:680px;max-width:96vw;max-height:86vh;display:flex;flex-direction:column;">
+        <div style="font-size:16px;font-weight:700;margin-bottom:4px;">👤 CMS names</div>
+        <div style="font-size:12px;color:var(--text3);margin-bottom:12px;">Each person in the CMS, and the name the Timesheet, schedules and rates use for them. Change one only if a person shows up under the wrong name or twice.</div>
+        <datalist id="prp-names">${(r.known_names||[]).map(n => `<option value="${String(n).replace(/"/g,'&quot;')}">`).join('')}</datalist>
+        <div style="overflow:auto;flex:1;border:1px solid var(--border);border-radius:8px;">
+          <table style="width:100%;border-collapse:collapse;font-size:12.5px;">
+            <thead><tr style="text-align:left;color:var(--text3);font-size:10px;text-transform:uppercase;"><th style="padding:8px;">In the CMS</th><th style="padding:8px;">Ext</th><th style="padding:8px;">Name used here</th><th style="padding:8px;">How it was matched</th><th></th></tr></thead>
+            <tbody>${rows || '<tr><td colspan="5" style="padding:20px;text-align:center;color:var(--text3);">Nobody yet — open the Timesheet once so the CMS can be read.</td></tr>'}</tbody>
+          </table>
+        </div>
+        <button class="btn btn-outline" style="margin-top:12px;" onclick="document.getElementById('pr-people-modal').remove()">Close</button>
+      </div>
+    </div>`);
+}
+
+async function prSavePerson(id){
+  const name = (document.getElementById('prp_' + id)?.value || '').trim();
+  const r = await API.post('/api/payroll/people', {employee_id: id, employee_name: name});
+  if(r.error){ showToast(r.error, true); return; }
+  showToast('✅ Saved');
+  loadTimeReport();
+}
+
 async function loadTimeReport(){
   const from = document.getElementById('tr-date-from')?.value || '';
   const to = document.getElementById('tr-date-to')?.value || '';
@@ -12185,7 +12623,7 @@ async function loadTimeReport(){
   const grace = document.getElementById('tr-grace')?.value || 5;
   const tbody = document.getElementById('tr-tbody');
   if(!tbody) return;
-  tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;padding:24px;color:var(--text3)">Loading...</td></tr>';
+  tbody.innerHTML = '<tr><td colspan="15" style="text-align:center;padding:24px;color:var(--text3)">Loading...</td></tr>';
 
   let params = `?grace_minutes=${grace}`;
   if(from) params += `&date_from=${from}`;
@@ -12194,10 +12632,13 @@ async function loadTimeReport(){
 
   try{
     const res = await API.get('/api/time-report' + params);
+    if(res.error) throw new Error(res.error);
     const rows = res.report || [];
     lastTimeReportData = res;
     updateRunTotal(res);
     document.getElementById('tr-count').textContent = `${rows.length} shift(s)`;
+    const srcEl = document.getElementById('tr-source');
+    if(srcEl) srcEl.innerHTML = prSourceLine(res);
 
     // Banner when a special overtime rate is currently in force
     const banner = document.getElementById('ot-active-banner');
@@ -12222,16 +12663,17 @@ async function loadTimeReport(){
     const okCount = rows.filter(r=>r.status==='OK').length;
     const varCount = rows.filter(r=>r.status==='Variance').length;
     const noShow = rows.filter(r=>r.status==='No Show').length;
-    const unsched = rows.filter(r=>r.status==='Unscheduled').length;
+    const unsched = rows.filter(r=>r.status==='Unscheduled' || r.status==='No schedule').length;
+    const upcoming = rows.filter(r=>r.status==='Upcoming').length;
     const t = res.totals || {};
     document.getElementById('tr-summary').innerHTML = `
-      ${trTile('On Schedule', okCount, 'var(--green)')}
-      ${trTile('With Variance', varCount, 'var(--yellow)')}
-      ${trTile('No Show', noShow, 'var(--red)')}
-      ${trTile('Unscheduled', unsched, 'var(--text3)')}
-      ${trTile('Regular Hours', (t.regular_hours||0).toFixed(1)+'h', 'var(--accent)')}
-      ${trTile('Overtime Hours', (t.overtime_hours||0).toFixed(1)+'h', 'var(--yellow)')}
-      ${trTile('Total Payroll', '$'+(t.total_pay||0).toFixed(2), 'var(--green)')}
+      ${trTile('On schedule', okCount, 'var(--green)')}
+      ${trTile('With something to check', varCount, 'var(--yellow)')}
+      ${trTile('No show', noShow, 'var(--red)')}
+      ${trTile('Not started yet', upcoming, 'var(--text3)')}
+      ${trTile('Outside a schedule', unsched, 'var(--text3)')}
+      ${trTile('Regular hours', (t.regular_hours||0).toFixed(1)+'h', 'var(--accent)')}
+      ${trTile('Overtime hours', (t.overtime_hours||0).toFixed(1)+'h', 'var(--yellow)')}
     `;
 
     // Per-agent payroll breakdown
@@ -12278,13 +12720,14 @@ async function loadTimeReport(){
     }
 
     if(!rows.length){
-      tbody.innerHTML = '<tr><td colspan="18" style="text-align:center;padding:32px;color:var(--text3)">No data for this range. Add schedules and upload a Clocker report.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="15" style="text-align:center;padding:32px;color:var(--text3)">Nobody clocked in and nothing was scheduled in this period.</td></tr>';
       return;
     }
 
     const fmtT = iso => iso ? new Date(iso).toLocaleString([], {month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '—';
     const fmtSched = r => r.scheduled_in ? `${new Date(r.scheduled_in).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})} → ${new Date(r.scheduled_out).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}` : '—';
     const statusBadgeCls = s => s==='OK'?'badge-green':s==='Variance'?'badge-yellow':s==='No Show'?'badge-red':'badge-gray';
+    const statusWord = s => s==='Variance' ? 'Check' : s==='Upcoming' ? 'Not started' : s;
 
     const shiftRow = (r, idx) => {
       const varColor = r.net_variance == null ? 'var(--text3)' : (r.net_variance < -0.1 ? 'var(--red)' : r.net_variance > 0.1 ? 'var(--green)' : 'var(--text2)');
@@ -12297,45 +12740,40 @@ async function loadTimeReport(){
       const origOut = (r.is_adjusted && r.original_out && r.original_out!==r.actual_out)
         ? `<span style="font-size:10px;color:var(--text3);display:block;text-decoration:line-through;">${fmtT(r.original_out)}</span>` : '';
       const rowBg = r.is_adjusted ? 'background:rgba(245,166,35,0.06);' : '';
+      const unpaid = Math.round(r.break_unpaid_minutes || 0);
+      const p = r.phone_deduction;
+      let phone = '<span style="color:var(--text3)">—</span>';
+      if(p && !(p.total_minutes>0)) phone = '<span style="color:var(--green)">on phone</span>';
+      if(p && p.total_minutes>0){
+        const detail = (p.gaps_counted||[]).map(g=>{
+          const f=new Date(g.from).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"});
+          const to=new Date(g.to).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"});
+          return `${f}-${to}  ${Math.round(g.deducted_minutes)}m  ${g.reason}`;
+        }).join(" | ");
+        const parts=[];
+        if(p.late_start_minutes>0) parts.push(`start ${Math.round(p.late_start_minutes)}m`);
+        if(p.midshift_minutes>0) parts.push(`mid ${Math.round(p.midshift_minutes)}m`);
+        if(p.early_finish_minutes>0) parts.push(`end ${Math.round(p.early_finish_minutes)}m`);
+        phone = `<span style="color:var(--red);font-weight:600;" title="${detail}">-${Math.round(p.total_minutes)}m</span>`+
+                `<span style="display:block;font-size:10px;color:var(--text3);">${parts.join(" · ")}</span>`;
+      }
+      const noWork = !r.actual_in;
       return `<tr style="${rowBg}">
         <td style="font-weight:600;">${adjMark}${r.employee_name}</td>
         <td style="white-space:nowrap;">${r.shift_date}${r.block_no>1?`<span style="font-size:10px;color:var(--accent);display:block;">block ${r.block_no}</span>`:''}</td>
-        <td style="white-space:nowrap;font-size:11px;color:var(--text3);">${fmtSched(r)}${r.break_allowed!=null?`<span style="display:block;">${r.break_allowed}m brk ${r.from_recurring?'<span title="From weekly schedule">🔁</span>':''}</span>`:''}</td>
+        <td style="white-space:nowrap;font-size:11px;color:var(--text3);">${fmtSched(r)}${r.from_recurring?' <span title="From the weekly schedule">🔁</span>':''}</td>
         <td style="white-space:nowrap;">${fmtT(r.actual_in)}${origIn}${lateTag}</td>
         <td style="white-space:nowrap;">${fmtT(r.actual_out)}${origOut}</td>
-        <td>${r.break_taken}m${r.break_count?`<span style="font-size:10px;color:var(--text3);display:block;">${r.break_count} break(s)</span>`:''}${(r.break_declared!=null && r.break_declared!==r.break_taken)?`<span style="font-size:10px;color:${r.break_taken>r.break_declared?'var(--red)':'var(--text3)'};display:block;">declared ${r.break_declared}m (${r.break_taken>r.break_declared?'+':''}${r.break_taken-r.break_declared}m)</span>`:''}${r.away_minutes?`<span style="font-size:10px;color:var(--yellow);display:block;">+${r.away_minutes}m away</span>`:''}</td>
+        <td>${noWork?'—':`${r.break_taken}m`}${(!noWork && r.break_allowed!=null)?`<span style="font-size:10px;color:var(--text3);display:block;">of ${r.break_allowed}m paid</span>`:''}${unpaid>0?`<span style="font-size:10px;color:var(--red);display:block;">${unpaid}m unpaid</span>`:''}</td>
         <td>${r.gross_hours!=null?r.gross_hours.toFixed(2)+'h':'—'}${r.segment_count>1?`<span style="font-size:10px;color:var(--text3);display:block;">${r.segment_count} sessions</span>`:''}</td>
         <td style="font-weight:600;">${r.net_hours!=null?r.net_hours.toFixed(2)+'h':'—'}</td>
         <td style="color:${varColor};font-weight:600;">${r.net_variance!=null?(r.net_variance>0?'+':'')+r.net_variance.toFixed(2)+'h':'—'}</td>
-        <td>${(r.regular_hours||0).toFixed(2)}h</td>
-        <td style="color:${r.overtime_hours>0?'var(--yellow)':'var(--text3)'};font-weight:${r.overtime_hours>0?'600':'400'};">${(r.overtime_hours||0).toFixed(2)}h${otBreak?`<span style="font-size:10px;display:block;">${otBreak}</span>`:''}</td>
-        <td style="font-size:11px;">${r.hourly_rate?'$'+r.hourly_rate.toFixed(2):'—'}</td>
-        <td style="font-weight:700;color:var(--green);">${r.total_pay?'$'+r.total_pay.toFixed(2):'—'}</td>
-        <td><span class="badge ${statusBadgeCls(r.status)}">${r.status}</span></td>
-        <td style="font-size:11px;">${(()=>{
-          const p = r.phone_deduction;
-          if(!p) return '<span style="color:var(--text3)">—</span>';
-          if(!(p.total_minutes>0)) return '<span style="color:var(--green)">on phone</span>';
-          const detail = (p.gaps_counted||[]).map(g=>{
-            const f=new Date(g.from).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"});
-            const to=new Date(g.to).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"});
-            return `${f}-${to}  ${Math.round(g.deducted_minutes)}m  ${g.reason}`;
-          }).join(" | ");
-          const parts=[];
-          if(p.late_start_minutes>0) parts.push(`start ${Math.round(p.late_start_minutes)}m`);
-          if(p.midshift_minutes>0) parts.push(`mid ${Math.round(p.midshift_minutes)}m`);
-          if(p.early_finish_minutes>0) parts.push(`end ${Math.round(p.early_finish_minutes)}m`);
-          return `<span style="color:var(--red);font-weight:600;" title="${detail}">-${Math.round(p.total_minutes)}m</span>`+
-                 `<span style="display:block;font-size:10px;color:var(--text3);">${parts.join(" · ")}</span>`;
-        })()}</td>
-        <td style="font-size:11px;font-weight:600;color:var(--green);">${(()=>{
-          const p = r.phone_deduction;
-          if(!p || !(p.total_minutes>0)) return r.total_pay!=null?"$"+r.total_pay.toFixed(2):"—";
-          return `$${(p.adjusted_pay!=null?p.adjusted_pay:0).toFixed(2)}`+
-                 `<span style="display:block;font-size:10px;color:var(--text3);font-weight:400;">was $${(p.original_pay||0).toFixed(2)}</span>`;
-        })()}</td>
-        <td style="font-size:11px;color:var(--text3);max-width:220px;">${(r.issues||[]).join('; ')||'—'}</td>
-        <td><button onclick="openAdjustModal(${idx})" style="background:none;border:none;color:${r.is_adjusted?'var(--yellow)':'var(--accent)'};cursor:pointer;font-size:11px;white-space:nowrap;">${r.is_adjusted?'Edit ✏️':'Adjust'}</button></td>
+        <td>${noWork?'—':(r.regular_hours||0).toFixed(2)+'h'}</td>
+        <td style="color:${r.overtime_hours>0?'var(--yellow)':'var(--text3)'};font-weight:${r.overtime_hours>0?'600':'400'};">${noWork?'—':(r.overtime_hours||0).toFixed(2)+'h'}${(otBreak && r.overtime_hours>0)?`<span style="font-size:10px;display:block;">${otBreak}</span>`:''}${(r.ot_dropped_hours||0)>0?`<span style="font-size:10px;display:block;color:var(--text3);">${r.ot_dropped_hours}h not paid</span>`:''}</td>
+        <td style="font-size:11px;">${phone}</td>
+        <td><span class="badge ${statusBadgeCls(r.status)}">${statusWord(r.status)}</span></td>
+        <td style="font-size:11px;color:var(--text3);max-width:260px;text-align:left;">${(r.issues||[]).join('; ')||'—'}</td>
+        <td>${noWork?'':`<button onclick="openAdjustModal(${idx})" style="background:none;border:none;color:${r.is_adjusted?'var(--yellow)':'var(--accent)'};cursor:pointer;font-size:11px;white-space:nowrap;">${r.is_adjusted?'Edit ✏️':'Adjust'}</button>`}</td>
       </tr>`;
     };
 
@@ -12365,21 +12803,25 @@ async function loadTimeReport(){
       const period = dates.length ? `${dayFmt(dates[0])} – ${dayFmt(dates[dates.length-1])}` : '—';
       const key = 'ag_' + name.replace(/[^a-z0-9]/gi,'_');
 
+      const worked = shifts.filter(x => x.actual_in).length;
+      const missed = shifts.filter(x => x.status==='No Show').length;
+      const clocked = shifts.reduce((s,x)=>s+(x.gross_hours||0), 0);
+      const brk = shifts.reduce((s,x)=>s+(x.break_taken||0), 0);
       const summary = `<tr class="agent-summary" data-key="${key}" onclick="toggleAgentRows('${key}')"
             style="cursor:pointer;background:var(--surface2);border-top:2px solid var(--border);">
         <td style="font-weight:700;font-size:13px;">
           <span id="${key}_caret" style="display:inline-block;width:12px;color:var(--accent);">▶</span> ${name}
         </td>
-        <td colspan="2" style="font-size:11px;color:var(--text3);">${period} · ${days} day${days===1?'':'s'} · ${shifts.length} shift${shifts.length===1?'':'s'}</td>
-        <td colspan="4" style="font-size:11px;color:var(--text3);">${issues ? issues + ' day' + (issues===1?'':'s') + ' with issues' : 'no issues'}</td>
-        <td style="font-weight:600;">${netHours.toFixed(2)}h</td>
+        <td colspan="2" style="font-size:11px;color:var(--text3);">${period} · ${worked} day${worked===1?'':'s'} worked${missed?` · <span style="color:var(--red);">${missed} no-show${missed===1?'':'s'}</span>`:''}</td>
+        <td colspan="2" style="font-size:11px;color:var(--text3);">${issues ? issues + ' to check' : 'nothing to check'}</td>
+        <td>${Math.round(brk)}m${(a.break_unpaid_minutes||0)>0?`<span style="font-size:10px;color:var(--red);display:block;">${a.break_unpaid_minutes}m unpaid</span>`:''}</td>
+        <td>${clocked.toFixed(2)}h</td>
+        <td style="font-weight:700;">${netHours.toFixed(2)}h</td>
         <td></td>
-        <td style="color:${(a.overtime_hours||0)>0?'var(--yellow)':'var(--text3)'};font-weight:600;">${(a.overtime_hours||0).toFixed(2)}h OT</td>
-        <td colspan="2" style="font-size:11px;">${a.hourly_rate?money(a.hourly_rate)+'/h':''}</td>
+        <td>${(a.regular_hours||0).toFixed(2)}h</td>
+        <td style="color:${(a.overtime_hours||0)>0?'var(--yellow)':'var(--text3)'};font-weight:600;">${(a.overtime_hours||0).toFixed(2)}h</td>
         <td style="color:${offMin>0?'var(--red)':'var(--text3)'};font-weight:600;">${offMin>0?'-'+Math.round(offMin)+'m':'—'}</td>
-        <td style="font-weight:700;color:var(--green);font-size:13px;">${money(payable)}
-          ${payable<origPay?`<span style="display:block;font-size:10px;color:var(--text3);font-weight:400;">was ${money(origPay)}</span>`:''}</td>
-        <td colspan="3" style="font-size:11px;color:var(--text3);">click to see each day</td>
+        <td colspan="3" style="font-size:11px;color:var(--text3);text-align:right;">click to see each day</td>
       </tr>`;
 
       const details = items.map(({r, idx}) =>
@@ -12393,7 +12835,7 @@ async function loadTimeReport(){
     if(msg.includes('<') || msg.includes('doctype') || msg.includes('JSON')){
       msg = 'Server error building the report — the page may also need a hard refresh (Ctrl+Shift+R).';
     }
-    tbody.innerHTML = `<tr><td colspan="18" style="text-align:center;padding:24px;color:var(--red)">${msg}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="15" style="text-align:center;padding:24px;color:var(--red)">${msg}</td></tr>`;
   }
   loadSchedulesList();
   loadRecurringList();
