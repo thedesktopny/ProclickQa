@@ -9,60 +9,169 @@
          --text:#F2F4FF; --text2:#AEB6E4; --text3:#7A84B8; --accent:#7B6CF6;
          --green:#10D48E; --red:#F24E4E; --yellow:#F5A623; }
   *{ box-sizing:border-box; }
+  html,body{ height:100%; }
   body{ margin:0; background:var(--bg); color:var(--text);
         font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
-  .wrap{ max-width:1100px; margin:0 auto; padding:22px 20px 60px; }
-  h1{ font-size:20px; margin:0 0 4px; }
-  .sub{ color:var(--text3); font-size:12.5px; margin-bottom:18px; }
-  .drop{ border:2px dashed var(--border); border-radius:14px; padding:38px 20px; text-align:center;
-         color:var(--text2); cursor:pointer; transition:border-color .15s, background .15s; }
-  .drop.over{ border-color:var(--accent); background:rgba(123,108,246,.08); }
+
+  .wrap{ max-width:1280px; margin:0 auto; padding:26px 28px 60px; }
+  .head{ margin-bottom:20px; }
+  h1{ font-size:22px; margin:0 0 4px; letter-spacing:-.2px; }
+  .sub{ color:var(--text3); font-size:13px; max-width:640px; }
+  /* Inside the portal the page already has its own title bar. */
+  .framed .head{ display:none; }
+  .framed .wrap{ padding-top:20px; }
+
+  .layout{ display:grid; grid-template-columns:290px minmax(0,1fr); gap:20px; align-items:start; }
+  @media (max-width:860px){ .layout{ grid-template-columns:1fr; } .wrap{ padding:16px 16px 40px; } }
+
+  /* ── settings panel ── */
+  .panel{ background:var(--surface); border:1px solid var(--border); border-radius:16px;
+          padding:18px; position:sticky; top:20px; }
+  @media (max-width:860px){ .panel{ position:static; } .main{ order:-1; } }
+  .group{ padding-bottom:16px; margin-bottom:16px; border-bottom:1px solid var(--border); }
+  .group:last-of-type{ border-bottom:0; margin-bottom:0; padding-bottom:4px; }
+  .glabel{ font-size:11px; font-weight:600; letter-spacing:.7px; text-transform:uppercase;
+           color:var(--text3); margin-bottom:10px; display:flex; justify-content:space-between; }
+  .glabel span{ color:var(--text2); text-transform:none; letter-spacing:0; font-weight:500; }
+
+  .choice{ display:block; cursor:pointer; margin-bottom:8px; }
+  .choice:last-child{ margin-bottom:0; }
+  .choice input{ position:absolute; opacity:0; pointer-events:none; }
+  .choice .box{ display:block; border:1px solid var(--border); background:var(--surface2);
+                border-radius:11px; padding:10px 12px; transition:border-color .15s, background .15s; }
+  .choice .box b{ display:block; font-size:13.5px; font-weight:600; color:var(--text); }
+  .choice .box i{ display:block; font-style:normal; font-size:12px; color:var(--text3); margin-top:1px; }
+  .choice:hover .box{ border-color:#3a4160; }
+  .choice input:checked + .box{ border-color:var(--accent); background:rgba(123,108,246,.14); }
+  .choice input:focus-visible + .box{ outline:2px solid var(--accent); outline-offset:2px; }
+
+  .toggle{ display:flex; align-items:center; justify-content:space-between; gap:10px; cursor:pointer;
+           font-size:13.5px; color:var(--text); }
+  .toggle small{ display:block; color:var(--text3); font-size:12px; }
+  .toggle input{ position:absolute; opacity:0; pointer-events:none; }
+  .toggle .sw{ flex:none; width:38px; height:22px; border-radius:22px; background:var(--surface2);
+               border:1px solid var(--border); position:relative; transition:background .15s, border-color .15s; }
+  .toggle .sw::after{ content:""; position:absolute; top:2px; left:2px; width:16px; height:16px;
+               border-radius:50%; background:var(--text3); transition:transform .15s, background .15s; }
+  .toggle input:checked + .sw{ background:var(--accent); border-color:var(--accent); }
+  .toggle input:checked + .sw::after{ transform:translateX(16px); background:#fff; }
+  .toggle input:focus-visible + .sw{ outline:2px solid var(--accent); outline-offset:2px; }
+
+  input[type=range]{ width:100%; accent-color:var(--accent); margin:0; display:block; }
+  .hint{ font-size:12px; color:var(--text3); margin-top:6px; }
+  select{ width:100%; background:var(--surface2); color:var(--text); border:1px solid var(--border);
+          border-radius:10px; padding:9px 10px; font:inherit; font-size:13.5px; }
+  select:focus{ outline:none; border-color:var(--accent); }
+
+  .btn{ background:var(--accent); color:#fff; border:0; border-radius:10px; padding:10px 16px;
+        font-size:13.5px; font-weight:600; cursor:pointer; font-family:inherit; transition:filter .15s, opacity .15s; }
+  .btn:hover:not(:disabled){ filter:brightness(1.1); }
+  .btn.outline{ background:transparent; border:1px solid var(--border); color:var(--text2); font-weight:500; }
+  .btn.outline:hover:not(:disabled){ border-color:#3a4160; color:var(--text); filter:none; }
+  .btn:disabled{ opacity:.4; cursor:default; }
+  .actions{ display:grid; grid-template-columns:1fr auto; gap:8px; margin-top:16px; }
+
+  /* ── drop zone ── */
+  .drop{ display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px;
+         min-height:250px; border:2px dashed #343a55; border-radius:18px; padding:30px 20px;
+         text-align:center; cursor:pointer; background:var(--surface);
+         transition:border-color .15s, background .15s, min-height .2s; }
+  .drop:hover{ border-color:var(--accent); }
+  .drop.over{ border-color:var(--accent); background:rgba(123,108,246,.12); }
   .drop input{ display:none; }
-  .bar{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:14px 0; }
-  .btn{ background:var(--accent); color:#fff; border:0; border-radius:9px; padding:9px 16px;
-        font-size:13px; cursor:pointer; font-family:inherit; }
-  .btn.outline{ background:transparent; border:1px solid var(--border); color:var(--text2); }
-  .btn:disabled{ opacity:.5; cursor:default; }
-  .grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:12px; }
-  .card{ background:var(--surface); border:1px solid var(--border); border-radius:12px; overflow:hidden; }
+  .drop .ico{ width:54px; height:54px; border-radius:50%; background:rgba(123,108,246,.16);
+              color:var(--accent); display:flex; align-items:center; justify-content:center; margin-bottom:6px; }
+  .drop .big{ font-size:17px; font-weight:600; color:var(--text); }
+  .drop .small{ font-size:13px; color:var(--text3); }
+  .drop .pick{ margin-top:10px; background:var(--accent); color:#fff; border-radius:10px;
+               padding:9px 18px; font-size:13.5px; font-weight:600; }
+  /* Once there are photos, the drop zone shrinks out of the way. */
+  .main.has .drop{ min-height:0; flex-direction:row; padding:14px 18px; gap:12px; justify-content:flex-start; text-align:left; }
+  .main.has .drop .ico{ width:36px; height:36px; margin:0; }
+  .main.has .drop .ico svg{ width:18px; height:18px; }
+  .main.has .drop .big{ font-size:14px; }
+  .main.has .drop .small{ display:none; }
+  .main.has .drop .pick{ margin:0 0 0 auto; padding:7px 14px; font-size:13px; }
+
+  .status{ display:flex; align-items:center; gap:8px; font-size:12.5px; color:var(--text2);
+           margin:14px 2px; min-height:18px; }
+  .status::before{ content:""; width:7px; height:7px; border-radius:50%; background:var(--accent); flex:none; }
+  .status:empty{ display:none; }
+
+  .grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); gap:14px; }
+  .card{ background:var(--surface); border:1px solid var(--border); border-radius:14px; overflow:hidden; }
   .card canvas, .card img{ width:100%; display:block; background:#000; }
-  .card .meta{ padding:8px 10px; font-size:11.5px; color:var(--text3); display:flex; justify-content:space-between; gap:8px; }
+  .card .meta{ padding:9px 12px; font-size:12px; color:var(--text3); display:flex; justify-content:space-between; gap:8px; }
   .card .meta b{ color:var(--text2); font-weight:500; }
   .card.busy .meta b{ color:var(--yellow); } .card.done .meta b{ color:var(--green); } .card.fail .meta b{ color:var(--red); }
-  .opts{ display:flex; gap:14px; flex-wrap:wrap; font-size:12.5px; color:var(--text2); }
-  .opts label{ display:flex; gap:6px; align-items:center; cursor:pointer; }
-  .status{ font-size:12px; color:var(--text3); min-height:18px; }
+  .card.busy{ animation:pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse{ 50%{ border-color:#4a4570; } }
+  @media (prefers-reduced-motion:reduce){ .card.busy{ animation:none; } *{ transition:none !important; } }
 </style>
+<script>if (window.top !== window.self) document.documentElement.classList.add('framed');</script>
 </head>
 <body>
 <div class="wrap">
-  <h1>Skin Block</h1>
-  <div class="sub">Drop photos in. People are found, their skin is covered, and the pictures download
-    themselves. Nothing leaves this computer — both detectors run in your browser.</div>
-
-  <label class="drop" id="drop">
-    <input type="file" id="files" multiple accept="image/*">
-    Drop photos here, or click to choose. As many as you like.
-  </label>
-
-  <div class="bar">
-    <div class="opts">
-      <label><input type="radio" name="mode" value="skin" checked> cover skin, keep clothes</label>
-      <label><input type="radio" name="mode" value="person"> cover the whole person</label>
-      <label><input type="checkbox" id="opt-hair"> hair too</label>
-      <label>grow <input type="range" id="opt-grow" min="0" max="24" value="6" style="width:80px;vertical-align:middle;">
-        <span id="grow-v">6</span>px</label>
-      <label>style <select id="opt-style">
-        <option value="solid">solid</option><option value="blur">blur</option><option value="pixel">pixelate</option>
-      </select></label>
-    </div>
-    <span style="flex:1"></span>
-    <button class="btn outline" id="dl-all" disabled>Download all</button>
-    <button class="btn outline" id="clear">Clear</button>
+  <div class="head">
+    <h1>Skin Block</h1>
+    <div class="sub">Drop photos in. People are found, their skin is covered, and the pictures download
+      themselves. Nothing leaves this computer.</div>
   </div>
-  <div class="status" id="status">Loading the detectors…</div>
-  <div class="grid" id="grid"></div>
+
+  <div class="layout">
+    <aside class="panel">
+      <div class="group">
+        <div class="glabel">What to cover</div>
+        <label class="choice"><input type="radio" name="mode" value="skin" checked>
+          <span class="box"><b>Skin only</b><i>Clothes stay visible</i></span></label>
+        <label class="choice"><input type="radio" name="mode" value="person">
+          <span class="box"><b>Whole person</b><i>Covers the full outline</i></span></label>
+      </div>
+
+      <div class="group">
+        <label class="toggle"><span>Cover hair too<small>Off leaves hair as it is</small></span>
+          <input type="checkbox" id="opt-hair"><span class="sw"></span></label>
+      </div>
+
+      <div class="group">
+        <div class="glabel">Extra margin <span><span id="grow-v">6</span> px</span></div>
+        <input type="range" id="opt-grow" min="0" max="24" value="6" aria-label="Extra margin around covered areas">
+        <div class="hint">Higher covers a little past the edge of the skin.</div>
+      </div>
+
+      <div class="group">
+        <div class="glabel">Cover style</div>
+        <select id="opt-style" aria-label="Cover style">
+          <option value="solid">Solid black</option><option value="blur">Blur</option><option value="pixel">Pixelate</option>
+        </select>
+      </div>
+
+      <div class="actions">
+        <button class="btn" id="dl-all" disabled>Download all</button>
+        <button class="btn outline" id="clear">Clear</button>
+      </div>
+    </aside>
+
+    <section class="main" id="main">
+      <label class="drop" id="drop">
+        <input type="file" id="files" multiple accept="image/*">
+        <span class="ico"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"/><path d="m6 10 6-6 6 6"/><path d="M4 20h16"/></svg></span>
+        <span class="big">Drop photos here</span>
+        <span class="small">As many as you like. Finished pictures download on their own.</span>
+        <span class="pick">Choose photos</span>
+      </label>
+      <div class="status" id="status">Loading the detectors…</div>
+      <div class="grid" id="grid"></div>
+    </section>
+  </div>
 </div>
+
+<script>
+  // Shrink the drop zone once there are photos, grow it back when cleared.
+  new MutationObserver(function(){
+    document.getElementById('main').classList.toggle('has', document.getElementById('grid').children.length > 0);
+  }).observe(document.getElementById('grid'), { childList:true });
+</script>
 
 <script type="module">
 /* ===========================================================================
