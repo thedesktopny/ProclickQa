@@ -4479,6 +4479,25 @@ def _resolve_schedules(date_from, date_to, employee=''):
     recurring = [dict(r) for r in c.fetchall()]
     conn.close()
 
+    # One spelling per person. The schedule page matches names ignoring case
+    # and spaces, so "eric" saved for one week and "Eric" in the pattern looked
+    # like the same person there — but here they were two, the customised week
+    # was ignored, and the default pattern's hours came back on a day off.
+    _canon = {}
+    for r in recurring:
+        _canon.setdefault(str(r['employee_name']).strip().lower(), r['employee_name'])
+    for _rows in (weekrows, specific):
+        for r in _rows:
+            _k = str(r['employee_name']).strip().lower()
+            r['employee_name'] = _canon.setdefault(_k, str(r['employee_name']).strip())
+    week_defined = {(w['employee_name'], str(w['week_start'])) for w in weekrows}
+    by_week = {}
+    for w in weekrows:
+        if w.get('active') is False:
+            continue
+        by_week.setdefault((w['employee_name'], str(w['week_start']), w['day_of_week']), []).append(w)
+    override_keys = {(s_['employee_name'], str(s_['shift_date']), s_.get('block_no') or 1) for s_ in specific}
+
     generated = []
     # Run when EITHER source has rows. Requiring recurring rows meant an agent
     # scheduled only through customised weeks — no default pattern — had no
@@ -4525,6 +4544,7 @@ def _resolve_schedules(date_from, date_to, employee=''):
                             'break_minutes': wrow['break_minutes'] or 0,
                             'from_recurring': True,
                             'from_week': True,
+                            'schedule_source': 'this week',
                         })
                     by_dow_seen.add((emp, wk, dow))
                     continue
@@ -4545,6 +4565,7 @@ def _resolve_schedules(date_from, date_to, employee=''):
                     'scheduled_out': sched_out,
                     'break_minutes': r['break_minutes'] or 0,
                     'from_recurring': True,
+                    'schedule_source': 'weekly pattern',
                 })
             # agents whose week was customised but who have no default pattern row
             for (emp, wkey, wdow), wlist in by_week.items():
@@ -4564,11 +4585,13 @@ def _resolve_schedules(date_from, date_to, employee=''):
                         'block_no': wblk, 'scheduled_in': w_in, 'scheduled_out': w_out,
                         'break_minutes': wrow['break_minutes'] or 0,
                         'from_recurring': True, 'from_week': True,
+                        'schedule_source': 'this week',
                     })
             cur += _td(days=1)
 
     for s in specific:
         s['from_recurring'] = False
+        s['schedule_source'] = 'one-off'
     return specific + generated
 
 def _week_start(d):
@@ -10073,7 +10096,16 @@ def _time_report_data(date_from, date_to, employee='', grace=5, source='auto'):
             except Exception: pass
 
     # Pull schedules for the window — specific dates plus expanded recurring patterns
-    schedules = _resolve_schedules(date_from, date_to, employee)
+    # A shift that starts the evening before this period and runs past midnight
+    # belongs to the day it started — i.e. to the period before. Schedules are
+    # read a day either side so those minutes are placed with their own shift
+    # instead of turning up here as a separate "unscheduled" line.
+    def _shift_day(d, n):
+        return str(datetime.strptime(d, '%Y-%m-%d').date() + timedelta(days=n)) if d else d
+    schedules_wide = _resolve_schedules(_shift_day(date_from, -1), _shift_day(date_to, 1), employee)
+    schedules = [s_ for s_ in schedules_wide
+                 if (not date_from or str(s_['shift_date']) >= date_from)
+                 and (not date_to or str(s_['shift_date']) <= date_to)]
 
     # Pay rates and any manager-declared special overtime periods.
     # Wrapped so a missing/not-yet-migrated table degrades to "no pay data"
@@ -10160,7 +10192,7 @@ def _time_report_data(date_from, date_to, employee='', grace=5, source='auto'):
     MAX_ASSIGN_HOURS = 6
     assignment = {}  # id(segment) -> schedule key
     for name, segs in shifts_by_emp.items():
-        emp_scheds = [s for s in schedules if s['employee_name'] == name]
+        emp_scheds = [s for s in schedules_wide if s['employee_name'] == name]
         for seg in segs:
             best_key, best_delta = None, None
             for s in emp_scheds:
@@ -10176,6 +10208,14 @@ def _time_report_data(date_from, date_to, employee='', grace=5, source='auto'):
                     best_key = (name, str(s['shift_date']), s.get('block_no') or 1)
             if best_key:
                 assignment[id(seg)] = best_key
+
+    # Time placed with a shift just outside the period is that period's to pay
+    _in_range = {(s_['employee_name'], str(s_['shift_date']), s_.get('block_no') or 1) for s_ in schedules}
+    for name, segs in shifts_by_emp.items():
+        for seg in segs:
+            k = assignment.get(id(seg))
+            if k and k not in _in_range:
+                matched_shift_keys.add((name, seg['login'].isoformat()))
 
     # 1) Every scheduled shift — matched against actual
     for s in schedules:
@@ -10198,6 +10238,7 @@ def _time_report_data(date_from, date_to, employee='', grace=5, source='auto'):
             'break_allowed': break_allowed,
             'block_no': s.get('block_no') or 1,
             'from_recurring': s.get('from_recurring', False),
+            'schedule_source': s.get('schedule_source') or ('weekly pattern' if s.get('from_recurring') else 'one-off'),
             # breaks are paid up to the allowance, so the scheduled paid time is
             # the whole block
             'scheduled_net_hours': round((sched_out - sched_in).total_seconds()/3600, 2),
@@ -10353,28 +10394,48 @@ def _time_report_data(date_from, date_to, employee='', grace=5, source='auto'):
         })
         rows.append(row)
 
-    # 2) Worked shifts with NO matching schedule (unscheduled work)
+    # 2) Worked shifts with NO matching schedule (unscheduled work).
+    # Sessions with a short gap between them are ONE shift — logging out and
+    # back in a few minutes later, or just after midnight, is not a second day
+    # of work. The shift is dated by when it started.
+    UNSCHED_JOIN_MINUTES = 120
     for name, shs in shifts_by_emp.items():
-        for sh in shs:
-            key = (name, sh['login'].isoformat())
-            if key in matched_shift_keys: continue
-            # Only include if its login date falls inside the requested window
-            d = sh['login'].date()
+        loose = sorted([sh for sh in shs if (name, sh['login'].isoformat()) not in matched_shift_keys],
+                       key=lambda x: x['login'])
+        groups = []
+        for sh in loose:
+            if groups:
+                last = groups[-1][-1]
+                if last['logout'] and (sh['login'] - last['logout']).total_seconds() <= UNSCHED_JOIN_MINUTES * 60:
+                    groups[-1].append(sh); continue
+            groups.append([sh])
+        for grp in groups:
+            first, last = grp[0], grp[-1]
+            # Only include if it started inside the requested window
+            d = first['login'].date()
             if date_from and str(d) < date_from: continue
             if date_to and str(d) > date_to: continue
-            break_taken = sum(b['minutes'] for b in sh['breaks'])
+            break_taken = sum(b['minutes'] for sh in grp for b in sh['breaks'])
             gross = net = None
             # For an agent who HAS a schedule, working outside it is overtime.
             # For someone with no schedule at all it is simply their hours.
-            unsched_pay = _compute_pay([sh], None, rates.get(name, []), ot_periods, _pay_opts(name))
-            if sh['logout']:
-                gross = (sh['logout'] - sh['login']).total_seconds()/3600
-                net = gross - unsched_pay['break_unpaid_minutes']/60
+            unsched_pay = _compute_pay(grp, None, rates.get(name, []), ot_periods, _pay_opts(name))
+            worked_secs = sum((sh['logout'] - sh['login']).total_seconds() for sh in grp if sh['logout'])
+            away = 0.0
             _has_sched = name in scheduled_names
             unsched_issues = ['Worked on a day with no scheduled shift' if _has_sched
                               else 'No schedule set for this agent']
-            if not sh['logout']:
-                unsched_issues.append('Never clocked out' if (now_local - sh['login']).total_seconds() > 20 * 3600
+            for prev, nxt in zip(grp, grp[1:]):
+                gap = (nxt['login'] - prev['logout']).total_seconds() / 60
+                if gap > 0:
+                    away += gap
+                    unsched_issues.append(f"Logged out for {gap:.0f} min "
+                                          f"({prev['logout'].strftime('%-I:%M %p')}–{nxt['login'].strftime('%-I:%M %p')})")
+            if last['logout']:
+                gross = (last['logout'] - first['login']).total_seconds()/3600
+                net = worked_secs/3600 - unsched_pay['break_unpaid_minutes']/60
+            else:
+                unsched_issues.append('Never clocked out' if (now_local - last['login']).total_seconds() > 20 * 3600
                                       else 'Still clocked in')
             if unsched_pay['break_unpaid_minutes'] >= 1:
                 unsched_issues.append(f"Break {break_taken:.0f}m is over the {unsched_pay['break_allowance_minutes']:.0f}m paid allowance — "
@@ -10389,13 +10450,13 @@ def _time_report_data(date_from, date_to, employee='', grace=5, source='auto'):
                 'employee_name': name, 'shift_date': str(d),
                 'scheduled_in': None, 'scheduled_out': None,
                 'break_allowed': round(unsched_pay['break_allowance_minutes']),
-                'block_no': 1, 'from_recurring': False,
+                'block_no': 1, 'from_recurring': False, 'schedule_source': None,
                 'scheduled_net_hours': None,
                 'status': 'Unscheduled' if _has_sched else 'No schedule',
-                'actual_in': sh['login'].isoformat(),
-                'actual_out': sh['logout'].isoformat() if sh['logout'] else None,
-                'break_taken': round(break_taken), 'break_count': len(sh['breaks']),
-                'away_minutes': 0, 'segment_count': 1,
+                'actual_in': first['login'].isoformat(),
+                'actual_out': last['logout'].isoformat() if last['logout'] else None,
+                'break_taken': round(break_taken), 'break_count': sum(len(sh['breaks']) for sh in grp),
+                'away_minutes': round(away), 'segment_count': len(grp),
                 'gross_hours': round(gross,2) if gross is not None else None,
                 'net_hours': round(net,2) if net is not None else None,
                 'late_minutes': None, 'early_out_minutes': None, 'net_variance': None,

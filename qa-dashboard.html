@@ -12505,7 +12505,7 @@ function prRender(){
           const none = !r.actual_in;
           return `<tr>
             <td style="white-space:nowrap;">${d}</td>
-            <td style="white-space:nowrap;color:var(--text3);">${r.scheduled_in ? fmtT(r.scheduled_in) + ' – ' + fmtT(r.scheduled_out) : '—'}</td>
+            <td style="white-space:nowrap;color:var(--text3);">${r.scheduled_in ? fmtT(r.scheduled_in) + ' – ' + fmtT(r.scheduled_out) + `<span class="pr-sub">${r.schedule_source==='this week'?'set for this week':r.schedule_source==='one-off'?'one-off for this date':'weekly pattern'}</span>` : 'off'}</td>
             <td style="white-space:nowrap;">${none ? `<span style="color:${r.status==='No Show'?'var(--red)':'var(--text3)'};">${r.status==='Upcoming'?'Not started':esc(r.status)}</span>` : fmtT(r.actual_in) + ' – ' + fmtT(r.actual_out)}</td>
             <td class="num">${r.gross_hours != null ? prHrs(r.clocked_hours != null ? r.clocked_hours : r.gross_hours) : '—'}</td>
             <td class="num">${none ? '—' : (r.break_taken||0) + 'm'}${(r.break_unpaid_minutes||0) >= 1 ? `<span class="pr-sub bad">${Math.round(r.break_unpaid_minutes)}m unpaid</span>` : ''}</td>
@@ -12761,7 +12761,7 @@ async function loadTimeReport(){
       return `<tr style="${rowBg}">
         <td style="font-weight:600;">${adjMark}${r.employee_name}</td>
         <td style="white-space:nowrap;">${r.shift_date}${r.block_no>1?`<span style="font-size:10px;color:var(--accent);display:block;">block ${r.block_no}</span>`:''}</td>
-        <td style="white-space:nowrap;font-size:11px;color:var(--text3);">${fmtSched(r)}${r.from_recurring?' <span title="From the weekly schedule">🔁</span>':''}</td>
+        <td style="white-space:nowrap;font-size:11px;color:var(--text3);">${fmtSched(r)}${r.schedule_source?`<span style="display:block;font-size:10px;" title="Where this scheduled shift comes from">${r.schedule_source==='this week'?'set for this week':r.schedule_source==='one-off'?'one-off for this date':'weekly pattern'}</span>`:''}</td>
         <td style="white-space:nowrap;">${fmtT(r.actual_in)}${origIn}${lateTag}</td>
         <td style="white-space:nowrap;">${fmtT(r.actual_out)}${origOut}</td>
         <td>${noWork?'—':`${r.break_taken}m`}${(!noWork && r.break_allowed!=null)?`<span style="font-size:10px;color:var(--text3);display:block;">of ${r.break_allowed}m paid</span>`:''}${unpaid>0?`<span style="font-size:10px;color:var(--red);display:block;">${unpaid}m unpaid</span>`:''}</td>
