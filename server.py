@@ -3766,16 +3766,18 @@ def _compute_pay(segments, sched_window, rate_history, ot_periods, opts=None):
                 reg_pay += hours * rate
             else:
                 mult = _mult_at(piece[0], ot_periods)
-                st = stretches.setdefault(where, {'secs': 0.0, 'pay': 0.0, 'by_mult': {},
+                st = stretches.setdefault(where, {'secs': 0.0, 'pay': 0.0, 'base': 0.0, 'by_mult': {},
                                                   'start': piece[0], 'end': piece[1]})
                 st['secs'] += secs
                 st['pay'] += hours * rate * mult
+                st['base'] += hours * rate
                 st['by_mult'][mult] = st['by_mult'].get(mult, 0) + hours
                 st['start'] = min(st['start'], piece[0]); st['end'] = max(st['end'], piece[1])
 
     ot_secs = ot_pay = dropped_secs = 0.0
     by_mult, dropped, unverified = {}, [], False
-    for where, st in stretches.items():
+    kept = []
+    for where, st in sorted(stretches.items(), key=lambda kv: kv[1]['start']):
         if calls is None:
             unverified = True                 # no call data — paid, but flagged
         elif not _overlaps_any(st['start'], st['end'], calls):
@@ -3783,9 +3785,36 @@ def _compute_pay(segments, sched_window, rate_history, ot_periods, opts=None):
             dropped.append({'where': where, 'hours': round(st['secs'] / 3600, 2),
                             'from': st['start'].isoformat(), 'to': st['end'].isoformat()})
             continue
+        kept.append(st)
+
+    # Scheduled time they were not clocked in for — a late start, a mid-shift
+    # logout, leaving early. Extra time worked outside the block makes that up
+    # first, at the normal rate; only what is left after that is overtime.
+    missed_secs = makeup_secs = 0.0
+    if sched_window:
+        s_in, s_out = sched_window
+        inside = 0.0
+        for seg in segments:
+            if seg['logout']:
+                inside += max(0.0, (min(seg['logout'], s_out) - max(seg['login'], s_in)).total_seconds())
+        missed_secs = max(0.0, (s_out - s_in).total_seconds() - inside)
+    owed = missed_secs
+    for st in kept:
+        take = min(owed, st['secs']) if owed > 0 else 0.0
+        if take > 0:
+            frac = take / st['secs']
+            reg_secs += take
+            reg_pay += st['base'] * frac
+            st['pay'] -= st['pay'] * frac
+            st['base'] -= st['base'] * frac
+            st['by_mult'] = {m: h * (1 - frac) for m, h in st['by_mult'].items()}
+            st['secs'] -= take
+            owed -= take
+            makeup_secs += take
         ot_secs += st['secs']; ot_pay += st['pay']
         for m, h in st['by_mult'].items():
-            by_mult[m] = by_mult.get(m, 0) + h
+            if h > 1e-9:
+                by_mult[m] = by_mult.get(m, 0) + h
 
     return {
         'regular_hours': round(reg_secs/3600, 2),
@@ -3802,6 +3831,8 @@ def _compute_pay(segments, sched_window, rate_history, ot_periods, opts=None):
         'paid_hours': round((reg_secs + ot_secs)/3600, 2),
         'ot_dropped_hours': round(dropped_secs/3600, 2),
         'ot_dropped': dropped,
+        'missed_minutes': round(missed_secs/60),
+        'makeup_minutes': round(makeup_secs/60),
         'ot_unverified': bool(unverified and ot_secs > 0),
     }
 
@@ -4532,7 +4563,11 @@ def _resolve_schedules(date_from, date_to, employee=''):
                         wi_h, wi_m = [int(x) for x in str(wrow['scheduled_in_time']).split(':')[:2]]
                         wo_h, wo_m = [int(x) for x in str(wrow['scheduled_out_time']).split(':')[:2]]
                         w_in = _dt.combine(cur, _dt.min.time()).replace(hour=wi_h, minute=wi_m)
-                        w_out_date = cur + _td(days=1) if wrow['overnight'] else cur
+                        # "overnight" only means something when the end is not
+                        # later than the start on the same day (2 PM -> 12 AM).
+                        # Ticked on a 10 AM -> 8 PM row it made a 34-hour shift
+                        # that swallowed the next morning's work.
+                        w_out_date = cur + _td(days=1) if (wrow['overnight'] and (wo_h, wo_m) <= (wi_h, wi_m)) else cur
                         w_out = _dt.combine(w_out_date, _dt.min.time()).replace(hour=wo_h, minute=wo_m)
                         generated.append({
                             'id': None,
@@ -4554,7 +4589,7 @@ def _resolve_schedules(date_from, date_to, employee=''):
                 in_h, in_m = [int(x) for x in str(r['scheduled_in_time']).split(':')[:2]]
                 out_h, out_m = [int(x) for x in str(r['scheduled_out_time']).split(':')[:2]]
                 sched_in = _dt.combine(cur, _dt.min.time()).replace(hour=in_h, minute=in_m)
-                out_date = cur + _td(days=1) if r['overnight'] else cur
+                out_date = cur + _td(days=1) if (r['overnight'] and (out_h, out_m) <= (in_h, in_m)) else cur
                 sched_out = _dt.combine(out_date, _dt.min.time()).replace(hour=out_h, minute=out_m)
                 generated.append({
                     'id': None,
@@ -4578,7 +4613,7 @@ def _resolve_schedules(date_from, date_to, employee=''):
                     wi_h, wi_m = [int(x) for x in str(wrow['scheduled_in_time']).split(':')[:2]]
                     wo_h, wo_m = [int(x) for x in str(wrow['scheduled_out_time']).split(':')[:2]]
                     w_in = _dt.combine(cur, _dt.min.time()).replace(hour=wi_h, minute=wi_m)
-                    w_out_date = cur + _td(days=1) if wrow['overnight'] else cur
+                    w_out_date = cur + _td(days=1) if (wrow['overnight'] and (wo_h, wo_m) <= (wi_h, wi_m)) else cur
                     w_out = _dt.combine(w_out_date, _dt.min.time()).replace(hour=wo_h, minute=wo_m)
                     generated.append({
                         'id': None, 'employee_name': emp, 'shift_date': cur,
@@ -5793,6 +5828,8 @@ def _issue_portal_session(user, remember_device=False):
         pages += PORTAL_QA_PAGES
     if user['is_manager']:
         pages += PORTAL_MANAGER_PAGES
+    elif _team_leader_agents(user.get('employee_id')) is not None:
+        pages += ['time-report']          # their team's Timesheet, no money
     if user.get('is_admin'):
         pages += PORTAL_ADMIN_PAGES
 
@@ -5927,6 +5964,8 @@ def portal_me():
         pages += PORTAL_QA_PAGES
     if p.get('m'):
         pages += PORTAL_MANAGER_PAGES
+    elif _team_leader_agents(p.get('e')) is not None:
+        pages += ['time-report']
     if p.get('a'):
         pages += PORTAL_ADMIN_PAGES
     return jsonify({'signed_in': True, 'name': p.get('n'), 'is_manager': bool(p.get('m')),
@@ -9880,9 +9919,103 @@ def payroll_people_links():
     return jsonify({'people': people, 'known_names': names})
 
 
+def _team_leader_agents(employee_id):
+    """The CMS employee ids on this team leader's team, or None if they are
+    not a team leader."""
+    if not employee_id:
+        return None
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute('SELECT 1 FROM team_leaders WHERE employee_id = %s', (int(employee_id),))
+        if not c.fetchone():
+            conn.close(); return None
+        c.execute('SELECT agent_employee_id FROM team_members WHERE leader_employee_id = %s', (int(employee_id),))
+        ids = [r[0] for r in c.fetchall()]
+        conn.close()
+        return ids
+    except Exception as e:
+        print('[timesheet] team lookup failed: ' + str(e)[:120])
+        return None
+
+
+def _timesheet_viewer():
+    """'full' for managers and admins (from either sign-in), a team leader's
+    team for a team leader, None for anyone else."""
+    p = _portal_user(request.headers.get('X-Portal-Ticket', ''))
+    if p:
+        if p.get('m') or p.get('a'):
+            return {'level': 'full'}
+        team = _team_leader_agents(p.get('e'))
+        if team is not None:
+            return {'level': 'team', 'employee_id': p.get('e'), 'team': team}
+        return None
+    user = get_token_user(get_request_token())
+    if not user and (session.get('role') in ('admin', 'manager') or session.get('admin')):
+        user = {'role': session.get('role', 'admin')}
+    if user and user.get('role') in ('manager', 'admin'):
+        return {'level': 'full'}
+    return None
+
+
+_MONEY_KEYS = {'hourly_rate', 'regular_pay', 'overtime_pay', 'total_pay', 'old_cms_pay',
+               'pay_reduction', 'adjusted_pay', 'original_pay', 'adjusted_total_pay',
+               'phone_pay_reduction', 'cms_rate', 'rate_source', 'pay_group', 'no_rate'}
+
+
+def _without_money(obj):
+    """The same report with every rate and dollar figure taken out."""
+    if isinstance(obj, dict):
+        return {k: _without_money(v) for k, v in obj.items() if k not in _MONEY_KEYS}
+    if isinstance(obj, list):
+        return [_without_money(v) for v in obj]
+    return obj
+
+
 @app.route('/api/time-report', methods=['GET'])
-@require_manager
 def time_report():
+    viewer = _timesheet_viewer()
+    if not viewer:
+        return jsonify({'error': 'Managers, admins and team leaders only'}), 403
+    if viewer['level'] == 'team':
+        try:
+            data = _time_report_data(
+                request.args.get('date_from', ''), request.args.get('date_to', ''),
+                '', int(request.args.get('grace_minutes', 5) or 5), 'auto')
+        except Exception as e:
+            import traceback
+            print(f"[time_report] team view FAILED:\n{traceback.format_exc()}")
+            return jsonify({'error': f'Timesheet failed: {str(e)[:300]}', 'report': [], 'per_agent': [], 'totals': {}}), 500
+        # Every agent, not just their own team: when a team leader is off,
+        # their agents go to whichever leader is on, and that leader has to be
+        # able to answer about attendance for anyone.
+        names = {a['employee_name'] for a in data.get('per_agent', [])}
+        emp = request.args.get('employee', '')
+        if emp:
+            names = {n for n in names if n == emp}
+        data['report'] = [r for r in data.get('report', []) if r['employee_name'] in names]
+        data['per_agent'] = [a for a in data.get('per_agent', []) if a['employee_name'] in names]
+        # totals rebuilt from the team alone — nothing about the rest of the floor
+        pa = data['per_agent']
+        data['totals'] = {
+            'agents': len(pa),
+            'regular_hours': round(sum(a.get('regular_hours') or 0 for a in pa), 2),
+            'overtime_hours': round(sum(a.get('overtime_hours') or 0 for a in pa), 2),
+            'clocked_hours': round(sum(a.get('clocked_hours') or 0 for a in pa), 2),
+            'break_unpaid_minutes': round(sum(a.get('break_unpaid_minutes') or 0 for a in pa)),
+            'ot_dropped_hours': round(sum(a.get('ot_dropped_hours') or 0 for a in pa), 2),
+            'phone_deducted_minutes': round(sum(a.get('deducted_minutes') or 0 for a in pa), 1),
+        }
+        data['team_view'] = True
+        # pay multipliers are pay information too: "(2h @1.5x)" comes out of the notes
+        import re as _re
+        for r in data['report']:
+            r['issues'] = [_re.sub(r'\s*\([^()]*@[\d.]+x[^()]*\)', '', i) for i in (r.get('issues') or [])]
+            r.pop('ot_breakdown', None)
+        for a in data['per_agent']:
+            a.pop('ot_breakdown', None)
+        data.pop('default_ot_multiplier', None)
+        data.pop('active_ot_periods', None)
+        return jsonify(_without_money(data))
     try:
         return _time_report_impl()
     except Exception as e:
@@ -10316,28 +10449,54 @@ def _time_report_data(date_from, date_to, employee='', grace=5, source='auto'):
             if seg['logout']:
                 worked_seconds += (seg['logout'] - seg['login']).total_seconds()
 
-        # Gaps between segments = logged out mid-shift
+        # Gaps between sessions. Only the part that falls INSIDE the scheduled
+        # block is time away from the shift; logging out at the end of the shift
+        # and coming back later for extra time is not "mid-shift".
+        _t = lambda x: x.strftime('%-I:%M %p')
         away_minutes = 0
         for prev, nxt in zip(segments, segments[1:]):
-            if prev['logout']:
-                gap = (nxt['login'] - prev['logout']).total_seconds()/60
-                if gap > 0:
-                    away_minutes += gap
-                    issues.append(
-                        f"Logged out mid-shift for {gap:.0f} min "
-                        f"({prev['logout'].strftime('%-I:%M %p')}–{nxt['login'].strftime('%-I:%M %p')})"
-                    )
+            if not prev['logout']:
+                continue
+            g0, g1 = prev['logout'], nxt['login']
+            if g1 <= g0:
+                continue
+            inside = max(0.0, (min(g1, sched_out) - max(g0, sched_in)).total_seconds() / 60)
+            if inside >= 1:
+                away_minutes += inside
+                issues.append(f"Logged out mid-shift for {inside:.0f} min "
+                              f"({_t(max(g0, sched_in))}–{_t(min(g1, sched_out))})")
+            if g1 > sched_out and g0 >= sched_out - timedelta(minutes=grace):
+                issues.append(f"Left at {_t(g0)} and came back at {_t(g1)} for extra time")
+            elif g0 < sched_in and g1 <= sched_in + timedelta(minutes=grace):
+                issues.append(f"Logged in early at {_t(segments[0]['login'])}, out at {_t(g0)}, back at {_t(g1)}")
 
         late_min = (login - sched_in).total_seconds()/60
         if late_min > grace: issues.append(f'Late login by {late_min:.0f} min')
-        elif late_min < -grace: issues.append(f'Early login by {abs(late_min):.0f} min')
+
+        # minutes actually WORKED outside the block, not the span from the
+        # block's end to the last logout (which counted the time she was gone)
+        def _worked_outside(before):
+            tot = 0.0
+            for seg in segments:
+                a_, b_ = seg['login'], seg['logout'] or seg['login']
+                if before:
+                    tot += max(0.0, (min(b_, sched_in) - a_).total_seconds())
+                else:
+                    tot += max(0.0, (b_ - max(a_, sched_out)).total_seconds())
+            return tot / 60
+        _early_work = _worked_outside(True)
+        if late_min < -grace and _early_work > grace:
+            issues.append(f'Worked {_early_work:.0f} min before the shift started')
 
         early_out_min = None
         gross = net = None
         if logout:
             early_out_min = (sched_out - logout).total_seconds()/60
             if early_out_min > grace: issues.append(f'Left early by {early_out_min:.0f} min')
-            elif early_out_min < -grace: issues.append(f'Stayed late by {abs(early_out_min):.0f} min')
+            elif early_out_min < -grace:
+                _late_work = _worked_outside(False)
+                if _late_work > grace:
+                    issues.append(f'Worked {_late_work:.0f} min after the shift ended (last out {_t(logout)})')
             gross = (logout - login).total_seconds()/3600           # full span of the shift
         else:
             # still clocked in right now is normal; only an old open shift is a problem
@@ -10363,6 +10522,9 @@ def _time_report_data(date_from, date_to, employee='', grace=5, source='auto'):
                           + (' — calls could not be checked' if pay['ot_unverified'] else ''))
         if pay['ot_dropped_hours'] > 0:
             issues.append(f"Outside scheduled hours for {pay['ot_dropped_hours']}h with no calls taken — not paid")
+        if pay['makeup_minutes'] >= 1:
+            issues.append(f"Missed {pay['missed_minutes']} min of the scheduled shift (late or logged out), so "
+                          f"{pay['makeup_minutes']} min of the extra time counts as regular hours, not overtime")
 
         if adj:
             issues.append(f"⚠️ Times adjusted by {adj.get('adjusted_by_name','manager')}: {adj.get('reason','')}")

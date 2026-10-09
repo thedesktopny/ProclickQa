@@ -217,6 +217,7 @@ td.agent{color:var(--text);font-weight:500;}
    (and the buttons in the top bar) off the right edge. */
 .main{ min-width:0; }
 #page-time-report, #page-payroll{ min-width:0; max-width:100%; }
+#page-time-report.ts-team .mgr-only{ display:none !important; }
 /* ---- Payroll ---- */
 .src-note{ font-size:12px; color:var(--text3); padding:8px 28px 0; }
 .src-note:empty{ display:none; }
@@ -2682,9 +2683,9 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
   <div class="topbar">
     <button class="navtoggle" onclick="toggleNav()" aria-label="Menu">☰</button><div class="page-title">⏰ Timesheet</div>
     <div class="topbar-right">
-      <button class="btn btn-outline" onclick="showPage('payroll')">💵 Payroll</button>
-      <button class="btn btn-outline" onclick="exportTimeReport('xlsx')">⬇️ Excel</button>
-      <label class="btn btn-outline" style="cursor:pointer;margin:0;" title="Only needed when the CMS cannot be read live">
+      <button class="btn btn-outline mgr-only" onclick="showPage('payroll')">💵 Payroll</button>
+      <button class="btn btn-outline mgr-only" onclick="exportTimeReport('xlsx')">⬇️ Excel</button>
+      <label class="btn btn-outline mgr-only" style="cursor:pointer;margin:0;" title="Only needed when the CMS cannot be read live">
         📤 Upload Clocker
         <input type="file" id="clocker-file-input" accept=".xlsx,.xls,.csv" style="display:none;" onchange="handleClockerUpload(event)">
       </label>
@@ -2728,7 +2729,7 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
 
   <div class="runtabs">
     <button class="runtab on" data-tab="days" onclick="showTimeTab('days')">Every shift</button>
-    <button class="runtab" data-tab="schedules" onclick="showTimeTab('schedules')">Schedules</button>
+    <button class="runtab mgr-only" data-tab="schedules" onclick="showTimeTab('schedules')">Schedules</button>
     <span class="runtabs-spacer"></span>
     <span class="runtab-tools" id="pay-tools">
       <button class="btn btn-outline" onclick="expandAllAgents(true)">Expand all</button>
@@ -6305,7 +6306,9 @@ function showPage(id){
   const adminPages = ['costs'];
   const isManager = currentRole==='manager' || isAdmin;
   if(adminPages.includes(id) && !isAdmin){ showToast('Admin access only', true); return; }
-  if(managerPages.includes(id) && !isManager){ showToast('You don\'t have access to that page', true); return; }
+  // the portal hands out pages per person (a team leader gets the Timesheet)
+  const grantedHere = typeof portalPages !== 'undefined' && (portalPages||[]).includes(id);
+  if(managerPages.includes(id) && !isManager && !grantedHere){ showToast('You don\'t have access to that page', true); return; }
 
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
@@ -6391,7 +6394,9 @@ function showPage(id){
       f.value = weekAgo.toISOString().slice(0,10);
       if(t) t.value = today.toISOString().slice(0,10);
     }
-    loadClockerEmployees();
+    const team = tsTeamView();
+    document.getElementById('page-time-report')?.classList.toggle('ts-team', team);
+    if(!team) loadClockerEmployees();
     if(!document.querySelector('.runbar-quick button.on')) setPayPeriod('this-week');
     else loadTimeReport();
   }
@@ -12638,7 +12643,12 @@ async function loadTimeReport(){
     updateRunTotal(res);
     document.getElementById('tr-count').textContent = `${rows.length} shift(s)`;
     const srcEl = document.getElementById('tr-source');
-    if(srcEl) srcEl.innerHTML = prSourceLine(res);
+    if(srcEl) srcEl.innerHTML = (res.team_view ? '<b>All agents — hours only.</b> ' : '') + prSourceLine(res);
+    if(res.team_view && !emp){
+      const sel = document.getElementById('tr-employee');
+      if(sel) sel.innerHTML = '<option value="">All agents</option>' +
+        (res.per_agent||[]).map(a=>`<option value="${esc(a.employee_name)}">${esc(a.employee_name)}</option>`).join('');
+    }
 
     // Banner when a special overtime rate is currently in force
     const banner = document.getElementById('ot-active-banner');
@@ -12773,7 +12783,7 @@ async function loadTimeReport(){
         <td style="font-size:11px;">${phone}</td>
         <td><span class="badge ${statusBadgeCls(r.status)}">${statusWord(r.status)}</span></td>
         <td style="font-size:11px;color:var(--text3);max-width:260px;text-align:left;">${(r.issues||[]).join('; ')||'—'}</td>
-        <td>${noWork?'':`<button onclick="openAdjustModal(${idx})" style="background:none;border:none;color:${r.is_adjusted?'var(--yellow)':'var(--accent)'};cursor:pointer;font-size:11px;white-space:nowrap;">${r.is_adjusted?'Edit ✏️':'Adjust'}</button>`}</td>
+        <td>${(noWork || tsTeamView())?'':`<button onclick="openAdjustModal(${idx})" style="background:none;border:none;color:${r.is_adjusted?'var(--yellow)':'var(--accent)'};cursor:pointer;font-size:11px;white-space:nowrap;">${r.is_adjusted?'Edit ✏️':'Adjust'}</button>`}</td>
       </tr>`;
     };
 
@@ -12837,8 +12847,15 @@ async function loadTimeReport(){
     }
     tbody.innerHTML = `<tr><td colspan="15" style="text-align:center;padding:24px;color:var(--red)">${msg}</td></tr>`;
   }
-  loadSchedulesList();
-  loadRecurringList();
+  if(!tsTeamView()){ loadSchedulesList(); loadRecurringList(); }
+}
+
+/* A team leader sees the Timesheet for their own team only: no schedules to
+   edit, no adjustments, no payroll. The server already leaves out every rate
+   and dollar figure; this just hides the buttons that would not work. */
+function tsTeamView(){
+  return typeof portalPages !== 'undefined' && (portalPages||[]).length > 0
+         && portalPages.includes('time-report') && !portalPages.includes('payroll');
 }
 
 function trTile(label, val, color){
