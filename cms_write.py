@@ -62,7 +62,8 @@ WRITABLE = {
     # Settings tables an admin may edit from the portal. Deliberately narrow:
     # AdminSettings is NOT here, because it holds the live payment key and
     # editing credentials from a web page is a different class of risk.
-    'PaymentType': ({'Name', 'Description', 'Active'}, set()),
+    # PaymentType has one column besides Id: Type ("Paypal", "UpWork" ...)
+    'PaymentType': ({'Type'}, {'Type'}),
     'CallStatusSelection': ({'Name', 'Description', 'Color', 'Active', 'SortOrder'}, set()),
     'Question': ({'QuestionText', 'Active', 'SortOrder'}, set()),
     'TableCompanies': ({'Name', 'PhoneNumber', 'Email', 'Active'}, set()),
@@ -1750,6 +1751,59 @@ def create_agent(fields, who, dry_run=True):
         except Exception:
             pass
     _log(who, out)
+    return out
+
+
+def set_payment_type(employee_id, payment_type_id, who):
+    """Change how one person is paid — Employee.PaymentTypeID and nothing else.
+
+    Kept out of the general Employee whitelist on purpose, so no other form can
+    change pay by passing an extra field. Both ids are checked to exist, the
+    previous value is logged, and the row is read back before "saved" is said.
+    """
+    employee_id = int(employee_id); payment_type_id = int(payment_type_id)
+    conn = cms_db._connect()
+    out = {'table': 'Employee', 'action': 'set_payment_type', 'row_id': employee_id,
+           'values': {'PaymentTypeID': payment_type_id}, 'dry_run': False}
+    try:
+        cu = conn.cursor()
+        cu.execute('SELECT Type FROM PaymentType WHERE Id = %s', (payment_type_id,))
+        t = cu.fetchone()
+        if not t:
+            raise WriteRefused('That payment type does not exist.')
+        cu.execute('SELECT PaymentTypeID, FirstName, LastName FROM Employee WHERE Id = %s', (employee_id,))
+        e = cu.fetchone()
+        if not e:
+            raise WriteRefused('There is no employee with id %d.' % employee_id)
+        out['before'] = {'PaymentTypeID': e[0]}
+        cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        cu.execute('UPDATE Employee SET PaymentTypeID = %s WHERE Id = %s', (payment_type_id, employee_id))
+        conn.commit()
+        cu = conn.cursor()
+        cu.execute('SELECT PaymentTypeID FROM Employee WHERE Id = %s', (employee_id,))
+        after = cu.fetchone()
+        if not after or after[0] is None or int(after[0]) != payment_type_id:
+            out.update({'ok': False, 'committed': False,
+                        'error': 'The database accepted the change but the record still reads the same. '
+                                 'The login may not have permission to write.'})
+        else:
+            out.update({'ok': True, 'committed': True, 'payment_type': (t[0] or '').strip(),
+                        'meaning': 'Saved and confirmed.'})
+    except WriteRefused:
+        conn.close()
+        raise
+    except Exception as ex:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        out.update({'ok': False, 'committed': False, 'error': _explain(ex), 'raw_error': str(ex)[:300]})
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    _log(who, out, before=out.get('before'))
     return out
 
 

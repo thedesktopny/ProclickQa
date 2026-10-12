@@ -3932,7 +3932,7 @@ def payroll_people():
     conn = _connect(); cu = conn.cursor()
     try:
         cu.execute("""SELECT e.Id, e.FirstName, e.LastName, e.Extension, e.HourlyRate,
-                             ISNULL(e.LeftFirm, 0), p.Type
+                             ISNULL(e.LeftFirm, 0), p.Type, e.PaymentTypeID
                       FROM Employee e
                       LEFT JOIN PaymentType p ON p.Id = e.PaymentTypeID""")
         rows = _all_rows(cu)
@@ -3948,8 +3948,20 @@ def payroll_people():
             'hourly_rate': _rate_dollars(r[4]),
             'left_firm': bool(r[5]),
             'payment_type': ((r[6] or '').strip() or None),
+            'payment_type_id': (int(r[7]) if r[7] is not None else None),
         })
     return out
+
+
+def payment_types():
+    """The pay methods the CMS knows — PaymentType rows, [{id, name}]."""
+    conn = _connect(); cu = conn.cursor()
+    try:
+        cu.execute('SELECT Id, Type FROM PaymentType ORDER BY Type')
+        rows = _all_rows(cu)
+    finally:
+        conn.close()
+    return [{'id': int(r[0]), 'name': (r[1] or '').strip()} for r in rows if r[0] is not None]
 
 
 _CLOCK_STATUS = {0: 'Out', 1: 'In', 2: 'OnBreak'}

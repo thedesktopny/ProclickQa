@@ -2825,6 +2825,7 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
     <div class="topbar-right">
       <button class="btn btn-outline" id="pr-back" onclick="prShowList()" style="display:none;">← All pay runs</button>
       <button class="btn btn-outline" id="pr-excel" onclick="prExport()" style="display:none;">⬇️ Excel</button>
+      <button class="btn btn-outline" onclick="prPayMethods()">💳 Pay methods</button>
       <button class="btn btn-outline" onclick="showPage('time-report')">⏰ Timesheet</button>
     </div>
   </div>
@@ -12479,7 +12480,7 @@ function prRender(){
     const list = groups.get(g).sort((a,b) => a.employee_name.localeCompare(b.employee_name));
     const gPay = list.reduce((s,a) => s + pay(a), 0), gHrs = list.reduce((s,a) => s + (a.paid_hours||0), 0);
     const worked = list.filter(a => (a.clocked_hours||0) > 0).length;
-    html += `<tr class="pr-group"><td colspan="4">${esc(g)} <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--text3);">· ${worked} ${worked===1?'person':'people'}</span></td>
+    html += `<tr class="pr-group"><td colspan="4">${esc(g)} <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--text3);">· ${worked} ${worked===1?'person':'people'}</span>${g==='Not set'?` <a href="#" onclick="prPayMethods();return false;" style="font-weight:600;text-transform:none;letter-spacing:0;color:var(--accent);margin-left:8px;">Set pay methods →</a>`:''}</td>
       <td class="num">${prHrs(gHrs)}</td><td colspan="3"></td><td class="num">${prMoney(gPay)}</td><td></td></tr>`;
     list.forEach(a => {
       const key = 'pr_' + String(a.employee_name).replace(/[^a-z0-9]/gi, '_');
@@ -12529,6 +12530,94 @@ function prRender(){
     <td class="num" style="color:var(--green);font-size:14px;">${prMoney(total)}</td><td class="num" style="color:var(--text3);">${prMoney(t.old_cms_pay)}</td></tr>`;
   document.getElementById('pr-agents').innerHTML = people.length ? html
     : '<tr><td colspan="10" class="pr-empty">Nobody clocked in during this period.</td></tr>';
+}
+
+/* How each person is paid (Paypal, UpWork …). Read from and saved to the CMS
+   itself, so both systems always agree. Managers and admins only. */
+let prPM = null;
+async function prPayMethods(){
+  document.getElementById('pr-pm-modal')?.remove();
+  document.body.insertAdjacentHTML('beforeend', `
+    <div class="modal" id="pr-pm-modal" style="display:flex;">
+      <div class="modal-box" style="width:640px;max-width:96vw;max-height:88vh;display:flex;flex-direction:column;">
+        <div style="font-size:16px;font-weight:700;margin-bottom:4px;">💳 Pay methods</div>
+        <div style="font-size:12px;color:var(--text3);margin-bottom:12px;">How each person is paid. Changes save straight into the CMS, so the old system shows the same. People with none set are at the top.</div>
+        <input id="pr-pm-q" placeholder="Search a name or extension" oninput="prPMRender()"
+               style="background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:13px;margin-bottom:10px;">
+        <div id="pr-pm-list" style="overflow:auto;flex:1;border:1px solid var(--border);border-radius:8px;min-height:120px;">
+          <div class="pr-empty">Reading the CMS…</div></div>
+        <div style="display:flex;gap:8px;margin-top:12px;align-items:center;flex-wrap:wrap;">
+          <input id="pr-pm-new" placeholder="New pay method, e.g. Wise" maxlength="40"
+                 style="flex:1;min-width:160px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:13px;">
+          <button class="btn btn-outline" onclick="prPMAddType()">+ Add pay method</button>
+          <button class="btn btn-outline" onclick="document.getElementById('pr-pm-modal').remove(); if(prPMDirty && prRun && prRun.run){ prPMDirty=false; prOpenRun(prRun.run.period_start, prRun.run.period_end); }">Close</button>
+        </div>
+      </div>
+    </div>`);
+  try{
+    const r = await API.get('/api/payroll/pay-methods');
+    if(r.error) throw new Error(r.error);
+    prPM = r; prPMRender();
+  }catch(e){
+    document.getElementById('pr-pm-list').innerHTML = `<div class="pr-empty" style="color:var(--red);">${esc(e.message)}</div>`;
+  }
+}
+
+function prPMRender(){
+  const box = document.getElementById('pr-pm-list');
+  if(!box || !prPM) return;
+  const q = (document.getElementById('pr-pm-q')?.value || '').trim().toLowerCase();
+  const people = (prPM.people||[]).filter(p => !q ||
+    (p.name||'').toLowerCase().includes(q) || (p.report_name||'').toLowerCase().includes(q) || String(p.extension||'').includes(q));
+  const opts = sel => `<option value="">— not set —</option>` + (prPM.types||[]).map(t =>
+    `<option value="${t.id}"${t.id===sel?' selected':''}>${esc(t.name)}</option>`).join('');
+  box.innerHTML = people.length ? `<table style="width:100%;border-collapse:collapse;font-size:12.5px;">
+    <thead><tr style="text-align:left;color:var(--text3);font-size:10px;text-transform:uppercase;letter-spacing:.5px;">
+      <th style="padding:8px;">Person</th><th style="padding:8px;">Ext</th><th style="padding:8px;">Paid by</th><th></th></tr></thead>
+    <tbody>${people.map(p => `<tr style="border-top:1px solid var(--border);">
+      <td style="padding:7px 8px;font-weight:600;">${esc(p.name)}${p.report_name && p.report_name!==p.name?`<span style="display:block;font-weight:400;font-size:11px;color:var(--text3);">shown as ${esc(p.report_name)}</span>`:''}</td>
+      <td style="padding:7px 8px;color:var(--text3);">${esc(p.extension||'')}</td>
+      <td style="padding:7px 8px;"><select id="pm_${p.employee_id}" onchange="prPMSet(${p.employee_id})"
+          style="background:var(--surface2);border:1px solid ${p.payment_type_id?'var(--border)':'var(--yellow)'};color:var(--text);border-radius:6px;padding:5px 8px;font-size:12px;min-width:140px;">${opts(p.payment_type_id)}</select></td>
+      <td style="padding:7px 8px;font-size:11px;color:var(--text3);" id="pm_s_${p.employee_id}"></td>
+    </tr>`).join('')}</tbody></table>`
+    : '<div class="pr-empty">Nobody matches.</div>';
+}
+
+async function prPMSet(id){
+  const sel = document.getElementById('pm_' + id), note = document.getElementById('pm_s_' + id);
+  const p = (prPM.people||[]).find(x => x.employee_id === id);
+  const v = parseInt(sel.value || '0', 10);
+  if(!v){ sel.value = p && p.payment_type_id ? p.payment_type_id : ''; showToast('Choose a pay method', true); return; }
+  const tname = (prPM.types||[]).find(t => t.id === v)?.name || '';
+  if(!confirm(`Change how ${p ? p.name : 'this person'} is paid to "${tname}"?\n\nThis is saved in the CMS.`)){
+    sel.value = p && p.payment_type_id ? p.payment_type_id : ''; return;
+  }
+  note.textContent = 'saving…'; sel.disabled = true;
+  try{
+    const r = await API.post('/api/payroll/pay-methods/set', {employee_id: id, payment_type_id: v});
+    if(!r.ok) throw new Error(r.error || 'Not saved');
+    if(p){ p.payment_type_id = v; p.payment_type = tname; }
+    note.innerHTML = '<span style="color:var(--green);">✓ saved</span>';
+    sel.style.borderColor = 'var(--border)';
+    if(prRun && !prRun.locked) prPMDirty = true;
+  }catch(e){
+    note.innerHTML = `<span style="color:var(--red);">${esc(e.message)}</span>`;
+    sel.value = p && p.payment_type_id ? p.payment_type_id : '';
+  }finally{ sel.disabled = false; }
+}
+let prPMDirty = false;
+
+async function prPMAddType(){
+  const inp = document.getElementById('pr-pm-new');
+  const name = (inp.value || '').trim();
+  if(!name){ showToast('Type the name of the pay method', true); return; }
+  if(!confirm(`Add "${name}" as a new pay method in the CMS?`)) return;
+  const r = await API.post('/api/payroll/pay-methods/add-type', {name});
+  if(!r.ok){ showToast(r.error || 'Could not add it', true); return; }
+  showToast('✅ Added ' + name);
+  inp.value = '';
+  try{ const x = await API.get('/api/payroll/pay-methods'); if(!x.error){ prPM = x; prPMRender(); } }catch(e){}
 }
 
 function prToggle(key){

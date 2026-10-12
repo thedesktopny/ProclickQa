@@ -9880,6 +9880,85 @@ def payroll_run_mark_paid():
     return jsonify({'paid': True})
 
 
+@app.route('/api/payroll/pay-methods', methods=['GET'])
+@portal_manager_only
+def payroll_pay_methods():
+    """Everyone still working, with how they are paid — read live from the CMS."""
+    import cms_db
+    try:
+        types = cms_db.payment_types()
+        people = cms_db.payroll_people()
+    except Exception as e:
+        return jsonify({'error': 'Could not read the CMS: ' + str(e)[:200]}), 400
+    names = {}
+    try:
+        _payroll_tables()
+        conn = get_db(); c = conn.cursor()
+        c.execute('SELECT employee_id, employee_name FROM payroll_people')
+        names = dict(c.fetchall()); conn.close()
+    except Exception:
+        pass
+    show_left = request.args.get('include_left') == '1'
+    out = []
+    for p in people:
+        if p['left_firm'] and not show_left:
+            continue
+        out.append({'employee_id': p['employee_id'],
+                    'name': ('%s %s' % (p['first_name'], p['last_name'])).strip(),
+                    'report_name': names.get(p['employee_id']),
+                    'extension': p['extension'], 'left_firm': p['left_firm'],
+                    'payment_type_id': p.get('payment_type_id'),
+                    'payment_type': p.get('payment_type')})
+    out.sort(key=lambda x: (x['payment_type'] is not None, (x['name'] or '').lower()))
+    return jsonify({'types': types, 'people': out})
+
+
+@app.route('/api/payroll/pay-methods/set', methods=['POST'])
+@portal_manager_only
+def payroll_pay_method_set():
+    """Change how one person is paid. Saved in the CMS itself, so the old
+    system and the new one always agree."""
+    import cms_write
+    d = request.json or {}
+    try:
+        out = cms_write.set_payment_type(d.get('employee_id'), d.get('payment_type_id'), _who())
+    except cms_write.WriteRefused as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    except (TypeError, ValueError):
+        return jsonify({'ok': False, 'error': 'Choose a person and a pay method.'}), 400
+    if out.get('ok'):
+        # the payroll's own copy follows at once, without waiting for a re-read
+        try:
+            _payroll_tables()
+            conn = get_db(); c = conn.cursor()
+            c.execute('UPDATE payroll_people SET payment_type = %s WHERE employee_id = %s',
+                      (out.get('payment_type'), int(d.get('employee_id'))))
+            conn.commit(); conn.close()
+        except Exception:
+            pass
+        _LIVE_SYNC_AT.clear()
+    return jsonify(out), (200 if out.get('ok') else 400)
+
+
+@app.route('/api/payroll/pay-methods/add-type', methods=['POST'])
+@portal_manager_only
+def payroll_pay_method_add():
+    """Add a new pay method (a PaymentType row) — e.g. "Wise"."""
+    import cms_db, cms_write
+    name = ((request.json or {}).get('name') or '').strip()
+    if not name or len(name) > 40:
+        return jsonify({'ok': False, 'error': 'Type a name for the pay method (up to 40 characters).'}), 400
+    try:
+        if any(t['name'].lower() == name.lower() for t in cms_db.payment_types()):
+            return jsonify({'ok': False, 'error': '"%s" already exists.' % name}), 409
+        out = cms_write.create('PaymentType', {'Type': name}, _who(), dry_run=False)
+    except cms_write.WriteRefused as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'Could not add it: ' + str(e)[:200]}), 400
+    return jsonify(out), (200 if out.get('ok') else 400)
+
+
 @app.route('/api/payroll/people', methods=['GET', 'POST'])
 @portal_manager_only
 def payroll_people_links():
