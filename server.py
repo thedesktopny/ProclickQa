@@ -1107,7 +1107,7 @@ def portal_manager_only(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         p = _portal_user(request.headers.get('X-Portal-Ticket', ''))
-        if p and p.get('m'):
+        if p and (p.get('m') or p.get('a')):
             return f(*args, **kwargs)
         if p:
             return jsonify({'error': 'Managers only'}), 403
@@ -5826,7 +5826,7 @@ def _issue_portal_session(user, remember_device=False):
     pages = list(PORTAL_PAGES)
     if user.get('is_qa') or user.get('is_admin'):
         pages += PORTAL_QA_PAGES
-    if user['is_manager']:
+    if user['is_manager'] or user.get('is_admin'):
         pages += PORTAL_MANAGER_PAGES
     elif _team_leader_agents(user.get('employee_id')) is not None:
         pages += ['time-report']          # their team's Timesheet, no money
@@ -5962,7 +5962,7 @@ def portal_me():
     pages = list(PORTAL_PAGES)
     if p.get('q') or p.get('a'):
         pages += PORTAL_QA_PAGES
-    if p.get('m'):
+    if p.get('m') or p.get('a'):
         pages += PORTAL_MANAGER_PAGES
     elif _team_leader_agents(p.get('e')) is not None:
         pages += ['time-report']
