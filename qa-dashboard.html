@@ -4066,11 +4066,23 @@ async function toggleProcessing(){
   }
 }
 
+/* Every way of reloading the list — the filter bar, the date picker, the page
+   numbers, the automatic refresh — goes through here, so the agent, score and
+   date filters always travel with it. They used to be left off, which is why
+   picking an agent showed everyone's calls. Dates arrive as LOCAL time and are
+   converted to UTC exactly once, here. */
 async function loadCalls(page=1, dateFrom='', dateTo=''){
   try{
+    const f = (typeof QF !== 'undefined' && QF['calls']) || {};
+    const dr = (typeof dateRangeState !== 'undefined' && dateRangeState['calls']) || {};
+    if(f.from) dateFrom = f.from + 'T00:00:00';
+    else if(!dateFrom && dr.from) dateFrom = dr.from;
+    if(f.to) dateTo = f.to + 'T23:59:59';
+    else if(!dateTo && dr.to) dateTo = dr.to;
     let url = `/api/calls?page=${page}&limit=25`;
     if(dateFrom) url += `&date_from=${encodeURIComponent(_toUtcParam(dateFrom))}`;
     if(dateTo) url += `&date_to=${encodeURIComponent(_toUtcParam(dateTo))}`;
+    if(typeof qfParams === 'function') url += qfParams('calls');
     const res=await API.get(url);
     // Handle both old array response and new paginated response
     if(Array.isArray(res)){
@@ -6230,7 +6242,7 @@ function qfReload(page){
     const dr = dateRangeState['calls'] || {from:'',to:''};
     const from = f.from ? f.from + 'T00:00:00' : dr.from;
     const to = f.to ? f.to + 'T23:59:59' : dr.to;
-    loadCalls(1, _toUtcParam(from), _toUtcParam(to)).then(()=>{
+    loadCalls(1, from, to).then(()=>{
       renderCalls();
       if(typeof renderPagination === 'function') renderPagination();
     });
@@ -6409,7 +6421,7 @@ function mountCallsDatePicker(){
   container.innerHTML = dateRangePickerHtml('calls');
   container.dataset.mounted = '1';
   initDateRangePicker('calls', async (from, to)=>{
-    await loadCalls(1, _toUtcParam(from), _toUtcParam(to));
+    await loadCalls(1, from, to);
     renderCalls();
     renderPagination();
   });
@@ -13636,8 +13648,12 @@ async function renderHumanReview(){
     // indication, which reads as "the old ones are gone" rather than "there
     // are more than fit here"
     let url = '/api/calls?page=1&limit=500&needs_review=1' + qfParams('humanreview');
-    if(dr.from) url += `&date_from=${encodeURIComponent(_toUtcParam(dr.from))}`;
-    if(dr.to) url += `&date_to=${encodeURIComponent(_toUtcParam(dr.to))}`;
+    // the filter bar's dates win over the date picker, the same as on Call Review
+    const qf = QF['humanreview'] || {};
+    const hFrom = qf.from ? qf.from + 'T00:00:00' : dr.from;
+    const hTo = qf.to ? qf.to + 'T23:59:59' : dr.to;
+    if(hFrom) url += `&date_from=${encodeURIComponent(_toUtcParam(hFrom))}`;
+    if(hTo) url += `&date_to=${encodeURIComponent(_toUtcParam(hTo))}`;
     const res = await API.get(url);
     hr = Array.isArray(res) ? res : (res.calls||[]);
     const capped = hr.length >= 500;
