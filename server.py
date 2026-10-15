@@ -9565,22 +9565,25 @@ def _link_people(conn, people, match_events):
         result[p['employee_id']] = choice
         taken.add(choice[0].lower())
 
+    from psycopg2.extras import execute_values
+    _vals = []
     for p in people:
         eid = p['employee_id']
         name, src = result.get(eid, (linked.get(eid), None))
-        c.execute("""INSERT INTO payroll_people
+        _vals.append((eid, name, p['first_name'], p['last_name'], p['extension'],
+                      p['hourly_rate'], p['payment_type'], p['left_firm'], src))
+    if _vals:
+        execute_values(c, """INSERT INTO payroll_people
                         (employee_id, employee_name, first_name, last_name, extension,
-                         hourly_rate, payment_type, left_firm, link_source, updated_at)
-                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+                         hourly_rate, payment_type, left_firm, link_source)
+                     VALUES %s
                      ON CONFLICT (employee_id) DO UPDATE SET
                         employee_name = COALESCE(payroll_people.employee_name, EXCLUDED.employee_name),
                         first_name = EXCLUDED.first_name, last_name = EXCLUDED.last_name,
                         extension = EXCLUDED.extension, hourly_rate = EXCLUDED.hourly_rate,
                         payment_type = EXCLUDED.payment_type, left_firm = EXCLUDED.left_firm,
                         link_source = COALESCE(payroll_people.link_source, EXCLUDED.link_source),
-                        updated_at = NOW()""",
-                  (eid, name, p['first_name'], p['last_name'], p['extension'],
-                   p['hourly_rate'], p['payment_type'], p['left_firm'], src))
+                        updated_at = NOW()""", _vals, page_size=500)
     conn.commit()
     # uploaded data covered these clock-ins, yet nobody lined up — the two
     # sources disagree about times, and that must be said rather than hidden
@@ -9588,6 +9591,8 @@ def _link_people(conn, people, match_events):
 
 
 _LIVE_SYNC_AT = {}
+import threading as _threading
+_LIVE_SYNC_LOCK = _threading.Lock()
 
 
 def _payroll_live_sync(date_from, date_to, force=False):
@@ -9609,9 +9614,26 @@ def _payroll_live_sync(date_from, date_to, force=False):
 
     key = (date_from, date_to)
     last = _LIVE_SYNC_AT.get(key)
-    if last and not force and _time.time() - last['at'] < 120:
+    if last and not force and _time.time() - last['at'] < 300:
         return last['result']
 
+    # One CMS read at a time. If another request is already reading, use what
+    # is stored rather than queue a second copy of the same slow work behind it
+    # (two of those used to be enough to tie up the whole site).
+    if not _LIVE_SYNC_LOCK.acquire(blocking=False):
+        if last:
+            return last['result']
+        if not _LIVE_SYNC_LOCK.acquire(timeout=40):
+            return {'ok': True, 'note': 'Live from the CMS (another refresh was running).'}
+    try:
+        return _payroll_live_sync_locked(date_from, date_to, key)
+    finally:
+        _LIVE_SYNC_LOCK.release()
+
+
+def _payroll_live_sync_locked(date_from, date_to, key):
+    import time as _time
+    import cms_db
     try:
         _payroll_tables()
         d0 = datetime.strptime(date_from, '%Y-%m-%d') - timedelta(days=1)
@@ -9626,7 +9648,8 @@ def _payroll_live_sync(date_from, date_to, force=False):
             have = {r[0] for r in c.fetchall()}
             unlinked = {e['employee_id'] for e in events} - have
             match_events = events
-            if unlinked:
+            c.execute('SELECT 1 FROM clocker_events LIMIT 1')
+            if unlinked and c.fetchone():
                 # a wider look back, once, so someone whose uploaded history is
                 # older than this period can still be recognised by it
                 try:
@@ -9637,11 +9660,12 @@ def _payroll_live_sync(date_from, date_to, force=False):
             link = _link_people(conn, people, match_events)
 
             c.execute('DELETE FROM clocker_live WHERE event_time >= %s AND event_time < %s', (d0, d1))
-            for e in events:
-                c.execute("""INSERT INTO clocker_live (employee_id, event_time, status, break_minutes, break_reason)
-                             VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
-                          (e['employee_id'], e['event_time'], e['status'],
-                           e['break_minutes'], e['break_reason']))
+            # all rows in a handful of round trips, not one per event
+            from psycopg2.extras import execute_values
+            execute_values(c, """INSERT INTO clocker_live (employee_id, event_time, status, break_minutes, break_reason)
+                                VALUES %s ON CONFLICT DO NOTHING""",
+                           [(e['employee_id'], e['event_time'], e['status'],
+                             e['break_minutes'], e['break_reason']) for e in events], page_size=1000)
             conn.commit()
         finally:
             conn.close()
@@ -10105,17 +10129,41 @@ def time_report():
                         'report': [], 'count': 0,
                         'totals': {}, 'per_agent': []}), 500
 
-def _availability_for_shift(conn, ext, emp_id, start, end, interval):
+def _load_snapshots(conn, start, end):
+    """Every phone snapshot in a window, in one read, indexed by extension and
+    by employee id — so a report does not go back to the database per shift."""
+    c = conn.cursor()
+    c.execute("""SELECT snapshot_at, agent_ext, employee_id, phone_status, cms_status
+                 FROM phone_status_snapshots
+                 WHERE snapshot_at >= %s AND snapshot_at < %s
+                 ORDER BY snapshot_at""", (start, end))
+    by_ext, by_id = {}, {}
+    for t, ext, eid, p, m in c.fetchall():
+        rec = (t, p, m)
+        if ext:
+            by_ext.setdefault(str(ext).strip(), []).append(rec)
+        if eid is not None:
+            by_id.setdefault(eid, []).append(rec)
+    return {'ext': by_ext, 'id': by_id}
+
+
+def _availability_for_shift(conn, ext, emp_id, start, end, interval, snaps=None):
     """Availability inside one shift, matched on extension or employee id."""
     if start is None or end is None or (not ext and emp_id is None):
         return None
-    c = conn.cursor()
-    c.execute("""SELECT snapshot_at, phone_status, cms_status FROM phone_status_snapshots
-                 WHERE snapshot_at >= %s AND snapshot_at < %s
-                   AND (agent_ext = %s OR (employee_id IS NOT NULL AND employee_id = %s))
-                 ORDER BY snapshot_at""",
-              (start, end, ext or '', emp_id))
-    raw = c.fetchall()
+    if snaps is not None:
+        import bisect
+        seq = snaps['ext'].get(str(ext or '').strip()) or snaps['id'].get(emp_id) or []
+        times = [r[0] for r in seq]
+        raw = seq[bisect.bisect_left(times, start):bisect.bisect_left(times, end)]
+    else:
+        c = conn.cursor()
+        c.execute("""SELECT snapshot_at, phone_status, cms_status FROM phone_status_snapshots
+                     WHERE snapshot_at >= %s AND snapshot_at < %s
+                       AND (agent_ext = %s OR (employee_id IS NOT NULL AND employee_id = %s))
+                     ORDER BY snapshot_at""",
+                  (start, end, ext or '', emp_id))
+        raw = c.fetchall()
     rows = [(p, m) for _, p, m in raw]
     if not raw:
         return None
@@ -10788,6 +10836,18 @@ def _time_report_data(date_from, date_to, employee='', grace=5, source='auto'):
         _conn2 = get_db()
         try:
             _interval = _PS.detect_interval(_conn2)
+            _grace = float(_phone_grace_minutes())
+            _min_gap = float(_phone_min_gap_minutes())
+            _snaps = None
+            try:
+                if date_from and date_to:
+                    _snaps = _load_snapshots(_conn2,
+                                             datetime.strptime(date_from, '%Y-%m-%d') - timedelta(days=1),
+                                             datetime.strptime(date_to, '%Y-%m-%d') + timedelta(days=3))
+            except Exception as _e:
+                print('[time_report] snapshot preload failed: ' + str(_e)[:120])
+                try: _conn2.rollback()
+                except Exception: pass
             for _row in rows:
                 _row['availability'] = None
                 _ai, _ao = _row.get('actual_in'), _row.get('actual_out')
@@ -10799,7 +10859,7 @@ def _time_report_data(date_from, date_to, employee='', grace=5, source='auto'):
                     continue
                 _av = _availability_for_shift(
                     _conn2, _ext, _eid,
-                    _dtx.fromisoformat(_ai), _dtx.fromisoformat(_ao), _interval)
+                    _dtx.fromisoformat(_ai), _dtx.fromisoformat(_ao), _interval, _snaps)
                 _row['availability'] = _av
                 if not _av:
                     continue
@@ -10814,8 +10874,6 @@ def _time_report_data(date_from, date_to, employee='', grace=5, source='auto'):
                 # Everything is reported side by side — hours worked, each gap,
                 # what was deducted, and the pay before and after — so the
                 # figure can always be explained to the agent.
-                _grace = float(_phone_grace_minutes())
-                _min_gap = float(_phone_min_gap_minutes())
                 _late = _av.get('late_to_phone_minutes') or 0.0
                 _early = _av.get('early_off_phone_minutes') or 0.0
 
