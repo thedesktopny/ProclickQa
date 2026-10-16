@@ -2151,7 +2151,8 @@ def calls_summary():
             params.append(v)
     agent = (request.args.get('agent') or '').strip()
     if agent:
-        where.append('agent_name = %s')
+        # names sometimes arrive with a stray space ("Bryan "), so compare trimmed
+        where.append('TRIM(agent_name) = %s')
         params.append(agent)
     # Deliberately NOT filtered to calls awaiting review. The question is "what
     # is this agent's score for the month", and answering it from the review
@@ -2162,7 +2163,7 @@ def calls_summary():
     clause = ' AND '.join(where)
     try:
         c.execute(f'''
-            SELECT agent_name,
+            SELECT TRIM(agent_name) AS agent_name,
                    COUNT(*) AS calls,
                    ROUND(AVG(overall_score)::numeric, 1) AS avg_score,
                    MIN(overall_score) AS worst,
@@ -2173,7 +2174,7 @@ def calls_summary():
                    ROUND(AVG(COALESCE(notes_score, 0))::numeric, 1) AS avg_notes,
                    SUM(COALESCE(call_duration_seconds, 0)) AS seconds
             FROM calls WHERE {clause}
-            GROUP BY agent_name
+            GROUP BY TRIM(agent_name)
             ORDER BY AVG(overall_score) ASC
         ''', params)
         rows = [dict(r) for r in c.fetchall()]
@@ -2244,10 +2245,10 @@ def agent_names():
     """Agents who actually have scored calls — for the filter list."""
     def build():
         conn = get_db(); c = conn.cursor()
-        c.execute("""SELECT DISTINCT agent_name FROM calls
-                     WHERE agent_name IS NOT NULL AND agent_name <> ''
+        c.execute("""SELECT DISTINCT TRIM(agent_name) FROM calls
+                     WHERE agent_name IS NOT NULL AND TRIM(agent_name) <> ''
                        AND overall_score > 0
-                     ORDER BY agent_name""")
+                     ORDER BY 1""")
         names = [r[0] for r in c.fetchall()]
         conn.close()
         return names
@@ -2284,7 +2285,7 @@ def get_calls():
     # what somebody wants when they ask "show me this agent's low scores".
     agent = (request.args.get('agent') or '').strip()
     if agent:
-        date_clause += ' AND calls.agent_name = %s'
+        date_clause += ' AND TRIM(calls.agent_name) = %s'
         date_params.append(agent)
     for arg, comparison in (('min_score', '>='), ('max_score', '<=')):
         raw = request.args.get(arg)
@@ -4974,7 +4975,7 @@ def _call_notes_filters(a):
     if a.get('date_to'):
         where.append('created_at <= %s'); params.append(a['date_to'] + ' 23:59:59')
     if a.get('agent'):
-        where.append('agent_name = %s'); params.append(a['agent'])
+        where.append('TRIM(agent_name) = TRIM(%s)'); params.append(a['agent'])
     if a.get('phone'):
         where.append('caller_id LIKE %s'); params.append('%' + a['phone'] + '%')
     if a.get('account'):
@@ -5305,7 +5306,7 @@ def notes_content_analytics():
     if date_to:
         where.append('created_at <= %s'); params.append(date_to + ' 23:59:59')
     if agent:
-        where.append('agent_name = %s'); params.append(agent)
+        where.append('TRIM(agent_name) = TRIM(%s)'); params.append(agent)
 
     conn = get_db(); c = conn.cursor(cursor_factory=RealDictCursor)
     c.execute("""SELECT agent_name, call_notes, notes_score, created_at

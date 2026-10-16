@@ -6306,10 +6306,20 @@ async function qfSummary(page){
   }catch(e){ box.innerHTML = ''; }
 }
 
+/* Clicking a name in the score summary filters to that agent. If the name is
+   not in the agent list (it comes from a different source than the scored
+   calls), setting the box silently fell back to "All agents" — so add it. */
 function qfPickAgent(page, name){
   const bar = document.getElementById('qf-' + page);
-  bar.querySelector('.qf-agent').value = name;
+  const sel = bar.querySelector('.qf-agent');
+  if(name && ![...sel.options].some(o => o.value === name)){
+    const o = document.createElement('option');
+    o.value = name; o.textContent = name;
+    sel.appendChild(o);
+  }
+  sel.value = name;
   qfChanged(page);
+  bar.scrollIntoView({behavior:'smooth', block:'start'});
 }
 
 function showPage(id){
