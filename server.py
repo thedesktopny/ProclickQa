@@ -9905,6 +9905,93 @@ def payroll_run_mark_paid():
     return jsonify({'paid': True})
 
 
+# ─── CLOCK IN / BREAK / CLOCK OUT (portal) ───────────────────────────────────
+@app.route('/api/clock/me', methods=['GET'])
+def clock_me():
+    """Where the signed-in person stands: out, in, or on a break, and since when."""
+    p = _portal_user(request.headers.get('X-Portal-Ticket', ''))
+    if not p or not p.get('e'):
+        return jsonify({'error': 'Sign in to the CMS first'}), 401
+    import cms_write
+    try:
+        st = cms_write.clock_status(p['e'])
+    except Exception as e:
+        return jsonify({'error': 'Could not read your status: ' + str(e)[:160]}), 400
+    st['enabled'] = cms_write.asterisk_configured()
+    try:
+        st['dnd'] = cms_write.dnd_state(p['e'])
+    except Exception as e:
+        st['dnd'] = {'on': False, 'error': str(e)[:120]}
+    return jsonify(st)
+
+
+@app.route('/api/clock/dnd-types', methods=['GET'])
+def clock_dnd_types():
+    """The kinds of Do Not Disturb people use in the CMS, to choose from."""
+    p = _portal_user(request.headers.get('X-Portal-Ticket', ''))
+    if not p:
+        return jsonify({'error': 'Sign in to the CMS first'}), 401
+    import cms_write
+    try:
+        return jsonify({'types': cms_write.dnd_types()})
+    except Exception as e:
+        return jsonify({'types': [], 'error': str(e)[:160]})
+
+
+@app.route('/api/clock/dnd', methods=['POST'])
+def clock_dnd():
+    """Go on Do Not Disturb (with a reason) or come off it — for yourself."""
+    p = _portal_user(request.headers.get('X-Portal-Ticket', ''))
+    if not p or not p.get('e'):
+        return jsonify({'ok': False, 'error': 'Sign in to the CMS first'}), 401
+    import cms_write
+    d = request.json or {}
+    try:
+        out = cms_write.dnd(p['e'], bool(d.get('on')), _who(), reason=d.get('reason'), kind=d.get('type'))
+    except cms_write.WriteRefused as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'Could not save that: ' + str(e)[:200]}), 400
+    return jsonify(out), (200 if out.get('ok') else 400)
+
+
+@app.route('/api/clock', methods=['POST'])
+def clock_action():
+    """Start a shift, go on a break, come back, or end the shift — for the
+    person signed in, never for someone else."""
+    p = _portal_user(request.headers.get('X-Portal-Ticket', ''))
+    if not p or not p.get('e'):
+        return jsonify({'ok': False, 'error': 'Sign in to the CMS first'}), 401
+    import cms_write
+    d = request.json or {}
+    try:
+        out = cms_write.clock(p['e'], (d.get('action') or '').strip(), _who(),
+                              minutes=d.get('minutes'), reason=d.get('reason'))
+    except cms_write.WriteRefused as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'Could not save that: ' + str(e)[:200]}), 400
+    # the Live floor and the Timesheet read these rows — let them see it at once
+    try:
+        _LIVE_SYNC_AT.clear()
+    except Exception:
+        pass
+    return jsonify(out), (200 if out.get('ok') else 400)
+
+
+@app.route('/api/clock/phone-check', methods=['GET'])
+@portal_manager_only
+def clock_phone_check():
+    """Is the phone system's database reachable? Read-only — for setting up."""
+    import cms_write
+    if not cms_write.asterisk_configured():
+        return jsonify({'ok': False, 'error': 'ASTERISK_DB_HOST / ASTERISK_DB_USER are not set on the server.'}), 400
+    try:
+        return jsonify({'ok': True, 'sample': cms_write.asterisk_check(request.args.get('extension'))})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)[:240]}), 400
+
+
 @app.route('/api/payroll/pay-methods', methods=['GET'])
 @portal_manager_only
 def payroll_pay_methods():
@@ -11718,7 +11805,7 @@ PORTAL_ALLOWED_PREFIXES = (
     '/api/waiting', '/api/queue-kinds', '/api/callbacks', '/api/call-search',
     '/api/work-note-shape', '/api/sms-number-lookup', '/api/sms-numbers',
     '/api/calls/summary', '/api/agent-names', '/api/date-coverage',
-    '/api/time-report', '/api/payroll', '/api/cms-settings', '/api/teams', '/api/team-leaders',
+    '/api/time-report', '/api/payroll', '/api/clock', '/api/cms-settings', '/api/teams', '/api/team-leaders',
     '/api/review-sample', '/api/calls/',
     # AgentMonitor's poller calls this one. It carries its own key rather than
     # a portal sign-in, so it is safe on this hostname — and being reachable

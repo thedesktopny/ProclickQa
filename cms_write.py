@@ -1833,3 +1833,315 @@ def _log(who, result, before=None):
         conn.commit(); conn.close()
     except Exception as e:
         print('[cms_write] could not record the change: ' + str(e)[:160])
+
+
+# ───────────────────────── clock in / break / clock out ─────────────────────
+# What the old CMS does on every status change, reproduced exactly:
+#   1. a row in EmployeeClocker (Status 1 = in, 2 = on a break, 0 = out, with
+#      the declared break minutes and reason on a break), and
+#   2. the phone system told, by writing cms_status into the Asterisk MySQL
+#      table ps_auths for the agent's extension — that is what decides whether
+#      calls ring them. Without step 2 an agent could be "clocked in" here and
+#      never receive a call, so clocking is refused until it is set up.
+import os as _os
+
+ASTERISK = {
+    'host': _os.getenv('ASTERISK_DB_HOST', ''),
+    'port': int(_os.getenv('ASTERISK_DB_PORT', '3306') or 3306),
+    'user': _os.getenv('ASTERISK_DB_USER', ''),
+    'password': _os.getenv('ASTERISK_DB_PASSWORD', ''),
+    'database': _os.getenv('ASTERISK_DB_NAME', 'asterisk'),
+}
+CLOCK_NAMES = {0: 'out', 1: 'in', 2: 'break'}
+
+
+def asterisk_configured():
+    return bool(ASTERISK['host'] and ASTERISK['user'])
+
+
+def _asterisk_connect():
+    import pymysql
+    return pymysql.connect(host=ASTERISK['host'], port=ASTERISK['port'], user=ASTERISK['user'],
+                           password=ASTERISK['password'], database=ASTERISK['database'],
+                           connect_timeout=6, read_timeout=8, write_timeout=8, autocommit=True)
+
+
+def asterisk_set_status(extension, cms_status):
+    """The same statement the old CMS runs on every clock change."""
+    conn = _asterisk_connect()
+    try:
+        cu = conn.cursor()
+        cu.execute("UPDATE ps_auths SET cms_status = %s, business_number = '' WHERE id = %s",
+                   (int(cms_status), str(extension).strip()))
+        return cu.rowcount
+    finally:
+        conn.close()
+
+
+def asterisk_check(extension=None):
+    """Can we reach the phone system's table at all? Read-only."""
+    conn = _asterisk_connect()
+    try:
+        cu = conn.cursor()
+        if extension:
+            cu.execute('SELECT id, cms_status, ast_status FROM ps_auths WHERE id = %s', (str(extension),))
+        else:
+            cu.execute('SELECT id, cms_status, ast_status FROM ps_auths ORDER BY id LIMIT 5')
+        return [{'extension': r[0], 'cms_status': r[1], 'ast_status': r[2]} for r in cu.fetchall()]
+    finally:
+        conn.close()
+
+
+def _now_local():
+    """The CMS stores clock times in New York time, as its own server does."""
+    from datetime import datetime
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo('America/New_York')).replace(tzinfo=None)
+    except Exception:
+        from datetime import timedelta
+        return datetime.utcnow() - timedelta(hours=4)
+
+
+def clock_status(employee_id):
+    """Where someone stands right now, from their latest EmployeeClocker row."""
+    conn = cms_db._connect()
+    try:
+        cu = conn.cursor()
+        cu.execute('SELECT FirstName, LastName, Extension FROM Employee WHERE Id = %s', (int(employee_id),))
+        e = cu.fetchone()
+        cu.execute("""SELECT TOP 1 Status, Created, BreakMinutes, BreakReason FROM EmployeeClocker
+                      WHERE EmployeeId = %s AND Status IS NOT NULL
+                      ORDER BY Created DESC, Id DESC""", (int(employee_id),))
+        r = cu.fetchone()
+    finally:
+        conn.close()
+    status = int(r[0]) if r and r[0] is not None else 0
+    return {'employee_id': int(employee_id),
+            'name': ('%s %s' % ((e[0] or '') if e else '', (e[1] or '') if e else '')).strip(),
+            'extension': (str(e[2]).strip() if e and e[2] not in (None, '') else None),
+            'status': CLOCK_NAMES.get(status, 'out'),
+            'since': cms_db._plain(r[1]) if r else None,
+            'break_minutes': (int(r[2]) if r and r[2] is not None else None),
+            'break_reason': (r[3] if r else None)}
+
+
+def clock(employee_id, action, who, minutes=None, reason=None):
+    """Start a shift ('in'), go on a break ('break'), come back ('back') or end
+    the shift ('out'). Only moves that make sense from where they are now."""
+    if not asterisk_configured():
+        raise WriteRefused('Clocking here is not switched on yet — the phone system connection '
+                           'is not set up. Use the old CMS for now.')
+    now = clock_status(employee_id)
+    cur = now['status']
+    allowed = {'in': ('out',), 'break': ('in',), 'back': ('break',), 'out': ('in', 'break')}
+    if action not in allowed:
+        raise WriteRefused('Unknown action.')
+    if cur not in allowed[action]:
+        msg = {'in': ('You are on a break — press Back to work.' if cur == 'break' else 'You are already clocked in.'),
+               'break': 'You can only start a break while clocked in.',
+               'back': 'You are not on a break.', 'out': 'You are not clocked in.'}[action]
+        raise WriteRefused(msg)
+    if not now['extension']:
+        raise WriteRefused('This person has no extension in the CMS, so the phone system cannot be told.')
+    status = {'in': 1, 'back': 1, 'break': 2, 'out': 0}[action]
+    mins = None
+    if action == 'break':
+        try:
+            mins = int(minutes)
+        except Exception:
+            raise WriteRefused('Choose how long the break is.')
+        if mins < 1 or mins > 240:
+            raise WriteRefused('A break must be between 1 and 240 minutes.')
+    reason = (reason or '').strip()[:200] or None
+    when = _now_local()
+
+    conn = cms_db._connect()
+    out = {'table': 'EmployeeClocker', 'action': 'clock_' + action, 'dry_run': False,
+           'values': {'EmployeeId': int(employee_id), 'Status': status, 'BreakMinutes': mins,
+                      'BreakReason': reason if action == 'break' else None}}
+    try:
+        cu = conn.cursor()
+        cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        cu.execute("""INSERT INTO EmployeeClocker (EmployeeId, Created, Status, BreakMinutes, BreakReason)
+                      OUTPUT INSERTED.Id VALUES (%s, %s, %s, %s, %s)""",
+                   (int(employee_id), when, status, mins, reason if action == 'break' else None))
+        r = cu.fetchone()
+        conn.commit()
+        out['row_id'] = int(r[0]) if r else None
+        out['committed'] = True
+    except Exception as ex:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        out.update({'ok': False, 'committed': False, 'error': _explain(ex), 'raw_error': str(ex)[:300]})
+        _log(who, out)
+        return out
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    # Do Not Disturb follows the shift: ending the shift ends it, and coming
+    # back from a break while it is still on keeps the phone on DND (3)
+    phone_status = status
+    try:
+        d = dnd_state(employee_id)
+        if d['on'] and action == 'out':
+            c2 = cms_db._connect()
+            try:
+                _dnd_insert(c2, employee_id, 'END_NOT_DISTRUB', when, 'shift ended', d.get('type'))
+                out['dnd_ended'] = True
+            finally:
+                c2.close()
+        elif d['on'] and status == 1:
+            phone_status = 3
+    except Exception as ex:
+        out['dnd_note'] = 'Could not check Do Not Disturb: ' + str(ex)[:120]
+
+    # the clock row is the record; now tell the phone system
+    try:
+        n = asterisk_set_status(now['extension'], phone_status)
+        out['phone_updated'] = bool(n)
+        if not n:
+            out['phone_warning'] = ('The phone system has no line for extension %s, so it was not updated.'
+                                    % now['extension'])
+    except Exception as ex:
+        out['phone_updated'] = False
+        out['phone_warning'] = 'Saved, but the phone system could not be told: ' + str(ex)[:160]
+    out['ok'] = True
+    out['status'] = CLOCK_NAMES[status]
+    out['since'] = when.isoformat()
+    _log(who, out)
+    return out
+
+
+# ───────────────────────── Do Not Disturb ─────────────────────────────────
+# NotDistrubStatus is a log: a NOT_DISTRUB row when someone goes on DND (with
+# the reason in Note and the kind in TypeDND), an END_NOT_DISTRUB row when they
+# come off. The phone system is told with cms_status 3 while on DND, and back
+# to 1 when it ends — the same as the old CMS.
+
+def dnd_state(employee_id):
+    """{'on': bool, 'since', 'note', 'type'} from the newest row."""
+    conn = cms_db._connect()
+    try:
+        cu = conn.cursor()
+        cu.execute("""SELECT TOP 1 Status, Created, Note, TypeDND FROM NotDistrubStatus
+                      WHERE EmployeeID = %s ORDER BY Id DESC""", (int(employee_id),))
+        r = cu.fetchone()
+    finally:
+        conn.close()
+    st = str((r[0] if r else '') or '').upper().strip()
+    on = bool(st) and not st.startswith('END')
+    return {'on': on, 'since': cms_db._plain(r[1]) if (r and on) else None,
+            'note': (r[2] if (r and on) else None), 'type': (r[3] if (r and on) else None)}
+
+
+def dnd_types():
+    """The kinds of DND people actually use in the CMS, most used first."""
+    conn = cms_db._connect()
+    try:
+        cu = conn.cursor()
+        cu.execute("""SELECT TOP 12 TypeDND, COUNT(*) FROM NotDistrubStatus
+                      WHERE TypeDND IS NOT NULL AND LTRIM(RTRIM(CAST(TypeDND AS varchar(100)))) <> ''
+                        AND Created >= DATEADD(day, -120, GETDATE())
+                      GROUP BY TypeDND ORDER BY COUNT(*) DESC""")
+        rows = []
+        while True:
+            r = cu.fetchone()
+            if not r:
+                break
+            rows.append(r)
+    finally:
+        conn.close()
+    return [{'type': str(r[0]).strip(), 'uses': int(r[1] or 0)} for r in rows]
+
+
+def _dnd_insert(conn, employee_id, status, when, note, kind):
+    cu = conn.cursor()
+    # refuse rather than guess if the table needs a column we do not fill
+    cu.execute("""SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+                  WHERE TABLE_NAME = 'NotDistrubStatus' AND IS_NULLABLE = 'NO'
+                    AND COLUMN_DEFAULT IS NULL
+                    AND COLUMNPROPERTY(OBJECT_ID(TABLE_SCHEMA + '.' + TABLE_NAME), COLUMN_NAME, 'IsIdentity') = 0""")
+    needed = set()
+    while True:
+        r = cu.fetchone()
+        if not r:
+            break
+        needed.add(r[0])
+    missing = needed - {'EmployeeID', 'Status', 'Created', 'Note', 'TypeDND'}
+    if missing:
+        raise WriteRefused('The CMS needs more for Do Not Disturb than this page knows how to fill ('
+                           + ', '.join(sorted(missing)) + '). Use the old CMS for DND for now.')
+    cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+    cu.execute("""INSERT INTO NotDistrubStatus (EmployeeID, Status, Created, Note, TypeDND)
+                  OUTPUT INSERTED.Id VALUES (%s, %s, %s, %s, %s)""",
+               (int(employee_id), status, when, note, kind))
+    r = cu.fetchone()
+    conn.commit()
+    return int(r[0]) if r else None
+
+
+def dnd(employee_id, turn_on, who, reason=None, kind=None):
+    """Go on Do Not Disturb (a reason is required) or come off it."""
+    if not asterisk_configured():
+        raise WriteRefused('Do Not Disturb here is not switched on yet — the phone system connection '
+                           'is not set up. Use the old CMS for now.')
+    clock_now = clock_status(employee_id)
+    state = dnd_state(employee_id)
+    reason = (reason or '').strip()[:300]
+    kind = (kind or '').strip()[:60] or None
+    if turn_on:
+        if state['on']:
+            raise WriteRefused('You are already on Do Not Disturb.')
+        if clock_now['status'] != 'in':
+            raise WriteRefused('Start your shift first — Do Not Disturb is only while working.')
+        if not reason:
+            raise WriteRefused('Type the reason for Do Not Disturb.')
+    elif not state['on']:
+        raise WriteRefused('You are not on Do Not Disturb.')
+    if not clock_now['extension']:
+        raise WriteRefused('This person has no extension in the CMS, so the phone system cannot be told.')
+
+    when = _now_local()
+    out = {'table': 'NotDistrubStatus', 'action': 'dnd_on' if turn_on else 'dnd_off', 'dry_run': False,
+           'values': {'EmployeeID': int(employee_id), 'Note': reason or None, 'TypeDND': kind}}
+    conn = cms_db._connect()
+    try:
+        out['row_id'] = _dnd_insert(conn, employee_id, 'NOT_DISTRUB' if turn_on else 'END_NOT_DISTRUB',
+                                    when, reason or None, kind if turn_on else state.get('type'))
+        out['committed'] = True
+    except WriteRefused:
+        raise
+    except Exception as ex:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        out.update({'ok': False, 'committed': False, 'error': _explain(ex), 'raw_error': str(ex)[:300]})
+        _log(who, out)
+        return out
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    # phone system: 3 while on DND; when it ends, back to whatever the clock says
+    phone = 3 if turn_on else {'in': 1, 'break': 2, 'out': 0}.get(clock_now['status'], 1)
+    try:
+        n = asterisk_set_status(clock_now['extension'], phone)
+        out['phone_updated'] = bool(n)
+        if not n:
+            out['phone_warning'] = 'The phone system has no line for extension %s.' % clock_now['extension']
+    except Exception as ex:
+        out['phone_updated'] = False
+        out['phone_warning'] = 'Saved, but the phone system could not be told: ' + str(ex)[:160]
+    out['ok'] = True
+    out['dnd'] = bool(turn_on)
+    _log(who, out)
+    return out

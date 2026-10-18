@@ -218,6 +218,32 @@ td.agent{color:var(--text);font-weight:500;}
 .main{ min-width:0; }
 #page-time-report, #page-payroll{ min-width:0; max-width:100%; }
 #page-time-report.ts-team .mgr-only{ display:none !important; }
+/* ---- start shift / break / end shift ---- */
+.clk{ margin:10px 12px 6px; padding:11px 12px; border:1px solid var(--border); border-radius:12px; background:var(--surface2); }
+.clk-state{ font-size:12.5px; color:var(--text); display:flex; align-items:center; gap:7px; flex-wrap:wrap; }
+.clk-state.muted{ color:var(--text3); font-size:11.5px; }
+.clk-dot{ width:8px; height:8px; border-radius:50%; flex:none; }
+.clk-dot.in{ background:var(--green); box-shadow:0 0 0 3px rgba(16,212,142,.18); }
+.clk-dot.brk{ background:var(--yellow); }
+.clk-dot.off{ background:var(--text3); }
+.clk-dot.dnd{ background:var(--red); }
+.clk-why{ display:block; width:100%; font-size:11px; color:var(--text3); margin-left:15px; }
+.clk-mins button{ white-space:nowrap; padding:5px 6px !important; flex:1 1 auto !important; }
+.clk-btns .clk-btn{ padding:7px 5px; font-size:11.5px; }
+.clk-btns{ display:flex; gap:6px; margin-top:9px; flex-wrap:wrap; }
+.clk-btn{ flex:1; min-width:0; background:var(--accent); color:#fff; border:0; border-radius:8px; padding:7px 8px;
+          font:inherit; font-size:12px; font-weight:600; cursor:pointer; white-space:nowrap; }
+.clk-btn.go{ background:var(--green); color:#04130d; }
+.clk-btn.ghost{ background:transparent; border:1px solid var(--border); color:var(--text2); font-weight:500; }
+.clk-btn:disabled{ opacity:.5; cursor:default; }
+.clk-note{ font-size:11px; color:var(--text3); }
+.clk-ask{ display:flex; flex-direction:column; gap:7px; width:100%; }
+.clk-mins{ display:flex; gap:4px; flex-wrap:wrap; }
+.clk-mins button{ flex:1; min-width:30px; background:var(--surface); border:1px solid var(--border); color:var(--text2);
+                  border-radius:6px; padding:5px 0; font:inherit; font-size:11.5px; cursor:pointer; }
+.clk-mins button.on{ background:var(--accent); border-color:var(--accent); color:#fff; }
+.clk-ask input{ background:var(--surface); border:1px solid var(--border); color:var(--text); border-radius:7px;
+                padding:6px 8px; font:inherit; font-size:12px; }
 /* ---- Payroll ---- */
 .src-note{ font-size:12px; color:var(--text3); padding:8px 28px 0; }
 .src-note:empty{ display:none; }
@@ -3764,7 +3790,7 @@ function handleSignedOut(){
   try{ haveToken = !!getToken(); }catch(e){}
   if(!haveTicket && !haveToken){
     // just stop the pollers quietly — there is nothing to tell them
-    [inTimer, cfTimer, lvTimer, acTimer, smsTimer].forEach(t => {
+    [inTimer, cfTimer, lvTimer, acTimer, smsTimer, clkTimer].forEach(t => {
       try{ clearInterval(t); }catch(e){}
     });
     pollStopAll();
@@ -3773,7 +3799,7 @@ function handleSignedOut(){
 
   authFailures++;
   if(authFailures < 3) return;
-  [inTimer, cfTimer, lvTimer, acTimer, smsTimer].forEach(t => { try{ clearInterval(t); }catch(e){} });
+  [inTimer, cfTimer, lvTimer, acTimer, smsTimer, clkTimer].forEach(t => { try{ clearInterval(t); }catch(e){} });
   if(!window.__saidSignedOut){
     window.__saidSignedOut = true;
     const box = document.getElementById('incoming');
@@ -3979,7 +4005,7 @@ async function checkAuth(){
 }
 
 async function doLogout(){
-  [inTimer, cfTimer, lvTimer, acTimer, smsTimer].forEach(t => {
+  [inTimer, cfTimer, lvTimer, acTimer, smsTimer, clkTimer].forEach(t => {
     try{ clearInterval(t); }catch(e){}
   });
   window.__saidSignedOut = true;
@@ -5791,7 +5817,167 @@ function portalApply(name, isManager){
                                    : isManager ? ' · manager' : '');
   const mark = document.querySelector('.logo-mark');
   if(mark) mark.innerHTML = '<div class="logo-icon">🎧</div>ProClick';
+  clockMount();
   showPage(portalPages[0] || 'live');
+}
+
+/* ── Start shift / break / end shift ─────────────────────────────────────
+   Sits at the top of the menu for everyone signed in to the CMS. Writes the
+   same clock row the old CMS writes and tells the phone system, so Live, the
+   Timesheet and call routing all follow at once. */
+let clkTimer = null, clkState = null, clkBreakMins = null;
+function clockMount(){
+  if(document.getElementById('clockbox')) { clockRefresh(); return; }
+  const side = document.querySelector('.sidebar');
+  const scroll = document.querySelector('.sidebar-scroll');
+  if(!side || !scroll) return;
+  const box = document.createElement('div');
+  box.id = 'clockbox'; box.className = 'clk';
+  box.innerHTML = '<div class="clk-state muted">Checking your status…</div>';
+  side.insertBefore(box, scroll);
+  clockRefresh();
+  clearInterval(clkTimer);
+  clkTimer = setInterval(clockRefresh, 60000);
+}
+
+async function clockRefresh(){
+  const box = document.getElementById('clockbox');
+  if(!box) return;
+  // don't redraw over the break chooser while someone is using it
+  if(document.getElementById('clk-reason')) return;
+  try{
+    const r = await fetch('/api/clock/me', {headers: portalHeaders()});
+    const j = await r.json();
+    if(j.error){ box.innerHTML = `<div class="clk-state muted">${esc(j.error)}</div>`; return; }
+    clkState = j; clockRender();
+  }catch(e){ /* keep what is showing; the next refresh tries again */ }
+}
+
+function clockRender(){
+  const box = document.getElementById('clockbox'), j = clkState;
+  if(!box || !j) return;
+  const t = j.since ? new Date(j.since) : null;
+  const at = t ? t.toLocaleTimeString([], {hour:'numeric', minute:'2-digit'}) : '';
+  const mins = t ? Math.max(0, Math.round((Date.now() - t.getTime()) / 60000)) : 0;
+  const dur = m => m >= 60 ? Math.floor(m/60) + 'h ' + (m%60) + 'm' : m + ' min';
+  let state, buttons = '';
+  const dnd = j.dnd && j.dnd.on;
+  if(j.status === 'in' && dnd){
+    const dt = j.dnd.since ? new Date(j.dnd.since) : null;
+    const dm = dt ? Math.max(0, Math.round((Date.now() - dt.getTime()) / 60000)) : 0;
+    state = `<span class="clk-dot dnd"></span>Do Not Disturb · ${dur(dm)}`
+          + `<span class="clk-why">${esc(j.dnd.type ? j.dnd.type + ' — ' : '')}${esc(j.dnd.note || '')}</span>`;
+    buttons = `<button class="clk-btn" onclick="clockDnd(false)">End DND</button>
+               <button class="clk-btn ghost" onclick="clockDo('out')">End shift</button>`;
+  }else if(j.status === 'in'){
+    state = `<span class="clk-dot in"></span>Working since ${at}`;
+    buttons = `<button class="clk-btn" onclick="clockBreakAsk()">☕ Break</button>
+               <button class="clk-btn" onclick="clockDndAsk()">🔕 DND</button>
+               <button class="clk-btn ghost" onclick="clockDo('out')">End shift</button>`;
+  }else if(j.status === 'break'){
+    const over = j.break_minutes && mins > j.break_minutes;
+    state = `<span class="clk-dot brk"></span>On break · <b style="color:${over?'var(--red)':'inherit'}">${dur(mins)}</b>${j.break_minutes?` of ${j.break_minutes} min`:''}`;
+    buttons = `<button class="clk-btn" onclick="clockDo('back')">Back to work</button>
+               <button class="clk-btn ghost" onclick="clockDo('out')">End shift</button>`;
+  }else{
+    state = `<span class="clk-dot off"></span>Not clocked in`;
+    buttons = `<button class="clk-btn go" onclick="clockDo('in')">▶ Start shift</button>`;
+  }
+  if(!j.enabled){
+    buttons = `<div class="clk-note">Clocking here isn't switched on yet — use the old CMS.</div>`;
+  }
+  box.innerHTML = `<div class="clk-state">${state}</div><div class="clk-btns" id="clk-btns">${buttons}</div>`;
+}
+
+function clockBreakAsk(){
+  const b = document.getElementById('clk-btns');
+  if(!b) return;
+  clkBreakMins = null;
+  b.innerHTML = `<div class="clk-ask">
+      <div class="clk-mins">${[5,10,15,20,30,45,60].map(m=>`<button onclick="clockBreakPick(this,${m})">${m}</button>`).join('')}</div>
+      <input id="clk-reason" placeholder="Reason (optional)" maxlength="200">
+      <div style="display:flex;gap:6px;">
+        <button class="clk-btn" id="clk-go-break" disabled onclick="clockDo('break')">Pick minutes</button>
+        <button class="clk-btn ghost" onclick="clockRender()">Cancel</button>
+      </div></div>`;
+}
+/* Do Not Disturb needs a reason, the same as in the old CMS. The kinds offered
+   are the ones people actually use there, read from the CMS itself. */
+let clkDndType = '';
+async function clockDndAsk(){
+  const b = document.getElementById('clk-btns');
+  if(!b) return;
+  clkDndType = '';
+  b.innerHTML = `<div class="clk-ask">
+      <div class="clk-mins" id="clk-dnd-types"><span class="clk-note">Loading…</span></div>
+      <input id="clk-reason" placeholder="Reason (required)" maxlength="300" oninput="clockDndReady()">
+      <div style="display:flex;gap:6px;">
+        <button class="clk-btn" id="clk-go-dnd" disabled onclick="clockDnd(true)">Start DND</button>
+        <button class="clk-btn ghost" onclick="clockRender()">Cancel</button>
+      </div></div>`;
+  try{
+    const r = await (await fetch('/api/clock/dnd-types', {headers: portalHeaders()})).json();
+    const box = document.getElementById('clk-dnd-types');
+    if(box) box.innerHTML = (r.types||[]).length
+      ? r.types.slice(0,6).map(t => `<button onclick="clockDndPick(this)" data-t="${esc(t.type)}">${esc(t.type)}</button>`).join('')
+      : '';
+  }catch(e){ const box = document.getElementById('clk-dnd-types'); if(box) box.innerHTML=''; }
+  document.getElementById('clk-reason')?.focus();
+}
+function clockDndPick(btn){
+  const was = btn.classList.contains('on');
+  btn.parentElement.querySelectorAll('button').forEach(x => x.classList.remove('on'));
+  if(!was){ btn.classList.add('on'); clkDndType = btn.dataset.t || ''; } else clkDndType = '';
+  clockDndReady();
+}
+function clockDndReady(){
+  const go = document.getElementById('clk-go-dnd');
+  const r = (document.getElementById('clk-reason')?.value || '').trim();
+  if(go) go.disabled = !r;
+}
+async function clockDnd(on){
+  const body = {on};
+  if(on){ body.reason = document.getElementById('clk-reason')?.value || ''; body.type = clkDndType; }
+  const b = document.getElementById('clk-btns');
+  if(b) b.querySelectorAll('button').forEach(x => x.disabled = true);
+  try{
+    const r = await fetch('/api/clock/dnd', {method:'POST', headers: portalHeaders(), body: JSON.stringify(body)});
+    const j = await r.json();
+    if(!j.ok) showToast(j.error || 'Not saved', true);
+    else{
+      showToast(on ? '🔕 Do Not Disturb on' : 'Do Not Disturb off');
+      if(j.phone_warning) setTimeout(()=>showToast(j.phone_warning, true), 1500);
+    }
+  }catch(e){ showToast('Could not reach the server', true); }
+  const ask = document.getElementById('clk-reason'); if(ask) ask.remove();
+  clockRefresh();
+}
+
+function clockBreakPick(btn, m){
+  clkBreakMins = m;
+  btn.parentElement.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === btn));
+  const go = document.getElementById('clk-go-break');
+  if(go){ go.disabled = false; go.textContent = `Start ${m} min`; }
+}
+
+async function clockDo(action){
+  if(action === 'out' && !confirm('End your shift now?')) return;
+  const body = {action};
+  if(action === 'break'){ body.minutes = clkBreakMins; body.reason = document.getElementById('clk-reason')?.value || ''; }
+  const b = document.getElementById('clk-btns');
+  if(b) b.querySelectorAll('button').forEach(x => x.disabled = true);
+  try{
+    const r = await fetch('/api/clock', {method:'POST', headers: portalHeaders(), body: JSON.stringify(body)});
+    const j = await r.json();
+    if(!j.ok){ showToast(j.error || 'Not saved', true); }
+    else{
+      showToast({in:'✅ Shift started', break:'☕ Break started', back:'✅ Back to work', out:'Shift ended'}[action]);
+      if(j.phone_warning) setTimeout(()=>showToast(j.phone_warning, true), 1500);
+    }
+  }catch(e){ showToast('Could not reach the server', true); }
+  clkBreakMins = null;
+  const ask = document.getElementById('clk-reason'); if(ask) ask.remove();
+  clockRefresh();
 }
 
 /* Signing out has to undo everything the sign-in set up, not just the portal
@@ -5800,10 +5986,11 @@ function portalApply(name, isManager){
    produced the "your sign-in has expired" bar straight after signing out. */
 async function portalSignOut(){
   // stop everything that polls, before anything is cleared
-  [inTimer, cfTimer, lvTimer, acTimer, smsTimer].forEach(t => {
+  [inTimer, cfTimer, lvTimer, acTimer, smsTimer, clkTimer].forEach(t => {
     try{ clearInterval(t); }catch(e){}
   });
   pollStopAll();
+  document.getElementById('clockbox')?.remove();
   window.__saidSignedOut = true;      // and no expired-session bar on the way out
 
   // Tell the server, so the ticket stops working everywhere — not only in
