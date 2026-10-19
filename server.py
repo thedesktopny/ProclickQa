@@ -6230,7 +6230,7 @@ def connections_check():
     return jsonify({'checks': checks, 'ok': ok_count, 'total': len(checks),
                     'outbound_ip': out_ip,
                     'analyze_url': request.url_root.rstrip('/') + '/api/analyze',
-                    'as_of': datetime.now().isoformat()})
+                    'as_of': datetime.utcnow().isoformat() + 'Z'})
 
 
 @app.route('/api/cms-db/write-readiness', methods=['GET'])
@@ -9009,7 +9009,7 @@ def live_route():
     import cms_db
     try:
         out = cms_db.live_snapshot()
-        out['as_of'] = datetime.now().isoformat()
+        out['as_of'] = datetime.utcnow().isoformat() + 'Z'
 
         # Money is for admins. Agents have no reason to see the day's takings,
         # and hiding the card in the page would not do — the figure travels in
@@ -9044,7 +9044,7 @@ def agents_live_route():
     import cms_db
     try:
         return jsonify({'agents': cms_db.agents_live(),
-                        'as_of': datetime.now().isoformat()})
+                        'as_of': datetime.utcnow().isoformat() + 'Z'})
     except Exception as e:
         return jsonify({'error': str(e)[:240]}), 400
 
