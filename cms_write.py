@@ -1926,7 +1926,7 @@ def clock_status(employee_id):
             'break_reason': (r[3] if r else None)}
 
 
-def clock(employee_id, action, who, minutes=None, reason=None):
+def clock(employee_id, action, who, minutes=None, reason=None, logged_out_by=None):
     """Start a shift ('in'), go on a break ('break'), come back ('back') or end
     the shift ('out'). Only moves that make sense from where they are now."""
     if not asterisk_configured():
@@ -1960,6 +1960,13 @@ def clock(employee_id, action, who, minutes=None, reason=None):
     out = {'table': 'EmployeeClocker', 'action': 'clock_' + action, 'dry_run': False,
            'values': {'EmployeeId': int(employee_id), 'Status': status, 'BreakMinutes': mins,
                       'BreakReason': reason if action == 'break' else None}}
+    if logged_out_by:
+        # someone else ended this shift (a team leader or manager); the CMS row
+        # is an ordinary clock-out, and who did it and why is kept in our log
+        out['values']['logged_out_by'] = logged_out_by
+        out['values']['reason'] = reason
+        out['values']['at'] = when.isoformat()
+        out['action'] = 'clock_out_by_leader'
     try:
         cu = conn.cursor()
         cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')

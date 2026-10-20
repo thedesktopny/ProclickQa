@@ -9979,6 +9979,46 @@ def clock_action():
     return jsonify(out), (200 if out.get('ok') else 400)
 
 
+@app.route('/api/clock/agent-out', methods=['POST'])
+def clock_agent_out():
+    """A team leader, manager or admin ends someone else's shift — the same
+    clock-out the agent would do themselves, with who did it and why kept in
+    the log. Team leaders may do it for any agent, since agents move between
+    team leaders when one is out."""
+    viewer = _timesheet_viewer()
+    if not viewer:
+        return jsonify({'ok': False, 'error': 'Only team leaders, managers and admins can log an agent out.'}), 403
+    import cms_write
+    d = request.json or {}
+    try:
+        agent_id = int(d.get('employee_id'))
+    except Exception:
+        return jsonify({'ok': False, 'error': 'Which agent?'}), 400
+    reason = (d.get('reason') or '').strip()[:300]
+    if len(reason) < 3:
+        return jsonify({'ok': False, 'error': 'Write why you are logging them out.'}), 400
+    who = _who()
+    try:
+        st = cms_write.clock_status(agent_id)
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'Could not read their status: ' + str(e)[:160]}), 400
+    if st.get('status') not in ('in', 'break'):
+        return jsonify({'ok': False, 'error': '%s is already logged out.' % (st.get('name') or 'This agent')}), 400
+    try:
+        out = cms_write.clock(agent_id, 'out', who, reason=reason,
+                              logged_out_by=who.get('name') or 'team leader')
+    except cms_write.WriteRefused as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'Could not log them out: ' + str(e)[:200]}), 400
+    try:
+        _LIVE_SYNC_AT.clear()
+    except Exception:
+        pass
+    out['agent'] = st.get('name')
+    return jsonify(out), (200 if out.get('ok') else 400)
+
+
 @app.route('/api/clock/phone-check', methods=['GET'])
 @portal_manager_only
 def clock_phone_check():
@@ -10393,6 +10433,57 @@ def _time_report_impl():
         request.args.get('date_from', ''), request.args.get('date_to', ''),
         request.args.get('employee', ''), int(request.args.get('grace_minutes', 5) or 5),
         request.args.get('source', 'auto')))
+
+
+def _leader_outs(rows, date_from, date_to):
+    """Adds "Logged out by X: reason" to the shift that someone else ended."""
+    import json as _json
+    conn = get_db(); c = conn.cursor()
+    try:
+        c.execute("""SELECT after_json, who FROM cms_audit
+                     WHERE action = 'clock_out_by_leader' AND committed
+                       AND at >= %s::date - INTERVAL '1 day' AND at < %s::date + INTERVAL '2 day'""",
+                  (str(date_from)[:10], str(date_to)[:10]))
+        outs = c.fetchall()
+        if not outs:
+            return
+        names = {}
+        try:
+            c.execute('SELECT employee_id, employee_name FROM payroll_people')
+            names = {int(r[0]): r[1] for r in c.fetchall() if r[0] is not None}
+        except Exception:
+            conn.rollback()
+    finally:
+        conn.close()
+    for aj, who in outs:
+        try:
+            v = _json.loads(aj or '{}')
+            at = datetime.fromisoformat(str(v.get('at'))[:19])
+        except Exception:
+            continue
+        name = names.get(int(v.get('EmployeeId') or 0))
+        if not name:
+            continue
+        key = name.strip().lower()
+        best = None
+        for r in rows:
+            if (r.get('employee_name') or '').strip().lower() != key or not r.get('actual_in'):
+                continue
+            try:
+                a_in = datetime.fromisoformat(r['actual_in'][:19])
+                a_out = datetime.fromisoformat(r['actual_out'][:19]) if r.get('actual_out') else None
+            except Exception:
+                continue
+            if a_in <= at + timedelta(minutes=2) and (a_out is None or a_out >= at - timedelta(minutes=2)):
+                best = r
+                break
+        if best is not None:
+            note = 'Logged out by %s at %s' % (v.get('logged_out_by') or who or 'a team leader',
+                                                at.strftime('%-I:%M %p'))
+            if v.get('reason'):
+                note += ': ' + str(v['reason'])
+            best.setdefault('issues', []).append(note)
+            best['logged_out_by'] = v.get('logged_out_by') or who
 
 
 def _time_report_data(date_from, date_to, employee='', grace=5, source='auto'):
@@ -11042,6 +11133,13 @@ def _time_report_data(date_from, date_to, employee='', grace=5, source='auto'):
     totals['phone_deducted_minutes'] = round(_tot_ded_min, 1)
     totals['phone_pay_reduction'] = round(_tot_ded_pay, 2)
     totals['adjusted_total_pay'] = round((totals.get('total_pay') or 0) - _tot_ded_pay, 2)
+
+    # Shifts a team leader or manager ended for the agent: say so on the shift,
+    # with who did it and why, so the early finish is not read as the agent's.
+    try:
+        _leader_outs(rows, date_from, date_to)
+    except Exception as _e:
+        print('[time_report] leader log-outs unavailable: ' + str(_e)[:160])
 
     # Any special overtime rate currently in force
     now = now_local

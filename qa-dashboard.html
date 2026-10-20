@@ -1078,6 +1078,13 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
 #page-skin-block.active{ display:block; padding:0; }
 #page-skin-block .sb-holder{ height:calc(100vh - 74px); min-height:560px; }
 #page-skin-block #sb-frame{ width:100%; height:100%; border:0; display:block; background:var(--bg); }
+.ac-out{flex:none;margin-right:10px;font-size:11.5px;font-weight:600;padding:5px 10px;border-radius:7px;
+  border:1px solid rgba(242,88,95,.45);background:rgba(242,88,95,.10);color:#F2585F;cursor:pointer;}
+.ac-out:hover{background:rgba(242,88,95,.22);}
+.ac-out-bg{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:9999;padding:16px;}
+.ac-out-box{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:20px;width:100%;max-width:420px;box-shadow:0 20px 50px rgba(0,0,0,.4);}
+.ac-out-box textarea{width:100%;box-sizing:border-box;background:var(--surface2);color:var(--text);
+  border:1px solid var(--border);border-radius:9px;padding:9px 11px;font:inherit;font-size:13px;resize:vertical;}
 </style>
 </head>
 <body>
@@ -11087,6 +11094,14 @@ async function acLoadLive(){
     const r = await API.get('/api/agents/live');
     if(r.error){ box.innerHTML = `<div style="color:var(--red)">${r.error}</div>`; return; }
     const list = r.agents || [];
+    // the CMS's live table catches up on its own schedule, so someone just
+    // logged out from here is shown as logged out until it does
+    list.forEach(a=>{
+      const t = acLoggedOut[a.employee_id];
+      if(!t) return;
+      if(Date.now() - t > 10*60000 || (a.clocker_since && new Date(a.clocker_since).getTime() > t)){ delete acLoggedOut[a.employee_id]; return; }
+      a.clocked_in = false; a.on_break = false; a.dnd = false; a.just_logged_out = true;
+    });
     document.getElementById('ac-asof').textContent = 'as of ' + new Date(r.as_of).toLocaleTimeString();
 
     const onShift = list.filter(a=>a.clocked_in);
@@ -11111,6 +11126,7 @@ async function acLoadLive(){
       const h = Math.floor(mins/60);
       return h < 24 ? h + 'h ago' : Math.floor(h/24) + 'd ago';
     };
+    const canOut = acCanLogOut();
     box.innerHTML = list.sort((a,b)=>(b.clocked_in-a.clocked_in) ||
         ((b.phone==='IN_USE')-(a.phone==='IN_USE')) || a.name.localeCompare(b.name))
       .map(a=>{
@@ -11118,7 +11134,7 @@ async function acLoadLive(){
         const dnd = !!a.dnd && !busy;
         const dot = !a.clocked_in ? 'var(--text3)' : busy ? 'var(--green)'
                   : dnd ? '#F2585F' : a.on_break ? '#7B6CF6' : 'var(--yellow)';
-        const state = !a.clocked_in ? 'off shift' : busy ? 'on a call'
+        const state = a.just_logged_out ? 'logged out just now' : !a.clocked_in ? 'off shift' : busy ? 'on a call'
                     : dnd ? 'do not disturb' + (a.dnd_note ? ' — ' + esc(a.dnd_note) : '')
                     : a.on_break ? 'on a break' : 'free';
         return `<div class="payrow ${acSelected===a.employee_id?'sel':''}" onclick="acOpen(${a.employee_id})">
@@ -11127,12 +11143,64 @@ async function acLoadLive(){
             <div class="mt">${state}${a.clocked_in&&a.clocker_since?' since '+new Date(a.clocker_since).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}):''}
               ${a.last_call_at?' · last call '+ago(a.last_call_at):''}
               ${a.last_call_phone?' ('+a.last_call_phone+')':''}</div></div>
+          ${canOut && a.clocked_in ? `<button class="ac-out" title="End this agent's shift"
+              onclick="event.stopPropagation();acLogOutAsk(${a.employee_id}, '${esc(a.name).replace(/'/g,"&#39;")}', ${busy?1:0})">Log out</button>` : ''}
           <div style="text-align:right;font-size:11.5px;color:var(--text3);">
             <div class="paynum" style="color:var(--text);font-size:13px;">${a.calls_in}<span style="opacity:.5">in</span>
               / ${a.calls_out}<span style="opacity:.5">out</span></div>
             ${a.minutes_on_call?a.minutes_on_call+' min on calls':''}</div>
         </div>`; }).join('');
   }catch(e){ box.innerHTML = `<div style="color:var(--red)">${e.message}</div>`; }
+}
+
+/* Team leaders, managers and admins can end an agent's shift from here —
+   the same clock-out the agent would do, with a reason that shows up on the
+   Timesheet. */
+const acLoggedOut = {};
+function acCanLogOut(){
+  // the portal gives the Timesheet to exactly these people
+  if(typeof portalTicket !== 'undefined' && portalTicket) return (portalPages||[]).includes('time-report');
+  return false;
+}
+function acLogOutAsk(id, name, onCall){
+  document.getElementById('ac-out-modal')?.remove();
+  const m = document.createElement('div');
+  m.id = 'ac-out-modal'; m.className = 'ac-out-bg';
+  m.onclick = e => { if(e.target === m) m.remove(); };
+  m.innerHTML = `<div class="ac-out-box" role="dialog" aria-label="Log out agent">
+      <div style="font-size:16px;font-weight:650;">Log out ${name}?</div>
+      <div style="font-size:12.5px;color:var(--text3);margin:6px 0 12px;line-height:1.45;">
+        Ends their shift now and takes their phone out of the queue, the same as if they pressed End shift.
+        The reason shows on their Timesheet.
+        ${onCall?'<div style="color:var(--yellow);margin-top:6px;">They are on a call right now. The call is not cut, but no new calls will come to them.</div>':''}</div>
+      <textarea id="ac-out-reason" rows="3" maxlength="300" placeholder="Why? (required)"
+        oninput="document.getElementById('ac-out-go').disabled = this.value.trim().length < 3"></textarea>
+      <div id="ac-out-err" style="color:var(--red);font-size:12px;min-height:16px;margin-top:6px;"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:4px;">
+        <button class="btn btn-secondary" onclick="document.getElementById('ac-out-modal').remove()">Cancel</button>
+        <button class="btn btn-primary" id="ac-out-go" disabled style="background:var(--red);border-color:var(--red);"
+          onclick="acLogOutDo(${id})">Log out</button>
+      </div></div>`;
+  document.body.appendChild(m);
+  document.getElementById('ac-out-reason').focus();
+}
+async function acLogOutDo(id){
+  const btn = document.getElementById('ac-out-go'), err = document.getElementById('ac-out-err');
+  const reason = (document.getElementById('ac-out-reason').value || '').trim();
+  if(reason.length < 3){ err.textContent = 'Write why.'; return; }
+  btn.disabled = true; btn.textContent = 'Logging out…'; err.textContent = '';
+  try{
+    const res = await fetch('/api/clock/agent-out', {method:'POST',
+      headers: {...portalHeaders(), 'Content-Type':'application/json'},
+      body: JSON.stringify({employee_id: id, reason})});
+    const j = await res.json().catch(()=>({}));
+    if(!res.ok || !j.ok){ err.textContent = j.error || 'Could not log them out.'; btn.disabled = false; btn.textContent = 'Log out'; return; }
+    document.getElementById('ac-out-modal')?.remove();
+    acLoggedOut[id] = Date.now();
+    showToast((j.agent || 'Agent') + ' is logged out');
+    if(j.phone_warning) setTimeout(()=>showToast(j.phone_warning, true), 1500);
+    acLoadLive();
+  }catch(e){ err.textContent = e.message; btn.disabled = false; btn.textContent = 'Log out'; }
 }
 
 async function acOpen(id){
