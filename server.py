@@ -776,6 +776,7 @@ def init_db():
         "ALTER TABLE calls ADD COLUMN IF NOT EXISTS summary TEXT",
         "ALTER TABLE calls ADD COLUMN IF NOT EXISTS flagged_moments TEXT",
         "ALTER TABLE calls ADD COLUMN IF NOT EXISTS error_message TEXT",
+        "ALTER TABLE calls ADD COLUMN IF NOT EXISTS notes_final BOOLEAN DEFAULT FALSE",
         "CREATE UNIQUE INDEX IF NOT EXISTS agents_name_unique ON agents (name)",
         "ALTER TABLE agents ADD COLUMN IF NOT EXISTS assigned_qa_user_id INTEGER",
         # ── Rate history: rates are effective-dated so past shifts keep their old rate
@@ -2767,6 +2768,9 @@ def analyze_call():
                 except: pass
                 return
 
+            # the agent is still writing the note — wait for the finished one
+            nonlocal_notes = _await_final_notes(call_id, agent_extension, caller_id, call_notes)
+
             url_path = recording_url.split('?')[0]
             ext = os.path.splitext(url_path)[1].lower()
             if ext not in ['.mp3', '.wav', '.m4a', '.ogg', '.webm', '.flac']:
@@ -2780,7 +2784,7 @@ def analyze_call():
                 download_recording(recording_url, audio_path, timeout=60, retries=2)
                 result = run_analysis(audio_path, agent_name, call_id,
                                     call_end_first=call_end_first,
-                                    call_notes=call_notes,
+                                    call_notes=nonlocal_notes,
                                     account_name=account_name,
                                     agent_qos_tx=agent_qos_tx, agent_qos_rx=agent_qos_rx,
                                     customer_qos_tx=customer_qos_tx, customer_qos_rx=customer_qos_rx)
@@ -12043,6 +12047,192 @@ def skinblock_status():
 _PULL_STATE = {'last_run': None, 'found': 0, 'queued': 0, 'error': None}
 
 
+# ─── WAITING FOR THE AGENT'S NOTES ───────────────────────────────────────────
+# A call reaches us the moment it hangs up, but the agent writes the real note
+# afterwards — the order, links, emails and totals — and the CMS only has it
+# once they end the work. Scored straight away, QA saw just the short
+# "Description on work" (e.g. ONLINE ASSIST) and marked the notes down for it.
+# So scoring now waits until the work is ended (up to half an hour), and a
+# background pass brings the full note into calls already in the system.
+
+def _ny_now():
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo('America/New_York')).replace(tzinfo=None)
+    except Exception:
+        return datetime.utcnow() - timedelta(hours=4)
+
+
+def _utc_to_ny(dt):
+    try:
+        from zoneinfo import ZoneInfo
+        from datetime import timezone as _tz
+        return dt.replace(tzinfo=_tz.utc).astimezone(ZoneInfo('America/New_York')).replace(tzinfo=None)
+    except Exception:
+        return dt - timedelta(hours=4)
+
+
+def _cms_id_from(call_id):
+    m = re.match(r'^CMS-(\d+)$', str(call_id or ''))
+    return int(m.group(1)) if m else None
+
+
+def _save_notes(call_id, notes, final):
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute('UPDATE calls SET call_notes = %s, notes_final = %s WHERE call_id = %s',
+                  (notes, bool(final), call_id))
+        conn.commit(); conn.close()
+    except Exception as e:
+        print('[notes] could not save notes for %s: %s' % (call_id, str(e)[:120]))
+
+
+def _await_final_notes(call_id, extension, phone, notes, max_wait=1800, every=60):
+    """Waits until the agent has ended the work on this call, then returns the
+    full note from the CMS. Never waits longer than max_wait seconds, and if
+    the CMS cannot be read, goes ahead with what it has."""
+    import cms_db
+    best = (notes or '').strip()
+    start = time.time()
+    around = _ny_now()
+    _set_status(call_id, 'Waiting for notes', only_if='Processing')
+    cms_id = _cms_id_from(call_id)
+    final = False
+    while True:
+        try:
+            info = cms_db.call_work_notes(cms_id, extension, phone, around)
+        except Exception as e:
+            print('[notes] CMS not readable for %s: %s' % (call_id, str(e)[:120]))
+            break
+        waited = time.time() - start
+        if info is None:
+            if waited > 300:          # the CMS never had this call
+                break
+        else:
+            cms_id = info['cms_call_id']
+            if len(info['notes']) > len(best):
+                best = info['notes']
+            if info['work_ended'] or (not info['has_work'] and waited > 300):
+                final = True
+                break
+        if waited + every > max_wait:
+            break
+        time.sleep(every)
+    _save_notes(call_id, best, final)
+    _set_status(call_id, 'Processing', only_if='Waiting for notes')
+    return best
+
+
+def _set_status(call_id, status, only_if):
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute('UPDATE calls SET status = %s, processing_started_at = NOW() '
+                  'WHERE call_id = %s AND status = %s', (status, call_id, only_if))
+        conn.commit(); conn.close()
+    except Exception as e:
+        print('[notes] status not changed for %s: %s' % (call_id, str(e)[:120]))
+
+
+def _refresh_recent_notes(limit=150, days=3):
+    """Brings the full note into calls already scored or waiting. Each call is
+    checked until its work is ended, then left alone."""
+    import cms_db
+    conn = get_db(); c = conn.cursor()
+    got = False
+    try:
+        c.execute('SELECT pg_try_advisory_lock(80421)')
+        got = bool(c.fetchone()[0])
+        if not got:
+            return {'skipped': 'already running'}
+        # a restart in the middle of waiting leaves a call parked; hand it to
+        # the normal retry instead of leaving it there for ever
+        c.execute("""UPDATE calls SET status = 'Failed',
+                            error_message = 'Interrupted while waiting for the agent''s notes — retry it'
+                     WHERE status = 'Waiting for notes' AND created_at < NOW() - INTERVAL '50 minutes'""")
+        conn.commit()
+        c.execute("""SELECT call_id, agent_extension, caller_id, call_notes, created_at
+                     FROM calls
+                     WHERE created_at >= NOW() - (%s || ' days')::interval
+                       AND NOT COALESCE(notes_final, FALSE)
+                       AND COALESCE(status, '') NOT IN ('Processing', 'Waiting for notes')
+                     ORDER BY created_at DESC LIMIT %s""", (str(int(days)), int(limit)))
+        rows = c.fetchall()
+        done = {'checked': 0, 'longer': 0, 'final': 0}
+        for call_id, ext, phone, notes, created in rows:
+            done['checked'] += 1
+            try:
+                info = cms_db.call_work_notes(_cms_id_from(call_id), ext, phone,
+                                              _utc_to_ny(created) if created else _ny_now())
+            except Exception as e:
+                print('[notes] refresh stopped: ' + str(e)[:120])
+                break
+            old_age_h = ((datetime.utcnow() - created).total_seconds() / 3600.0) if created else 99
+            have = (notes or '').strip()
+            if info is None:
+                if old_age_h > 2:
+                    c.execute('UPDATE calls SET notes_final = TRUE WHERE call_id = %s', (call_id,))
+                    done['final'] += 1
+                continue
+            new = have
+            if len(info['notes']) > len(have):
+                new = info['notes']; done['longer'] += 1
+            final = info['work_ended'] or (not info['has_work'] and old_age_h > 2)
+            if new != have or final:
+                c.execute('UPDATE calls SET call_notes = %s, notes_final = %s WHERE call_id = %s',
+                          (new, bool(final), call_id))
+                done['final'] += int(bool(final))
+        conn.commit()
+        return done
+    finally:
+        try:
+            if got:
+                c.execute('SELECT pg_advisory_unlock(80421)'); conn.commit()
+        except Exception:
+            pass
+        conn.close()
+
+
+def _notes_refresher():
+    import threading
+
+    def loop():
+        time.sleep(90)
+        while True:
+            try:
+                r = _refresh_recent_notes()
+                if r.get('longer'):
+                    print('[notes] full notes brought in for %d calls' % r['longer'])
+            except Exception as e:
+                print('[notes] refresh failed: ' + str(e)[:160])
+            time.sleep(600)
+    threading.Thread(target=loop, daemon=True).start()
+
+
+@app.route('/api/calls/refresh-notes', methods=['POST'])
+@require_manager
+def refresh_notes_now():
+    """Re-check the notes of the last N days of calls against the CMS."""
+    try:
+        days = min(30, max(1, int((request.json or {}).get('days') or 3)))
+    except Exception:
+        days = 3
+    conn = get_db(); c = conn.cursor()
+    c.execute("UPDATE calls SET notes_final = FALSE WHERE created_at >= NOW() - (%s || ' days')::interval",
+              (str(days),))
+    n = c.rowcount; conn.commit(); conn.close()
+    import threading
+
+    def run():
+        for _ in range(200):
+            r = _refresh_recent_notes(limit=200, days=days)
+            if not r.get('checked'):
+                break
+    threading.Thread(target=run, daemon=True).start()
+    return jsonify({'ok': True, 'calls_to_check': n,
+                    'note': 'Running in the background; the notes update as it goes.'})
+
+
+
 def _score_in_background(call):
     """Downloads the recording and scores it, then writes the result.
 
@@ -12151,6 +12341,15 @@ def _pull_calls_from_cms(minutes=180, limit=50, dry_run=False):
     for call in found:
         if call['call_id'] in have:
             continue
+        if not call.get('work_ended'):
+            try:
+                ended = datetime.fromisoformat(str(call.get('ended'))[:19])
+                young = (_ny_now() - ended).total_seconds() < 3600
+            except Exception:
+                young = False
+            if young:
+                out['skipped'].append('%s: agent still writing the note' % call['call_id'])
+                continue
         url = call['recording_url'] or ''
         if not url.lower().startswith(('http://', 'https://')):
             url = base.rstrip('/') + '/' + url.lstrip('/')
@@ -12312,6 +12511,11 @@ def _warm_skinblock_assets():
 
 
 _warm_skinblock_assets()
+
+try:
+    _notes_refresher()
+except Exception as e:
+    print('[notes] could not start the notes refresher: ' + str(e)[:140])
 
 try:
     _live_calls_reader()

@@ -1398,6 +1398,7 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
         <option value="Review">Needs review</option>
         <option value="Passed">Passed</option>
         <option value="Processing">Processing</option>
+        <option value="Waiting for notes">Waiting for notes</option>
       </select>
       <input class="date-filter" id="calls-search" placeholder="🔍 Search agent or customer..." oninput="filterCalls()" style="width:220px;">
     </div>
@@ -14754,7 +14755,7 @@ function scoreCircle(score){
 }
 
 function statusBadge(status, errorMessage){
-  const map={Critical:'badge-red',Passed:'badge-green',Review:'badge-yellow',Processing:'badge-gray',Failed:'badge-red',Paused:'badge-yellow'};
+  const map={Critical:'badge-red',Passed:'badge-green',Review:'badge-yellow',Processing:'badge-gray','Waiting for notes':'badge-gray',Failed:'badge-red',Paused:'badge-yellow'};
   const safeMsg = errorMessage ? errorMessage.replace(/"/g,'&quot;').replace(/'/g,"\\'") : '';
   const titleAttr = (status==='Failed' && safeMsg) ? ` title="${safeMsg}"` : '';
   const cursorStyle = (status==='Failed' && safeMsg) ? ' style="cursor:help;"' : '';

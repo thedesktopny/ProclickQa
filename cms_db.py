@@ -1086,6 +1086,77 @@ def _shorter_note(*values):
     return texts[0] if len(texts) > 1 else ''
 
 
+def full_work_note(*values):
+    """Everything the agent wrote for a call, in one piece.
+
+    The CMS keeps two writings per call: the long note (the order, links,
+    emails, totals) and a short "Description on work" such as ONLINE ASSIST,
+    and which column holds which varies. QA must see the whole note, so the
+    longest text comes first and anything shorter that it does not already
+    contain is added after it, labelled."""
+    texts = []
+    for v in values:
+        t = (v or '').strip()
+        if t and t not in texts:
+            texts.append(t)
+    if not texts:
+        return ''
+    texts.sort(key=len, reverse=True)
+    out = texts[0]
+    for t in texts[1:]:
+        if t.lower() not in out.lower():
+            out += '\n\nDescription on work: ' + t
+    return out
+
+
+def call_work_notes(cms_id=None, extension=None, phone=None, around=None):
+    """The notes for one call as they stand in the CMS now, and whether the
+    agent has finished the work (so the notes are final).
+
+    Finds the call by its CMS id when we have it; otherwise by the agent's
+    extension and the caller's number close to the time it ended ('around' is
+    New York time, as the CMS stores it). Returns None if no such call."""
+    from datetime import timedelta
+    conn = _connect(); cu = conn.cursor()
+    try:
+        row = None
+        if cms_id:
+            cu.execute("""SELECT c.Id, c.Note, c.AccountWorkId, c.Ended FROM PhoneCallsLog c
+                          WHERE c.Id = %s""", (int(cms_id),))
+            row = cu.fetchone()
+        if row is None and extension and around is not None:
+            digits = ''.join(ch for ch in str(phone or '') if ch.isdigit())[-10:]
+            q = """SELECT TOP 1 c.Id, c.Note, c.AccountWorkId, c.Ended FROM PhoneCallsLog c
+                   WHERE c.Started >= %s AND c.Started <= %s
+                     AND LTRIM(RTRIM(c.PickedUpBy)) = %s"""
+            args = [around - timedelta(hours=3), around + timedelta(minutes=15), str(extension).strip()]
+            if len(digits) >= 7:
+                q += " AND c.Phone LIKE %s"
+                args.append('%' + digits)
+            q += " ORDER BY ABS(DATEDIFF(second, ISNULL(c.Ended, c.Started), %s))"
+            args.append(around)
+            cu.execute(q, tuple(args))
+            row = cu.fetchone()
+        if row is None:
+            return None
+        call_id, call_note, work_id, ended = row
+        w = None
+        if work_id:
+            cu.execute('SELECT Id, Note, TaskDescription, EndTime FROM AccountWork WHERE Id = %s', (int(work_id),))
+            w = cu.fetchone()
+        if w is None:
+            cu.execute('SELECT TOP 1 Id, Note, TaskDescription, EndTime FROM AccountWork '
+                       'WHERE PhoneCallId = %s ORDER BY Id DESC', (int(call_id),))
+            w = cu.fetchone()
+        return {'cms_call_id': int(call_id),
+                'notes': full_work_note(w[1] if w else None, w[2] if w else None, call_note),
+                'has_work': w is not None,
+                'work_ended': bool(w and w[3] is not None),
+                'call_ended': _plain(ended)}
+    finally:
+        conn.close()
+
+
 def finished_calls_for_qa(minutes=180, limit=100, min_seconds=20):
     """Answered calls with a recording, ready to be scored.
 
@@ -1105,7 +1176,7 @@ def finished_calls_for_qa(minutes=180, limit=100, min_seconds=20):
                     e.FirstName, e.LastName,
                     w.AccountId, w.Note, w.MinutesBilled,
                     a.FirstName, a.LastName,
-                    DATEDIFF(second, c.Started, c.Ended)
+                    DATEDIFF(second, c.Started, c.Ended), w.TaskDescription, w.EndTime
                   FROM PhoneCallsLog c
                   LEFT JOIN Employee e ON e.Extension = c.PickedUpBy
                   LEFT JOIN AccountWork w ON w.Id = c.AccountWorkId
@@ -1141,8 +1212,9 @@ def finished_calls_for_qa(minutes=180, limit=100, min_seconds=20):
             # inconsistently. Rather than pick one and be wrong half the time,
             # take whichever actually holds the writing — that is what an agent
             # means by "the note" — and keep the other as the title.
-            'call_notes': _longer_note(r[15], r[11]),
-            'call_title': _shorter_note(r[15], r[11]),
+            'call_notes': full_work_note(r[15], r[20], r[11]),
+            'call_title': _shorter_note(r[15], r[20], r[11]),
+            'work_ended': (r[14] is None) or (r[21] is not None),
             'outbound': bool(r[8]),
             'called': r[9],
             'ended': _plain(r[3]),
