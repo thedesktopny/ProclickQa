@@ -2190,7 +2190,8 @@ def dnd(employee_id, turn_on, who, reason=None, kind=None):
 
 BV_BASE = 'https://portal.bulkvs.com/api/v1.0'
 SMS_TRUNK = 'SMS-ProClick'
-CAMPAIGN_LIMIT = 49           # the old CMS: "Count < 49"
+CAMPAIGN_LIMIT = 48           # David's rule: never more than 48 on a campaign
+                              # (BulkVS's own ceiling is 49; one kept spare for safety)
 NOT_READY_CODE = '7401'       # BulkVS: the number is not ready to send yet
 
 
@@ -2386,34 +2387,95 @@ def campaign_plan(number, statics=None):
                             '(the rest are static or were set up by hand).')}
     movable.sort(key=lambda x: x[0])
     t, r = movable[0]
-    return {'step': 'swap', 'tcr': _rec_tcr(r), 'move_out': _rec_tn(r),
+    tcr = _rec_tcr(r)
+    # a campaign that is over the limit is brought back down to it: take off
+    # enough of its oldest so that, with this number added, it sits at the limit
+    count = next((c['count'] for c in camps if c['tcr'] == tcr), CAMPAIGN_LIMIT)
+    extra = [_rec_tn(x) for _, x in movable[1:] if _rec_tcr(x) == tcr][:max(0, count - CAMPAIGN_LIMIT)]
+    return {'step': 'swap', 'tcr': tcr, 'move_out': _rec_tn(r), 'extra_out': extra,
             'move_out_since': t.isoformat(), 'campaigns': camps,
-            'meaning': ('Both campaigns are full. Will take %s off %s (on since %s) '
+            'meaning': ('Both campaigns are full. Will take %s off %s (on since %s)%s '
                         'and put this number on instead.'
-                        % (_rec_tn(r), _rec_tcr(r), t.strftime('%b %d %I:%M %p')))}
+                        % (_rec_tn(r), tcr, t.strftime('%b %d %Y %I:%M %p'),
+                           (' and %d more to bring it down to %d' % (len(extra), CAMPAIGN_LIMIT))
+                           if extra else ''))}
 
 
-def _put_on_campaign(ten, tcr):
-    """The old CMS's updateTCR. An empty campaign takes the number off."""
+import threading as _threading
+import contextlib as _contextlib
+_CAMPAIGN_THREAD_LOCK = _threading.Lock()
+
+
+@_contextlib.contextmanager
+def _campaign_lock():
+    """Only one campaign change at a time, across every worker — so two sends
+    at the same moment can never both take the last place and push a
+    campaign past the limit."""
+    with _CAMPAIGN_THREAD_LOCK:
+        conn = None
+        try:
+            from server import get_db
+            conn = get_db()
+            cu = conn.cursor()
+            cu.execute("SET lock_timeout = '30s'")
+            cu.execute('SELECT pg_advisory_lock(80422)')
+        except Exception as e:
+            print('[sms] campaign lock only within this worker: ' + str(e)[:100])
+            conn = None
+        try:
+            yield
+        finally:
+            if conn is not None:
+                try:
+                    conn.cursor().execute('SELECT pg_advisory_unlock(80422)')
+                    conn.close()
+                except Exception:
+                    pass
+
+
+def _put_on_campaign(ten, tcr, lidb=None, webhook=None, removed_already=0):
+    """The old CMS's updateTCR. An empty campaign takes the number off.
+
+    The last line of defence for the limit: before putting a number ON, the
+    campaign's count is read again from BulkVS, and the change is refused if
+    it would go past CAMPAIGN_LIMIT. 'removed_already' counts numbers taken
+    off this campaign a moment ago that BulkVS may not have counted yet."""
     import time as _t
     from datetime import datetime as _dt
     if tcr:
-        body = {'TN': '1' + ten, 'Lidb': _dt.now().strftime('%Y%m%d%H%M'),
-                'Webhook': 'WebHook2', 'Tcr': tcr}
+        camps = {c['tcr']: c['count'] for c in bv_campaigns()}
+        if tcr not in camps:
+            raise WriteRefused('There is no campaign called %s at BulkVS.' % tcr)
+        if camps[tcr] is None:
+            raise WriteRefused('Could not read how full %s is, so nothing was changed.' % tcr)
+        if camps[tcr] - removed_already >= CAMPAIGN_LIMIT:
+            raise WriteRefused('%s already has %d numbers — the limit is %d. Take one off first.'
+                               % (tcr, camps[tcr] - removed_already, CAMPAIGN_LIMIT))
+        body = {'TN': '1' + ten, 'Lidb': lidb or _dt.now().strftime('%Y%m%d%H%M'),
+                'Webhook': webhook or 'WebHook2', 'Tcr': tcr}
     else:
-        body = {'TN': '1' + ten, 'Lidb': 'PROCLICK', 'Webhook': 'WebHook1', 'Tcr': ''}
+        body = {'TN': '1' + ten, 'Lidb': 'PROCLICK', 'Webhook': webhook or 'WebHook1', 'Tcr': ''}
     _bv('POST', '/tnRecord', body)
     _BV_ALL['records'] = None
+    _ACTIVITY['data'] = None
     _t.sleep(0.5)
 
 
 def apply_campaign_plan(number, plan):
+    """Carries out the campaign step. The plan is worked out again inside the
+    lock, from fresh BulkVS figures, so it cannot act on a stale picture."""
     ten = _ten(number)
-    if plan['step'] == 'join':
-        _put_on_campaign(ten, plan['tcr'])
-    elif plan['step'] == 'swap':
-        _put_on_campaign(plan['move_out'], '')
-        _put_on_campaign(ten, plan['tcr'])
+    with _campaign_lock():
+        _BV_ALL['records'] = None
+        plan = campaign_plan(ten)
+        if plan['step'] == 'join':
+            _put_on_campaign(ten, plan['tcr'])
+        elif plan['step'] == 'swap':
+            gone = 0
+            for out_ in [plan['move_out']] + list(plan.get('extra_out') or []):
+                _put_on_campaign(out_, '')
+                gone += 1
+            _put_on_campaign(ten, plan['tcr'], removed_already=gone)
     return plan
 
 
@@ -2918,3 +2980,183 @@ def sms_activity(fresh=False):
             'bulkvs_checked': bv_ok, 'count': len(rows)}
     _ACTIVITY.update(at=_t.time(), data=data)
     return data
+
+
+# ─── Managing one number by hand, with guardrails ───────────────────────────
+def number_info(number):
+    """Everything about one number: BulkVS's record, the CMS's static list,
+    who has it, and what a send would do. Reads only."""
+    ten = _ten(number)
+    if len(ten) != 10:
+        raise WriteRefused('Give a ten-digit number.')
+    statics = static_numbers()
+    rec = bv_record(ten)
+    camps = bv_campaigns()
+    conn = cms_db._connect()
+    try:
+        cu = conn.cursor()
+        cu.execute("""SELECT TOP 5 Id, FirstName, LastName, ISNULL(smsActivate,0) FROM Account
+                      WHERE RIGHT(ISNULL(smsNumber,''), 10) = %s""", (ten,))
+        customers = [{'account_id': int(r[0]), 'customer': ('%s %s' % (r[1] or '', r[2] or '')).strip(),
+                      'active': bool(r[3])} for r in cu.fetchall()]
+        cu.execute("SELECT COUNT(*) FROM SMSNumberTable WHERE RIGHT([%s], 10) = %%s" % cms_db.pool_col(), (ten,))
+        in_pool = int(cu.fetchone()[0] or 0) > 0
+        cu.execute("""SELECT MAX(CASE WHEN InOut = 'Out' THEN smsDate END),
+                             MAX(CASE WHEN InOut = 'In' THEN smsDate END)
+                      FROM SMSLog WHERE RIGHT(AccountSMSNumber, 10) = %s""", (ten,))
+        r = cu.fetchone() or (None, None)
+    finally:
+        conn.close()
+    m = (rec or {}).get('Messaging') or {}
+    out = {'number': ten, 'at_bulkvs': rec is not None,
+           'campaign': _rec_tcr(rec) if rec else None,
+           'webhook': _rec_webhook(rec) if rec else None,
+           'lidb': _rec_lidb(rec) if rec else None,
+           'put_on_by_cms_at': (_lidb_time(_rec_lidb(rec)).isoformat()
+                                if rec and _lidb_time(_rec_lidb(rec)) else None),
+           'sms_enabled': m.get('Sms'), 'mms_enabled': m.get('Mms'),
+           'static_tcr': (statics.get(ten) or {}).get('tcr'),
+           'customers': customers, 'in_pool': in_pool,
+           'last_sent': cms_db._plain(r[0]), 'last_received': cms_db._plain(r[1]),
+           'campaigns': [{'tcr': c['tcr'], 'count': c['count'], 'limit': CAMPAIGN_LIMIT} for c in camps],
+           'limit': CAMPAIGN_LIMIT, 'record': rec}
+    # plain-language warnings, so a problem is visible before anything is touched
+    w = []
+    if rec is None:
+        w.append('BulkVS does not have this number.')
+    else:
+        if m.get('Sms') is False:
+            w.append('SMS is switched OFF for this number at BulkVS — it cannot text at all.')
+        if out['static_tcr'] and out['campaign'] != out['static_tcr']:
+            w.append('The CMS has it as static on %s, but BulkVS has it on %s.'
+                     % (out['static_tcr'], out['campaign'] or 'no campaign'))
+        if out['campaign'] and not out['static_tcr'] and not out['put_on_by_cms_at']:
+            w.append('It is on %s but is not on the CMS\'s static list, and was not put there by '
+                     'the CMS (Lidb "%s"). If it is meant to be static, press "Make static" so the '
+                     'CMS knows to leave it alone.' % (out['campaign'], out['lidb'] or 'blank'))
+        if out['webhook'] not in ('WebHook1', 'WebHook2'):
+            w.append('Its webhook is "%s", not WebHook1 or WebHook2 — replies to it may not reach '
+                     'the CMS.' % (out['webhook'] or 'blank'))
+    for c in camps:
+        if c['count'] is not None and c['count'] > CAMPAIGN_LIMIT:
+            w.append('%s has %d numbers, over the limit of %d. The next automatic swap on it '
+                     'brings it back down.' % (c['tcr'], c['count'], CAMPAIGN_LIMIT))
+    out['warnings'] = w
+    return out
+
+
+def _set_static_row(ten, tcr, static):
+    """Adds or updates this number on the CMS's static list (AccountSMS)."""
+    conn = cms_db._connect()
+    try:
+        cu = conn.cursor()
+        cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        cu.execute('SELECT id FROM AccountSMS WHERE RIGHT(SMSNumber, 10) = %s', (ten,))
+        have = cu.fetchone()
+        if have:
+            if tcr:
+                cu.execute('UPDATE AccountSMS SET StaticCompign = %s, SMSCompaign = %s WHERE id = %s',
+                           (1 if static else 0, tcr, int(have[0])))
+            else:
+                cu.execute('UPDATE AccountSMS SET StaticCompign = %s WHERE id = %s',
+                           (1 if static else 0, int(have[0])))
+        elif static:
+            cu.execute("""SELECT TOP 1 Id FROM Account
+                          WHERE RIGHT(ISNULL(smsNumber,''), 10) = %s ORDER BY Id DESC""", (ten,))
+            a = cu.fetchone()
+            cu.execute("""INSERT INTO AccountSMS (AccountID, Created, SMSNumber, SMSCompaign, StaticCompign)
+                          VALUES (%s, GETDATE(), %s, %s, 1)""", (int(a[0]) if a else None, ten, tcr))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def number_campaign_action(number, action, who, tcr=None, reason=None):
+    """Take a number off its campaign, put it on one, or make it static or not.
+
+    Guardrails: never past CAMPAIGN_LIMIT on any campaign (checked against
+    BulkVS at the moment of change); a static number cannot be taken off or
+    moved until it is made not-static first; a number BulkVS does not have, or
+    with SMS switched off, cannot be put on; one change at a time; every
+    change needs a reason and is logged; and BulkVS is read back afterwards
+    to prove it took.
+    """
+    ten = _ten(number)
+    reason = (reason or '').strip()
+    if action not in ('off', 'on', 'make_static', 'unstatic'):
+        raise WriteRefused('Unknown action.')
+    if len(reason) < 3:
+        raise WriteRefused('Write why — it is kept in the log.')
+    with _campaign_lock():
+        _BV_ALL['records'] = None
+        info = number_info(ten)
+        if not info['at_bulkvs']:
+            raise WriteRefused('BulkVS does not have %s.' % ten)
+        current, static = info['campaign'], info['static_tcr']
+        names = {c['tcr']: c['count'] for c in info['campaigns']}
+        if action in ('on', 'make_static'):
+            tcr = (tcr or current or '').strip()
+            if tcr not in names:
+                raise WriteRefused('Choose one of the campaigns: %s.' % ', '.join(names))
+            if info['sms_enabled'] is False:
+                raise WriteRefused('SMS is switched off for %s at BulkVS — turn it on there first.' % ten)
+        if action == 'off':
+            if static:
+                raise WriteRefused('%s is static on %s. Press "Remove static" first if you really '
+                                   'mean to take it off.' % (ten, static))
+            if not current:
+                raise WriteRefused('%s is not on a campaign.' % ten)
+            _put_on_campaign(ten, '', webhook=info['webhook'])
+        elif action == 'on':
+            if static and static != tcr:
+                raise WriteRefused('%s is static on %s. Remove static first to move it.' % (ten, static))
+            if current == tcr:
+                raise WriteRefused('%s is already on %s.' % (ten, tcr))
+            moved = 0
+            if current:
+                _put_on_campaign(ten, '', webhook=info['webhook'])
+            _put_on_campaign(ten, tcr, removed_already=moved)
+        elif action == 'make_static':
+            if static == tcr and current == tcr:
+                raise WriteRefused('%s is already static on %s.' % (ten, tcr))
+            if current != tcr:
+                if current:
+                    _put_on_campaign(ten, '', webhook=info['webhook'])
+                _put_on_campaign(ten, tcr, lidb='STATIC', webhook=info['webhook'] or 'WebHook1')
+            else:
+                # already on it — just mark it so the CMS never moves it
+                import time as _t
+                _bv('POST', '/tnRecord', {'TN': '1' + ten, 'Lidb': 'STATIC',
+                                          'Webhook': info['webhook'] or 'WebHook1', 'Tcr': tcr})
+                _BV_ALL['records'] = None
+                _t.sleep(0.5)
+            _set_static_row(ten, tcr, True)
+        elif action == 'unstatic':
+            if not static:
+                raise WriteRefused('%s is not static.' % ten)
+            _set_static_row(ten, None, False)
+            if current:
+                # stays on its campaign, but now as a rotating number the CMS may move
+                from datetime import datetime as _dt
+                _bv('POST', '/tnRecord', {'TN': '1' + ten, 'Lidb': _dt.now().strftime('%Y%m%d%H%M'),
+                                          'Webhook': info['webhook'] or 'WebHook2', 'Tcr': current})
+                _BV_ALL['records'] = None
+        after = number_info(ten)
+    expected = {'off': None, 'on': tcr, 'make_static': tcr, 'unstatic': current}[action]
+    confirmed = (after['campaign'] or None) == (expected or None)
+    out = {'table': 'BulkVS', 'action': 'campaign_' + action, 'dry_run': False, 'ok': True,
+           'committed': True, 'confirmed': confirmed, 'after': after,
+           'values': {'number': ten, 'from': current, 'to': expected, 'reason': reason,
+                      'static_before': static}}
+    out['meaning'] = {
+        'off': 'Took %s off %s.' % (ten, current),
+        'on': 'Put %s on %s.' % (ten, tcr),
+        'make_static': '%s is now static on %s — the CMS will never move it.' % (ten, tcr),
+        'unstatic': '%s is no longer static. It stays on %s, but the CMS may now move it.'
+                    % (ten, current or 'no campaign'),
+    }[action]
+    if not confirmed:
+        out['meaning'] += (' BulkVS does not show the change yet (it shows %s) — check again in a '
+                           'minute.' % (after['campaign'] or 'no campaign'))
+    _log(who, out)
+    return out

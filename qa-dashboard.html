@@ -1910,6 +1910,16 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
       asks them about that number directly, with no filters, which is the only way to know
       whether they really have it.
     </div>
+    <div class="card" style="padding:16px 18px;margin-bottom:14px;">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <div style="font-size:14px;font-weight:650;margin-right:6px;">Manage one number</div>
+        <input id="nm-number" class="cms-in" style="width:180px;" placeholder="10-digit number"
+               onkeydown="if(event.key==='Enter')nmLookup()">
+        <button class="btn btn-primary" style="font-size:12px;" onclick="nmLookup()">Look up</button>
+        <span style="font-size:11.5px;color:var(--text3);">Take off a campaign, put on one, make static — never more than 48 on a campaign.</span>
+      </div>
+      <div id="nm-body" style="margin-top:4px;"></div>
+    </div>
     <div id="sn-health"></div>
     <div class="card" style="padding:16px 18px;margin-top:14px;">
       <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;">
@@ -6306,7 +6316,7 @@ async function snLoadHealth(){
   const lim = h.campaign_limit || 49;
   const camp = (h.campaigns||[]).map(c=>{
     const pct = c.count!=null ? Math.min(100, Math.round(c.count/lim*100)) : 0;
-    const col = c.count>=lim ? 'var(--red)' : c.count>=lim-5 ? 'var(--yellow)' : 'var(--green)';
+    const col = c.count>lim ? 'var(--red)' : c.count>=lim ? 'var(--yellow)' : 'var(--green)';
     return `<div class="card" style="padding:14px 16px;flex:1;min-width:200px;">
       <div style="font-size:11px;color:var(--text3);letter-spacing:.06em;">CAMPAIGN</div>
       <div style="font-size:17px;font-weight:650;margin:2px 0 8px;">${esc(c.tcr)}</div>
@@ -6314,7 +6324,7 @@ async function snLoadHealth(){
       <div style="height:6px;background:var(--surface2);border-radius:4px;margin:8px 0 6px;overflow:hidden;">
         <div style="height:100%;width:${pct}%;background:${col};"></div></div>
       <div style="font-size:11.5px;color:var(--text3);">${c.static} static · ${Math.max(0,(c.counted_here||0)-c.static)} rotating
-        ${c.free!=null ? ' · '+(c.free>0? c.free+' free' : '<b style="color:var(--red)">full</b>') : ''}</div></div>`;
+        ${c.free!=null ? ' · '+(c.free>0? c.free+' free' : c.free===0 ? '<b style="color:var(--yellow)">full</b>' : '<b style="color:var(--red)">'+(-c.free)+' over the limit</b>') : ''}</div></div>`;
   }).join('');
   const probs = (h.problems||[]);
   const rot = h.rotating || [];
@@ -6341,7 +6351,7 @@ async function snLoadHealth(){
     <details class="card" style="padding:12px 18px;margin-bottom:10px;">
       <summary style="cursor:pointer;font-size:13px;font-weight:600;">Static numbers (${(h.static||[]).length}) — fixed to a campaign, never moved</summary>
       <table class="data-table" style="margin-top:10px;"><thead><tr><th>Number</th><th>Campaign</th><th>At BulkVS</th><th>Webhook</th></tr></thead><tbody>
-      ${(h.static||[]).map(x=>`<tr><td>${esc(x.number)}</td><td>${esc(x.tcr)}</td>
+      ${(h.static||[]).map(x=>`<tr><td><a href="#" style="color:var(--accent)" onclick="nmLookup('${esc(x.number)}');window.scrollTo({top:0,behavior:'smooth'});return false;">${esc(x.number)}</a></td><td>${esc(x.tcr)}</td>
         <td>${x.at_bulkvs===false?'<span class="neg">missing</span>':x.on_its_campaign===false?'<span class="warn">on '+esc(x.bulkvs_tcr||'nothing')+'</span>':x.at_bulkvs?'✅':'—'}</td>
         <td>${esc(x.webhook||'')}</td></tr>`).join('')}</tbody></table></details>
     <details class="card" style="padding:12px 18px;">
@@ -6350,7 +6360,8 @@ async function snLoadHealth(){
       ${rot.map(x=>`<tr><td>${esc(x.number)}</td><td style="font-size:12px;">${esc(x.customer||'')}</td><td>${esc(x.tcr)}</td>
         <td style="font-size:12px;">${x.since?new Date(x.since).toLocaleString():'<span class="warn">set by hand ('+esc(x.lidb||'blank')+')</span>'}</td>
         <td style="font-size:12px;">${x.last_sent?cuWhen(x.last_sent):''}</td>
-        <td><button class="cn-chip" onclick="snPlan('${esc(x.number)}')">If it sends now?</button></td></tr>`).join('')}</tbody></table></details>`;
+        <td><button class="cn-chip" onclick="snPlan('${esc(x.number)}')">If it sends now?</button>
+            <button class="cn-chip" onclick="nmLookup('${esc(x.number)}');window.scrollTo({top:0,behavior:'smooth'})">Manage</button></td></tr>`).join('')}</tbody></table></details>`;
 }
 
 /* Every texting number with when it last sent and received a message, so
@@ -6407,7 +6418,7 @@ function saRender(){
       <th>Number</th><th>Customer</th><th>Where</th><th>Campaign</th><th>Last sent</th><th>Last received</th>
       <th>Last activity</th><th class="n">90 days</th><th class="n">Ever</th></tr></thead><tbody>
       ${shown.map(x=>`<tr>
-        <td style="white-space:nowrap;">${esc(x.number)}${x.at_bulkvs===false?' <span class="neg" title="BulkVS does not have it">✕</span>':''}</td>
+        <td style="white-space:nowrap;"><a href="#" style="color:var(--accent)" onclick="nmLookup('${esc(x.number)}');window.scrollTo({top:0,behavior:'smooth'});return false;">${esc(x.number)}</a>${x.at_bulkvs===false?' <span class="neg" title="BulkVS does not have it">✕</span>':''}</td>
         <td style="font-size:12px;">${x.account_id?`<a href="#" style="color:var(--accent)" onclick="showPage('customers');cuOpen(${x.account_id});return false;">${esc(x.customer||'#'+x.account_id)}</a>`:''}
           ${x.customers_on_it>1?` <span class="warn">(+${x.customers_on_it-1} more)</span>`:''}</td>
         <td style="font-size:12px;">${esc(x.where)}${x.where.startsWith('customer')&&x.active===false?' · <span class="warn">texting off</span>':''}</td>
@@ -6435,6 +6446,81 @@ function saDownload(){
   a.href = URL.createObjectURL(new Blob(['\ufeff' + csv], {type: 'text/csv'}));
   a.download = 'texting-numbers-' + (SA_FILTERS.find(f=>f[0]===saFilter)||['','all'])[1].replace(/\W+/g,'-').toLowerCase() + '.csv';
   document.body.appendChild(a); a.click(); a.remove();
+}
+
+/* One number: what BulkVS and the CMS say about it, and the guarded actions. */
+let nmInfo = null;
+async function nmLookup(num){
+  const n = String(num || document.getElementById('nm-number').value || '').replace(/\D/g,'').slice(-10);
+  const box = document.getElementById('nm-body');
+  if(n.length !== 10){ box.innerHTML = '<div style="color:var(--red);font-size:12.5px;margin-top:10px;">Give a ten-digit number.</div>'; return; }
+  document.getElementById('nm-number').value = n;
+  box.innerHTML = '<div style="color:var(--text3);font-size:12.5px;margin-top:10px;">Asking BulkVS…</div>';
+  try{
+    const r = await API.get('/api/sms/number/' + n);
+    if(r.error || r.ok === false){ box.innerHTML = `<div style="color:var(--red);font-size:12.5px;margin-top:10px;">${esc(r.error)}</div>`; return; }
+    nmInfo = r; nmRender();
+  }catch(e){ box.innerHTML = `<div style="color:var(--red);font-size:12.5px;margin-top:10px;">${esc(e.message)}</div>`; }
+}
+function nmRender(msg, ok){
+  const r = nmInfo; if(!r) return;
+  const row = (k, v) => `<div style="display:flex;gap:10px;padding:3px 0;"><span style="width:150px;color:var(--text3);">${k}</span><span>${v}</span></div>`;
+  const when = d => d ? new Date(d).toLocaleString() : 'never';
+  const camps = (r.campaigns||[]).map(c => `${esc(c.tcr)} ${c.count}/${r.limit}`).join(' · ');
+  const btn = (label, action, style) => `<button class="cn-chip" style="${style||''}" onclick="nmAct('${action}')">${label}</button>`;
+  const acts = [];
+  if(r.at_bulkvs){
+    if(r.campaign && !r.static_tcr) acts.push(btn('Take off campaign', 'off', 'color:var(--red);'));
+    if(!r.static_tcr) acts.push(btn(r.campaign ? 'Move to the other campaign' : 'Put on a campaign', 'on'));
+    if(!r.static_tcr) acts.push(btn('Make static', 'make_static'));
+    if(r.static_tcr) acts.push(btn('Remove static', 'unstatic'));
+  }
+  document.getElementById('nm-body').innerHTML = `
+    <div style="font-size:12.5px;margin-top:12px;">
+      ${row('At BulkVS', r.at_bulkvs ? '✅ yes' : '<span class="neg">no</span>')}
+      ${row('Campaign', r.campaign ? '<b>'+esc(r.campaign)+'</b>' : 'none')}
+      ${row('Static', r.static_tcr ? '✅ static on '+esc(r.static_tcr) : 'no')}
+      ${row('Put on by the CMS', r.put_on_by_cms_at ? when(r.put_on_by_cms_at) : (r.campaign ? 'no — Lidb "'+esc(r.lidb||'')+'"' : '—'))}
+      ${row('Webhook', esc(r.webhook||'—'))}
+      ${row('SMS / MMS', (r.sms_enabled===false?'<span class="neg">SMS off</span>':'SMS on') + ' · ' + (r.mms_enabled===false?'MMS off':'MMS on'))}
+      ${row('Customer', (r.customers||[]).map(c=>`<a href="#" style="color:var(--accent)" onclick="showPage('customers');cuOpen(${c.account_id});return false;">${esc(c.customer)}</a>${c.active?'':' (texting off)'}`).join(', ') || (r.in_pool ? 'spare pool' : 'nobody'))}
+      ${row('Last sent / received', when(r.last_sent) + ' / ' + when(r.last_received))}
+      ${row('Campaigns now', camps)}
+      ${(r.warnings||[]).map(w=>`<div style="color:var(--yellow);margin-top:6px;">⚠️ ${esc(w)}</div>`).join('')}
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:12px;">${acts.join('')}
+        <button class="cn-chip" onclick="nmLookup('${r.number}')">Refresh</button></div>
+      ${msg ? `<div style="margin-top:10px;color:${ok?'var(--green)':'var(--red)'};">${esc(msg)}</div>` : ''}
+    </div>`;
+}
+async function nmAct(action){
+  const r = nmInfo; if(!r) return;
+  const others = (r.campaigns||[]).filter(c => c.tcr !== r.campaign);
+  let tcr = null;
+  if(action === 'on' || (action === 'make_static' && !r.campaign)){
+    const choices = (action === 'on' ? others : r.campaigns) || [];
+    const room = choices.filter(c => c.count < r.limit);
+    if(!room.length){ nmRender('No campaign has room — both are at ' + r.limit + ' or more. Take a number off one first.', false); return; }
+    tcr = room.length === 1 ? room[0].tcr
+        : prompt('Which campaign? ' + room.map(c => c.tcr + ' (' + c.count + '/' + r.limit + ')').join(', '), room[0].tcr);
+    if(!tcr) return;
+  } else if(action === 'make_static'){
+    tcr = r.campaign;
+  }
+  const what = {off: 'Take ' + r.number + ' off ' + r.campaign,
+                on: 'Put ' + r.number + ' on ' + tcr,
+                make_static: 'Make ' + r.number + ' static on ' + tcr + ' (the CMS will never move it)',
+                unstatic: 'Make ' + r.number + ' no longer static (the CMS may then move it)'}[action];
+  const reason = prompt(what + '?\n\nWhy? (kept in the log)');
+  if(reason === null) return;
+  if(reason.trim().length < 3){ nmRender('Write why — at least a few words.', false); return; }
+  nmRender('Working — checking BulkVS first…', true);
+  try{
+    const res = await API.post('/api/sms/number/' + r.number + '/campaign', {action, tcr, reason});
+    if(res.ok === false || res.error){ nmRender(res.error || 'Not done.', false); return; }
+    nmInfo = res.after || nmInfo;
+    nmRender((res.confirmed ? '✅ ' : '⏳ ') + res.meaning, true);
+    snLoadHealth();
+  }catch(e){ nmRender(e.message, false); }
 }
 
 async function snOrder(){
@@ -6519,6 +6605,7 @@ function snRender(){
         <button class="cn-chip" onclick="snWebhook('${key}','WebHook2')">Set WebHook2</button>
         <button class="cn-chip" onclick="snPlan('${key}')">If it sends now?</button>
         <button class="cn-chip" onclick="snPlanApply('${key}')">Put on campaign now</button>
+        <button class="cn-chip" onclick="nmLookup('${key}');window.scrollTo({top:0,behavior:'smooth'})">Manage</button>
         <button class="cn-chip" onclick="snTest('${key}')">Send a test</button>
         ${n.account_id ? `<button class="cn-chip" onclick="cuOpen(${n.account_id})">Open customer</button>` : ''}
       </div>

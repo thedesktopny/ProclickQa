@@ -7546,6 +7546,25 @@ def sms_activity_csv():
                     headers={'Content-Disposition': 'attachment; filename=texting-numbers-activity.csv'})
 
 
+@app.route('/api/sms/number/<number>', methods=['GET'])
+@portal_manager_only
+def sms_number_info_route(number):
+    """Everything about one texting number. Changes nothing."""
+    import cms_write
+    return _sms_call(cms_write.number_info, number)
+
+
+@app.route('/api/sms/number/<number>/campaign', methods=['POST'])
+@portal_admin_only
+def sms_number_campaign_route(number):
+    """Take a number off its campaign, put it on one, or make it static or
+    not — admins only, with the guardrails in cms_write."""
+    import cms_write
+    d = request.json or {}
+    return _sms_call(cms_write.number_campaign_action, number, (d.get('action') or '').strip(),
+                     _who(), tcr=d.get('tcr'), reason=d.get('reason'))
+
+
 @app.route('/api/sms/order', methods=['POST'])
 @portal_manager_only
 def sms_order_route():
