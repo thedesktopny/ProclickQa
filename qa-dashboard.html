@@ -1911,6 +1911,20 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
       whether they really have it.
     </div>
     <div id="sn-health"></div>
+    <div class="card" style="padding:16px 18px;margin-top:14px;">
+      <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;">
+        <div style="font-size:14px;font-weight:650;">Last activity of every number</div>
+        <span id="sa-count" style="font-size:11.5px;color:var(--text3);"></span>
+        <span style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap;">
+          <input id="sa-search" class="cms-in" style="width:180px;" placeholder="number or customer…" oninput="saRender()">
+          <button class="btn btn-outline" style="font-size:12px;" onclick="saLoad(true)">Re-check</button>
+          <button class="btn btn-outline" style="font-size:12px;" onclick="saDownload()">Download spreadsheet</button>
+        </span>
+      </div>
+      <div id="sa-filters" style="display:flex;gap:6px;flex-wrap:wrap;margin:12px 0 10px;"></div>
+      <div id="sa-body" style="font-size:12.5px;color:var(--text3);">Press "Show" to read every number — it takes a few seconds.
+        <button class="cn-chip" onclick="saLoad(false)">Show</button></div>
+    </div>
     <div style="font-size:13px;font-weight:650;margin:22px 0 10px;">Every number</div>
     <div id="sn-body"></div>
   </div>
@@ -6337,6 +6351,90 @@ async function snLoadHealth(){
         <td style="font-size:12px;">${x.since?new Date(x.since).toLocaleString():'<span class="warn">set by hand ('+esc(x.lidb||'blank')+')</span>'}</td>
         <td style="font-size:12px;">${x.last_sent?cuWhen(x.last_sent):''}</td>
         <td><button class="cn-chip" onclick="snPlan('${esc(x.number)}')">If it sends now?</button></td></tr>`).join('')}</tbody></table></details>`;
+}
+
+/* Every texting number with when it last sent and received a message, so
+   the ones nobody needs any more can be found. Oldest activity first. */
+let saData = null, saFilter = 'all';
+const SA_FILTERS = [
+  ['all', 'All'],
+  ['idle180', 'No activity in 6 months'],
+  ['idle365', 'No activity in a year'],
+  ['never', 'Never used'],
+  ['nobody', 'Not on any customer'],
+  ['inactive', 'Customer has texting off'],
+  ['missing', 'Missing at BulkVS'],
+];
+function saDays(d){ return d ? (Date.now() - new Date(d).getTime()) / 86400000 : Infinity; }
+function saMatch(x, f){
+  if(f === 'idle180') return saDays(x.last_activity) > 180;
+  if(f === 'idle365') return saDays(x.last_activity) > 365;
+  if(f === 'never') return !x.last_activity;
+  if(f === 'nobody') return x.where === 'nobody';
+  if(f === 'inactive') return x.where.startsWith('customer') && x.active === false;
+  if(f === 'missing') return x.at_bulkvs === false && x.where !== 'nobody';
+  return true;
+}
+async function saLoad(fresh){
+  const box = document.getElementById('sa-body');
+  box.innerHTML = 'Reading every number and its messages…';
+  try{
+    const r = await API.get('/api/sms/activity' + (fresh ? '?fresh=1' : ''));
+    if(r.error || r.ok === false){ box.innerHTML = `<span style="color:var(--red)">${esc(r.error||'Could not read')}</span>`; return; }
+    saData = r; saRender();
+  }catch(e){ box.innerHTML = `<span style="color:var(--red)">${esc(e.message)}</span>`; }
+}
+function saList(){
+  const q = (document.getElementById('sa-search').value || '').toLowerCase().trim();
+  return (saData ? saData.numbers : []).filter(x => saMatch(x, saFilter)
+    && (!q || x.number.includes(q.replace(/\D/g,'') || '~') || (x.customer||'').toLowerCase().includes(q)));
+}
+function saRender(){
+  if(!saData) return;
+  document.getElementById('sa-filters').innerHTML = SA_FILTERS.map(([k, label]) => {
+    const n = saData.numbers.filter(x => saMatch(x, k)).length;
+    return `<button class="cn-chip ${saFilter===k?'on':''}" style="${saFilter===k?'background:var(--accent);color:#fff;':''}"
+      onclick="saFilter='${k}';saRender()">${label} · ${n.toLocaleString()}</button>`;
+  }).join('');
+  const list = saList();
+  document.getElementById('sa-count').textContent = saData.count.toLocaleString() + ' numbers'
+    + (saData.bulkvs_checked ? '' : ' · BulkVS could not be checked');
+  const when = d => d ? new Date(d).toLocaleDateString([], {year:'numeric', month:'short', day:'numeric'}) : '<span style="color:var(--text3)">never</span>';
+  const ago = d => { const n = saDays(d); return n === Infinity ? '' : n < 1 ? 'today' : n < 60 ? Math.round(n)+' days ago' : n < 730 ? Math.round(n/30)+' months ago' : (n/365).toFixed(1)+' years ago'; };
+  const shown = list.slice(0, 400);
+  document.getElementById('sa-body').innerHTML = !list.length ? 'Nothing matches.' : `
+    <div class="table-wrap"><table class="data-table"><thead><tr>
+      <th>Number</th><th>Customer</th><th>Where</th><th>Campaign</th><th>Last sent</th><th>Last received</th>
+      <th>Last activity</th><th class="n">90 days</th><th class="n">Ever</th></tr></thead><tbody>
+      ${shown.map(x=>`<tr>
+        <td style="white-space:nowrap;">${esc(x.number)}${x.at_bulkvs===false?' <span class="neg" title="BulkVS does not have it">✕</span>':''}</td>
+        <td style="font-size:12px;">${x.account_id?`<a href="#" style="color:var(--accent)" onclick="showPage('customers');cuOpen(${x.account_id});return false;">${esc(x.customer||'#'+x.account_id)}</a>`:''}
+          ${x.customers_on_it>1?` <span class="warn">(+${x.customers_on_it-1} more)</span>`:''}</td>
+        <td style="font-size:12px;">${esc(x.where)}${x.where.startsWith('customer')&&x.active===false?' · <span class="warn">texting off</span>':''}</td>
+        <td style="font-size:12px;">${x.static_tcr?esc(x.static_tcr)+' (static)':esc(x.campaign||'')}</td>
+        <td style="font-size:12px;white-space:nowrap;">${when(x.last_sent)}</td>
+        <td style="font-size:12px;white-space:nowrap;">${when(x.last_received)}</td>
+        <td style="font-size:12px;white-space:nowrap;">${ago(x.last_activity) || '<span class="warn">never</span>'}</td>
+        <td class="n">${x.messages_90d}</td><td class="n">${x.messages_total.toLocaleString()}</td></tr>`).join('')}
+      </tbody></table></div>
+    ${list.length > shown.length ? `<div style="margin-top:8px;">Showing the first 400 of ${list.length.toLocaleString()} — the spreadsheet has all of them.</div>` : ''}`;
+}
+function saDownload(){
+  if(!saData){ showToast('Press "Show" first', true); return; }
+  const list = saList();
+  const head = ['Number','Customer','Account id','Where','Texting on','Static campaign','On campaign now',
+                'At BulkVS','Last sent','Last received','Last activity','Messages last 90 days','Messages ever'];
+  const cell = v => { v = v == null ? '' : String(v); return /[",\n]/.test(v) ? '"' + v.replace(/"/g,'""') + '"' : v; };
+  const d = v => (v || '').slice(0, 16).replace('T', ' ');
+  const rows = list.map(x => [x.number, x.customer, x.account_id, x.where,
+    x.active==null?'':(x.active?'yes':'no'), x.static_tcr, x.campaign,
+    x.at_bulkvs==null?'':(x.at_bulkvs?'yes':'no'), d(x.last_sent), d(x.last_received), d(x.last_activity),
+    x.messages_90d, x.messages_total]);
+  const csv = [head, ...rows].map(r => r.map(cell).join(',')).join('\r\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob(['\ufeff' + csv], {type: 'text/csv'}));
+  a.download = 'texting-numbers-' + (SA_FILTERS.find(f=>f[0]===saFilter)||['','all'])[1].replace(/\W+/g,'-').toLowerCase() + '.csv';
+  document.body.appendChild(a); a.click(); a.remove();
 }
 
 async function snOrder(){

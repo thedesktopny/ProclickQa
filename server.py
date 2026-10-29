@@ -7510,6 +7510,42 @@ def sms_plan_apply_route(number):
     return _sms_call(go)
 
 
+@app.route('/api/sms/activity', methods=['GET'])
+@portal_manager_only
+def sms_activity_route():
+    """Every texting number with its last sent and received message."""
+    import cms_write
+    return _sms_call(cms_write.sms_activity, fresh=(request.args.get('fresh') == '1'))
+
+
+@app.route('/api/sms/activity.csv', methods=['GET'])
+@portal_manager_only
+def sms_activity_csv():
+    """The same list as a spreadsheet."""
+    import cms_write, csv, io
+    try:
+        d = cms_write.sms_activity()
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)[:200]}), 400
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(['Number', 'Customer', 'Account id', 'Where', 'Texting on', 'Static campaign',
+                'On campaign now', 'At BulkVS', 'Last sent', 'Last received', 'Last activity',
+                'Messages last 90 days', 'Messages ever'])
+    for x in d['numbers']:
+        w.writerow([x['number'], x['customer'] or '', x['account_id'] or '', x['where'],
+                    '' if x['active'] is None else ('yes' if x['active'] else 'no'),
+                    x['static_tcr'] or '', x['campaign'] or '',
+                    '' if x['at_bulkvs'] is None else ('yes' if x['at_bulkvs'] else 'no'),
+                    (x['last_sent'] or '')[:16].replace('T', ' '),
+                    (x['last_received'] or '')[:16].replace('T', ' '),
+                    (x['last_activity'] or '')[:16].replace('T', ' '),
+                    x['messages_90d'], x['messages_total']])
+    from flask import Response
+    return Response(buf.getvalue(), mimetype='text/csv',
+                    headers={'Content-Disposition': 'attachment; filename=texting-numbers-activity.csv'})
+
+
 @app.route('/api/sms/order', methods=['POST'])
 @portal_manager_only
 def sms_order_route():

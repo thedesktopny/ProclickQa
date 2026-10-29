@@ -2826,3 +2826,95 @@ def sms_health():
                                 'text': 'BulkVS returned no campaigns — sending would not be able to join one'})
     out['bulkvs_numbers'] = len(recs)
     return out
+
+
+_ACTIVITY = {'at': 0, 'data': None}
+
+
+def sms_activity(fresh=False):
+    """Every texting number we have anywhere — on a customer, in the spare
+    pool, or only at BulkVS — with when it last sent and last received a
+    message, so numbers nobody uses stand out. Reads only. Kept 10 minutes."""
+    import time as _t
+    if not fresh and _ACTIVITY['data'] is not None and _t.time() - _ACTIVITY['at'] < 600:
+        return _ACTIVITY['data']
+    statics = static_numbers()
+    conn = cms_db._connect()
+    try:
+        cu = conn.cursor()
+        cu.execute("""SELECT RIGHT(AccountSMSNumber, 10),
+                             MAX(CASE WHEN InOut = 'Out' THEN smsDate END),
+                             MAX(CASE WHEN InOut = 'In' THEN smsDate END),
+                             SUM(CASE WHEN smsDate >= DATEADD(day, -90, GETDATE()) THEN 1 ELSE 0 END),
+                             COUNT(*)
+                      FROM SMSLog WHERE ISNULL(AccountSMSNumber, '') <> ''
+                      GROUP BY RIGHT(AccountSMSNumber, 10)""")
+        log = {}
+        for r in cu.fetchall():
+            log[_ten(r[0])] = (r[1], r[2], int(r[3] or 0), int(r[4] or 0))
+        cu.execute("""SELECT Id, FirstName, LastName, smsNumber, ISNULL(smsActivate, 0)
+                      FROM Account WHERE ISNULL(smsNumber, '') <> ''""")
+        accounts = cu.fetchall()
+        cu.execute('SELECT [%s], Created FROM SMSNumberTable' % cms_db.pool_col())
+        pool = cu.fetchall()
+    finally:
+        conn.close()
+
+    rows = {}
+
+    def row(ten):
+        return rows.setdefault(ten, {'number': ten, 'customer': None, 'account_id': None,
+                                     'customers_on_it': 0, 'active': None, 'where': 'nobody',
+                                     'static_tcr': None, 'campaign': None, 'at_bulkvs': None,
+                                     'last_sent': None, 'last_received': None,
+                                     'last_activity': None, 'messages_90d': 0, 'messages_total': 0})
+
+    for aid, fn, ln, num, act in accounts:
+        ten = _ten(num)
+        if len(ten) < 10:
+            continue
+        x = row(ten)
+        x['customers_on_it'] += 1
+        if x['account_id'] is None or act:
+            x.update(customer=('%s %s' % (fn or '', ln or '')).strip() or None,
+                     account_id=int(aid), active=bool(act), where='customer')
+    for num, created in pool:
+        ten = _ten(num)
+        if len(ten) == 10:
+            x = row(ten)
+            x['where'] = 'customer and spare pool' if x['where'] == 'customer' else 'spare pool'
+            x['added_to_pool'] = cms_db._plain(created)
+    for ten, v in statics.items():
+        row(ten)['static_tcr'] = v['tcr']
+
+    bv_ok = False
+    if bv_configured():
+        try:
+            for r in bv_all_records(fresh=True):
+                ten = _rec_tn(r)
+                routing = r.get('Routing') or {}
+                trunk = routing.get('Trunk Group') or r.get('Trunk Group') or ''
+                if ten in rows or trunk == SMS_TRUNK:
+                    x = row(ten)
+                    x['at_bulkvs'] = True
+                    x['campaign'] = _rec_tcr(r) or None
+            for x in rows.values():
+                if x['at_bulkvs'] is None:
+                    x['at_bulkvs'] = False
+            bv_ok = True
+        except Exception as e:
+            print('[sms] activity could not read BulkVS: ' + str(e)[:120])
+
+    for ten, x in rows.items():
+        if ten in log:
+            out_, in_, n90, ntot = log[ten]
+            x['last_sent'] = cms_db._plain(out_)
+            x['last_received'] = cms_db._plain(in_)
+            x['messages_90d'], x['messages_total'] = n90, ntot
+            dates = [d for d in (x['last_sent'], x['last_received']) if d]
+            x['last_activity'] = max(dates) if dates else None
+
+    data = {'numbers': sorted(rows.values(), key=lambda x: (x['last_activity'] or '', x['number'])),
+            'bulkvs_checked': bv_ok, 'count': len(rows)}
+    _ACTIVITY.update(at=_t.time(), data=data)
+    return data
