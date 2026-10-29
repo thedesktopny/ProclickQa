@@ -1530,6 +1530,30 @@ def staffing_picture(weeks=4, slot_minutes=30, target_seconds=20, target_answere
             'target': '%d%% answered within %ds' % (target_answered * 100, target_seconds)}
 
 
+_POOL_COL = {}
+
+
+def pool_col():
+    """The spare-pool table's number column. The CMS schema says SMSNumber;
+    an earlier note said Number. Asked once, so a wrong guess cannot hide the
+    whole pool again."""
+    if 'c' in _POOL_COL:
+        return _POOL_COL['c']
+    col = 'SMSNumber'
+    try:
+        conn = _connect(); cu = conn.cursor()
+        cu.execute("""SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+                      WHERE TABLE_NAME = 'SMSNumberTable'""")
+        names = [r[0] for r in cu.fetchall()]
+        conn.close()
+        if 'SMSNumber' not in names and 'Number' in names:
+            col = 'Number'
+        _POOL_COL['c'] = col
+    except Exception:
+        pass
+    return col
+
+
 def sms_numbers_all(limit=400):
     """Every SMS number we hold, whether spare or given to a customer.
 
@@ -1541,8 +1565,8 @@ def sms_numbers_all(limit=400):
     out = {'numbers': []}
     found = {}
     try:
-        cu.execute("""SELECT TOP %d Number, Created FROM SMSNumberTable
-                      ORDER BY Created DESC""" % int(limit))
+        cu.execute("""SELECT TOP %d [%s], Created FROM SMSNumberTable
+                      ORDER BY Created DESC""" % (int(limit), pool_col()))
         while True:
             r = cu.fetchone()
             if not r:
@@ -1622,7 +1646,7 @@ def our_sms_numbers():
     conn = _connect(); cu = conn.cursor()
     out = {'spare': [], 'in_use_count': 0, 'in_use_sample': []}
     try:
-        cu.execute("""SELECT TOP 25 Number, Created FROM SMSNumberTable
+        cu.execute("""SELECT TOP 25 [""" + pool_col() + """], Created FROM SMSNumberTable
                       ORDER BY Created DESC""")
         while True:
             r = cu.fetchone()

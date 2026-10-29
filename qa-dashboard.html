@@ -1910,6 +1910,8 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
       asks them about that number directly, with no filters, which is the only way to know
       whether they really have it.
     </div>
+    <div id="sn-health"></div>
+    <div style="font-size:13px;font-weight:650;margin:22px 0 10px;">Every number</div>
     <div id="sn-body"></div>
   </div>
 </div>
@@ -6277,7 +6279,103 @@ function sbReload(){
    assigned — and until now there was no way to see that. */
 let snData = null;
 
+/* The health check: both campaigns, the static numbers, which number would
+   be taken off next, the spare pool, and anything that disagrees. */
+async function snLoadHealth(){
+  const box = document.getElementById('sn-health');
+  if(!box) return;
+  box.innerHTML = '<div class="card" style="padding:16px 18px;color:var(--text3);font-size:12.5px;">Checking the texting setup with BulkVS…</div>';
+  let h;
+  try{ h = await API.get('/api/sms/health'); }
+  catch(e){ box.innerHTML = `<div class="card" style="padding:16px;color:var(--red)">${esc(e.message)}</div>`; return; }
+  if(h.error && !h.pool){ box.innerHTML = `<div class="card" style="padding:16px;color:var(--red)">${esc(h.error)}</div>`; return; }
+  const lim = h.campaign_limit || 49;
+  const camp = (h.campaigns||[]).map(c=>{
+    const pct = c.count!=null ? Math.min(100, Math.round(c.count/lim*100)) : 0;
+    const col = c.count>=lim ? 'var(--red)' : c.count>=lim-5 ? 'var(--yellow)' : 'var(--green)';
+    return `<div class="card" style="padding:14px 16px;flex:1;min-width:200px;">
+      <div style="font-size:11px;color:var(--text3);letter-spacing:.06em;">CAMPAIGN</div>
+      <div style="font-size:17px;font-weight:650;margin:2px 0 8px;">${esc(c.tcr)}</div>
+      <div style="font-size:26px;font-weight:700;">${c.count ?? '?'}<span style="font-size:13px;color:var(--text3);font-weight:500;"> of ${lim}</span></div>
+      <div style="height:6px;background:var(--surface2);border-radius:4px;margin:8px 0 6px;overflow:hidden;">
+        <div style="height:100%;width:${pct}%;background:${col};"></div></div>
+      <div style="font-size:11.5px;color:var(--text3);">${c.static} static · ${Math.max(0,(c.counted_here||0)-c.static)} rotating
+        ${c.free!=null ? ' · '+(c.free>0? c.free+' free' : '<b style="color:var(--red)">full</b>') : ''}</div></div>`;
+  }).join('');
+  const probs = (h.problems||[]);
+  const rot = h.rotating || [];
+  const next = rot.find(x=>x.movable);
+  const areas = Object.entries((h.pool||{}).by_area_code||{});
+  box.innerHTML = `
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px;">
+      ${camp || '<div class="card" style="padding:14px 16px;flex:1;color:var(--text3);font-size:12.5px;">No campaign information.</div>'}
+      <div class="card" style="padding:14px 16px;flex:1;min-width:200px;">
+        <div style="font-size:11px;color:var(--text3);letter-spacing:.06em;">SPARE POOL</div>
+        <div style="font-size:26px;font-weight:700;margin-top:6px;">${(h.pool||{}).count||0}</div>
+        <div style="font-size:11.5px;color:var(--text3);margin-top:4px;">
+          ${areas.length ? areas.map(([k,v])=>k+': '+v).join(' · ') : 'empty — the next "Turn on texting" will buy one'}</div>
+        <button class="cn-chip" style="margin-top:10px;" onclick="snOrder()">Buy a number…</button></div>
+    </div>
+    <div class="card" style="padding:14px 18px;margin-bottom:12px;">
+      <div style="font-size:13px;font-weight:650;margin-bottom:6px;">
+        ${probs.length ? '⚠️ ' + probs.length + ' thing' + (probs.length===1?'':'s') + ' to look at' : '✅ Nothing wrong found'}</div>
+      ${probs.map(p=>`<div style="font-size:12.5px;color:var(--text2);padding:3px 0;">• ${esc(p.text)}</div>`).join('')}
+      <div style="font-size:11.5px;color:var(--text3);margin-top:8px;">
+        ${h.bulkvs_numbers!=null ? h.bulkvs_numbers + ' numbers at BulkVS · ' : ''}${h.accounts_with_numbers||0} customers have a texting number
+        ${next ? ' · next to be taken off when both are full: <b>'+esc(next.number)+'</b> (on since '+new Date(next.since).toLocaleString()+')' : ''}</div>
+    </div>
+    <details class="card" style="padding:12px 18px;margin-bottom:10px;">
+      <summary style="cursor:pointer;font-size:13px;font-weight:600;">Static numbers (${(h.static||[]).length}) — fixed to a campaign, never moved</summary>
+      <table class="data-table" style="margin-top:10px;"><thead><tr><th>Number</th><th>Campaign</th><th>At BulkVS</th><th>Webhook</th></tr></thead><tbody>
+      ${(h.static||[]).map(x=>`<tr><td>${esc(x.number)}</td><td>${esc(x.tcr)}</td>
+        <td>${x.at_bulkvs===false?'<span class="neg">missing</span>':x.on_its_campaign===false?'<span class="warn">on '+esc(x.bulkvs_tcr||'nothing')+'</span>':x.at_bulkvs?'✅':'—'}</td>
+        <td>${esc(x.webhook||'')}</td></tr>`).join('')}</tbody></table></details>
+    <details class="card" style="padding:12px 18px;">
+      <summary style="cursor:pointer;font-size:13px;font-weight:600;">Rotating numbers on a campaign (${rot.length}) — first one is taken off next</summary>
+      <table class="data-table" style="margin-top:10px;"><thead><tr><th>Number</th><th>Customer</th><th>Campaign</th><th>On since</th><th>Last sent</th><th></th></tr></thead><tbody>
+      ${rot.map(x=>`<tr><td>${esc(x.number)}</td><td style="font-size:12px;">${esc(x.customer||'')}</td><td>${esc(x.tcr)}</td>
+        <td style="font-size:12px;">${x.since?new Date(x.since).toLocaleString():'<span class="warn">set by hand ('+esc(x.lidb||'blank')+')</span>'}</td>
+        <td style="font-size:12px;">${x.last_sent?cuWhen(x.last_sent):''}</td>
+        <td><button class="cn-chip" onclick="snPlan('${esc(x.number)}')">If it sends now?</button></td></tr>`).join('')}</tbody></table></details>`;
+}
+
+async function snOrder(){
+  const area = prompt('Buy a new texting number in which area code? (This costs money.)', '845');
+  if(!area) return;
+  const a = String(area).replace(/\D/g,'').slice(0,3);
+  if(a.length !== 3){ showToast('Give a three-digit area code', true); return; }
+  if(!confirm('Buy one ' + a + ' number from BulkVS and add it to the spare pool?')) return;
+  try{
+    const r = await API.post('/api/sms/order', {area_code: a});
+    if(r.ok === false || r.error){ showToast(r.error || 'Could not buy one', true); return; }
+    showToast(r.meaning || ('Bought ' + r.number));
+    loadSmsNumbers();
+  }catch(e){ showToast(e.message, true); }
+}
+
+/* Read-only: what the campaign step would do for this number right now. */
+async function snPlan(key){
+  const k = String(key).replace(/\D/g,'').slice(-10);
+  snSay(k, 'Asking BulkVS…');
+  try{
+    const r = await API.get('/api/sms/plan/' + k);
+    if(r.error){ snSay(k, '❌ ' + r.error, 'var(--red)'); if(!document.getElementById('sn-out-'+k)) showToast(r.error, true); return; }
+    const txt = '🧭 ' + r.meaning + (r.step==='join'||r.step==='swap' ? '\n   (nothing has been changed — "Put on campaign now" does it, or the next text from this number will)' : '');
+    snSay(k, txt, 'var(--text2)');
+    if(!document.getElementById('sn-out-'+k)) showToast(r.meaning);
+  }catch(e){ snSay(k, 'Failed: ' + e.message, 'var(--red)'); }
+}
+async function snPlanApply(key){
+  if(!confirm('Do the campaign step for ' + key + ' now? If both campaigns are full this takes another number off.')) return;
+  snSay(key, 'Working…');
+  try{
+    const r = await API.post('/api/sms/plan/' + key + '/apply', {});
+    snSay(key, (r.ok ? '✅ ' : '❌ ') + (r.meaning || r.error || ''), r.ok ? 'var(--green)' : 'var(--red)');
+  }catch(e){ snSay(key, 'Failed: ' + e.message, 'var(--red)'); }
+}
+
 async function loadSmsNumbers(){
+  snLoadHealth();
   const box = document.getElementById('sn-body');
   box.innerHTML = '<div style="color:var(--text3);font-size:12.5px;">Reading…</div>';
   try{
@@ -6321,6 +6419,8 @@ function snRender(){
         <button class="cn-chip" onclick="snCheck('${key}')">Check at BulkVS</button>
         <button class="cn-chip" onclick="snWebhook('${key}','WebHook1')">Set WebHook1</button>
         <button class="cn-chip" onclick="snWebhook('${key}','WebHook2')">Set WebHook2</button>
+        <button class="cn-chip" onclick="snPlan('${key}')">If it sends now?</button>
+        <button class="cn-chip" onclick="snPlanApply('${key}')">Put on campaign now</button>
         <button class="cn-chip" onclick="snTest('${key}')">Send a test</button>
         ${n.account_id ? `<button class="cn-chip" onclick="cuOpen(${n.account_id})">Open customer</button>` : ''}
       </div>
@@ -10685,6 +10785,39 @@ async function cuRefreshTexts(accountId){
   }catch(e){}
 }
 
+/* Turning texting on and off, as the old CMS's Activate / Disable SMS. */
+async function cuTextingOn(){
+  if(!cuData) return;
+  const a = cuData.account;
+  const digits = String(a.phone || a.mobile || '').replace(/\D/g,'').slice(-10);
+  let area = digits.length === 10 ? digits.slice(0,3) : '';
+  const ask = prompt('Give ' + (a.name || 'this customer') + ' a texting number in which area code?', area);
+  if(ask === null) return;
+  area = String(ask).replace(/\D/g,'').slice(0,3);
+  if(area.length !== 3){ showToast('Give a three-digit area code', true); return; }
+  showToast('Setting up texting…');
+  try{
+    const r = await API.post(`/api/customers/${a.id}/texting/on`, {area_code: area});
+    if(r.ok === false || r.error){ showToast(r.error || 'Could not turn on texting', true); return; }
+    showToast(r.meaning || ('Texting is on: ' + r.number));
+    if(r.refill_warning) setTimeout(()=>showToast(r.refill_warning, true), 1800);
+    await cuOpen(a.id); cuTab('sms');
+  }catch(e){ showToast(e.message, true); }
+}
+async function cuTextingOff(){
+  if(!cuData) return;
+  const a = cuData.account;
+  if(!confirm('Turn off texting for ' + (a.name || 'this customer') + '?\n\n'
+      + a.sms_number + ' will be released at BulkVS and cannot be got back. '
+      + 'Their message history stays.')) return;
+  try{
+    const r = await API.post(`/api/customers/${a.id}/texting/off`, {});
+    if(r.ok === false || r.error){ showToast(r.error || 'Could not turn it off', true); return; }
+    showToast(r.meaning || 'Texting is off');
+    await cuOpen(a.id); cuTab('sms');
+  }catch(e){ showToast(e.message, true); }
+}
+
 async function cuSendText(){
   if(!cuData) return;
   const box = document.getElementById('sms-text');
@@ -10712,6 +10845,8 @@ async function cuSendText(){
       return;
     }
     if(pending) pending.style.opacity = '';
+    if(r.campaign && (r.campaign.step === 'join' || r.campaign.step === 'swap')) out.textContent = 'ℹ️ ' + r.campaign.meaning;
+    if(r.campaign_warning) out.textContent = '⚠️ ' + r.campaign_warning;
     if(r.unconfirmed && pending){
       const stamp = pending.querySelector('.sms-time');
       if(stamp) stamp.textContent = 'sent · not confirmed';
@@ -10927,8 +11062,11 @@ function cuTab(which){
         ${canText
           ? `<span>Texting <b style="color:var(--text)">${esc(theirs)}</b>
                from our number <b style="color:var(--text)">${esc(a.sms_number)}</b></span>`
-          : `<span style="color:var(--yellow)">This account has no texting number.
-               Setting one up is done in the CMS.</span>`}
+          : `<span style="color:var(--yellow)">This account has no texting number.</span>
+             <button class="btn btn-primary" style="font-size:12px;padding:5px 12px;"
+               onclick="cuTextingOn()">Turn on texting</button>`}
+        ${canText && portalIsManager ? `<button class="cn-chip" style="color:var(--red);"
+             onclick="cuTextingOff()">Turn off texting</button>` : ''}
         <span style="margin-left:auto;">${r.sms.length} messages</span>
       </div>
       <div class="card" style="padding:14px 16px;max-height:440px;overflow:auto;"

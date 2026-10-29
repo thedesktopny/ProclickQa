@@ -7421,17 +7421,30 @@ def sms_number_test(number):
     auth = os.getenv('BULKVS_AUTH', '').strip()
     if not auth:
         return jsonify({'ok': False, 'error': 'BULKVS_AUTH is not set'}), 400
-    answer, problem = _bulkvs('POST', '/messageSend',
-                              {'From': '1' + frm, 'To': ['1' + to[-10:]], 'Message': text})
-    if problem:
-        return jsonify({'ok': False, 'error': problem}), 400
-    results = (answer or {}).get('Results') or []
+    # the same campaign step a real send takes, so a test proves the real path
+    import cms_write
+    campaign = None
+    try:
+        plan = cms_write.campaign_plan(frm)
+        if plan['step'] in ('join', 'swap'):
+            cms_write.apply_campaign_plan(frm, plan)
+        campaign = plan.get('meaning')
+    except Exception as e:
+        campaign = 'Campaign step failed: ' + str(e)[:160]
+    try:
+        answer = cms_write._send_via_bulkvs({'From': frm, 'To': [to[-10:]], 'Message': text})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)[:240], 'campaign': campaign}), 400
+    if not isinstance(answer, dict):
+        answer = {}
+    results = answer.get('Results') or []
     ok = any(str(x.get('Status', '')).upper() in ('SUCCESS', 'OK', 'QUEUED', 'ACCEPTED')
              for x in results if isinstance(x, dict)) or bool(
                  (answer or {}).get('RefId') or (answer or {}).get('RefID'))
-    return jsonify({'ok': ok, 'answer': answer,
-                    'meaning': ('Sent from %s to %s.' % (frm, to[-10:])) if ok
-                               else 'The texting service did not accept it.'})
+    return jsonify({'ok': ok, 'answer': answer, 'campaign': campaign,
+                    'meaning': (('Sent from %s to %s.' % (frm, to[-10:])) if ok
+                                else 'The texting service did not accept it.')
+                               + ('\n   campaign: ' + campaign if campaign else '')})
 
 
 def _log_admin_action(what, detail):
@@ -7445,6 +7458,82 @@ def _log_admin_action(what, detail):
         conn.commit(); conn.close()
     except Exception as e:
         print('[audit] ' + str(e)[:120])
+
+
+# ─── TEXTING: the old CMS's number and campaign handling ─────────────────────
+def _sms_call(fn, *a, **k):
+    import cms_write
+    try:
+        out = fn(*a, **k)
+    except cms_write.WriteRefused as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    except cms_write.BulkVSError as e:
+        return jsonify({'ok': False, 'error': str(e), 'code': e.code}), 400
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'That did not work: ' + str(e)[:240]}), 400
+    if isinstance(out, dict) and out.get('ok') is False:
+        return jsonify(out), 400
+    return jsonify(out)
+
+
+@app.route('/api/sms/health', methods=['GET'])
+@portal_manager_only
+def sms_health_route():
+    """The whole texting setup on one page — read only."""
+    import cms_write
+    return _sms_call(cms_write.sms_health)
+
+
+@app.route('/api/sms/plan/<number>', methods=['GET'])
+@portal_manager_only
+def sms_plan_route(number):
+    """What would happen to this number's campaign if it sent now. Changes nothing."""
+    import cms_write
+    return _sms_call(cms_write.campaign_plan, number)
+
+
+@app.route('/api/sms/plan/<number>/apply', methods=['POST'])
+@portal_manager_only
+def sms_plan_apply_route(number):
+    """Do that campaign step now, without sending anything — for testing."""
+    import cms_write
+
+    def go():
+        plan = cms_write.campaign_plan(number)
+        if plan['step'] in ('missing', 'stuck'):
+            raise cms_write.WriteRefused(plan['meaning'])
+        cms_write.apply_campaign_plan(number, plan)
+        _log_admin_action('sms_campaign_' + plan['step'],
+                          {'number': cms_write._ten(number), 'tcr': plan.get('tcr'),
+                           'moved_out': plan.get('move_out')})
+        return dict(plan, ok=True, done=True)
+    return _sms_call(go)
+
+
+@app.route('/api/sms/order', methods=['POST'])
+@portal_manager_only
+def sms_order_route():
+    """Buy a number in an area code into the spare pool. Costs money."""
+    import cms_write
+    d = request.json or {}
+    return _sms_call(cms_write.order_number, d.get('area_code'), _who())
+
+
+@app.route('/api/customers/<int:account_id>/texting/on', methods=['POST'])
+@portal_or_manager
+def customer_texting_on(account_id):
+    """Give this customer a texting number, as the old CMS's Activate SMS."""
+    import cms_write
+    d = request.json or {}
+    return _sms_call(cms_write.activate_texting, account_id, _who(), d.get('area_code'))
+
+
+@app.route('/api/customers/<int:account_id>/texting/off', methods=['POST'])
+@portal_manager_only
+def customer_texting_off(account_id):
+    """Turn texting off and release the number at BulkVS. Managers and admins."""
+    import cms_write
+    return _sms_call(cms_write.disable_texting, account_id, _who())
 
 
 @app.route('/api/sms-number-lookup', methods=['GET'])
@@ -7481,7 +7570,7 @@ def sms_number_lookup():
                          'sms_number': r[3], 'active': bool(r[4]),
                          'ends': str(r[5])[:10] if r[5] else None})
         out['on_accounts'] = rows
-        cu.execute("SELECT COUNT(*) FROM SMSNumberTable WHERE RIGHT(Number, 10) = %s", (ten,))
+        cu.execute("SELECT COUNT(*) FROM SMSNumberTable WHERE RIGHT([%s], 10) = %%s" % cms_db.pool_col(), (ten,))
         out['still_in_the_spare_pool'] = int((cu.fetchone() or [0])[0] or 0) > 0
         conn.close()
     except Exception as e:
@@ -11907,7 +11996,7 @@ PORTAL_ALLOWED_PREFIXES = (
     '/api/waiting', '/api/queue-kinds', '/api/callbacks', '/api/call-search',
     '/api/work-note-shape', '/api/sms-number-lookup', '/api/sms-numbers',
     '/api/calls/summary', '/api/agent-names', '/api/date-coverage',
-    '/api/time-report', '/api/payroll', '/api/clock', '/api/cms-settings', '/api/teams', '/api/team-leaders',
+    '/api/time-report', '/api/payroll', '/api/clock', '/api/sms/', '/api/cms-settings', '/api/teams', '/api/team-leaders',
     '/api/review-sample', '/api/calls/',
     # AgentMonitor's poller calls this one. It carries its own key rather than
     # a portal sign-in, so it is safe on this hostname — and being reachable

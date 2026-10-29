@@ -684,7 +684,7 @@ def send_text(account_id, message, who, media_url=None):
     if not our_number or int(active or 0) != 1:
         conn.close()
         raise WriteRefused(
-            '%s has no texting number yet. Setting one up is done in the CMS.' % (name or 'This account'))
+            '%s has no texting number yet. Press "Turn on texting" first.' % (name or 'This account'))
     if not their_number:
         conn.close()
         raise WriteRefused('%s has no phone number to text.' % (name or 'This account'))
@@ -699,9 +699,11 @@ def send_text(account_id, message, who, media_url=None):
         escaped = escaped.replace(ch, code)
     escaped = escaped.replace('\r', '\\u000D').replace('\n', '\\n')
 
-    body = {'From': our_number, 'To': [their_number], 'Message': escaped}
-    if media_url:
-        body['MediaURLs'] = [media_url]
+    # Sent exactly as the old CMS sends it. Putting the escaped text inside a
+    # normal JSON encoder would escape the escapes, and the customer would
+    # receive "\u002E" where a full stop should be.
+    body = _old_cms_send_body(our_number, their_number,
+                              message if message else ' ', media_url)
 
     auth = os.getenv('BULKVS_AUTH', '')
     if not auth:
@@ -713,14 +715,25 @@ def send_text(account_id, message, who, media_url=None):
            'to': their_number, 'from': our_number, 'dry_run': False,
            'values': {'message': message[:120]}}
     timed_out = False
+    # The old CMS's step before every send: the number must be on one of the
+    # two campaigns. Done here too now — without it a number that had been
+    # taken off a campaign could not send from this page.
     try:
-        req = _u.Request(BULKVS_SEND_URL,
-                         data=_json.dumps(body).encode(),
-                         headers={'Authorization': 'Basic ' + auth,
-                                  'Content-Type': 'application/json'})
+        plan = campaign_plan(our_number)
+        if plan['step'] in ('join', 'swap'):
+            apply_campaign_plan(our_number, plan)
+        out['campaign'] = {k: plan.get(k) for k in ('step', 'tcr', 'move_out', 'meaning')}
+        if plan['step'] in ('missing', 'stuck'):
+            out['campaign_warning'] = plan['meaning']
+    except Exception as e:
+        out['campaign_warning'] = 'Could not check the campaign: ' + str(e)[:160]
+    try:
         try:
-            with _u.urlopen(req, timeout=45) as resp:
-                answer = _json.loads(resp.read().decode() or '{}')
+            answer = _send_via_bulkvs(body)
+            if not isinstance(answer, dict):
+                answer = {}
+        except BulkVSError:
+            raise
         except Exception as e:
             # A timeout means we stopped waiting, not that nothing happened.
             # The message has almost always gone by this point — the service
@@ -2151,4 +2164,665 @@ def dnd(employee_id, turn_on, who, reason=None, kind=None):
     out['ok'] = True
     out['dnd'] = bool(turn_on)
     _log(who, out)
+    return out
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# TEXTING — numbers, the two campaigns, and sending
+#
+# Copied from the old CMS's SMSController, with its rough edges smoothed:
+#
+#   * A customer's number comes from the spare pool (SMSNumberTable), oldest
+#     first, matching their area code. Taking one orders a replacement from
+#     BulkVS so the pool refills.
+#   * Before every send the number must be on one of the two campaigns. Static
+#     numbers (AccountSMS with StaticCompign = 1) are fixed to theirs. Anything
+#     else: if BulkVS already has it on a campaign, fine; otherwise it joins
+#     the first campaign under 49; if both are full, the number that was put on
+#     longest ago is taken off and this one takes its place.
+#   * Turning texting off releases the number at BulkVS and clears the account.
+#
+# Differences from the old code, all on the side of caution: a number is only
+# ever taken off a campaign if WE put it there (its Lidb is our timestamp) and
+# it is not static; BulkVS's answer is checked to be about the number asked
+# for; and the "not ready yet" retry gives up after a minute instead of never.
+# ═════════════════════════════════════════════════════════════════════════════
+
+BV_BASE = 'https://portal.bulkvs.com/api/v1.0'
+SMS_TRUNK = 'SMS-ProClick'
+CAMPAIGN_LIMIT = 49           # the old CMS: "Count < 49"
+NOT_READY_CODE = '7401'       # BulkVS: the number is not ready to send yet
+
+
+class BulkVSError(Exception):
+    def __init__(self, message, code=None, status=None):
+        super().__init__(message)
+        self.code = str(code) if code is not None else None
+        self.status = status
+
+
+def bv_configured():
+    return bool(os.getenv('BULKVS_AUTH', '').strip())
+
+
+def _bv(method, path, body=None, timeout=25, raw=None):
+    """One call to BulkVS. Raises BulkVSError with their code and description
+    when they refuse, so callers can tell 'not ready' from 'no'. 'raw' sends a
+    body exactly as given, for the message text (see _old_cms_send_body)."""
+    import json as _json
+    import urllib.request as _u
+    import urllib.error as _ue
+    auth = os.getenv('BULKVS_AUTH', '').strip()
+    if not auth:
+        raise WriteRefused('The texting service is not configured here yet (BULKVS_AUTH).')
+    if raw is not None:
+        data = raw.encode('utf-8')
+    else:
+        data = _json.dumps(body).encode() if body is not None else None
+    req = _u.Request(BV_BASE + path, data=data, method=method,
+                     headers={'Authorization': 'Basic ' + auth,
+                              'Content-Type': 'application/json'})
+    try:
+        with _u.urlopen(req, timeout=timeout) as resp:
+            text = resp.read().decode()
+    except _ue.HTTPError as e:
+        try:
+            raw = e.read().decode()
+        except Exception:
+            raw = ''
+        code, desc = None, raw[:200] or str(e)
+        try:
+            j = _json.loads(raw)
+            if isinstance(j, dict):
+                code = j.get('code') or j.get('Code')
+                desc = j.get('description') or j.get('Description') or desc
+        except Exception:
+            pass
+        raise BulkVSError('BulkVS refused: %s' % desc, code=code, status=e.code)
+    try:
+        return _json.loads(text) if text.strip() else {}
+    except Exception:
+        return text
+
+
+def _ten(n):
+    d = ''.join(ch for ch in str(n or '') if ch.isdigit())
+    return d[-10:]
+
+
+def _rec_tn(r):
+    return _ten(r.get('TN') or r.get('Tn') or r.get('tn'))
+
+
+def _rec_tcr(r):
+    m = r.get('Messaging') or {}
+    return ((m.get('TCR') or m.get('Tcr') or r.get('TCR') or r.get('Tcr') or '') or '').strip()
+
+
+def _rec_webhook(r):
+    m = r.get('Messaging') or {}
+    return (m.get('Webhook') or m.get('WebHook') or r.get('Webhook') or r.get('WebHook') or '')
+
+
+def _rec_lidb(r):
+    return str(r.get('Lidb') or r.get('LIDB') or '').strip()
+
+
+def _lidb_time(lidb):
+    """Our own stamp, yyyyMMddHHmm, as the old CMS writes it — or None."""
+    import re as _re
+    from datetime import datetime as _dt
+    if not _re.fullmatch(r'\d{12}', lidb or ''):
+        return None
+    try:
+        return _dt.strptime(lidb, '%Y%m%d%H%M')
+    except Exception:
+        return None
+
+
+_BV_ALL = {'at': 0, 'records': None}
+
+
+def bv_all_records(fresh=False):
+    """Every number in the BulkVS account. Kept for a minute — the health
+    check and a send close together should not each ask for the whole list."""
+    import time as _t
+    if not fresh and _BV_ALL['records'] is not None and _t.time() - _BV_ALL['at'] < 60:
+        return _BV_ALL['records']
+    ans = _bv('GET', '/tnRecord', timeout=40)
+    recs = [r for r in (ans if isinstance(ans, list) else [ans]) if isinstance(r, dict)]
+    _BV_ALL.update(at=_t.time(), records=recs)
+    return recs
+
+
+def bv_record(number):
+    """BulkVS's record for this number, or None. Their filter is not always
+    honoured, so the answer is checked to be about this number before it is
+    believed, and the whole list is searched if it is not."""
+    ten = _ten(number)
+    try:
+        ans = _bv('GET', '/tnRecord?Number=1' + ten)
+        for r in (ans if isinstance(ans, list) else [ans]):
+            if isinstance(r, dict) and _rec_tn(r) == ten:
+                return r
+    except BulkVSError:
+        pass
+    for r in bv_all_records():
+        if _rec_tn(r) == ten:
+            return r
+    return None
+
+
+def bv_campaigns():
+    ans = _bv('GET', '/campaigns')
+    out = []
+    for c in (ans if isinstance(ans, list) else [ans]):
+        if not isinstance(c, dict):
+            continue
+        tcr = (c.get('TCR') or c.get('Tcr') or c.get('tcr') or '').strip()
+        cnt = c.get('Count', c.get('count', c.get('TN Count')))
+        try:
+            cnt = int(cnt)
+        except Exception:
+            cnt = None
+        if tcr:
+            out.append({'tcr': tcr, 'count': cnt, 'raw': c})
+    return out
+
+
+def static_numbers():
+    """Numbers fixed to a campaign by hand: AccountSMS with StaticCompign = 1."""
+    conn = cms_db._connect()
+    try:
+        cu = conn.cursor()
+        cu.execute("""SELECT SMSNumber, SMSCompaign, AccountID FROM AccountSMS
+                      WHERE ISNULL(StaticCompign, 0) = 1""")
+        out = {}
+        for r in cu.fetchall():
+            if r[0]:
+                out[_ten(r[0])] = {'tcr': (r[1] or '').strip(),
+                                   'account_id': int(r[2]) if r[2] else None}
+        return out
+    finally:
+        conn.close()
+
+
+def campaign_plan(number, statics=None):
+    """What has to happen before this number can send. Reads only."""
+    ten = _ten(number)
+    statics = static_numbers() if statics is None else statics
+    if ten in statics and statics[ten]['tcr']:
+        return {'step': 'static', 'tcr': statics[ten]['tcr'],
+                'meaning': 'Static number, always on %s — nothing to change.' % statics[ten]['tcr']}
+    rec = bv_record(ten)
+    if rec is None:
+        return {'step': 'missing',
+                'meaning': 'BulkVS does not have %s, so it cannot send.' % ten}
+    if _rec_tcr(rec):
+        return {'step': 'already', 'tcr': _rec_tcr(rec),
+                'meaning': 'Already on campaign %s — it can send.' % _rec_tcr(rec)}
+    camps = bv_campaigns()
+    if not camps or any(c['count'] is None for c in camps):
+        # never take a number off on a guess
+        return {'step': 'stuck', 'campaigns': camps,
+                'meaning': ('Could not read how full the campaigns are from BulkVS, so nothing '
+                            'was changed. Raw answer: %s' % str([c.get('raw') for c in camps])[:200])}
+    for c in camps:
+        if c['count'] < CAMPAIGN_LIMIT:
+            return {'step': 'join', 'tcr': c['tcr'], 'campaigns': camps,
+                    'meaning': 'Will join campaign %s (%d of %d used).'
+                               % (c['tcr'], c['count'], CAMPAIGN_LIMIT)}
+    # both full: take off the one WE put on longest ago — never a static one,
+    # never one somebody set up by hand
+    movable = []
+    for r in bv_all_records():
+        t = _lidb_time(_rec_lidb(r))
+        if (_rec_tcr(r) and t is not None and _rec_tn(r) not in statics
+                and _rec_tn(r) != ten and _rec_webhook(r) in ('WebHook2', '')):
+            movable.append((t, r))
+    if not movable:
+        return {'step': 'stuck', 'campaigns': camps,
+                'meaning': ('Both campaigns are full and no number can safely be taken off '
+                            '(the rest are static or were set up by hand).')}
+    movable.sort(key=lambda x: x[0])
+    t, r = movable[0]
+    return {'step': 'swap', 'tcr': _rec_tcr(r), 'move_out': _rec_tn(r),
+            'move_out_since': t.isoformat(), 'campaigns': camps,
+            'meaning': ('Both campaigns are full. Will take %s off %s (on since %s) '
+                        'and put this number on instead.'
+                        % (_rec_tn(r), _rec_tcr(r), t.strftime('%b %d %I:%M %p')))}
+
+
+def _put_on_campaign(ten, tcr):
+    """The old CMS's updateTCR. An empty campaign takes the number off."""
+    import time as _t
+    from datetime import datetime as _dt
+    if tcr:
+        body = {'TN': '1' + ten, 'Lidb': _dt.now().strftime('%Y%m%d%H%M'),
+                'Webhook': 'WebHook2', 'Tcr': tcr}
+    else:
+        body = {'TN': '1' + ten, 'Lidb': 'PROCLICK', 'Webhook': 'WebHook1', 'Tcr': ''}
+    _bv('POST', '/tnRecord', body)
+    _BV_ALL['records'] = None
+    _t.sleep(0.5)
+
+
+def apply_campaign_plan(number, plan):
+    ten = _ten(number)
+    if plan['step'] == 'join':
+        _put_on_campaign(ten, plan['tcr'])
+    elif plan['step'] == 'swap':
+        _put_on_campaign(plan['move_out'], '')
+        _put_on_campaign(ten, plan['tcr'])
+    return plan
+
+
+def _old_cms_escape(message):
+    """The old CMS's escaping. It writes these characters as \\uXXXX codes
+    INSIDE a JSON body it builds by hand, so BulkVS reads them back as the
+    ordinary characters. A backslash, tab and other control characters are
+    covered too, which the old code left out (a message with one broke)."""
+    m = (message or '').replace('\\', '\\u005C')
+    for ch, code in (('@', '\\u0040'), ('?', '\\u003F'), ('$', '\\u0024'),
+                     ('#', '\\u0023'), ("'", '\\u0027'), ('*', '\\u002A'),
+                     ('_', '\\u005F'), ('+', '\\u002B'), ('&', '\\u0026'),
+                     (';', '\\u003B'), ('.', '\\u002E'), ('=', '\\u003D'),
+                     ('"', '\\u0022')):
+        m = m.replace(ch, code)
+    m = m.replace('\r', '\\u000D').replace('\n', '\\n').replace('\t', '\\t')
+    return ''.join(ch if ord(ch) >= 32 else '\\u%04X' % ord(ch) for ch in m)
+
+
+def _old_cms_send_body(frm, to, message, media_url=None):
+    """The messageSend body exactly as the old CMS puts it on the wire."""
+    body = (' {\n"From": "' + frm + '",\n"To": ["' + to + '"],\n"Message": "'
+            + _old_cms_escape(message) + '"\n ')
+    if media_url:
+        body += ',"MediaURLs":[ "' + media_url.replace('\\', '\\\\').replace('"', '%22') + '"]\n'
+    return body + ' }'
+
+
+def _send_via_bulkvs(body, tries=6, wait=10):
+    """messageSend, waiting while BulkVS says the number is not ready yet
+    (it takes a little while after joining a campaign). Gives up after about
+    a minute rather than hanging for ever as the old loop could."""
+    import time as _t
+    last = None
+    for i in range(tries):
+        try:
+            if isinstance(body, str):
+                return _bv('POST', '/messageSend', raw=body, timeout=45)
+            return _bv('POST', '/messageSend', body, timeout=45)
+        except BulkVSError as e:
+            last = e
+            if e.code != NOT_READY_CODE:
+                raise
+            if i < tries - 1:
+                _t.sleep(wait)
+    raise BulkVSError('The number is still not ready to send after %d tries: %s'
+                      % (tries, last), code=NOT_READY_CODE)
+
+
+def _area_code(account_row_phone):
+    ten = _ten(account_row_phone)
+    return ten[:3] if len(ten) == 10 else ''
+
+
+def _number_in_cms(ten):
+    """Is this number already ours — in the pool or on an account?"""
+    conn = cms_db._connect()
+    try:
+        cu = conn.cursor()
+        cu.execute("SELECT COUNT(*) FROM Account WHERE RIGHT(ISNULL(smsNumber,''), 10) = %s", (ten,))
+        on_acct = int(cu.fetchone()[0] or 0)
+        cu.execute("SELECT COUNT(*) FROM SMSNumberTable WHERE RIGHT([%s], 10) = %%s" % cms_db.pool_col(), (ten,))
+        in_pool = int(cu.fetchone()[0] or 0)
+        return on_acct, in_pool
+    finally:
+        conn.close()
+
+
+def order_number(npa, who):
+    """Buy one number in this area code from BulkVS and put it in the spare
+    pool — the old CMS's orderTN. Costs money, so callers confirm first."""
+    npa = ''.join(ch for ch in str(npa or '') if ch.isdigit())[:3]
+    if len(npa) != 3:
+        raise WriteRefused('Give a three-digit area code.')
+    out = {'table': 'SMSNumberTable', 'action': 'order_number', 'dry_run': False,
+           'values': {'area_code': npa}}
+    try:
+        avail = _bv('GET', '/orderTn?Npa=%s&Lca=false&Limit=1' % npa)
+        avail = [a for a in (avail if isinstance(avail, list) else [avail]) if isinstance(a, dict)]
+        if not avail or not _rec_tn(avail[0]):
+            raise WriteRefused('BulkVS has no numbers to sell in area code %s right now.' % npa)
+        tn = _rec_tn(avail[0])
+        on_acct, in_pool = _number_in_cms(tn)
+        if on_acct or in_pool:
+            raise WriteRefused('BulkVS offered %s, but we already have it. Try again.' % tn)
+        ans = _bv('POST', '/orderTn', {
+            'TN': '1' + tn, 'Lidb': 'PROCLICK',
+            'Portout Pin': os.getenv('BULKVS_PORTOUT_PIN', '1111111'),
+            'ReferenceID': '', 'Trunk Group': SMS_TRUNK,
+            'Sms': True, 'Mms': True, 'Webhook': 'WebHook1'}, timeout=45)
+        got = _rec_tn(ans) if isinstance(ans, dict) else ''
+        if not got:
+            raise BulkVSError('BulkVS did not confirm the order: %s' % str(ans)[:160])
+        conn = cms_db._connect()
+        try:
+            cu = conn.cursor()
+            cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+            cu.execute('INSERT INTO SMSNumberTable ([%s], Created) VALUES (%%s, GETDATE())' % cms_db.pool_col(), (got,))
+            conn.commit()
+        finally:
+            conn.close()
+        _BV_ALL['records'] = None
+        out.update(ok=True, committed=True, number=got,
+                   meaning='Bought %s and added it to the spare pool.' % got)
+        out['values']['number'] = got
+    except WriteRefused:
+        raise
+    except Exception as e:
+        out.update(ok=False, committed=False, error=str(e)[:300])
+    _log(who, out)
+    return out
+
+
+def _take_spare(npa):
+    """The oldest spare in this area code, removed from the pool and returned.
+    Locked, so two agents can never be handed the same number."""
+    conn = cms_db._connect()
+    try:
+        cu = conn.cursor()
+        cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        cu.execute("EXEC sp_getapplock @Resource = 'SMSNumberTable', @LockMode = 'Exclusive', "
+                   "@LockOwner = 'Transaction', @LockTimeout = 15000")
+        for _ in range(5):
+            pc = cms_db.pool_col()
+            cu.execute("""SELECT TOP 1 [%s] FROM SMSNumberTable
+                          WHERE [%s] LIKE %%s ORDER BY Created, Id""" % (pc, pc), (npa + '%',))
+            r = cu.fetchone()
+            if not r:
+                conn.commit()
+                return None
+            num = (r[0] or '').strip()
+            cu.execute('DELETE FROM SMSNumberTable WHERE [%s] = %%s' % cms_db.pool_col(), (num,))
+            cu.execute("SELECT COUNT(*) FROM Account WHERE RIGHT(ISNULL(smsNumber,''), 10) = %s",
+                       (_ten(num),))
+            if int(cu.fetchone()[0] or 0) == 0:
+                conn.commit()
+                return num
+            # already a customer's — it should not have been in the pool; drop it, try the next
+        conn.commit()
+        return None
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def activate_texting(account_id, who, npa=None):
+    """Give a customer a texting number — the old CMS's ActivateSMS. Takes
+    the oldest spare in their area code; if there is none, buys one first
+    (the old CMS bought one and made the agent press the button again). Then
+    buys a replacement so the pool stays topped up."""
+    account_id = int(account_id)
+    conn = cms_db._connect()
+    try:
+        cu = conn.cursor()
+        cu.execute("""SELECT smsNumber, ISNULL(smsActivate,0), Phone, Mobile, FirstName, LastName
+                      FROM Account WHERE Id = %s""", (account_id,))
+        row = cu.fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise WriteRefused('There is no account with id %d.' % account_id)
+    current, active, phone, mobile, first, last = row
+    name = ('%s %s' % (first or '', last or '')).strip() or 'This account'
+    if (current or '').strip() and int(active or 0) == 1:
+        raise WriteRefused('%s already has texting on %s.' % (name, current.strip()))
+    if (current or '').strip():
+        # a number is still on the account, just switched off — switch it back
+        # on rather than spend a new one, if BulkVS still has it
+        if bv_record(current) is not None:
+            conn = cms_db._connect()
+            try:
+                cu = conn.cursor()
+                cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+                cu.execute("UPDATE Account SET smsActivate = 1, SMSDateEnd = '9999-12-31' WHERE Id = %s",
+                           (account_id,))
+                conn.commit()
+            finally:
+                conn.close()
+            out = {'table': 'Account', 'action': 'activate_texting', 'row_id': account_id,
+                   'dry_run': False, 'values': {'number': current.strip(), 'reused': True},
+                   'ok': True, 'committed': True, 'number': current.strip(),
+                   'meaning': '%s can text again from %s.' % (name, current.strip())}
+            _log(who, out)
+            return out
+    npa = ''.join(ch for ch in str(npa or '') if ch.isdigit())[:3] or _area_code(phone or mobile)
+    if len(npa) != 3:
+        raise WriteRefused('%s has no phone number to take an area code from. '
+                           'Give one.' % name)
+
+    out = {'table': 'Account', 'action': 'activate_texting', 'row_id': account_id,
+           'dry_run': False, 'values': {'area_code': npa}}
+    bought_first = None
+    num = _take_spare(npa)
+    if not num:
+        o = order_number(npa, who)
+        if not o.get('ok'):
+            raise WriteRefused('No spare %s number, and buying one failed: %s'
+                               % (npa, o.get('error') or '?'))
+        bought_first = o['number']
+        num = _take_spare(npa)
+        if not num:
+            raise WriteRefused('Bought %s but could not take it from the pool. '
+                               'Look at SMS Numbers.' % bought_first)
+    conn = cms_db._connect()
+    try:
+        cu = conn.cursor()
+        cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        cu.execute("""UPDATE Account SET smsActivate = 1, smsNumber = %s,
+                             SMSDateEnd = '9999-12-31' WHERE Id = %s""", (num, account_id))
+        conn.commit()
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        # put the number back so it is not lost
+        try:
+            c2 = cms_db._connect(); k = c2.cursor()
+            k.execute('INSERT INTO SMSNumberTable ([%s], Created) VALUES (%%s, GETDATE())' % cms_db.pool_col(), (num,))
+            c2.commit(); c2.close()
+        except Exception:
+            pass
+        out.update(ok=False, committed=False, error=_explain(e))
+        _log(who, out)
+        return out
+    finally:
+        conn.close()
+
+    out.update(ok=True, committed=True, number=num, bought_first=bought_first)
+    out['values']['number'] = num
+    # top the pool back up, as the old CMS does every time
+    try:
+        refill = order_number(npa, who)
+        out['refill'] = refill.get('number') if refill.get('ok') else None
+        if not refill.get('ok'):
+            out['refill_warning'] = 'Could not buy a replacement spare: ' + str(refill.get('error'))[:160]
+    except Exception as e:
+        out['refill'] = None
+        out['refill_warning'] = 'Could not buy a replacement spare: ' + str(e)[:160]
+    out['meaning'] = '%s can now text from %s.' % (name, num)
+    _log(who, out)
+    return out
+
+
+def disable_texting(account_id, who):
+    """Turn texting off — the old CMS's DisableSMS. Releases the number at
+    BulkVS (it is gone for good) and clears it from the account. If BulkVS
+    will not release it, the account is left exactly as it was."""
+    account_id = int(account_id)
+    conn = cms_db._connect()
+    try:
+        cu = conn.cursor()
+        cu.execute('SELECT smsNumber, FirstName, LastName FROM Account WHERE Id = %s', (account_id,))
+        row = cu.fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise WriteRefused('There is no account with id %d.' % account_id)
+    num = (row[0] or '').strip()
+    name = ('%s %s' % (row[1] or '', row[2] or '')).strip() or 'This account'
+    if not num:
+        raise WriteRefused('%s has no texting number.' % name)
+    ten = _ten(num)
+    if ten in static_numbers():
+        raise WriteRefused('%s is a static campaign number. Releasing it would take it off '
+                           'its campaign for good — that has to be done by hand.' % ten)
+    out = {'table': 'Account', 'action': 'disable_texting', 'row_id': account_id,
+           'dry_run': False, 'values': {'number': num}}
+    if bv_record(ten) is None:
+        released = 'BulkVS no longer had it'
+    else:
+        _bv('DELETE', '/tnRecord?Number=' + num)
+        _BV_ALL['records'] = None
+        released = 'released at BulkVS'
+    conn = cms_db._connect()
+    try:
+        cu = conn.cursor()
+        cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        cu.execute("""UPDATE Account SET smsActivate = 0, smsNumber = '',
+                             SMSDateEnd = '9999-12-31' WHERE Id = %s""", (account_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    out.update(ok=True, committed=True, released=released,
+               meaning='Texting is off for %s. %s was %s.' % (name, num, released))
+    _log(who, out)
+    return out
+
+
+def sms_health():
+    """Everything about the texting setup on one page, read only: the two
+    campaigns, the static numbers, which number would be taken off next, the
+    spare pool, and anything that disagrees between the CMS and BulkVS."""
+    from collections import Counter
+    out = {'configured': bv_configured(), 'campaign_limit': CAMPAIGN_LIMIT, 'problems': []}
+    statics = static_numbers()
+    conn = cms_db._connect()
+    try:
+        cu = conn.cursor()
+        cu.execute('SELECT [%s], Created FROM SMSNumberTable ORDER BY Created' % cms_db.pool_col())
+        pool = [{'number': (r[0] or '').strip(), 'added': cms_db._plain(r[1])} for r in cu.fetchall()]
+        cu.execute("""SELECT Id, FirstName, LastName, smsNumber, ISNULL(smsActivate,0)
+                      FROM Account WHERE ISNULL(smsNumber,'') <> ''""")
+        accounts = [{'account_id': int(r[0]), 'customer': ('%s %s' % (r[1] or '', r[2] or '')).strip(),
+                     'number': (r[3] or '').strip(), 'active': bool(r[4])} for r in cu.fetchall()]
+        cu.execute("""SELECT RIGHT(AccountSMSNumber,10), MAX(smsDate), COUNT(*) FROM SMSLog
+                      WHERE InOut = 'Out' AND smsDate >= DATEADD(day, -30, GETDATE())
+                      GROUP BY RIGHT(AccountSMSNumber,10)""")
+        sent = {r[0]: {'last_sent': cms_db._plain(r[1]), 'sent_30d': int(r[2] or 0)} for r in cu.fetchall()}
+    finally:
+        conn.close()
+    by_area = Counter(_ten(p['number'])[:3] for p in pool)
+    out['pool'] = {'count': len(pool), 'by_area_code': dict(sorted(by_area.items())), 'numbers': pool}
+    out['accounts_with_numbers'] = len(accounts)
+    acct_by = {}
+    for a in accounts:
+        acct_by.setdefault(_ten(a['number']), []).append(a)
+    for ten, lst in acct_by.items():
+        if len(lst) > 1:
+            out['problems'].append({'kind': 'shared', 'number': ten,
+                                    'text': '%s is on %d accounts: %s' % (ten, len(lst),
+                                            ', '.join(x['customer'] or str(x['account_id']) for x in lst))})
+    for p in pool:
+        if _ten(p['number']) in acct_by:
+            out['problems'].append({'kind': 'both', 'number': _ten(p['number']),
+                                    'text': '%s is in the spare pool AND on a customer' % _ten(p['number'])})
+    if not out['configured']:
+        out['problems'].append({'kind': 'config', 'text': 'BULKVS_AUTH is not set, so BulkVS cannot be checked.'})
+        out['static'] = [{'number': k, **v} for k, v in statics.items()]
+        return out
+
+    recs = bv_all_records(fresh=True)
+    by_tn = {_rec_tn(r): r for r in recs}
+    camps = bv_campaigns()
+    on_camp = Counter(_rec_tcr(r) for r in recs if _rec_tcr(r))
+    out['campaigns'] = [{'tcr': c['tcr'], 'count': c['count'],
+                         'counted_here': on_camp.get(c['tcr'], 0),
+                         'static': len([1 for k, v in statics.items() if v['tcr'] == c['tcr']]),
+                         'free': (CAMPAIGN_LIMIT - c['count']) if c['count'] is not None else None}
+                        for c in camps]
+    out['static'] = []
+    for ten, v in sorted(statics.items()):
+        r = by_tn.get(ten)
+        st = {'number': ten, 'tcr': v['tcr'], 'account_id': v['account_id'],
+              'at_bulkvs': r is not None, 'bulkvs_tcr': _rec_tcr(r) if r else None,
+              'webhook': _rec_webhook(r) if r else None,
+              'on_its_campaign': bool(r and _rec_tcr(r) == v['tcr'])}
+        out['static'].append(st)
+        if r is None:
+            out['problems'].append({'kind': 'static_missing', 'number': ten,
+                                    'text': 'Static number %s is not at BulkVS' % ten})
+        elif not st['on_its_campaign']:
+            out['problems'].append({'kind': 'static_off', 'number': ten,
+                                    'text': 'Static number %s should be on %s but BulkVS has it on %s'
+                                            % (ten, v['tcr'], _rec_tcr(r) or 'no campaign')})
+    rot = []
+    for r in recs:
+        t = _lidb_time(_rec_lidb(r))
+        if _rec_tcr(r) and _rec_tn(r) not in statics:
+            rot.append({'number': _rec_tn(r), 'tcr': _rec_tcr(r),
+                        'since': t.isoformat() if t else None,
+                        'movable': t is not None,
+                        'lidb': _rec_lidb(r), 'webhook': _rec_webhook(r),
+                        'customer': (acct_by.get(_rec_tn(r)) or [{}])[0].get('customer'),
+                        **sent.get(_rec_tn(r), {})})
+    rot.sort(key=lambda x: (not x['movable'], x['since'] or ''))
+    out['rotating'] = rot
+    for x in rot:
+        if not x['movable']:
+            out['problems'].append({'kind': 'hand_set', 'number': x['number'],
+                                    'text': ('%s is on %s but was not put there by the CMS (Lidb "%s"), '
+                                             'so it will never be taken off — it holds a place permanently'
+                                             % (x['number'], x['tcr'], x['lidb']))})
+    # numbers the CMS hands out that BulkVS does not have — they cannot send
+    for ten, lst in acct_by.items():
+        if any(a['active'] for a in lst) and ten not in by_tn:
+            out['problems'].append({'kind': 'account_missing', 'number': ten,
+                                    'text': '%s is %s\'s texting number but BulkVS does not have it'
+                                            % (ten, lst[0]['customer'] or lst[0]['account_id'])})
+    for p in pool:
+        if _ten(p['number']) not in by_tn:
+            out['problems'].append({'kind': 'pool_missing', 'number': _ten(p['number']),
+                                    'text': 'Spare %s is not at BulkVS — handing it out would fail'
+                                            % _ten(p['number'])})
+    ours = set(acct_by) | {_ten(p['number']) for p in pool} | set(statics)
+    orphans = []
+    for r in recs:
+        routing = r.get('Routing') or {}
+        trunk = routing.get('Trunk Group') or r.get('Trunk Group') or ''
+        if trunk == SMS_TRUNK and _rec_tn(r) not in ours:
+            orphans.append(_rec_tn(r))
+    out['not_in_cms'] = orphans
+    if orphans:
+        out['problems'].append({'kind': 'orphans',
+                                'text': '%d texting numbers at BulkVS belong to nobody in the CMS (you may be paying for them)'
+                                        % len(orphans)})
+    for c in out['campaigns']:
+        if c['count'] is not None and c['count'] != c['counted_here']:
+            out['problems'].append({'kind': 'count_mismatch',
+                                    'text': ('BulkVS says %s has %d numbers but %d of our numbers show it — '
+                                             'some may be outside this account or still changing'
+                                             % (c['tcr'], c['count'], c['counted_here']))})
+    if not out['campaigns']:
+        out['problems'].append({'kind': 'no_campaigns',
+                                'text': 'BulkVS returned no campaigns — sending would not be able to join one'})
+    out['bulkvs_numbers'] = len(recs)
     return out
