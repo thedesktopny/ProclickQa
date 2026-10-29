@@ -62,8 +62,37 @@ app.config['SESSION_REFRESH_EACH_REQUEST'] = True
 @app.before_request
 def make_session_permanent():
     session.permanent = True
+    try:
+        from flask import g as _g
+        _g._t0 = time.time()
+    except Exception:
+        pass
     if request.method == 'OPTIONS':
         return '', 204
+
+
+# ─── How long requests take, so "it's slow" can be pinned to something ───────
+import collections as _collections
+import re as _re_speed
+_SPEED = {'slow': _collections.deque(maxlen=200), 'paths': {}}
+
+
+@app.after_request
+def _time_request(resp):
+    try:
+        from flask import g as _g
+        t0 = getattr(_g, '_t0', None)
+        if t0 is not None:
+            ms = int((time.time() - t0) * 1000)
+            path = _re_speed.sub(r'/\d+', '/<n>', request.path)
+            st = _SPEED['paths'].setdefault(path, {'count': 0, 'total_ms': 0, 'max_ms': 0})
+            st['count'] += 1; st['total_ms'] += ms; st['max_ms'] = max(st['max_ms'], ms)
+            if ms >= 2000:
+                _SPEED['slow'].append({'at': datetime.utcnow().isoformat() + 'Z', 'path': path,
+                                       'method': request.method, 'ms': ms, 'status': resp.status_code})
+    except Exception:
+        pass
+    return resp
 CORS(app, resources={r"/api/*": {"origins": "*", "allow_headers": ["Content-Type", "Authorization", "X-Auth-Token"], "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"]}})
 
 ADMIN_USERNAME = os.getenv('ADMIN_USERNAME', 'david')
@@ -2768,8 +2797,14 @@ def analyze_call():
                 except: pass
                 return
 
-            # the agent is still writing the note — wait for the finished one
-            nonlocal_notes = _await_final_notes(call_id, agent_extension, caller_id, call_notes)
+            # The agent is still writing the note. Rather than a thread per call
+            # asking the CMS every minute, the call is parked and one shared
+            # check (every 90 seconds, all calls at once) scores it when the
+            # agent has finished.
+            if _notes_wait_on():
+                _set_status(call_id, 'Waiting for notes', only_if='Processing')
+                return
+            nonlocal_notes = call_notes
 
             url_path = recording_url.split('?')[0]
             ext = os.path.splitext(url_path)[1].lower()
@@ -9093,7 +9128,7 @@ def customer_texts_read(account_id):
     """Opening a conversation marks its messages read."""
     import cms_write
     try:
-        return jsonify(cms_write.mark_texts_read(account_id))
+        return jsonify(cms_write.mark_texts_read(account_id, (request.json or {}).get('contact')))
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)[:200]}), 400
 
@@ -12155,7 +12190,7 @@ PORTAL_ALLOWED_PREFIXES = (
     '/api/waiting', '/api/queue-kinds', '/api/callbacks', '/api/call-search',
     '/api/work-note-shape', '/api/sms-number-lookup', '/api/sms-numbers',
     '/api/calls/summary', '/api/agent-names', '/api/date-coverage',
-    '/api/time-report', '/api/payroll', '/api/clock', '/api/sms/', '/api/personal-info', '/api/cms-settings', '/api/teams', '/api/team-leaders',
+    '/api/time-report', '/api/payroll', '/api/clock', '/api/sms/', '/api/personal-info', '/api/speed', '/api/cms-settings', '/api/teams', '/api/team-leaders',
     '/api/review-sample', '/api/calls/',
     # AgentMonitor's poller calls this one. It carries its own key rather than
     # a portal sign-in, so it is safe on this hostname — and being reachable
@@ -12335,42 +12370,6 @@ def _save_notes(call_id, notes, final):
         print('[notes] could not save notes for %s: %s' % (call_id, str(e)[:120]))
 
 
-def _await_final_notes(call_id, extension, phone, notes, max_wait=1800, every=60):
-    """Waits until the agent has ended the work on this call, then returns the
-    full note from the CMS. Never waits longer than max_wait seconds, and if
-    the CMS cannot be read, goes ahead with what it has."""
-    import cms_db
-    best = (notes or '').strip()
-    start = time.time()
-    around = _ny_now()
-    _set_status(call_id, 'Waiting for notes', only_if='Processing')
-    cms_id = _cms_id_from(call_id)
-    final = False
-    while True:
-        try:
-            info = cms_db.call_work_notes(cms_id, extension, phone, around)
-        except Exception as e:
-            print('[notes] CMS not readable for %s: %s' % (call_id, str(e)[:120]))
-            break
-        waited = time.time() - start
-        if info is None:
-            if waited > 300:          # the CMS never had this call
-                break
-        else:
-            cms_id = info['cms_call_id']
-            if len(info['notes']) > len(best):
-                best = info['notes']
-            if info['work_ended'] or (not info['has_work'] and waited > 300):
-                final = True
-                break
-        if waited + every > max_wait:
-            break
-        time.sleep(every)
-    _save_notes(call_id, best, final)
-    _set_status(call_id, 'Processing', only_if='Waiting for notes')
-    return best
-
-
 def _set_status(call_id, status, only_if):
     try:
         conn = get_db(); c = conn.cursor()
@@ -12381,56 +12380,127 @@ def _set_status(call_id, status, only_if):
         print('[notes] status not changed for %s: %s' % (call_id, str(e)[:120]))
 
 
-def _refresh_recent_notes(limit=150, days=3):
-    """Brings the full note into calls already scored or waiting. Each call is
-    checked until its work is ended, then left alone."""
-    import cms_db
-    conn = get_db(); c = conn.cursor()
-    got = False
+def _notes_wait_on():
     try:
-        c.execute('SELECT pg_try_advisory_lock(80421)')
-        got = bool(c.fetchone()[0])
+        import cms_db
+        return bool(cms_db.configured())
+    except Exception:
+        return False
+
+
+def _match_cms_call(row, cms_calls, by_id):
+    """The CMS call this VoiceGuard call is: by its CMS id when it has one,
+    otherwise the agent's extension and the caller's number, closest in time."""
+    cid = _cms_id_from(row['call_id'])
+    if cid:
+        return by_id.get(cid)
+    ext = str(row.get('agent_extension') or '').strip()
+    ph = ''.join(ch for ch in str(row.get('caller_id') or '') if ch.isdigit())[-10:]
+    if not ext:
+        return None
+    when = row.get('created_ny') or (_utc_to_ny(row['created_at']) if row.get('created_at') else _ny_now())
+    best, gap = None, None
+    for c in cms_calls:
+        if c['extension'] != ext or (len(ph) >= 7 and c['phone10'] and c['phone10'] != ph):
+            continue
+        t = c['ended'] or c['started']
+        if not t:
+            continue
+        g = abs((t - when).total_seconds())
+        if g <= 3 * 3600 and (gap is None or g < gap):
+            best, gap = c, g
+    return best
+
+
+_NOTES_PASS = {'n': 0, 'last': None, 'last_result': None}
+
+
+def _notes_pass(refresh_days=None):
+    """One shared check for every call that needs its agent's notes:
+       * calls waiting to be scored — scored once the agent has ended the work
+         (or after 30 minutes, whichever is first);
+       * every few runs, recent calls already scored — their notes brought up
+         to date for Call Review.
+    Two CMS reads per pass, however many calls are waiting."""
+    import cms_db
+    conn = get_db(); c = conn.cursor(cursor_factory=RealDictCursor)
+    got = False
+    result = {'waiting': 0, 'scored': 0, 'refreshed': 0}
+    try:
+        c.execute('SELECT pg_try_advisory_lock(80421) AS ok')
+        got = bool(c.fetchone()['ok'])
         if not got:
-            return {'skipped': 'already running'}
-        # a restart in the middle of waiting leaves a call parked; hand it to
-        # the normal retry instead of leaving it there for ever
-        c.execute("""UPDATE calls SET status = 'Failed',
-                            error_message = 'Interrupted while waiting for the agent''s notes — retry it'
-                     WHERE status = 'Waiting for notes' AND created_at < NOW() - INTERVAL '50 minutes'""")
-        conn.commit()
-        c.execute("""SELECT call_id, agent_extension, caller_id, call_notes, created_at
-                     FROM calls
-                     WHERE created_at >= NOW() - (%s || ' days')::interval
-                       AND NOT COALESCE(notes_final, FALSE)
-                       AND COALESCE(status, '') NOT IN ('Processing', 'Waiting for notes')
-                     ORDER BY created_at DESC LIMIT %s""", (str(int(days)), int(limit)))
-        rows = c.fetchall()
-        done = {'checked': 0, 'longer': 0, 'final': 0}
-        for call_id, ext, phone, notes, created in rows:
-            done['checked'] += 1
-            try:
-                info = cms_db.call_work_notes(_cms_id_from(call_id), ext, phone,
-                                              _utc_to_ny(created) if created else _ny_now())
-            except Exception as e:
-                print('[notes] refresh stopped: ' + str(e)[:120])
-                break
-            old_age_h = ((datetime.utcnow() - created).total_seconds() / 3600.0) if created else 99
-            have = (notes or '').strip()
-            if info is None:
-                if old_age_h > 2:
-                    c.execute('UPDATE calls SET notes_final = TRUE WHERE call_id = %s', (call_id,))
-                    done['final'] += 1
+            return {'skipped': 'another worker is doing it'}
+        c.execute("""SELECT call_id, agent_name, agent_extension, caller_id, call_notes,
+                            recording_url, call_end_first, account_name, created_at,
+                            agent_qos_tx, agent_qos_rx, customer_qos_tx, customer_qos_rx,
+                            EXTRACT(EPOCH FROM NOW() - created_at) AS age_s,
+                            (created_at AT TIME ZONE current_setting('TimeZone')) AT TIME ZONE 'America/New_York' AS created_ny
+                     FROM calls WHERE status = 'Waiting for notes'
+                     ORDER BY created_at LIMIT 300""")
+        waiting = [dict(r) for r in c.fetchall()]
+        _NOTES_PASS['n'] += 1
+        do_refresh = refresh_days is not None or _NOTES_PASS['n'] % 7 == 1
+        recent = []
+        if do_refresh:
+            days = int(refresh_days or 3)
+            c.execute("""SELECT call_id, agent_extension, caller_id, call_notes, created_at,
+                                EXTRACT(EPOCH FROM NOW() - created_at) AS age_s,
+                                (created_at AT TIME ZONE current_setting('TimeZone')) AT TIME ZONE 'America/New_York' AS created_ny
+                         FROM calls
+                         WHERE created_at >= NOW() - (%s || ' days')::interval
+                           AND NOT COALESCE(notes_final, FALSE)
+                           AND COALESCE(status, '') NOT IN ('Processing', 'Waiting for notes')
+                         ORDER BY created_at DESC LIMIT 1500""", (str(days),))
+            recent = [dict(r) for r in c.fetchall()]
+        if not waiting and not recent:
+            return result
+        oldest_s = max([float(r.get('age_s') or 0) for r in waiting + recent] or [0])
+        hours = int(oldest_s // 3600) + 2
+        cms_calls = cms_db.recent_calls_with_notes(hours=hours,
+                                                   max_rows=40000 if hours <= 12 else 120000)
+        by_id = {x['cms_call_id']: x for x in cms_calls}
+        paused = is_processing_paused()
+        to_score = []
+        for r in waiting:
+            result['waiting'] += 1
+            age = float(r.get('age_s') or 9999)
+            info = _match_cms_call(r, cms_calls, by_id)
+            notes = (r.get('call_notes') or '').strip()
+            if info and len(info['notes']) > len(notes):
+                notes = info['notes']
+            ready = (age > 1800 or
+                     (info is not None and (info['work_ended'] or (not info['has_work'] and age > 300))) or
+                     (info is None and age > 600))
+            if not ready or paused or len(to_score) >= 15:
+                if info and notes != (r.get('call_notes') or '').strip():
+                    c.execute('UPDATE calls SET call_notes = %s WHERE call_id = %s', (notes, r['call_id']))
                 continue
-            new = have
-            if len(info['notes']) > len(have):
-                new = info['notes']; done['longer'] += 1
-            final = info['work_ended'] or (not info['has_work'] and old_age_h > 2)
+            c.execute("""UPDATE calls SET call_notes = %s, notes_final = %s, status = 'Processing',
+                                processing_started_at = NOW()
+                         WHERE call_id = %s AND status = 'Waiting for notes'""",
+                      (notes, bool(info and info['work_ended']), r['call_id']))
+            if c.rowcount:
+                to_score.append(dict(r, call_notes=notes))
+        for r in recent:
+            info = _match_cms_call(r, cms_calls, by_id)
+            age_h = float(r.get('age_s') or 360000) / 3600
+            have = (r.get('call_notes') or '').strip()
+            if info is None:
+                if age_h > 2:
+                    c.execute('UPDATE calls SET notes_final = TRUE WHERE call_id = %s', (r['call_id'],))
+                continue
+            new = info['notes'] if len(info['notes']) > len(have) else have
+            final = info['work_ended'] or (not info['has_work'] and age_h > 2)
             if new != have or final:
                 c.execute('UPDATE calls SET call_notes = %s, notes_final = %s WHERE call_id = %s',
-                          (new, bool(final), call_id))
-                done['final'] += int(bool(final))
+                          (new, bool(final), r['call_id']))
+                result['refreshed'] += int(new != have)
         conn.commit()
-        return done
+        for r in to_score:
+            _score_in_background(r)
+            result['scored'] += 1
+        return result
     finally:
         try:
             if got:
@@ -12444,15 +12514,18 @@ def _notes_refresher():
     import threading
 
     def loop():
-        time.sleep(90)
+        time.sleep(60)
         while True:
             try:
-                r = _refresh_recent_notes()
-                if r.get('longer'):
-                    print('[notes] full notes brought in for %d calls' % r['longer'])
+                r = _notes_pass()
+                _NOTES_PASS.update(last=datetime.utcnow().isoformat() + 'Z', last_result=r)
+                if r.get('scored') or r.get('refreshed'):
+                    print('[notes] %s' % r)
             except Exception as e:
-                print('[notes] refresh failed: ' + str(e)[:160])
-            time.sleep(600)
+                _NOTES_PASS.update(last=datetime.utcnow().isoformat() + 'Z',
+                                   last_result={'error': str(e)[:200]})
+                print('[notes] pass failed: ' + str(e)[:160])
+            time.sleep(90)
     threading.Thread(target=loop, daemon=True).start()
 
 
@@ -12461,7 +12534,7 @@ def _notes_refresher():
 def refresh_notes_now():
     """Re-check the notes of the last N days of calls against the CMS."""
     try:
-        days = min(30, max(1, int((request.json or {}).get('days') or 3)))
+        days = min(4, max(1, int((request.json or {}).get('days') or 3)))
     except Exception:
         days = 3
     conn = get_db(); c = conn.cursor()
@@ -12469,13 +12542,7 @@ def refresh_notes_now():
               (str(days),))
     n = c.rowcount; conn.commit(); conn.close()
     import threading
-
-    def run():
-        for _ in range(200):
-            r = _refresh_recent_notes(limit=200, days=days)
-            if not r.get('checked'):
-                break
-    threading.Thread(target=run, daemon=True).start()
+    threading.Thread(target=lambda: _notes_pass(refresh_days=days), daemon=True).start()
     return jsonify({'ok': True, 'calls_to_check': n,
                     'note': 'Running in the background; the notes update as it goes.'})
 
@@ -12504,10 +12571,12 @@ def _score_in_background(call):
         audio_path = os.path.join(upload_dir, 'pull_%s_%d%s' % (call_id, int(time.time()), ext))
         try:
             download_recording(url, audio_path, timeout=60, retries=2)
+            qos = {k: call[k] for k in ('agent_qos_tx', 'agent_qos_rx', 'customer_qos_tx', 'customer_qos_rx')
+                   if call.get(k)}
             result = run_analysis(audio_path, call.get('agent_name') or '', call_id,
-                                  call_end_first=call.get('call_end_first', 'customer'),
+                                  call_end_first=call.get('call_end_first') or 'customer',
                                   call_notes=call.get('call_notes', ''),
-                                  account_name=call.get('account_name') or '')
+                                  account_name=call.get('account_name') or '', **qos)
             conn = get_db(); c = conn.cursor()
             c.execute("""UPDATE calls SET duration=%s, overall_score=%s, confidence=%s,
                             emotion=%s, status=%s, flags=%s, scorecard=%s, transcript=%s,
@@ -12662,6 +12731,40 @@ def pull_calls():
     except Exception as e:
         _PULL_STATE['error'] = str(e)[:200]
         return jsonify({'error': str(e)[:200]}), 400
+
+
+@app.route('/api/speed', methods=['GET'])
+@portal_manager_only
+def speed_check():
+    """What is slow right now: the slowest recent requests on this worker, the
+    average per page, and a live timing of each thing the pages depend on."""
+    import threading, cms_db
+    probes = {}
+
+    def timed(name, fn):
+        t = time.time()
+        try:
+            fn(); probes[name] = {'ms': int((time.time() - t) * 1000)}
+        except Exception as e:
+            probes[name] = {'ms': int((time.time() - t) * 1000), 'error': str(e)[:160]}
+
+    def pg():
+        conn = get_db(); c = conn.cursor(); c.execute('SELECT 1'); conn.close()
+
+    def cms():
+        conn = cms_db._connect(); cu = conn.cursor(); cu.execute('SELECT 1'); cu.fetchone(); conn.close()
+
+    timed('voiceguard_database', pg)
+    timed('cms_database', cms)
+    timed('cms_live_agents', lambda: cms_db.agents_live())
+    paths = sorted(({'path': k, 'count': v['count'], 'avg_ms': int(v['total_ms'] / max(1, v['count'])),
+                     'max_ms': v['max_ms']} for k, v in _SPEED['paths'].items()),
+                   key=lambda x: -x['avg_ms'])[:25]
+    return jsonify({'worker': os.getpid(), 'threads': threading.active_count(),
+                    'up_seconds': int(time.time() - _APP_STARTED_AT),
+                    'probes': probes, 'slowest_pages_on_average': paths,
+                    'recent_slow_requests': list(_SPEED['slow'])[-30:][::-1],
+                    'notes_check': {'last': _NOTES_PASS.get('last'), 'result': _NOTES_PASS.get('last_result')}})
 
 
 @app.route('/api/ping')

@@ -848,15 +848,22 @@ def _send_later(body, account_id, our_number, their_number, message, media_url, 
     threading.Thread(target=run, daemon=True).start()
 
 
-def mark_texts_read(account_id):
-    """Once a conversation has been opened, its messages are no longer unread."""
+def mark_texts_read(account_id, contact=None):
+    """Once a conversation has been opened, its messages are no longer unread —
+    just that conversation's, when a contact is given, as the old CMS does."""
     conn = cms_db._connect()
     try:
         cu = conn.cursor()
         cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
-        cu.execute("""UPDATE [SMSLog] SET smsNotRead = 0
-                      WHERE AccountId = %s AND InOut = 'In'
-                        AND ISNULL(smsNotRead, 0) = 1""", (int(account_id),))
+        digits = ''.join(ch for ch in str(contact or '') if ch.isdigit())[-10:]
+        if len(digits) == 10:
+            cu.execute("""UPDATE [SMSLog] SET smsNotRead = 0
+                          WHERE AccountId = %s AND InOut = 'In' AND ISNULL(smsNotRead, 0) = 1
+                            AND RIGHT(ContactNumber, 10) = %s""", (int(account_id), digits))
+        else:
+            cu.execute("""UPDATE [SMSLog] SET smsNotRead = 0
+                          WHERE AccountId = %s AND InOut = 'In'
+                            AND ISNULL(smsNotRead, 0) = 1""", (int(account_id),))
         n = cu.rowcount
         conn.commit()
         conn.close()
