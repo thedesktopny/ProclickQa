@@ -85,7 +85,7 @@ SERVER_SET = {
 }
 
 MAX_TEXT = 400
-MAX_NOTE = 2000
+MAX_NOTE = 100000      # the CMS columns are varchar(max); this only stops absurd pastes
 
 # Some things are only required as a group. A customer needs a name of some
 # kind and at least one way to reach them; which field carries it does not
@@ -645,7 +645,7 @@ def end_work(work_id, minutes_billed, note, who, task=None, dry_run=False):
 BULKVS_SEND_URL = 'https://portal.bulkvs.com/api/v1.0/messageSend'
 
 
-def send_text(account_id, message, who, media_url=None):
+def send_text(account_id, message, who, media_url=None, to=None):
     """Send a text to a customer from the number already assigned to them.
 
     Copied from the CMS's SendSMS, including the character escaping it applies
@@ -678,6 +678,16 @@ def send_text(account_id, message, who, media_url=None):
         raise WriteRefused('There is no account with id %d.' % account_id)
     active, our_number, phone, mobile, first, last = row
     their_number = (phone or mobile or '').strip()
+    if to:
+        # the old CMS texts whichever number the agent picked — any contact in
+        # the conversation, or a new one typed in
+        digits = ''.join(ch for ch in str(to) if ch.isdigit())
+        if len(digits) == 11 and digits.startswith('1'):
+            digits = digits[1:]
+        if len(digits) != 10:
+            conn.close()
+            raise WriteRefused('"%s" is not a ten-digit phone number.' % to)
+        their_number = digits
     our_number = (our_number or '').strip()
     name = ('%s %s' % (first or '', last or '')).strip()
 
@@ -729,11 +739,23 @@ def send_text(account_id, message, who, media_url=None):
         out['campaign_warning'] = 'Could not check the campaign: ' + str(e)[:160]
     try:
         try:
-            answer = _send_via_bulkvs(body)
+            answer = _send_via_bulkvs(body, tries=2, wait=6)
             if not isinstance(answer, dict):
                 answer = {}
-        except BulkVSError:
-            raise
+        except BulkVSError as e:
+            if e.code != NOT_READY_CODE:
+                raise
+            # The number has just joined a campaign and BulkVS is not ready
+            # for it yet. Keep trying in the background — for up to five
+            # minutes — and write it into the history only once it has gone.
+            _send_later(body, account_id, our_number, their_number, message, media_url, who)
+            conn.close()
+            out.update({'ok': True, 'committed': False, 'queued': True,
+                        'meaning': ('The number %s was just put on a campaign and BulkVS is still '
+                                    'getting it ready. The message will go out automatically within '
+                                    'a few minutes and then appear here.' % our_number)})
+            _log(who, out, before=None)
+            return out
         except Exception as e:
             # A timeout means we stopped waiting, not that nothing happened.
             # The message has almost always gone by this point — the service
@@ -795,6 +817,35 @@ def send_text(account_id, message, who, media_url=None):
             pass
     _log(who, out, before=None)
     return out
+
+
+def _send_later(body, account_id, our_number, their_number, message, media_url, who):
+    import threading
+
+    def run():
+        try:
+            answer = _send_via_bulkvs(body, tries=20, wait=15)
+            c = cms_db._connect()
+            try:
+                k = c.cursor()
+                k.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+                k.execute("""INSERT INTO [SMSLog]
+                             (AccountId, AccountSMSNumber, ContactNumber, InOut,
+                              message, smsDate, smsNotRead, MediaURL)
+                             VALUES (%s, %s, %s, 'Out', %s, GETDATE(), 0, %s)""",
+                          (account_id, our_number, their_number, message, media_url))
+                c.commit()
+            finally:
+                c.close()
+            _log(who, {'table': 'SMSLog', 'action': 'send_text_delayed', 'account_id': account_id,
+                       'committed': True, 'values': {'to': their_number, 'from': our_number,
+                                                     'message': (message or '')[:120]}})
+        except Exception as e:
+            _log(who, {'table': 'SMSLog', 'action': 'send_text_delayed', 'account_id': account_id,
+                       'committed': False, 'error': 'Never sent: ' + str(e)[:200],
+                       'values': {'to': their_number, 'from': our_number,
+                                  'message': (message or '')[:120]}})
+    threading.Thread(target=run, daemon=True).start()
 
 
 def mark_texts_read(account_id):
@@ -2288,7 +2339,7 @@ def bv_all_records(fresh=False):
     """Every number in the BulkVS account. Kept for a minute — the health
     check and a send close together should not each ask for the whole list."""
     import time as _t
-    if not fresh and _BV_ALL['records'] is not None and _t.time() - _BV_ALL['at'] < 60:
+    if not fresh and _BV_ALL['records'] is not None and _t.time() - _BV_ALL['at'] < 600:
         return _BV_ALL['records']
     ans = _bv('GET', '/tnRecord', timeout=40)
     recs = [r for r in (ans if isinstance(ans, list) else [ans]) if isinstance(r, dict)]
@@ -2296,11 +2347,38 @@ def bv_all_records(fresh=False):
     return recs
 
 
-def bv_record(number):
+def _patch_cached(ten, tcr=None, lidb=None, webhook=None, remove=False):
+    """After our own change, correct the remembered list rather than throw it
+    away — downloading every number again on each send is what made it slow."""
+    recs = _BV_ALL.get('records')
+    if recs is None:
+        return
+    for r in list(recs):
+        if _rec_tn(r) == ten:
+            if remove:
+                recs.remove(r)
+                return
+            m = r.setdefault('Messaging', {})
+            if tcr is not None:
+                m['TCR'] = tcr
+            if webhook is not None:
+                m['Webhook'] = webhook
+            if lidb is not None:
+                r['Lidb'] = lidb
+            return
+
+
+def bv_record(number, fresh=False):
     """BulkVS's record for this number, or None. Their filter is not always
     honoured, so the answer is checked to be about this number before it is
     believed, and the whole list is searched if it is not."""
     ten = _ten(number)
+    if not fresh and _BV_ALL.get('records') is not None:
+        import time as _t
+        if _t.time() - _BV_ALL['at'] < 600:
+            for r in _BV_ALL['records']:
+                if _rec_tn(r) == ten:
+                    return r
     try:
         ans = _bv('GET', '/tnRecord?Number=1' + ten)
         for r in (ans if isinstance(ans, list) else [ans]):
@@ -2456,7 +2534,7 @@ def _put_on_campaign(ten, tcr, lidb=None, webhook=None, removed_already=0):
     else:
         body = {'TN': '1' + ten, 'Lidb': 'PROCLICK', 'Webhook': webhook or 'WebHook1', 'Tcr': ''}
     _bv('POST', '/tnRecord', body)
-    _BV_ALL['records'] = None
+    _patch_cached(ten, tcr=body['Tcr'], lidb=body['Lidb'], webhook=body['Webhook'])
     _ACTIVITY['data'] = None
     _t.sleep(0.5)
 
@@ -2466,7 +2544,6 @@ def apply_campaign_plan(number, plan):
     lock, from fresh BulkVS figures, so it cannot act on a stale picture."""
     ten = _ten(number)
     with _campaign_lock():
-        _BV_ALL['records'] = None
         plan = campaign_plan(ten)
         if plan['step'] == 'join':
             _put_on_campaign(ten, plan['tcr'])

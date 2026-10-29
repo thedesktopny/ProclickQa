@@ -2945,13 +2945,13 @@ def customer_profile(account_id, limit=120):
         return u.endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic', '.bmp'))
 
     sms = []
-    for d, io, cn, msg, media in rows("""
-        SELECT TOP 100 smsDate, InOut, ContactNumber, message, MediaURL
+    for d, io, cn, msg, media, unread in rows("""
+        SELECT TOP 300 smsDate, InOut, ContactNumber, message, MediaURL, ISNULL(smsNotRead, 0)
         FROM SMSLog WHERE AccountId = %s ORDER BY smsDate DESC""", (aid,)):
         if _is_layout_file(media):
             continue
         sms.append({'when': _plain(d), 'direction': io, 'from_to': cn,
-                    'message': msg, 'media': media,
+                    'message': msg, 'media': media, 'unread': bool(unread),
                     'is_picture': _looks_like_a_picture(media)})
 
     tickets = [{'created': _plain(cr), 'status': st, 'priority': pr,

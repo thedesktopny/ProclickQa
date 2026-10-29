@@ -5264,6 +5264,14 @@ function portalFinishLogin(r){
     document.getElementById('portal-login').style.display = 'none';
     portalApply(r.name, r.is_manager);
     openFromAddress();
+    // agents' shifts start when they sign in — say so, or say why not
+    const sh = r.shift;
+    if(sh){
+      const t = sh.since ? new Date(sh.since).toLocaleTimeString([], {hour:'numeric', minute:'2-digit'}) : '';
+      if(sh.done) setTimeout(()=>showToast('Your shift started' + (t ? ' at ' + t : '')), 600);
+      else if(sh.error) setTimeout(()=>showToast('Your shift was not started: ' + sh.error + ' — press Start shift.', true), 600);
+      if(sh.phone_warning) setTimeout(()=>showToast(sh.phone_warning, true), 2200);
+    }
 }
 
 /* Shows only the pages this person may open, and labels who they are. */
@@ -6030,8 +6038,15 @@ async function portalSignOut(){
   // Tell the server, so the ticket stops working everywhere — not only in
   // this browser. A signed ticket is otherwise valid for its full ten hours
   // however thoroughly the page is cleared.
-  try{ await fetch('/api/portal/logout', {method:'POST', headers: portalHeaders()}); }catch(e){}
+  let shiftNote = '';
+  try{
+    const res = await fetch('/api/portal/logout', {method:'POST', headers: portalHeaders()});
+    const j = await res.json().catch(()=>({}));
+    if(j.shift && j.shift.done) shiftNote = 'Your shift has ended.';
+    else if(j.shift && j.shift.error) shiftNote = 'Your shift could not be ended: ' + j.shift.error;
+  }catch(e){}
   try{ if(getToken()) await API.post('/api/logout', {}); }catch(e){}
+  if(shiftNote){ try{ showToast(shiftNote, !shiftNote.startsWith('Your shift has')); }catch(e){} }
 
   portalTicket = null;
   portalPages = [];
@@ -6044,7 +6059,8 @@ async function portalSignOut(){
   // the remembered device is deliberately KEPT: signing out is not the same as
   // saying "this machine is not mine", and clearing it would email a code at
   // every sign-in, which is what people work around.
-  location.replace(location.pathname);
+  // give the "shift ended" note a moment on screen before the page resets
+  setTimeout(()=>location.replace(location.pathname), shiftNote ? 1800 : 0);
 }
 
 
@@ -10942,9 +10958,14 @@ async function cuRefreshTexts(accountId){
     const r = await API.get('/api/customers/' + accountId);
     if(!r || !r.sms || !cuData || cuData.account.id !== accountId) return;
     const seen = new Set((cuData.sms || []).map(m => m.when + '|' + (m.message || '')));
-    const fresh = r.sms.filter(m => !seen.has(m.when + '|' + (m.message || '')));
-    if(!fresh.length) return;
+    const tenOf = v => String(v || '').replace(/\D/g,'').replace(/^1(\d{10})$/, '$1').slice(-10);
+    const freshAll = r.sms.filter(m => !seen.has(m.when + '|' + (m.message || '')));
+    if(!freshAll.length) return;
     cuData.sms = r.sms;
+    const fresh = freshAll.filter(m => cuSmsTo === 'all' || tenOf(m.from_to) === cuSmsTo);
+    if(freshAll.some(m => m.direction === 'In' && tenOf(m.from_to) !== cuSmsTo && cuSmsTo !== 'all'))
+      showToast('New text from ' + tenOf(freshAll.find(m => m.direction === 'In').from_to));
+    if(!fresh.length) return;
     const thread = document.getElementById('sms-thread');
     if(!thread) return;
     const atBottom = thread.scrollHeight - thread.scrollTop - thread.clientHeight < 60;
@@ -11003,6 +11024,17 @@ async function cuTextingOff(){
   }catch(e){ showToast(e.message, true); }
 }
 
+let cuSmsTo = '', cuSmsAccount = null;
+function cuSmsPick(t){ cuSmsTo = t; cuTab('sms'); }
+function cuSmsNew(){
+  const el = document.getElementById('sms-new-to');
+  let d = String(el && el.value || '').replace(/\D/g,'');
+  if(d.length === 11 && d[0] === '1') d = d.slice(1);
+  if(d.length !== 10){ showToast('Type a ten-digit phone number', true); return; }
+  cuSmsTo = d; cuTab('sms');
+  setTimeout(()=>document.getElementById('sms-text')?.focus(), 50);
+}
+
 async function cuSendText(){
   if(!cuData) return;
   const box = document.getElementById('sms-text');
@@ -11019,8 +11051,10 @@ async function cuSendText(){
   cuUnattach();
   out.textContent = '';
   try{
+    if(cuSmsTo === 'all'){ if(pending) pending.remove(); box.value = message;
+      out.textContent = 'Pick which number to text first.'; return; }
     const r = await API.post(`/api/customers/${cuData.account.id}/texts`,
-                             {message, media_url: cuMedia});
+                             {message, media_url: media, to: cuSmsTo || undefined});
     if(r.error || r.ok === false){
       // put the words back so nothing is lost, and mark the attempt failed
       if(pending) pending.remove();
@@ -11029,7 +11063,12 @@ async function cuSendText(){
         + (r.raw_error && r.raw_error !== r.error ? ' — ' + r.raw_error : '');
       return;
     }
-    if(pending) pending.style.opacity = '';
+    if(r.queued){
+      if(pending){ const st = pending.querySelector('.sms-time'); if(st) st.textContent = 'queued — sending in a few minutes'; }
+      out.textContent = '⏳ ' + r.meaning;
+      return;
+    }
+    if(pending){ pending.style.opacity = ''; const st = pending.querySelector('.sms-time'); if(st) st.textContent = 'sent just now'; }
     if(r.campaign && (r.campaign.step === 'join' || r.campaign.step === 'swap')) out.textContent = 'ℹ️ ' + r.campaign.meaning;
     if(r.campaign_warning) out.textContent = '⚠️ ' + r.campaign_warning;
     if(r.unconfirmed && pending){
@@ -11038,7 +11077,7 @@ async function cuSendText(){
     }
     if(cuData && cuData.sms){
       cuData.sms.unshift({when: new Date().toISOString(), direction: 'Out',
-                          message, media, is_picture: !!media});
+                          message, media, is_picture: !!media, from_to: cuSmsTo});
     }
     box.focus();
   }catch(e){
@@ -11240,7 +11279,28 @@ function cuTab(which){
   else if(which === 'sms'){
     const a = r.account;
     const canText = !!a.sms_number && a.sms_active === 1;
-    const theirs = a.phone || a.mobile || '';
+    // Every number in this account's conversation, newest first, as the old
+    // CMS's contact list — plus the account's own phone, and any typed in.
+    const ten = v => String(v || '').replace(/\D/g,'').replace(/^1(\d{10})$/, '$1').slice(-10);
+    const contacts = [];
+    (r.sms || []).forEach(m => { const t = ten(m.from_to); if(t.length === 10 && !contacts.includes(t)) contacts.push(t); });
+    const own = ten(a.phone || a.mobile);
+    if(own.length === 10 && !contacts.includes(own)) contacts.push(own);
+    if(cuSmsAccount !== a.id){ cuSmsAccount = a.id; cuSmsTo = contacts[0] || own || ''; }
+    if(cuSmsTo && cuSmsTo !== 'all' && !contacts.includes(cuSmsTo)) contacts.unshift(cuSmsTo);
+    const fmtNum = t => t.length === 10 ? '(' + t.slice(0,3) + ') ' + t.slice(3,6) + '-' + t.slice(6) : t;
+    const unread = t => (r.sms || []).filter(m => ten(m.from_to) === t && m.direction === 'In' && m.unread).length;
+    const shown = cuSmsTo === 'all' ? r.sms : (r.sms || []).filter(m => ten(m.from_to) === cuSmsTo);
+    const theirs = cuSmsTo && cuSmsTo !== 'all' ? fmtNum(cuSmsTo) : 'everyone';
+    const chips = `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;">
+        ${contacts.map(t => `<button class="cn-chip" style="${cuSmsTo===t?'background:var(--accent);color:#fff;':''}"
+            onclick="cuSmsPick('${t}')">${fmtNum(t)}${t===own?' · account phone':''}${unread(t)?' <b>· '+unread(t)+' new</b>':''}</button>`).join('')}
+        ${contacts.length > 1 ? `<button class="cn-chip" style="${cuSmsTo==='all'?'background:var(--accent);color:#fff;':''}" onclick="cuSmsPick('all')">All</button>` : ''}
+        ${canText ? `<span style="display:inline-flex;gap:4px;">
+            <input id="sms-new-to" class="cms-in" style="width:150px;padding:5px 9px;font-size:12px;" placeholder="Another number…"
+              onkeydown="if(event.key==='Enter')cuSmsNew()">
+            <button class="cn-chip" onclick="cuSmsNew()">Text it</button></span>` : ''}
+      </div>`;
     body.innerHTML = `
       <div style="display:flex;gap:12px;align-items:baseline;flex-wrap:wrap;
            font-size:12px;color:var(--text3);margin-bottom:10px;">
@@ -11252,11 +11312,12 @@ function cuTab(which){
                onclick="cuTextingOn()">Turn on texting</button>`}
         ${canText && portalIsManager ? `<button class="cn-chip" style="color:var(--red);"
              onclick="cuTextingOff()">Turn off texting</button>` : ''}
-        <span style="margin-left:auto;">${r.sms.length} messages</span>
+        <span style="margin-left:auto;">${shown.length} messages</span>
       </div>
+      ${chips}
       <div class="card" style="padding:14px 16px;max-height:440px;overflow:auto;"
            id="sms-thread">
-        ${r.sms.length ? [...r.sms].reverse().map(m=>`
+        ${shown.length ? [...shown].reverse().map(m=>`
           <div style="display:flex;justify-content:${m.direction==='In'?'flex-start':'flex-end'};margin-bottom:8px;">
             <div style="max-width:72%;background:${m.direction==='In'?'var(--surface2)':'var(--accent)'};
                  color:${m.direction==='In'?'var(--text)':'#fff'};padding:9px 13px;
@@ -11275,9 +11336,9 @@ function cuTab(which){
                    </div>`
                 : `<div><a href="${esc(m.media)}" target="_blank"
                      style="color:inherit;text-decoration:underline;font-size:11px;">attachment</a></div>`) : ''}
-              <div style="font-size:10px;opacity:.6;margin-top:4px;">${cuWhen(m.when)}</div>
+              <div style="font-size:10px;opacity:.6;margin-top:4px;">${cuWhen(m.when)}${cuSmsTo==='all'&&m.from_to?' · '+esc(fmtNum(ten(m.from_to))):''}</div>
             </div></div>`).join('')
-          : '<div class="payhint">No messages yet.</div>'}
+          : '<div class="payhint">No messages with this number yet.</div>'}
       </div>
       ${canText ? `
         <div id="sms-attached" style="display:none;margin-top:10px;"></div>

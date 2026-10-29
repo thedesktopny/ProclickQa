@@ -5864,6 +5864,12 @@ def _issue_portal_session(user, remember_device=False):
            'is_qa': bool(user.get('is_qa')), 'vg_token': vg_token,
            'extension': user.get('extension'), 'pages': pages}
 
+    # Agents — QA and team leaders included — start their shift by signing
+    # in, as in the old CMS. Managers and admins often sign in just to check
+    # something, so they use the Start shift button instead.
+    if not (user.get('is_manager') or user.get('is_admin')):
+        out['shift'] = _auto_clock(user.get('employee_id'), 'in', user.get('name'))
+
     if False:          # remembering a device is deliberately not offered
         # 30 days, so an agent proves themselves about once a month on their
         # own machine rather than at the start of every shift
@@ -5883,13 +5889,43 @@ def _issue_portal_session(user, remember_device=False):
     return jsonify(out)
 
 
+def _auto_clock(employee_id, action, name):
+    """Starts or ends the shift as part of signing in or out. Never stops the
+    sign-in or sign-out itself: if the clock cannot be changed, it says why
+    and the person can use the shift box."""
+    if not employee_id:
+        return {'done': False, 'note': 'no CMS employee record'}
+    import cms_write
+    try:
+        st = cms_write.clock_status(employee_id)
+        if action == 'in' and st['status'] != 'out':
+            return {'done': False, 'note': 'already ' + ('on a break' if st['status'] == 'break' else 'clocked in'),
+                    'status': st['status'], 'since': st.get('since')}
+        if action == 'out' and st['status'] == 'out':
+            return {'done': False, 'note': 'already clocked out', 'status': 'out'}
+        r = cms_write.clock(employee_id, action, {'name': '%s (signed %s)' % (name or 'agent', action),
+                                                  'employee_id': employee_id})
+        try:
+            _LIVE_SYNC_AT.clear()
+        except Exception:
+            pass
+        return {'done': bool(r.get('ok')), 'status': r.get('status'), 'since': r.get('since'),
+                'error': r.get('error'), 'phone_warning': r.get('phone_warning')}
+    except Exception as e:
+        return {'done': False, 'error': str(e)[:200]}
+
+
 @app.route('/api/portal/logout', methods=['POST'])
 def portal_logout():
-    """Ends this person's portal sessions everywhere, not just in this browser."""
+    """Ends this person's portal sessions everywhere, not just in this browser.
+    For agents it also ends the shift, as signing in started it."""
     p = _portal_user(request.headers.get('X-Portal-Ticket', ''))
+    out = {'ok': True}
+    if p and p.get('e') and not (p.get('m') or p.get('a')):
+        out['shift'] = _auto_clock(p.get('e'), 'out', p.get('n'))
     if p and p.get('u'):
         revoke_portal_sessions(p['u'], 'signed out')
-    return jsonify({'ok': True})
+    return jsonify(out)
 
 
 @app.route('/api/portal/verify-code', methods=['POST'])
@@ -8974,7 +9010,7 @@ def customer_send_text(account_id):
     d = request.json or {}
     try:
         out = cms_write.send_text(account_id, d.get('message'), _who(),
-                                  media_url=d.get('media_url'))
+                                  media_url=d.get('media_url'), to=d.get('to'))
     except cms_write.WriteRefused as e:
         return jsonify({'ok': False, 'error': str(e)}), 400
     except Exception as e:
