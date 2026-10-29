@@ -3237,3 +3237,115 @@ def number_campaign_action(number, action, who, tcr=None, reason=None):
                            'minute.' % (after['campaign'] or 'no campaign'))
     _log(who, out)
     return out
+
+
+
+# ─── Saved logins and details (the old CMS's "Personal Info") ───────────────
+def record_personal_info_view(info_id, employee_id, reason=None):
+    """The old CMS's own record of every look — PersonalInfoMetadata, with the
+    call and the work the agent had open at that moment — so its reports keep
+    working whichever system the agent used."""
+    if not employee_id:
+        return None
+    conn = cms_db._connect()
+    try:
+        cu = conn.cursor()
+        cu.execute("""SELECT TOP 1 Id FROM AccountWork
+                      WHERE EmployeeId = %s AND EndTime IS NULL ORDER BY Id DESC""", (int(employee_id),))
+        w = cu.fetchone()
+        cu.execute("SELECT Extension FROM Employee WHERE Id = %s", (int(employee_id),))
+        e = cu.fetchone()
+        call = None
+        if e and e[0]:
+            cu.execute("""SELECT TOP 1 Id FROM PhoneCallsLog
+                          WHERE LTRIM(RTRIM(PickedUpBy)) = %s AND Ended IS NULL
+                            AND Started >= DATEADD(hour, -6, GETDATE())
+                          ORDER BY Id DESC""", (str(e[0]).strip(),))
+            call = cu.fetchone()
+        cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        cu.execute("""INSERT INTO PersonalInfoMetadata
+                      (PersonalInfoId, Created, AccessedBy, Reason, PhoneCallId, AccountWorkId)
+                      VALUES (%s, GETDATE(), %s, %s, %s, %s)""",
+                   (int(info_id), int(employee_id), (reason or '')[:800] or None,
+                    int(call[0]) if call else None, int(w[0]) if w else None))
+        conn.commit()
+        return {'call_id': int(call[0]) if call else None, 'work_id': int(w[0]) if w else None}
+    finally:
+        conn.close()
+
+
+def _touch_account(cu, account_id):
+    cu.execute('UPDATE Account SET Modified = GETDATE() WHERE Id = %s', (int(account_id),))
+
+
+def add_personal_info(account_id, title, value, who):
+    title = (title or '').strip()
+    value = (value or '').strip()
+    if not title or not value:
+        raise WriteRefused('Give it a title and the details.')
+    if len(title) > 250:
+        raise WriteRefused('The title is too long (limit 250 characters).')
+    if len(value) > MAX_NOTE:
+        raise WriteRefused('That is too long.')
+    conn = cms_db._connect()
+    try:
+        cu = conn.cursor()
+        cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        cu.execute("""INSERT INTO AccountPersonalInfo (AccountId, CreatedBy, Title, Description, Created)
+                      OUTPUT INSERTED.Id VALUES (%s, %s, %s, %s, GETDATE())""",
+                   (int(account_id), int((who or {}).get('employee_id') or 0) or None, title, value))
+        new_id = int(cu.fetchone()[0])
+        _touch_account(cu, account_id)
+        conn.commit()
+    finally:
+        conn.close()
+    out = {'table': 'AccountPersonalInfo', 'action': 'add_personal_info', 'row_id': new_id,
+           'ok': True, 'committed': True, 'dry_run': False,
+           'values': {'account_id': int(account_id), 'title': title}}
+    _log(who, out)
+    return out
+
+
+def edit_personal_info(info_id, title, value, who):
+    title = (title or '').strip()
+    value = (value or '').strip()
+    if not title or not value:
+        raise WriteRefused('Give it a title and the details.')
+    if len(title) > 250:
+        raise WriteRefused('The title is too long (limit 250 characters).')
+    before = cms_db.personal_info(info_id)
+    conn = cms_db._connect()
+    try:
+        cu = conn.cursor()
+        cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        cu.execute("""UPDATE AccountPersonalInfo SET Title = %s, Description = %s, Modified = GETDATE()
+                      WHERE Id = %s""", (title, value, int(info_id)))
+        _touch_account(cu, before['account_id'])
+        conn.commit()
+    finally:
+        conn.close()
+    # the log keeps the title change, never the old or new secret itself
+    out = {'table': 'AccountPersonalInfo', 'action': 'edit_personal_info', 'row_id': int(info_id),
+           'ok': True, 'committed': True, 'dry_run': False,
+           'values': {'account_id': before['account_id'], 'title': title,
+                      'title_before': before['title'], 'value_changed': before['value'] != value}}
+    _log(who, out)
+    return out
+
+
+def delete_personal_info(info_id, who):
+    before = cms_db.personal_info(info_id)
+    conn = cms_db._connect()
+    try:
+        cu = conn.cursor()
+        cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        cu.execute('DELETE FROM AccountPersonalInfo WHERE Id = %s', (int(info_id),))
+        _touch_account(cu, before['account_id'])
+        conn.commit()
+    finally:
+        conn.close()
+    out = {'table': 'AccountPersonalInfo', 'action': 'delete_personal_info', 'row_id': int(info_id),
+           'ok': True, 'committed': True, 'dry_run': False,
+           'values': {'account_id': before['account_id'], 'title': before['title']}}
+    _log(who, out)
+    return out

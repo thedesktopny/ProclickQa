@@ -11170,7 +11170,7 @@ async function cuOpen(id){
         ${tab('sms','Texts', r.sms.length)}
         ${tab('balance','Minute balance', r.balance.length)}
         ${tab('tickets','Tickets', r.tickets.length)}
-        ${tab('other','Cards & logins', r.cards.length + r.credentials.length)}
+        ${tab('other','Logins & cards', (r.profiles||[]).length + r.cards.length + r.credentials.length)}
       </div>
       <div id="cu-tab-body" style="margin-top:14px;"></div>`;
     cuTab('work');
@@ -11396,7 +11396,23 @@ function cuTab(which){
       </div>`).join('');
   }
   else {
-    body.innerHTML = `<div class="paygrid" style="margin-top:0;">
+    const pf = r.profiles || [];
+    body.innerHTML = `
+      <div class="card" style="padding:16px 18px;margin-bottom:14px;">
+        <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;">
+          <h2 class="payh" style="margin:0;">Saved logins &amp; info</h2>
+          <span class="payhint" style="margin:0;">Opening one is recorded — who looked, when, and on which call.</span>
+          <button class="btn btn-outline" style="margin-left:auto;font-size:12px;" onclick="piAddForm()">+ Add</button>
+        </div>
+        <div id="pi-add"></div>
+        ${pf.length ? pf.map(p=>`<div class="payrow" style="cursor:default">
+            <div class="nm">${esc(p.title)}<div class="mt">added ${cuDate(p.added)}${p.by?' by '+esc(p.by):''}${p.changed?' · changed '+cuDate(p.changed):''}</div></div>
+            <button class="cn-chip" onclick="piOpen(${p.id})">Show</button>
+          </div>
+          <div id="pi-${p.id}" style="display:none;padding:8px 0 12px;"></div>`).join('')
+          : '<div class="payhint" style="margin-top:10px;">Nothing saved for this account yet.</div>'}
+      </div>
+      <div class="paygrid" style="margin-top:0;">
       <div class="card" style="padding:16px 18px;">
         <h2 class="payh">Cards on file</h2>
         ${r.cards.length ? r.cards.map(c=>`<div class="payrow" style="cursor:default">
@@ -11405,8 +11421,8 @@ function cuTab(which){
           </div>`).join('') : '<div class="payhint">None saved.</div>'}
       </div>
       <div class="card" style="padding:16px 18px;">
-        <h2 class="payh">Stored logins</h2>
-        <div class="payhint">Opening one is recorded — who looked, when, and at which account.</div>
+        <h2 class="payh">Older stored logins</h2>
+        <div class="payhint">From the CMS's separate login list. Opening one is recorded.</div>
         ${r.credentials.length ? r.credentials.map(c=>`<div class="payrow" style="cursor:default">
             <div class="nm">${esc(c.title)}<div class="mt">${esc(c.website)||''} · ${cuDate(c.added)}
               ${c.fields?` · ${c.fields} fields`:''}</div></div>
@@ -11442,6 +11458,86 @@ async function cuCredOpen(id){
           Recorded as opened by ${esc(r.logged_as || 'you')}.</div>
       </div>`;
   }catch(e){ box.innerHTML = `<div style="color:var(--red);font-size:12px;">${e.message}</div>`; }
+}
+
+/* Saved logins & info — the old CMS's Personal Info. Shown one at a time,
+   recorded every time, editable by anyone working the account. */
+async function piOpen(id){
+  const box = document.getElementById('pi-' + id);
+  if(!box) return;
+  if(box.style.display === 'block'){ box.style.display = 'none'; box.innerHTML = ''; return; }
+  box.style.display = 'block';
+  box.innerHTML = '<div style="color:var(--text3);font-size:11.5px;">Opening…</div>';
+  try{
+    const r = await API.post('/api/personal-info/' + id, {});
+    if(r.error){ box.innerHTML = `<div style="color:var(--red);font-size:12px;">${esc(r.error)}</div>`; return; }
+    piShow(id, r);
+  }catch(e){ box.innerHTML = `<div style="color:var(--red);font-size:12px;">${esc(e.message)}</div>`; }
+}
+function piShow(id, r){
+  const box = document.getElementById('pi-' + id);
+  box.dataset.title = r.title || ''; box.dataset.value = r.value || '';
+  box.innerHTML = `
+    <div style="background:var(--surface2);border:1px solid var(--border);border-radius:9px;padding:10px 12px;">
+      <div style="font-size:12.5px;white-space:pre-wrap;word-break:break-word;line-height:1.6;">${fmtNote(r.value)}</div>
+      <div style="display:flex;gap:6px;margin-top:10px;flex-wrap:wrap;">
+        <button class="cn-chip" onclick="piCopy(${id})">Copy</button>
+        <button class="cn-chip" onclick="piEditForm(${id})">Edit</button>
+        ${portalIsManager ? `<button class="cn-chip" style="color:var(--red);" onclick="piDelete(${id})">Delete</button>` : ''}
+        <span style="font-size:10.5px;color:var(--text3);margin-left:auto;align-self:center;">Recorded as opened by ${esc(r.logged_as || 'you')}.</span>
+      </div>
+    </div>`;
+}
+async function piCopy(id){
+  const box = document.getElementById('pi-' + id);
+  navigator.clipboard.writeText(box.dataset.value || '').then(()=>showToast('Copied'), ()=>showToast('Could not copy', true));
+  try{ await API.post('/api/personal-info/' + id, {copied: true}); }catch(e){}
+}
+function piFormHtml(title, value, save, cancel){
+  return `<div style="background:var(--surface2);border:1px solid var(--border);border-radius:9px;padding:12px;margin-top:10px;">
+      <input id="pi-f-title" class="cms-in" style="width:100%;box-sizing:border-box;margin-bottom:8px;" maxlength="250"
+             placeholder="Title, e.g. Amazon login" value="${esc(title||'')}">
+      <textarea id="pi-f-value" class="cms-in" rows="4" style="width:100%;box-sizing:border-box;"
+             placeholder="Email / password / details">${esc(value||'')}</textarea>
+      <div id="pi-f-err" style="color:var(--red);font-size:12px;min-height:14px;margin-top:4px;"></div>
+      <div style="display:flex;gap:6px;justify-content:flex-end;">
+        <button class="btn btn-secondary" style="font-size:12px;" onclick="${cancel}">Cancel</button>
+        <button class="btn btn-primary" style="font-size:12px;" onclick="${save}">Save</button></div></div>`;
+}
+function piAddForm(){
+  document.getElementById('pi-add').innerHTML = piFormHtml('', '', 'piSave(null)', "document.getElementById('pi-add').innerHTML=''");
+  document.getElementById('pi-f-title').focus();
+}
+function piEditForm(id){
+  const box = document.getElementById('pi-' + id);
+  box.innerHTML = piFormHtml(box.dataset.title, box.dataset.value, 'piSave(' + id + ')', 'piRestore(' + id + ')');
+}
+function piRestore(id){
+  const box = document.getElementById('pi-' + id);
+  piShow(id, {title: box.dataset.title, value: box.dataset.value});
+}
+async function piSave(id){
+  const title = document.getElementById('pi-f-title').value.trim();
+  const value = document.getElementById('pi-f-value').value.trim();
+  const err = document.getElementById('pi-f-err');
+  if(!title || !value){ err.textContent = 'Give it a title and the details.'; return; }
+  try{
+    const r = id ? await API.patch('/api/personal-info/' + id, {title, value})
+                 : await API.post(`/api/customers/${cuData.account.id}/personal-info`, {title, value});
+    if(r.ok === false || r.error){ err.textContent = r.error || 'Not saved.'; return; }
+    showToast('Saved');
+    await cuOpen(cuData.account.id); cuTab('other');
+  }catch(e){ err.textContent = e.message; }
+}
+async function piDelete(id){
+  const box = document.getElementById('pi-' + id);
+  if(!confirm('Delete "' + (box.dataset.title || 'this') + '" from this account? This cannot be undone.')) return;
+  try{
+    const r = await API.del('/api/personal-info/' + id);
+    if(r.ok === false || r.error){ showToast(r.error || 'Not deleted', true); return; }
+    showToast('Deleted');
+    await cuOpen(cuData.account.id); cuTab('other');
+  }catch(e){ showToast(e.message, true); }
 }
 
 async function cuCredCopy(id, value){

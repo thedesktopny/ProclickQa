@@ -6296,6 +6296,74 @@ def cms_settings_route():
         return jsonify({'error': str(e)[:240]}), 400
 
 
+@app.route('/api/personal-info/<int:info_id>', methods=['POST'])
+@portal_or_manager
+def personal_info_reveal(info_id):
+    """Shows one saved login or detail (the old CMS's Personal Info) — after
+    recording who looked, in our log and in the CMS's own PersonalInfoMetadata.
+    The same on-shift rule as the other stored logins applies."""
+    import cms_db, cms_write, json
+    who = _who()
+    d = request.json or {}
+    reason = (d.get('reason') or '').strip()[:200]
+    action = 'copy_personal_info' if d.get('copied') else 'view_personal_info'
+    try:
+        info = cms_db.personal_info(info_id)
+    except Exception as e:
+        return jsonify({'error': str(e)[:200]}), 400
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute("""INSERT INTO cms_audit
+                     (who, employee_id, action, table_name, row_id, before_json,
+                      after_json, committed)
+                     VALUES (%s, %s, %s, 'AccountPersonalInfo', %s, NULL, %s, TRUE)""",
+                  (who.get('name'), who.get('employee_id'), action, info_id,
+                   json.dumps({'account_id': info['account_id'], 'title': info['title'],
+                               'reason': reason,
+                               'ip': request.headers.get('X-Forwarded-For', request.remote_addr)})))
+        conn.commit(); conn.close()
+    except Exception as e:
+        return jsonify({'error': 'Could not record who is looking, so it was not shown. '
+                                 + str(e)[:120]}), 500
+    if not d.get('copied'):
+        try:
+            cms_write.record_personal_info_view(info_id, who.get('employee_id'), reason)
+        except Exception as e:
+            print('[personal-info] CMS view record failed: ' + str(e)[:160])
+    try:
+        verdict = check_credential_view(info['account_id'], info['title'], who)
+        if isinstance(verdict, dict) and verdict.get('blocked'):
+            return jsonify({'error': verdict['message'], 'locked': verdict.get('locked'),
+                            'blocked': True}), 403
+    except Exception as e:
+        print('[personal-info] security check failed: ' + str(e)[:160])
+    return jsonify({'id': info['id'], 'title': info['title'], 'value': info['value'],
+                    'changed': info['changed'], 'logged_as': who.get('name')})
+
+
+@app.route('/api/customers/<int:account_id>/personal-info', methods=['POST'])
+@portal_or_manager
+def personal_info_add(account_id):
+    import cms_write
+    d = request.json or {}
+    return _sms_call(cms_write.add_personal_info, account_id, d.get('title'), d.get('value'), _who())
+
+
+@app.route('/api/personal-info/<int:info_id>', methods=['PATCH'])
+@portal_or_manager
+def personal_info_edit(info_id):
+    import cms_write
+    d = request.json or {}
+    return _sms_call(cms_write.edit_personal_info, info_id, d.get('title'), d.get('value'), _who())
+
+
+@app.route('/api/personal-info/<int:info_id>', methods=['DELETE'])
+@portal_manager_only
+def personal_info_delete(info_id):
+    import cms_write
+    return _sms_call(cms_write.delete_personal_info, info_id, _who())
+
+
 @app.route('/api/credentials/<int:credential_id>', methods=['POST'])
 @portal_or_manager
 def credential_reveal(credential_id):
@@ -12087,7 +12155,7 @@ PORTAL_ALLOWED_PREFIXES = (
     '/api/waiting', '/api/queue-kinds', '/api/callbacks', '/api/call-search',
     '/api/work-note-shape', '/api/sms-number-lookup', '/api/sms-numbers',
     '/api/calls/summary', '/api/agent-names', '/api/date-coverage',
-    '/api/time-report', '/api/payroll', '/api/clock', '/api/sms/', '/api/cms-settings', '/api/teams', '/api/team-leaders',
+    '/api/time-report', '/api/payroll', '/api/clock', '/api/sms/', '/api/personal-info', '/api/cms-settings', '/api/teams', '/api/team-leaders',
     '/api/review-sample', '/api/calls/',
     # AgentMonitor's poller calls this one. It carries its own key rather than
     # a portal sign-in, so it is safe on this hostname — and being reachable

@@ -2973,10 +2973,39 @@ def customer_profile(account_id, limit=120):
         FROM CustomerCredentials c
         WHERE c.AccountId = %s ORDER BY c.Created DESC""", (aid,))]
 
+    # The saved logins and details agents actually use — the old CMS's
+    # "Personal Info" (AccountPersonalInfo). Titles only; the value is shown
+    # one at a time, and every look is recorded.
+    try:
+        profiles = [{'id': n(i), 'title': ti, 'added': _plain(cr), 'changed': _plain(md),
+                     'by': ('%s %s' % (fn or '', ln or '')).strip() or None}
+                    for i, ti, cr, md, fn, ln in rows("""
+            SELECT p.Id, p.Title, p.Created, p.Modified, e.FirstName, e.LastName
+            FROM AccountPersonalInfo p LEFT JOIN Employee e ON e.Id = p.CreatedBy
+            WHERE p.AccountId = %s ORDER BY p.Id""", (aid,))]
+    except Exception as e:
+        profiles = []
+        print('[cms] personal info not read: ' + str(e)[:120])
+
     conn.close()
     return {'account': account, 'totals': totals, 'work': work, 'payments': payments_list,
             'notes': notes, 'balance': balance, 'sms': sms, 'tickets': tickets,
-            'cards': cards, 'credentials': credentials}
+            'cards': cards, 'credentials': credentials, 'profiles': profiles}
+
+
+def personal_info(info_id):
+    """One saved login or detail, with its value. The caller records the look."""
+    conn = _connect(); cu = conn.cursor()
+    try:
+        cu.execute("""SELECT Id, AccountId, Title, Description, Created, Modified
+                      FROM AccountPersonalInfo WHERE Id = %s""", (int(info_id),))
+        r = cu.fetchone()
+    finally:
+        conn.close()
+    if not r:
+        raise RuntimeError('That saved info no longer exists.')
+    return {'id': int(r[0]), 'account_id': int(r[1]), 'title': r[2], 'value': r[3] or '',
+            'added': _plain(r[4]), 'changed': _plain(r[5])}
 
 
 def _dnd_now(conn):
