@@ -2892,6 +2892,7 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
             </tbody>
           </table>
         </div>
+        <div id="ws-removed" style="font-size:11.5px;color:var(--text3);margin-top:8px;line-height:1.8;"></div>
       </div>
     </div>
 
@@ -12437,7 +12438,9 @@ async function loadRecurringList(){
     const wres = await API.get(`/api/week-schedules?week_start=${ws}`);
     weekCache = wres.week || [];
     weekCustomised = wres.customised || [];
-  }catch(e){ weekCache = []; weekCustomised = []; }
+    schedRemoved = wres.removed || {};
+    schedRemovedNames = wres.removed_names || [];
+  }catch(e){ weekCache = []; weekCustomised = []; schedRemoved = {}; schedRemovedNames = []; }
   await loadRatesCache();
 
   const badge = document.getElementById('ws-week-badge');
@@ -12456,7 +12459,18 @@ async function loadRecurringList(){
   // what this week actually looks like: the week's own rows where they exist,
   // the default pattern everywhere else
   const customSet = new Set(weekCustomised.map(n=>n.toLowerCase()));
-  const effective = recurringCache.filter(r=>!customSet.has(r.employee_name.toLowerCase())).concat(weekCache);
+  // people taken off the schedule disappear from the week they left onwards
+  const weekEnd = (()=>{ const d = new Date(ws + 'T12:00:00'); d.setDate(d.getDate() + 6); return d.toISOString().slice(0,10); })();
+  const gone = n => { const f = schedRemoved[String(n).trim().toLowerCase()]; return f && f <= weekEnd; };
+  const effective = recurringCache.filter(r=>!customSet.has(r.employee_name.toLowerCase())).concat(weekCache)
+                                  .filter(r => !gone(r.employee_name));
+  const removedNote = document.getElementById('ws-removed');
+  if(removedNote){
+    const list = schedRemovedNames.map(x => [x.name, x.from + (x.auto ? ', disabled in the CMS' : '')]);
+    removedNote.innerHTML = !list.length ? '' :
+      'Taken off the schedule: ' + list.map(([n, d]) => `<span style="white-space:nowrap;">${esc(n)} <span style="opacity:.7">(from ${esc(d)})</span>
+        <a href="#" style="color:var(--accent)" onclick="schedRestore('${esc(n).replace(/'/g,"&#39;")}');return false;">put back</a></span>`).join(' · ');
+  }
 
   if(!effective.length){
     tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;padding:24px;color:var(--text3)">No schedules yet. Click "📅 Weekly Schedule" to add one.</td></tr>';
@@ -12493,9 +12507,34 @@ async function loadRecurringList(){
       ${cells}
       <td>${brk}m</td>
       <td style="font-size:11px;">${rateCell}</td>
-      <td><button onclick="editWeeklyFor('${name.replace(/'/g,"\\'")}')" style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:11px;">Edit</button></td>
+      <td style="white-space:nowrap;"><button onclick="editWeeklyFor('${name.replace(/'/g,"\\'")}')" style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:11px;">Edit</button>
+        <button onclick="schedRemove('${name.replace(/'/g,"\\'")}')" title="This person no longer works here" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:11px;">Remove</button></td>
     </tr>`;
   }).join('');
+}
+
+let schedRemoved = {}, schedRemovedNames = [];
+async function schedRemove(name){
+  const today = new Date(); const iso = new Date(today.getTime() - today.getTimezoneOffset()*60000).toISOString().slice(0,10);
+  const from = prompt('Take ' + name + ' off the schedule — for someone who no longer works here.\n\n'
+    + 'From which date? (Days before it stay as they were, so pay already worked out does not change.)', iso);
+  if(from === null) return;
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(from.trim())){ showToast('Use the date format YYYY-MM-DD', true); return; }
+  try{
+    const r = await API.post('/api/schedules/remove-person', {employee_name: name, from_date: from.trim()});
+    if(r.error){ showToast(r.error, true); return; }
+    showToast(r.meaning || 'Removed');
+    loadRecurringList();
+  }catch(e){ showToast(e.message, true); }
+}
+async function schedRestore(name){
+  if(!confirm('Put ' + name + ' back on the schedule?')) return;
+  try{
+    const r = await API.post('/api/schedules/remove-person', {employee_name: name, restore: true});
+    if(r.error){ showToast(r.error, true); return; }
+    showToast(r.meaning || 'Back on the schedule');
+    loadRecurringList();
+  }catch(e){ showToast(e.message, true); }
 }
 
 function editWeeklyFor(name){

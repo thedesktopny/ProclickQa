@@ -806,6 +806,11 @@ def init_db():
         "ALTER TABLE calls ADD COLUMN IF NOT EXISTS flagged_moments TEXT",
         "ALTER TABLE calls ADD COLUMN IF NOT EXISTS error_message TEXT",
         "ALTER TABLE calls ADD COLUMN IF NOT EXISTS notes_final BOOLEAN DEFAULT FALSE",
+        """CREATE TABLE IF NOT EXISTS schedule_removed (
+            employee_name TEXT PRIMARY KEY,
+            from_date DATE NOT NULL,
+            removed_by TEXT,
+            removed_at TIMESTAMP DEFAULT NOW())""",
         "CREATE UNIQUE INDEX IF NOT EXISTS agents_name_unique ON agents (name)",
         "ALTER TABLE agents ADD COLUMN IF NOT EXISTS assigned_qa_user_id INTEGER",
         # ── Rate history: rates are effective-dated so past shifts keep their old rate
@@ -4482,6 +4487,7 @@ def save_recurring_bulk():
         return jsonify({'error': 'employee_name and days required'}), 400
     conn = get_db(); c = conn.cursor()
     # Replace this agent's whole weekly pattern so removed blocks disappear
+    c.execute('DELETE FROM schedule_removed WHERE lower(employee_name) = lower(%s)', (name,))
     c.execute('DELETE FROM recurring_schedules WHERE employee_name=%s', (name,))
     for day in days:
         c.execute('''INSERT INTO recurring_schedules
@@ -4667,7 +4673,133 @@ def _resolve_schedules(date_from, date_to, employee=''):
     for s in specific:
         s['from_recurring'] = False
         s['schedule_source'] = 'one-off'
-    return specific + generated
+    out = specific + generated
+    # People taken off the schedule: nothing from the day they were removed on.
+    # Earlier days stay exactly as they were, so past pay is unchanged.
+    try:
+        gone = _removed_from_schedule()
+        if gone:
+            out = [r for r in out
+                   if not (str(r.get('employee_name') or '').strip().lower() in gone
+                           and str(r.get('shift_date'))[:10] >= gone[str(r.get('employee_name')).strip().lower()])]
+    except Exception as e:
+        print('[schedules] removed list not applied: ' + str(e)[:120])
+    return out
+
+
+def _removed_from_schedule():
+    """{lower-case name: 'YYYY-MM-DD'} — who was taken off, from which day."""
+    conn = get_db(); c = conn.cursor()
+    try:
+        c.execute('SELECT employee_name, from_date FROM schedule_removed')
+        return {str(n).strip().lower(): str(d)[:10] for n, d in c.fetchall()}
+    finally:
+        conn.close()
+
+
+_LEFT_SYNC = {'at': 0, 'last': None}
+
+
+def _sync_left_firm_removals(force=False):
+    """Someone disabled in the CMS (LeftFirm) comes off the schedule by
+    themselves, from the day it is noticed — earlier days are left as they
+    were, so pay already worked out does not change. Re-enable them in the CMS
+    and they come back, unless a manager removed them by hand."""
+    import time as _t
+    if not force and _t.time() - _LEFT_SYNC['at'] < 600:
+        return _LEFT_SYNC['last']
+    _LEFT_SYNC['at'] = _t.time()
+    import cms_db
+    try:
+        cconn = cms_db._connect(); cu = cconn.cursor()
+        cu.execute('SELECT Id, FirstName, LastName, ISNULL(LeftFirm, 0) FROM Employee')
+        emps = cu.fetchall(); cconn.close()
+    except Exception as e:
+        _LEFT_SYNC['last'] = {'error': str(e)[:160]}
+        return _LEFT_SYNC['last']
+    left_ids = {int(r[0]) for r in emps if r[3]}
+    active_ids = {int(r[0]) for r in emps if not r[3]}
+    by_full = {}
+    for r in emps:
+        by_full.setdefault(('%s %s' % (r[1] or '', r[2] or '')).strip().lower(), []).append(int(r[0]))
+    today = str(_ny_now().date())
+    conn = get_db(); c = conn.cursor()
+    out = {'removed': [], 'restored': []}
+    try:
+        try:
+            c.execute('SELECT employee_id, employee_name FROM payroll_people')
+            by_name = {}
+            for eid, nm in c.fetchall():
+                if eid is not None and nm:
+                    by_name.setdefault(str(nm).strip().lower(), set()).add(int(eid))
+        except Exception:
+            conn.rollback(); by_name = {}
+        names = set()
+        for q in ('SELECT DISTINCT employee_name FROM recurring_schedules WHERE active = TRUE',
+                  "SELECT DISTINCT employee_name FROM week_schedules WHERE week_start >= CURRENT_DATE - 7",
+                  'SELECT DISTINCT employee_name FROM agent_schedules WHERE shift_date >= CURRENT_DATE'):
+            try:
+                c.execute(q); names.update(str(r[0]).strip() for r in c.fetchall() if r[0])
+            except Exception:
+                conn.rollback()
+        c.execute('SELECT employee_name, removed_by FROM schedule_removed')
+        removed = {str(n).strip().lower(): (by or '') for n, by in c.fetchall()}
+
+        def ids_for(n):
+            k = n.strip().lower()
+            return by_name.get(k) or set(by_full.get(k, []))
+
+        for n in sorted(names):
+            ids = ids_for(n)
+            if not ids:
+                continue
+            k = n.lower()
+            # only when every CMS record behind this name is disabled
+            if ids <= left_ids and k not in removed:
+                c.execute("""INSERT INTO schedule_removed (employee_name, from_date, removed_by)
+                             VALUES (%s, %s, 'auto: disabled in the CMS')
+                             ON CONFLICT (employee_name) DO NOTHING""", (n, today))
+                out['removed'].append(n)
+            elif k in removed and removed[k].startswith('auto') and ids & active_ids:
+                c.execute('DELETE FROM schedule_removed WHERE lower(employee_name) = %s', (k,))
+                out['restored'].append(n)
+        conn.commit()
+    finally:
+        conn.close()
+    _LEFT_SYNC['last'] = out
+    if out['removed'] or out['restored']:
+        print('[schedules] disabled in the CMS: %s' % out)
+    return out
+
+
+@app.route('/api/schedules/remove-person', methods=['POST'])
+@require_manager
+def schedule_remove_person():
+    """Take someone who has left off the schedule from a date (today unless
+    given). Nothing before that date changes, so payroll already worked out is
+    untouched; their weeks from then on are cleared. 'restore' puts them back."""
+    d = request.json or {}
+    name = (d.get('employee_name') or '').strip()
+    if not name:
+        return jsonify({'error': 'Which person?'}), 400
+    conn = get_db(); c = conn.cursor()
+    if d.get('restore'):
+        c.execute('DELETE FROM schedule_removed WHERE lower(employee_name) = lower(%s)', (name,))
+        conn.commit(); conn.close()
+        return jsonify({'ok': True, 'meaning': '%s is back on the schedule.' % name})
+    from_date = (d.get('from_date') or '').strip()[:10] or str(_ny_now().date())
+    who = (_who() or {}).get('name') or 'manager'
+    c.execute("""INSERT INTO schedule_removed (employee_name, from_date, removed_by)
+                 VALUES (%s, %s, %s)
+                 ON CONFLICT (employee_name) DO UPDATE SET from_date = EXCLUDED.from_date,
+                     removed_by = EXCLUDED.removed_by, removed_at = NOW()""", (name, from_date, who))
+    # their own rows for later weeks and days go, so nothing lingers
+    c.execute("""DELETE FROM week_schedules WHERE lower(employee_name) = lower(%s)
+                 AND week_start > %s::date""", (name, from_date))
+    c.execute("""DELETE FROM agent_schedules WHERE lower(employee_name) = lower(%s)
+                 AND shift_date >= %s::date""", (name, from_date))
+    conn.commit(); conn.close()
+    return jsonify({'ok': True, 'meaning': '%s is off the schedule from %s.' % (name, from_date)})
 
 def _week_start(d):
     """Monday of the week containing date-string d (YYYY-MM-DD)."""
@@ -4699,7 +4831,21 @@ def get_week_schedules():
     default = [dict(r) for r in c.fetchall()]
     conn.close()
     customised = sorted({w['employee_name'] for w in week})
-    return jsonify({'week_start': ws, 'week': week, 'default': default, 'customised': customised})
+    try:
+        _sync_left_firm_removals()
+    except Exception as e:
+        print('[schedules] left-firm check failed: ' + str(e)[:120])
+    try:
+        removed = _removed_from_schedule()
+        conn = get_db(); c2 = conn.cursor()
+        c2.execute('SELECT employee_name, from_date, removed_by FROM schedule_removed ORDER BY employee_name')
+        removed_names = [{'name': n, 'from': str(d)[:10], 'auto': str(by or '').startswith('auto')}
+                         for n, d, by in c2.fetchall()]
+        conn.close()
+    except Exception:
+        removed, removed_names = {}, []
+    return jsonify({'week_start': ws, 'week': week, 'default': default, 'customised': customised,
+                    'removed': removed, 'removed_names': removed_names})
 
 
 @app.route('/api/week-schedules/bulk', methods=['POST'])
@@ -4718,6 +4864,7 @@ def save_week_schedule():
         return jsonify({'error': 'bad week_start'}), 400
     conn = get_db()
     c = conn.cursor()
+    c.execute('DELETE FROM schedule_removed WHERE lower(employee_name) = lower(%s)', (name,))
     c.execute('DELETE FROM week_schedules WHERE employee_name=%s AND week_start=%s', (name, ws))
     saved = 0
     for day in days:
@@ -4787,9 +4934,15 @@ def copy_week_schedule():
     conn = get_db()
     c = conn.cursor()
     agents, rows = 0, 0
+    try:
+        removed = _removed_from_schedule()
+    except Exception:
+        removed = {}
     for name, items in by_agent.items():
         if name in already and not overwrite:
             continue
+        if removed.get(str(name).strip().lower(), '9999') <= str(tgt):
+            continue                      # taken off the schedule
         c.execute('DELETE FROM week_schedules WHERE employee_name=%s AND week_start=%s', (name, str(tgt)))
         for r in items:
             if r.get('active') is False:
@@ -12536,6 +12689,10 @@ def _notes_refresher():
     def loop():
         time.sleep(60)
         while True:
+            try:
+                _sync_left_firm_removals()
+            except Exception as e:
+                print('[schedules] left-firm check failed: ' + str(e)[:120])
             try:
                 r = _notes_pass()
                 _NOTES_PASS.update(last=datetime.utcnow().isoformat() + 'Z', last_result=r)
