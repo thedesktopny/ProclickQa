@@ -856,10 +856,11 @@ def mark_texts_read(account_id, contact=None):
         cu = conn.cursor()
         cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
         digits = ''.join(ch for ch in str(contact or '') if ch.isdigit())[-10:]
-        if len(digits) == 10:
+        if len(digits) >= 3:
+            # short codes (5-6 digits) included — Walmart, Amazon and the like
             cu.execute("""UPDATE [SMSLog] SET smsNotRead = 0
-                          WHERE AccountId = %s AND InOut = 'In' AND ISNULL(smsNotRead, 0) = 1
-                            AND RIGHT(ContactNumber, 10) = %s""", (int(account_id), digits))
+                          WHERE AccountId = %%s AND InOut = 'In' AND ISNULL(smsNotRead, 0) = 1
+                            AND RIGHT(ContactNumber, %d) = %%s""" % len(digits), (int(account_id), digits))
         else:
             cu.execute("""UPDATE [SMSLog] SET smsNotRead = 0
                           WHERE AccountId = %s AND InOut = 'In'

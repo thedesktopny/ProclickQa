@@ -11432,12 +11432,16 @@ function cuTab(which){
     const canText = !!a.sms_number && a.sms_active === 1;
     // A chat, as in the old CMS: everyone this account has texted with on the
     // left (newest first, unread marked), the conversation on the right.
-    const ten = v => String(v || '').replace(/\D/g,'').replace(/^1(\d{10})$/, '$1').slice(-10);
-    const fmtNum = t => t && t.length === 10 ? '(' + t.slice(0,3) + ') ' + t.slice(3,6) + '-' + t.slice(6) : (t || '');
+    // Short codes count too — Walmart, Amazon and banks send their codes from
+    // 5–6 digit numbers, and those were being left out of the list entirely.
+    const ten = v => { const d = String(v || '').replace(/\D/g,'');
+                       return d.length === 11 && d[0] === '1' ? d.slice(1) : d.length > 10 ? d.slice(-10) : d; };
+    const fmtNum = t => t && t.length === 10 ? '(' + t.slice(0,3) + ') ' + t.slice(3,6) + '-' + t.slice(6)
+                      : (t && t.length < 10 ? t + ' · short code' : (t || ''));
     const own = ten(a.phone || a.mobile);
     const people = {};
     (r.sms || []).forEach(m => {
-      const t = ten(m.from_to); if(t.length !== 10) return;
+      const t = ten(m.from_to); if(!t || t.length < 3) return;
       const p = people[t] || (people[t] = {num: t, last: null, unread: 0, count: 0});
       p.count++;
       if(!p.last) p.last = m;                       // messages arrive newest first
@@ -11504,7 +11508,10 @@ function cuTab(which){
             ${shown.length ? [...shown].reverse().map(bubble).join('')
               : '<div class="payhint" style="margin:auto;text-align:center;">No messages with this number yet.' + (canText ? '<br>Write the first one below.' : '') + '</div>'}
           </div>
-          ${canText ? `
+          ${canText && cuSmsTo && cuSmsTo.length < 10 ? `
+          <div style="padding:12px 16px;border-top:1px solid var(--border);font-size:12px;color:var(--text3);">
+            This is an automated short code (codes and alerts). It can't be texted back.</div>` : ''}
+          ${canText && !(cuSmsTo && cuSmsTo.length < 10) ? `
           <div id="sms-attached" style="display:none;padding:0 12px;"></div>
           <div class="sx-compose">
             <input type="file" id="sms-file" style="display:none;"
