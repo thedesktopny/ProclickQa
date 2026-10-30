@@ -808,6 +808,7 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
 #cu-profile .data-table .col-billed{ width:70px; text-align:right; }
 #cu-profile .data-table .col-rec{ width:88px; }
 #cu-profile .data-table td.note-cell{
+  cursor:text; user-select:text;
   white-space:normal; word-break:break-word; overflow-wrap:anywhere;
   line-height:1.65; padding-top:10px; padding-bottom:10px;
 }
@@ -1114,7 +1115,7 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
   .sx-list{max-height:200px;}
   .sx-thread{min-height:300px;max-height:420px;}
 }
-.clk-brk{font-size:11.5px;color:var(--text2);margin:4px 0 2px;line-height:1.4;}
+.clk-brk{font-size:12px;color:var(--text);margin:6px 0 4px;line-height:1.4;padding:5px 8px;border-radius:8px;background:rgba(255,255,255,.05);}
 </style>
 </head>
 <body>
@@ -5972,15 +5973,18 @@ function clockRender(){
     const dm = dt ? Math.max(0, Math.round((Date.now() - dt.getTime()) / 60000)) : 0;
     state = `<span class="clk-dot dnd"></span>Do Not Disturb · ${dur(dm)}`
           + `<span class="clk-why">${esc(j.dnd.type ? j.dnd.type + ' — ' : '')}${esc(j.dnd.note || '')}</span>`;
-    buttons = `<button class="clk-btn" onclick="clockDnd(false)">End DND</button>${endBtn}`;
+    buttons = `<button class="clk-btn" onclick="clockBreakAsk()">☕ Break</button>
+               <button class="clk-btn" onclick="clockDnd(false)">End DND</button>${endBtn}`;
   }else if(j.status === 'in'){
     state = `<span class="clk-dot in"></span>Working since ${at}`;
     buttons = `<button class="clk-btn" onclick="clockBreakAsk()">☕ Break</button>
                <button class="clk-btn" onclick="clockDndAsk()">🔕 DND</button>${endBtn}`;
   }else if(j.status === 'break'){
     const over = j.break_minutes && mins > j.break_minutes;
-    state = `<span class="clk-dot brk"></span>On break · <b style="color:${over?'var(--red)':'inherit'}">${dur(mins)}</b>${j.break_minutes?` of ${j.break_minutes} min`:''}`;
-    buttons = `<button class="clk-btn" onclick="clockDo('back')">Back to work</button>${endBtn}`;
+    state = `<span class="clk-dot brk"></span>On break · <b style="color:${over?'var(--red)':'inherit'}">${dur(mins)}</b>${j.break_minutes?` of ${j.break_minutes} min`:''}`
+          + (dnd ? `<span class="clk-why">Do Not Disturb stays on when you come back</span>` : '');
+    buttons = `<button class="clk-btn" onclick="clockDo('back')">Back to work</button>`
+            + (dnd ? `<button class="clk-btn" onclick="clockDnd(false)">End DND</button>` : '') + endBtn;
   }else{
     state = `<span class="clk-dot off"></span>Not clocked in`;
     buttons = own
@@ -5993,6 +5997,11 @@ function clockRender(){
   // every break so far this shift, added up — agents lose track after two
   let brk = '';
   const bl = (j.breaks || []);
+  // always shown while on shift — "0m" until the first break — so it is
+  // somewhere to look, not something that appears only after a break
+  if(j.status !== 'out' && Array.isArray(j.breaks) && !bl.length){
+    brk = `<div class="clk-brk">☕ Breaks this shift: <b>0m</b> <span style="opacity:.7">(none yet)</span></div>`;
+  }
   if(bl.length && j.status !== 'out'){
     const secs = bl.reduce((t, b) => t + (b.ongoing && b.start
       ? Math.max(0, (Date.now() - new Date(b.start).getTime()) / 1000) : (b.seconds || 0)), 0);
@@ -10896,6 +10905,13 @@ async function mnSave(confirm){
 
 let cuWorkId = null;
 
+/* Clicking the note itself does nothing, so words can be selected and copied;
+   the Edit button opens the editor. */
+function cuWorkEditById(workId){
+  const w = ((cuData && cuData.work) || []).find(x => x.id === workId);
+  if(w) cuWorkEdit(workId, w.note || '', w.task || '');
+}
+
 function cuWorkEdit(workId, note, task){
   cuWorkId = workId;
   document.getElementById('wn-note').value = note || '';
@@ -11349,11 +11365,11 @@ function cuTab(which){
         <td style="white-space:nowrap;">${esc(w.agent)||'—'}</td>
         <td style="font-size:11.5px;white-space:nowrap;">${esc(w.phone)||''}
           <span style="color:var(--text3);font-size:10px;display:block">${w.direction}</span></td>
-        <td class="note-cell" style="font-size:12.5px;color:var(--text);cursor:text;"
-            onclick="cuWorkEdit(${w.id}, ${JSON.stringify(w.note||'').replace(/"/g,'&quot;')}, ${JSON.stringify(w.task||'').replace(/"/g,'&quot;')})"
-            title="Click to write or change the note">
-          ${fmtNote(w.note)||'<span style="color:var(--accent)">+ add a note</span>'}
-          ${w.task?`<div style="color:var(--text3);font-size:11px;margin-top:3px;">${esc(w.task)}</div>`:''}</td>
+        <td class="note-cell" style="font-size:12.5px;color:var(--text);user-select:text;">
+          ${w.note ? fmtNote(w.note) : ''}
+          ${w.task?`<div style="color:var(--text3);font-size:11px;margin-top:3px;">${esc(w.task)}</div>`:''}
+          <div style="margin-top:6px;"><button class="cn-chip" style="font-size:11px;padding:3px 10px;"
+            onclick="cuWorkEditById(${w.id})">${w.note ? '✎ Edit note' : '+ Add a note'}</button></div></td>
         <td class="n">${w.minutes_billed||0}</td>
         <td>${w.recording?`<button class="cn-chip" onclick="cuPlay('${w.recording}')">▶ listen</button>`:'<span style="color:var(--text3);font-size:11px">—</span>'}</td>
       </tr>`).join('') + '</tbody></table>');
