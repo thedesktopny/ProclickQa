@@ -1114,6 +1114,7 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
   .sx-list{max-height:200px;}
   .sx-thread{min-height:300px;max-height:420px;}
 }
+.clk-brk{font-size:11.5px;color:var(--text2);margin:4px 0 2px;line-height:1.4;}
 </style>
 </head>
 <body>
@@ -2184,23 +2185,23 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
     <button class="navtoggle" onclick="toggleNav()" aria-label="Menu">☰</button>
     <div class="page-title">📇 Agents</div>
     <div class="topbar-right">
-      <input id="al-search" placeholder="Name or extension…" oninput="alRender()" style="width:200px;">
+      <input id="al-search" placeholder="Name, phone name or ext…" oninput="alRender()" style="width:220px;">
       <label style="font-size:11.5px;color:var(--text3);display:flex;align-items:center;gap:6px;">
         <input type="checkbox" id="al-former" onchange="loadAgentList()"> include former staff
       </label>
       <span id="al-count" style="font-size:11.5px;color:var(--text3);"></span>
       <button class="btn btn-primary" id="al-add" style="display:none;"
-              onclick="newAgent()">+ Add agent</button>
+              onclick="cmsNewAgent()">+ Add agent</button>
     </div>
   </div>
   <div style="padding:18px 28px 44px;"><div id="al-body"></div></div>
 </div>
 
-<div class="modal" id="agent-modal">
+<div class="modal" id="cms-agent-modal">
   <div class="modal-box" style="max-width:520px;">
     <div class="modal-head">
       <h2 id="ag-title">New agent</h2>
-      <button onclick="hideModal('agent-modal')" class="modal-x">&times;</button>
+      <button onclick="hideModal('cms-agent-modal')" class="modal-x">&times;</button>
     </div>
     <div style="padding:20px 24px 24px;">
       <div class="ag-grid">
@@ -2212,6 +2213,8 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
       <div class="ag-grid" style="margin-top:12px;">
         <div><div class="cn-lab">Extension</div>
           <input id="ag-ext" class="cms-in" inputmode="numeric" style="width:100%;"></div>
+        <div><div class="cn-lab">Phone name <span style="text-transform:none;letter-spacing:0;">(the name they use on calls)</span></div>
+          <input id="ag-phone" class="cms-in" maxlength="50" style="width:100%;" placeholder="e.g. Sarah"></div>
         <div><div class="cn-lab">Role</div>
           <select id="ag-role" class="cms-in" style="width:100%;">
             <option value="">No role (agent)</option>
@@ -2247,9 +2250,9 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
 
       <div id="ag-out" style="font-size:12.5px;margin:14px 0 4px;min-height:20px;
            line-height:1.6;"></div>
-      <button id="ag-go" onclick="saveAgent()" class="btn btn-primary"
+      <button id="ag-go" onclick="cmsSaveAgent()" class="btn btn-primary"
               style="width:100%;padding:11px;">Check first</button>
-      <button id="ag-confirm" onclick="saveAgent(true)" class="btn btn-primary"
+      <button id="ag-confirm" onclick="cmsSaveAgent(true)" class="btn btn-primary"
               style="width:100%;padding:11px;margin-top:8px;display:none;">Yes, create them</button>
     </div>
   </div>
@@ -3601,7 +3604,9 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
     <textarea id="we-note" rows="5" class="cms-in" style="width:100%;"
               placeholder="What the customer wanted and what you did…"></textarea>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px 16px;margin-top:14px;">
-      <div><div class="cn-lab">Minutes to bill</div>
+      <div><div class="cn-lab">Minutes to bill
+          <span style="float:right;text-transform:none;letter-spacing:0;">worked
+            <b id="we-clock" style="color:var(--text);font-variant-numeric:tabular-nums;">0m 00s</b></span></div>
         <input id="we-minutes" type="number" min="0" max="1440" class="cms-in" style="width:100%"
                value="0" oninput="wbPreview()"></div>
       <div><div class="cn-lab">Task (optional)</div>
@@ -5473,12 +5478,12 @@ async function qaSave(){
    first and says exactly what it would do before anything is saved. */
 let agEditing = null, agTlWas = '';
 
-function newAgent(){
+function cmsNewAgent(){
   agEditing = null;
   agTlWas = '';
   agFillLeaders(null);
   document.getElementById('ag-title').textContent = 'New agent';
-  ['ag-first','ag-last','ag-ext','ag-email','ag-pass'].forEach(id=>{
+  ['ag-first','ag-last','ag-ext','ag-phone','ag-email','ag-pass'].forEach(id=>{
     const el = document.getElementById(id); if(el) el.value = '';
   });
   document.getElementById('ag-role').value = '';
@@ -5489,7 +5494,7 @@ function newAgent(){
   document.getElementById('ag-go').textContent = 'Check first';
   document.getElementById('ag-go').style.display = '';
   document.getElementById('ag-confirm').style.display = 'none';
-  showModal('agent-modal');
+  showModal('cms-agent-modal');
 }
 
 async function agFillLeaders(selected){
@@ -5508,8 +5513,8 @@ async function loadTeamsQuietly(){
   try{ tmData = await API.get('/api/teams'); }catch(e){}
 }
 
-function editAgent(id){
-  const a = (alData || []).find(x => x.id === id);
+function cmsEditAgent(id){
+  const a = ((alData && alData.agents) || alData || []).find(x => x.id === id);
   if(!a) return;
   agEditing = id;
   const current = tmData
@@ -5522,6 +5527,7 @@ function editAgent(id){
   document.getElementById('ag-first').value = parts[0] || '';
   document.getElementById('ag-last').value = parts.slice(1).join(' ');
   document.getElementById('ag-ext').value = a.extension || '';
+  document.getElementById('ag-phone').value = a.phone_name || '';
   document.getElementById('ag-qa').checked = !!a.qa;
   document.getElementById('ag-cam').checked = !!a.camera;
   // an existing person's login is not changed from here
@@ -5530,16 +5536,17 @@ function editAgent(id){
   document.getElementById('ag-go').textContent = 'Save changes';
   document.getElementById('ag-go').style.display = '';
   document.getElementById('ag-confirm').style.display = 'none';
-  showModal('agent-modal');
+  showModal('cms-agent-modal');
 }
 
-async function saveAgent(confirmed){
+async function cmsSaveAgent(confirmed){
   const out = document.getElementById('ag-out');
   const btn = document.getElementById('ag-go');
   const body = {
     first_name: document.getElementById('ag-first').value.trim(),
     last_name: document.getElementById('ag-last').value.trim(),
     extension: document.getElementById('ag-ext').value.trim(),
+    phone_name: document.getElementById('ag-phone').value.trim(),
     is_qa: document.getElementById('ag-qa').checked,
     with_camera: document.getElementById('ag-cam').checked,
     confirm: !!confirmed,
@@ -5573,7 +5580,7 @@ async function saveAgent(confirmed){
       }
       out.style.color = 'var(--green)';
       out.textContent = '✅ ' + r.meaning;
-      setTimeout(()=>{ hideModal('agent-modal'); loadAgentList(); }, 1000);
+      setTimeout(()=>{ hideModal('cms-agent-modal'); loadAgentList(); }, 1000);
     }else{
       // the rehearsal — say what would happen, then let them confirm
       out.style.color = 'var(--text2)';
@@ -5711,24 +5718,47 @@ function alRender(){
   if(!alData) return;
   const q = (document.getElementById('al-search').value||'').toLowerCase().trim();
   const list = alData.agents.filter(a => !q ||
-    a.name.toLowerCase().includes(q) || String(a.extension||'').includes(q));
+    a.name.toLowerCase().includes(q) || (a.phone_name||'').toLowerCase().includes(q)
+    || String(a.extension||'').includes(q));
   document.getElementById('al-count').textContent =
     `${list.length} of ${alData.agents.length}`;
   const add = document.getElementById('al-add');
   if(add) add.style.display = portalIsManager ? '' : 'none';
+  // The name on the phone is often not the person's own name, which is the
+  // whole reason this list is looked at — so it sits right beside it.
+  const differs = a => a.phone_name && a.phone_name.trim().toLowerCase() !== (a.first||'').trim().toLowerCase()
+                       && a.phone_name.trim().toLowerCase() !== a.name.trim().toLowerCase();
+  const fl = document.getElementById('al-former');
+  if(fl && fl.closest('label')) fl.closest('label').style.display = portalIsManager ? '' : 'none';
+  if(!portalIsManager){
+    // Agents see what the old CMS's list showed them: who is who — the real
+    // name and the name used on the phone — for everyone still working who
+    // has a phone name. Nothing else, and nothing to change.
+    const mine = list.filter(a => !a.left_firm && (a.phone_name || '').trim());
+    document.getElementById('al-count').textContent = `${mine.length} people`;
+    document.getElementById('al-body').innerHTML = mine.length ? `
+      <div class="card" style="padding:0;max-width:640px;"><div class="table-wrap"><table class="data-table">
+        <thead><tr><th>Name</th><th>Phone name</th><th class="n">Extension</th></tr></thead>
+        <tbody>${mine.map(a=>`<tr><td>${esc(a.name)}</td>
+          <td style="${differs(a)?'color:var(--accent);font-weight:600;':''}">${esc(a.phone_name)}</td>
+          <td class="n" style="font-variant-numeric:tabular-nums;">${esc(a.extension)||'—'}</td></tr>`).join('')}</tbody>
+      </table></div></div>` : '<div style="color:var(--text3);font-size:13px;">Nobody matches that.</div>';
+    return;
+  }
   document.getElementById('al-body').innerHTML = list.length ? `
-    <div class="lvfloor">${list.map(a=>`
-      <div class="lvtile ${a.left_firm?'off':'free'}" onclick="portalOpenAgent(${a.id})"
-           style="border-left-color:${a.left_firm?'var(--text3)':'var(--accent)'};position:relative;">
-        <div class="nm">${esc(a.name)}</div>
-        <div class="ex">ext ${esc(a.extension)||'—'}</div>
-        <div class="st" style="color:var(--text3)">
-          ${a.left_firm?'former':(a.qa?'QA':'agent')}${a.camera?' · camera':''}</div>
-        ${alLeaderName(a.id) ? `<div class="st" style="color:var(--accent);font-size:10.5px;">
-          ${esc(alLeaderName(a.id))}</div>` : ''}
-        ${portalIsManager ? `<button class="al-edit"
-            onclick="event.stopPropagation();editAgent(${a.id})" title="Edit">✎</button>` : ''}
-      </div>`).join('')}</div>`
+    <div class="card" style="padding:0;"><div class="table-wrap"><table class="data-table al-table">
+      <thead><tr><th>Agent</th><th>Phone name</th><th class="n">Ext</th><th>Role</th><th>Team leader</th>${portalIsManager?'<th></th>':''}</tr></thead>
+      <tbody>${list.map(a=>`<tr style="cursor:pointer;${a.left_firm?'opacity:.55;':''}" onclick="portalOpenAgent(${a.id})">
+        <td><b>${esc(a.name)}</b></td>
+        <td>${a.phone_name ? `<span style="${differs(a)?'color:var(--accent);font-weight:600;':''}">${esc(a.phone_name)}</span>`
+                           : '<span style="color:var(--text3)">—</span>'}</td>
+        <td class="n" style="font-variant-numeric:tabular-nums;">${esc(a.extension)||'—'}</td>
+        <td style="font-size:12px;color:var(--text3);">${a.left_firm?'former':((a.roles||[]).join(', ') || (a.qa?'QA':'agent'))}</td>
+        <td style="font-size:12px;">${esc(alLeaderName(a.id) || '')}</td>
+        ${portalIsManager ? `<td style="text-align:right;"><button class="cn-chip"
+            onclick="event.stopPropagation();cmsEditAgent(${a.id})">Edit</button></td>` : ''}
+      </tr>`).join('')}</tbody></table></div></div>
+    <div style="font-size:11.5px;color:var(--text3);margin-top:8px;">Phone names in blue are different from the person's own name.</div>`
     : '<div style="color:var(--text3);font-size:13px;">Nobody matches that.</div>';
 }
 
@@ -5933,31 +5963,46 @@ function clockRender(){
   const dur = m => m >= 60 ? Math.floor(m/60) + 'h ' + (m%60) + 'm' : m + ' min';
   let state, buttons = '';
   const dnd = j.dnd && j.dnd.on;
+  // Agents (QA and team leaders too) start and end their shift by signing in
+  // and out, so only managers and admins get Start / End shift buttons.
+  const own = !!portalIsManager;
+  const endBtn = own ? `<button class="clk-btn ghost" onclick="clockDo('out')">End shift</button>` : '';
   if(j.status === 'in' && dnd){
     const dt = j.dnd.since ? new Date(j.dnd.since) : null;
     const dm = dt ? Math.max(0, Math.round((Date.now() - dt.getTime()) / 60000)) : 0;
     state = `<span class="clk-dot dnd"></span>Do Not Disturb · ${dur(dm)}`
           + `<span class="clk-why">${esc(j.dnd.type ? j.dnd.type + ' — ' : '')}${esc(j.dnd.note || '')}</span>`;
-    buttons = `<button class="clk-btn" onclick="clockDnd(false)">End DND</button>
-               <button class="clk-btn ghost" onclick="clockDo('out')">End shift</button>`;
+    buttons = `<button class="clk-btn" onclick="clockDnd(false)">End DND</button>${endBtn}`;
   }else if(j.status === 'in'){
     state = `<span class="clk-dot in"></span>Working since ${at}`;
     buttons = `<button class="clk-btn" onclick="clockBreakAsk()">☕ Break</button>
-               <button class="clk-btn" onclick="clockDndAsk()">🔕 DND</button>
-               <button class="clk-btn ghost" onclick="clockDo('out')">End shift</button>`;
+               <button class="clk-btn" onclick="clockDndAsk()">🔕 DND</button>${endBtn}`;
   }else if(j.status === 'break'){
     const over = j.break_minutes && mins > j.break_minutes;
     state = `<span class="clk-dot brk"></span>On break · <b style="color:${over?'var(--red)':'inherit'}">${dur(mins)}</b>${j.break_minutes?` of ${j.break_minutes} min`:''}`;
-    buttons = `<button class="clk-btn" onclick="clockDo('back')">Back to work</button>
-               <button class="clk-btn ghost" onclick="clockDo('out')">End shift</button>`;
+    buttons = `<button class="clk-btn" onclick="clockDo('back')">Back to work</button>${endBtn}`;
   }else{
     state = `<span class="clk-dot off"></span>Not clocked in`;
-    buttons = `<button class="clk-btn go" onclick="clockDo('in')">▶ Start shift</button>`;
+    buttons = own
+      ? `<button class="clk-btn go" onclick="clockDo('in')">▶ Start shift</button>`
+      : `<div class="clk-note">Your shift starts when you sign in. Sign out and back in to start it.</div>`;
   }
   if(!j.enabled){
     buttons = `<div class="clk-note">Clocking here isn't switched on yet — use the old CMS.</div>`;
   }
-  box.innerHTML = `<div class="clk-state">${state}</div><div class="clk-btns" id="clk-btns">${buttons}</div>`;
+  // every break so far this shift, added up — agents lose track after two
+  let brk = '';
+  const bl = (j.breaks || []);
+  if(bl.length && j.status !== 'out'){
+    const secs = bl.reduce((t, b) => t + (b.ongoing && b.start
+      ? Math.max(0, (Date.now() - new Date(b.start).getTime()) / 1000) : (b.seconds || 0)), 0);
+    const mm = s => Math.round(s / 60) + 'm';
+    const each = bl.map((b, i) => 'Break ' + (i + 1) + ': ' + (b.ongoing ? mm((Date.now() - new Date(b.start).getTime())/1000) + ' so far'
+                          : mm(b.seconds)) + (b.reason ? ' — ' + b.reason : '')).join('\n');
+    brk = `<div class="clk-brk" title="${esc(each)}">☕ Breaks this shift: <b>${mm(secs)}</b>
+             <span style="opacity:.7">(${bl.length} break${bl.length === 1 ? '' : 's'}: ${bl.map(b => b.ongoing ? mm((Date.now() - new Date(b.start).getTime())/1000) + '…' : mm(b.seconds)).join(' + ')})</span></div>`;
+  }
+  box.innerHTML = `<div class="clk-state">${state}</div>${brk}<div class="clk-btns" id="clk-btns">${buttons}</div>`;
 }
 
 function clockBreakAsk(){
@@ -10212,17 +10257,13 @@ async function wbRefresh(){
     openWork = r.work || null;
     const bar = document.getElementById('work-bar');
     if(!bar) return;
-    if(!openWork){ bar.style.display = 'none'; document.body.style.paddingBottom = ''; return; }
+    if(!openWork){ clearInterval(wbClock); bar.style.display = 'none'; document.body.style.paddingBottom = ''; return; }
     document.getElementById('wb-account').textContent = openWork.account || ('Account ' + openWork.account_id);
-    const mins = openWork.started
-      ? Math.max(0, Math.round((Date.now() - new Date(openWork.started).getTime())/60000)) : 0;
+    openWork._fetched = Date.now();
     const paused = !!openWork.paused_now;
-    const pausedMin = Math.round((openWork.paused_seconds || 0) / 60);
-    document.getElementById('wb-meta').textContent =
-      (paused ? 'PAUSED · ' : '') + `open ${mins} min`
-      + (pausedMin ? ` (${pausedMin} paused)` : '')
-      + (openWork.phone ? ' · ' + openWork.phone : '')
-      + ` · ${openWork.minutes_left} minutes left on the account`;
+    wbTick();
+    clearInterval(wbClock);
+    wbClock = setInterval(wbTick, 1000);
     const pb = document.getElementById('wb-pause');
     if(pb) pb.textContent = paused ? 'Resume' : 'Pause';
     bar.style.borderTopColor = paused ? 'var(--yellow)' : 'var(--green)';
@@ -10231,6 +10272,36 @@ async function wbRefresh(){
     bar.style.display = '';
     document.body.style.paddingBottom = '64px';
   }catch(e){}
+}
+
+/* The running clock: worked time to the second, paused time left out —
+   the number the minutes to bill are taken from. */
+let wbClock = null;
+function wbSeconds(){
+  if(!openWork) return {worked: 0, paused: 0, open: 0};
+  const since = Math.max(0, Math.round((Date.now() - (openWork._fetched || Date.now())) / 1000));
+  const open = (openWork.elapsed_seconds != null ? openWork.elapsed_seconds
+               : Math.max(0, Math.round((Date.now() - new Date(openWork.started).getTime())/1000))) + since;
+  const paused = (openWork.paused_seconds || 0) + (openWork.paused_now ? since : 0);
+  return {worked: Math.max(0, open - paused), paused, open};
+}
+function wbClockText(sec){
+  sec = Math.max(0, Math.floor(sec));
+  // spelled out, so 7 minutes 5 seconds can never be read as 7 hours 5 minutes
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), x = sec % 60;
+  return (h ? h + 'h ' : '') + m + 'm ' + String(x).padStart(2, '0') + 's';
+}
+function wbTick(){
+  const el = document.getElementById('wb-meta');
+  if(!openWork || !el){ clearInterval(wbClock); return; }
+  const t = wbSeconds();
+  el.innerHTML = (openWork.paused_now ? '<b style="color:var(--yellow)">PAUSED</b> · ' : '')
+    + `<b style="color:var(--text);font-variant-numeric:tabular-nums;font-size:12.5px;">⏱ ${wbClockText(t.worked)}</b> worked`
+    + (t.paused ? ` · ${wbClockText(t.paused)} paused` : '')
+    + (openWork.phone ? ' · ' + esc(openWork.phone) : '')
+    + ` · ${openWork.minutes_left} minutes left on the account`;
+  const live = document.getElementById('we-clock');
+  if(live && document.getElementById('work-end-modal').style.display === 'flex') live.textContent = wbClockText(t.worked);
 }
 
 function wbOpenAccount(){ if(openWork){ showPage('customers'); cuOpen(openWork.account_id); } }
@@ -10252,11 +10323,12 @@ function wbEndOpen(){
     ' · they have ' + openWork.minutes_left + ' minutes left'
     + (pausedMin ? ' · ' + pausedMin + ' minutes were paused and are not suggested' : '');
   document.getElementById('we-note').value = '';
-  // suggest the time on the call, less anything paused
-  const openMin = openWork.started
-    ? Math.max(0, Math.round((Date.now() - new Date(openWork.started).getTime())/60000)) : 0;
-  const suggest = Math.max(0, openMin - Math.round((openWork.paused_seconds || 0)/60));
+  // suggest the full minutes actually worked: 7:01 and 7:59 both suggest 7.
+  // The exact time is shown beside it, so the agent can see why.
+  const t = wbSeconds();
+  const suggest = Math.floor(t.worked / 60);
   document.getElementById('we-minutes').value = String(suggest);
+  document.getElementById('we-clock').textContent = wbClockText(t.worked);
   document.getElementById('we-task').value = '';
   document.getElementById('we-out').textContent = '';
   wbPreview();

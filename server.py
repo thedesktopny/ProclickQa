@@ -6898,10 +6898,19 @@ def qa_assignments_set():
 def agent_list_route():
     """Everyone and their extension."""
     import cms_db
+    p = _portal_user(request.headers.get('X-Portal-Ticket', ''))
+    full = (not p) or bool(p.get('m') or p.get('a'))
     try:
-        return jsonify(cms_db.agent_list(request.args.get('include_left') == '1'))
+        out = cms_db.agent_list(full and request.args.get('include_left') == '1')
     except Exception as e:
         return jsonify({'error': str(e)[:240]}), 400
+    if not full:
+        # agents get only who is who: the name, the name used on the phone, and the extension
+        out = {'agents': [{'id': a['id'], 'name': a['name'], 'first': a['first'],
+                           'phone_name': a['phone_name'], 'extension': a['extension'], 'left_firm': False}
+                          for a in out['agents'] if (a.get('phone_name') or '').strip()],
+               'includes_former': False}
+    return jsonify(out)
 
 
 def _who():
@@ -6980,7 +6989,8 @@ def update_agent_route(employee_id):
     d = request.json or {}
     allowed = {'FirstName': d.get('first_name'), 'LastName': d.get('last_name'),
                'Extension': d.get('extension'), 'QA': d.get('is_qa'),
-               'WithCamera': d.get('with_camera'), 'Gender': d.get('gender')}
+               'WithCamera': d.get('with_camera'), 'Gender': d.get('gender'),
+               'PhoneName': (d.get('phone_name').strip()[:50] if isinstance(d.get('phone_name'), str) else None)}
     values = {k: v for k, v in allowed.items() if v is not None}
     if not values:
         return jsonify({'ok': False, 'error': 'Nothing to change.'}), 400
@@ -9171,8 +9181,12 @@ def work_open():
         return jsonify({'work': None})
     try:
         conn = cms_db._connect(); cu = conn.cursor()
+        # The time worked is counted by the CMS's own clock. The agent's
+        # computer is in another time zone, and working it out there from a
+        # bare start time was out by hours.
         cu.execute("""SELECT TOP 1 w.Id, w.AccountId, w.StartTime, w.PhoneCallId,
-                             a.FirstName, a.LastName, a.Phone, ISNULL(a.MinutesLeft,0)
+                             a.FirstName, a.LastName, a.Phone, ISNULL(a.MinutesLeft,0),
+                             DATEDIFF(second, w.StartTime, GETDATE())
                       FROM AccountWork w LEFT JOIN Account a ON a.Id = w.AccountId
                       WHERE w.EmployeeId = %s AND w.EndTime IS NULL
                       ORDER BY w.StartTime DESC""", (int(who['employee_id']),))
@@ -9182,7 +9196,8 @@ def work_open():
         work = {'id': int(r[0]), 'account_id': int(r[1]),
                 'started': cms_db._plain(r[2]), 'call_id': int(r[3] or 0),
                 'account': ('%s %s' % (r[4] or '', r[5] or '')).strip(),
-                'phone': r[6], 'minutes_left': int(r[7] or 0)}
+                'phone': r[6], 'minutes_left': int(r[7] or 0),
+                'elapsed_seconds': max(0, int(r[8] or 0))}
         try:
             work.update(cms_db.work_pause_state(work['id']))
         except Exception:
@@ -10251,8 +10266,13 @@ def clock_action():
         return jsonify({'ok': False, 'error': 'Sign in to the CMS first'}), 401
     import cms_write
     d = request.json or {}
+    action = (d.get('action') or '').strip()
+    # agents start and end their shift by signing in and out; only managers
+    # and admins clock themselves in and out by hand
+    if action in ('in', 'out') and not (p.get('m') or p.get('a')):
+        return jsonify({'ok': False, 'error': 'Your shift starts when you sign in and ends when you sign out.'}), 403
     try:
-        out = cms_write.clock(p['e'], (d.get('action') or '').strip(), _who(),
+        out = cms_write.clock(p['e'], action, _who(),
                               minutes=d.get('minutes'), reason=d.get('reason'))
     except cms_write.WriteRefused as e:
         return jsonify({'ok': False, 'error': str(e)}), 400
