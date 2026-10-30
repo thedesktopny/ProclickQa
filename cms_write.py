@@ -49,7 +49,7 @@ WRITABLE = {
     # elsewhere.
     'Employee': (
         {'QA', 'FirstName', 'LastName', 'Extension', 'WithCamera', 'Gender',
-         'ExperienceLevel', 'notLogIn', 'ScheduleId'},
+         'ExperienceLevel', 'notLogIn', 'ScheduleId', 'PhoneName'},
         set(),
     ),
     # Marking a missed call as dealt with — exactly what the CMS's
@@ -1776,14 +1776,15 @@ def create_agent(fields, who, dry_run=True):
 
         cu.execute("""INSERT INTO [Employee]
                       (FirstName, LastName, Extension, AspNetUserId, LeftFirm,
-                       Created, QA, WithCamera, Gender, HourlyRate)
+                       Created, QA, WithCamera, Gender, HourlyRate, PhoneName)
                       OUTPUT INSERTED.Id
-                      VALUES (%s, %s, %s, %s, 0, GETDATE(), %s, %s, %s, %s)""",
+                      VALUES (%s, %s, %s, %s, 0, GETDATE(), %s, %s, %s, %s, %s)""",
                    (first, last, extension, user_id,
                     1 if fields.get('is_qa') else 0,
                     1 if fields.get('with_camera') else 0,
                     (fields.get('gender') or None),
-                    int(fields.get('hourly_rate') or 0)))
+                    int(fields.get('hourly_rate') or 0),
+                    ((fields.get('phone_name') or '').strip()[:50] or None)))
         row = cu.fetchone()
         employee_id = int(row[0]) if row else None
 
@@ -1974,8 +1975,22 @@ def _now_local():
         return datetime.utcnow() - timedelta(hours=4)
 
 
+def _ny_iso(dt):
+    """A CMS time (New York, stored without a zone) as a full timestamp with
+    its offset, so a browser anywhere — the Philippines included — shows it
+    right instead of treating it as its own local time."""
+    if dt is None:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+        return dt.replace(tzinfo=ZoneInfo('America/New_York')).isoformat()
+    except Exception:
+        return cms_db._plain(dt)
+
+
 def clock_status(employee_id):
-    """Where someone stands right now, from their latest EmployeeClocker row."""
+    """Where someone stands right now, from their latest EmployeeClocker row —
+    and every break taken so far in this shift, so they can see the total."""
     conn = cms_db._connect()
     try:
         cu = conn.cursor()
@@ -1985,16 +2000,46 @@ def clock_status(employee_id):
                       WHERE EmployeeId = %s AND Status IS NOT NULL
                       ORDER BY Created DESC, Id DESC""", (int(employee_id),))
         r = cu.fetchone()
+        rows, now = [], None
+        status = int(r[0]) if r and r[0] is not None else 0
+        if status in (1, 2):
+            # this shift = everything since the last clock-out (within a day)
+            cu.execute("""SELECT Status, Created, BreakMinutes, BreakReason, GETDATE() FROM EmployeeClocker
+                          WHERE EmployeeId = %s AND Status IS NOT NULL
+                            AND Created >= DATEADD(hour, -20, GETDATE())
+                          ORDER BY Created, Id""", (int(employee_id),))
+            rows = cu.fetchall()
     finally:
         conn.close()
-    status = int(r[0]) if r and r[0] is not None else 0
+    shift = []
+    if rows:
+        now = rows[0][4]
+        start = 0
+        for i, x in enumerate(rows):
+            if int(x[0] or 0) == 0:
+                start = i + 1                      # a clock-out ends the earlier shift
+        rows = rows[start:]
+    breaks = []
+    for i, x in enumerate(rows):
+        if int(x[0] or 0) != 2:
+            continue
+        end = rows[i + 1][1] if i + 1 < len(rows) else None
+        secs = int(((end or now) - x[1]).total_seconds()) if x[1] else 0
+        breaks.append({'start': _ny_iso(x[1]), 'end': _ny_iso(end), 'seconds': max(0, secs),
+                       'planned_minutes': int(x[2]) if x[2] is not None else None,
+                       'reason': x[3], 'ongoing': end is None})
+    shift_start = rows[0][1] if rows else None
     return {'employee_id': int(employee_id),
             'name': ('%s %s' % ((e[0] or '') if e else '', (e[1] or '') if e else '')).strip(),
             'extension': (str(e[2]).strip() if e and e[2] not in (None, '') else None),
             'status': CLOCK_NAMES.get(status, 'out'),
-            'since': cms_db._plain(r[1]) if r else None,
+            'since': _ny_iso(r[1]) if r else None,
+            'seconds_in_state': (int((now - r[1]).total_seconds()) if (r and now and r[1]) else None),
+            'shift_started': _ny_iso(shift_start),
             'break_minutes': (int(r[2]) if r and r[2] is not None else None),
-            'break_reason': (r[3] if r else None)}
+            'break_reason': (r[3] if r else None),
+            'breaks': breaks,
+            'break_seconds_total': sum(b['seconds'] for b in breaks)}
 
 
 def clock(employee_id, action, who, minutes=None, reason=None, logged_out_by=None):
@@ -2091,7 +2136,7 @@ def clock(employee_id, action, who, minutes=None, reason=None, logged_out_by=Non
         out['phone_warning'] = 'Saved, but the phone system could not be told: ' + str(ex)[:160]
     out['ok'] = True
     out['status'] = CLOCK_NAMES[status]
-    out['since'] = when.isoformat()
+    out['since'] = _ny_iso(when)
     _log(who, out)
     return out
 
@@ -2114,7 +2159,7 @@ def dnd_state(employee_id):
         conn.close()
     st = str((r[0] if r else '') or '').upper().strip()
     on = bool(st) and not st.startswith('END')
-    return {'on': on, 'since': cms_db._plain(r[1]) if (r and on) else None,
+    return {'on': on, 'since': _ny_iso(r[1]) if (r and on) else None,
             'note': (r[2] if (r and on) else None), 'type': (r[3] if (r and on) else None)}
 
 
