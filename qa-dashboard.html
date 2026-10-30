@@ -2097,6 +2097,7 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
       </div>
       <!-- Thirty agents have to fit without scrolling, so each one is a small
            tile: colour carries the status, and the detail appears on hover. -->
+      <div id="lv-breaks"></div>
       <div id="lv-floor" class="lvfloor"></div>
     </div>
 
@@ -9653,7 +9654,35 @@ function lvRenderFloor(){
     + `${onDnd?` · ${onDnd} on do not disturb`:''}${onBreak?` · ${onBreak} on break`:''}`
     + ` · ${list.length} agents in total`;
 
-  document.getElementById('lv-floor').innerHTML = list.map(a=>{
+  // Everyone on a break, together, the one due back soonest first — the
+  // floor's rule is to wait for someone to come back before going yourself.
+  const isBusy = a => (a.phone||'').toUpperCase()==='IN_USE';
+  const breakers = list.filter(a => a.clocked_in && a.on_break && !isBusy(a));
+  const leftOf = a => {
+    const el = a.break_elapsed_seconds != null ? a.break_elapsed_seconds
+             : (a.clocker_since ? Math.max(0, (Date.now() - new Date(a.clocker_since).getTime())/1000) : 0);
+    return a.break_planned ? a.break_planned * 60 - el : -el;      // no planned length: longest out first
+  };
+  breakers.sort((x, y) => leftOf(x) - leftOf(y));
+  const bbox = document.getElementById('lv-breaks');
+  if(bbox){
+    bbox.innerHTML = !breakers.length ? '' : `
+      <div style="font-size:11.5px;font-weight:650;color:#9C90FF;margin:0 0 6px;">☕ On break now · ${breakers.length} — first one back is first</div>
+      <div class="lvfloor" style="margin-bottom:12px;">${breakers.map(a => {
+        const left = leftOf(a), m = Math.ceil(Math.abs(left) / 60);
+        const over = a.break_planned && left < 0;
+        const line = !a.break_planned ? `on break · ${Math.round(-left/60)} min so far`
+                   : over ? `${m} min over` : `${m} min left`;
+        return `<div class="lvtile brk" onclick="lvOpenAgent(${a.employee_id})" title="${esc((a.break_reason||'') + (a.break_planned ? ' · ' + a.break_planned + ' min break' : ''))}">
+          <div class="nm">${esc(a.name)||'—'}</div>
+          <div class="ex">ext ${a.extension||'—'}${a.break_planned ? ' · ' + a.break_planned + ' min break' : ''}</div>
+          <div class="st" style="color:${over ? '#F2585F' : '#9C90FF'}">${line}</div></div>`;
+      }).join('')}</div>
+      <div style="font-size:11.5px;font-weight:650;color:var(--text3);margin:0 0 6px;">Everyone else</div>`;
+  }
+  const breakIds = new Set(breakers.map(a => a.employee_id));
+
+  document.getElementById('lv-floor').innerHTML = list.filter(a => !breakIds.has(a.employee_id)).map(a=>{
     const busy = (a.phone||'').toUpperCase()==='IN_USE';
     const dnd = !!a.dnd && !busy;                 // a call in progress outranks DND
     // on_break comes from the clocker status, so it means "on a break now"

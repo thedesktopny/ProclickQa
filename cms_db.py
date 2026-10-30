@@ -1109,6 +1109,45 @@ def full_work_note(*values):
     return out
 
 
+def recent_calls_with_notes(hours=6, max_rows=40000):
+    """Every answered call of the last few hours with its agent's notes, in two
+    reads — instead of one search per call. Both reads are bounded by the
+    newest Ids (the tables' own primary key), so they never scan the millions
+    of older rows, whatever indexes the CMS has or lacks."""
+    hours = max(1, min(int(hours), 96))
+    conn = _connect(); cu = conn.cursor()
+    try:
+        cu.execute('SELECT MAX(Id) FROM PhoneCallsLog')
+        ctop = int((cu.fetchone() or [0])[0] or 0)
+        cu.execute("""SELECT c.Id, LTRIM(RTRIM(c.PickedUpBy)), c.Phone, c.Started, c.Ended, c.Note, c.AccountWorkId
+                      FROM PhoneCallsLog c
+                      WHERE c.Id > %s AND c.Started >= DATEADD(hour, -%d, GETDATE())
+                        AND ISNULL(c.PickedUpBy, '') <> ''""" % (ctop - int(max_rows), hours))
+        calls = cu.fetchall()
+        cu.execute('SELECT MAX(Id) FROM AccountWork')
+        wtop = int((cu.fetchone() or [0])[0] or 0)
+        cu.execute("""SELECT Id, PhoneCallId, Note, TaskDescription, EndTime FROM AccountWork
+                      WHERE Id > %s AND StartTime >= DATEADD(hour, -%d, GETDATE())""" % (wtop - int(max_rows), hours + 2))
+        works = cu.fetchall()
+    finally:
+        conn.close()
+    by_id, by_call = {}, {}
+    for w in works:
+        by_id[int(w[0])] = w
+        if w[1]:
+            by_call.setdefault(int(w[1]), w)
+    out = []
+    for cid, ext, phone, started, ended, cnote, wid in calls:
+        w = by_id.get(int(wid)) if wid else None
+        w = w or by_call.get(int(cid))
+        digits = ''.join(ch for ch in str(phone or '') if ch.isdigit())[-10:]
+        out.append({'cms_call_id': int(cid), 'extension': (ext or '').strip(), 'phone10': digits,
+                    'started': started, 'ended': ended,
+                    'notes': full_work_note(w[2] if w else None, w[3] if w else None, cnote),
+                    'has_work': w is not None, 'work_ended': bool(w and w[4] is not None)})
+    return out
+
+
 def call_work_notes(cms_id=None, extension=None, phone=None, around=None):
     """The notes for one call as they stand in the CMS now, and whether the
     agent has finished the work (so the notes are final).
@@ -3128,6 +3167,29 @@ def _live_snapshot(feed_limit=70, hours=6):
                               BreakMinutes, SipPhoneStatus, SipPhoneTime, MinutesOnCall,
                               NumCallsIn, NumCallsOut, LastCallPhone, LastCallStartAt
                        FROM Tmp_LiveEmployeesStatusFinal""")]
+
+    # Everyone on a break: how long they said it would be and how long it has
+    # been, straight from their own clock rows and the CMS's clock — so the
+    # floor can line them up by who is back soonest, whatever time zone the
+    # viewer's computer is in.
+    on_break = [int(a['employee_id']) for a in agents if a.get('on_break') and a.get('employee_id')]
+    if on_break:
+        try:
+            marks = ','.join(str(i) for i in on_break)
+            for eid, mins, secs, why in rows("""
+                SELECT e.EmployeeId, e.BreakMinutes, DATEDIFF(second, e.Created, GETDATE()), e.BreakReason
+                FROM EmployeeClocker e
+                JOIN (SELECT EmployeeId, MAX(Id) AS mid FROM EmployeeClocker
+                      WHERE EmployeeId IN (%s) AND Created >= DATEADD(hour, -16, GETDATE())
+                      GROUP BY EmployeeId) m ON m.mid = e.Id
+                WHERE e.Status = 2""" % marks):
+                for a in agents:
+                    if a.get('employee_id') == int(eid):
+                        a['break_planned'] = int(mins) if mins is not None else None
+                        a['break_elapsed_seconds'] = max(0, int(secs or 0))
+                        a['break_reason'] = why
+        except Exception as e:
+            print('[live] break detail not read: ' + str(e)[:120])
 
     dnd = _dnd_now(conn)
     for a in agents:
