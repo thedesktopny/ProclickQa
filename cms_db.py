@@ -1932,7 +1932,129 @@ def work_note_shape(limit=400):
     return out
 
 
-def callback_list(hours=48, limit=100):
+_COMPANIES = {'at': 0, 'rows': None, 'map': None}
+
+
+def companies_full():
+    """Every business the phone system answers for (TableCompanies), with the
+    numbers callers dial for each. Read every five minutes."""
+    import time as _t
+    if _COMPANIES['rows'] is not None and _t.time() - _COMPANIES['at'] < 300:
+        return _COMPANIES['rows'], _COMPANIES['map']
+    conn = _connect()
+    try:
+        cu = conn.cursor()
+        cu.execute("""SELECT Id, Name, PhoneNumbers, CallerIdName,
+                             ISNULL(isDisabled, 0), ISNULL(isBusiness, 0)
+                      FROM TableCompanies ORDER BY Name""")
+        rows, m = [], {}
+        for cid, name, nums, cid_name, disabled, business in cu.fetchall():
+            numbers = []
+            for tok in str(nums or '').replace(';', ',').replace(' ', ',').split(','):
+                d = ''.join(ch for ch in tok if ch.isdigit())
+                if len(d) >= 7:
+                    numbers.append(d)
+                    m.setdefault(d, int(cid))
+                    if len(d) > 10:
+                        m.setdefault(d[-10:], int(cid))
+            rows.append({'id': int(cid), 'name': (name or '').strip(),
+                         'caller_id_name': (cid_name or '').strip(),
+                         'numbers': numbers, 'disabled': bool(disabled),
+                         'business': bool(business)})
+    finally:
+        conn.close()
+    _COMPANIES.update(at=_t.time(), rows=rows, map=m)
+    return rows, m
+
+
+def company_id_for(called, m):
+    d = ''.join(ch for ch in str(called or '') if ch.isdigit())
+    if not d:
+        return None
+    return m.get(d) or m.get(d[-10:]) or None
+
+
+def is_manager_line(company):
+    return 'manager' in (company.get('name') or '').lower()
+
+
+def default_our_lines(rows):
+    """Until someone chooses, ProClick's own lines: any business named
+    ProClick or that shows "ProClick" as its caller ID."""
+    def pc(x):
+        x = (x or '').strip().lower().replace(' ', '')
+        return x.startswith('proclick')
+    return {r['id'] for r in rows if (pc(r['name']) or pc(r['caller_id_name'])) and not is_manager_line(r)}
+
+
+_ENROLLED = {}
+
+
+def employee_company_names(employee_id):
+    """The businesses this person is enrolled to answer for in the CMS
+    (EmployeeCompanyRelations) — how the old CMS knew whose lines were whose."""
+    import time as _t
+    hit = _ENROLLED.get(employee_id)
+    if hit and _t.time() - hit[0] < 300:
+        return hit[1]
+    conn = _connect()
+    try:
+        cu = conn.cursor()
+        cu.execute("""SELECT c.Name FROM EmployeeCompanyRelations r
+                      JOIN TableCompanies c ON c.Id = r.CompanyId
+                      WHERE r.EmployeeId = %s AND ISNULL(r.Enroled, 0) = 1""", (int(employee_id),))
+        names = [str(x[0] or '').strip() for x in cu.fetchall()]
+    finally:
+        conn.close()
+    _ENROLLED[employee_id] = (_t.time(), names)
+    return names
+
+
+def callback_list(hours=48, limit=100, scope='proclick', ours=None):
+    """Who still needs calling back — only the business lines chosen as ours
+    (ProClick's by default; a manager can tick others). The Manager line's
+    missed calls go to managers only (scope 'manager' adds 'manager_calls').
+    Every business line, with how many callers are waiting on it, comes back
+    in 'lines' so a manager can see exactly what is and is not counted."""
+    full = _callback_list_all(hours, max(limit * 4, 400), dedupe=False)
+    if full.get('error'):
+        return full
+    try:
+        rows, m = companies_full()
+    except Exception as e:
+        return {'calls': [], 'count': 0, 'error': 'Could not read the business list: ' + str(e)[:120]}
+    by_id = {r['id']: r for r in rows}
+    ours = set(ours) if ours is not None else default_our_lines(rows)
+    mine, mgr = [], []
+    seen = {'ours': set(), 'manager': set()}
+    waiting = {}            # company id -> set of callers
+    unknown = set()
+    for c in full['calls']:
+        cid = company_id_for(c.get('called'), m)
+        comp = by_id.get(cid)
+        c['company'] = comp['name'] if comp else None
+        key = (c.get('phone') or '')[-10:]
+        if comp is None:
+            unknown.add(key)
+            continue
+        waiting.setdefault(cid, set()).add(key)
+        g = 'manager' if is_manager_line(comp) else ('ours' if cid in ours else None)
+        if g is None or key in seen[g]:
+            continue
+        seen[g].add(key)
+        (mgr if g == 'manager' else mine).append(c)
+    out = {'calls': mine[:limit], 'count': len(mine[:limit]), 'unknown_line': len(unknown)}
+    if scope == 'manager':
+        out['manager_calls'] = mgr[:limit]
+        out['manager_count'] = len(mgr[:limit])
+        out['lines'] = [{'id': r['id'], 'name': r['name'], 'caller_id_name': r['caller_id_name'],
+                         'numbers': r['numbers'], 'disabled': r['disabled'],
+                         'manager_line': is_manager_line(r), 'counted': r['id'] in ours,
+                         'waiting': len(waiting.get(r['id'], ()))} for r in rows]
+    return out
+
+
+def _callback_list_all(hours=48, limit=100, dedupe=True):
     """Missed callers who still need calling back.
 
     Two ways a name leaves this list, matching the old CMS: the caller rings
@@ -1968,7 +2090,7 @@ def callback_list(hours=48, limit=100):
             # one entry per caller — five missed calls from one number is one
             # person to ring back, not five
             key = phone[-10:] if len(phone) >= 10 else phone
-            if key in seen:
+            if dedupe and key in seen:
                 continue
             seen.add(key)
             out['calls'].append({

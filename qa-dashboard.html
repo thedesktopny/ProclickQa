@@ -2087,7 +2087,8 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
       <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;">
         <h2 class="payh" style="margin:0;">📞 To call back</h2>
         <span id="lv-cb-count" style="font-size:11.5px;color:var(--text3);"></span>
-        <select id="lv-cb-hours" class="cms-in" style="width:auto;margin-left:auto;font-size:12px;"
+        <button class="cn-chip" id="lv-cb-lines" style="display:none;margin-left:auto;" onclick="cbLinesOpen()">Which lines count?</button>
+        <select id="lv-cb-hours" class="cms-in" style="width:auto;font-size:12px;"
                 onchange="loadCallbacks()">
           <option value="12">Last 12 hours</option>
           <option value="48" selected>Last 2 days</option>
@@ -9780,10 +9781,15 @@ async function loadCallbacks(){
     const hours = document.getElementById('lv-cb-hours').value;
     const r = await API.get('/api/callbacks?hours=' + hours);
     if(r.error){ card.style.display = 'none'; return; }
-    card.style.display = r.count ? '' : 'none';
+    const mgr = r.manager_calls || [];
+    cbLines = r.lines || null;
+    const lb = document.getElementById('lv-cb-lines');
+    if(lb) lb.style.display = cbLines ? '' : 'none';
+    // managers always see the card, so the line choice can be reached
+    card.style.display = (r.count || mgr.length || cbLines) ? '' : 'none';
     document.getElementById('lv-cb-count').textContent =
-      r.count ? `${r.count} waiting for a call back` : '';
-    box.innerHTML = r.calls.map(c=>`
+      r.count ? `${r.count} waiting for a call back` : (mgr.length ? 'none on the ProClick lines' : '');
+    const cbRow = c=>`
       <div class="payrow" style="cursor:default;" id="cb-${c.call_id}">
         <div class="nm">
           <span style="font-variant-numeric:tabular-nums;font-size:14px;">${esc(c.phone)}</span>
@@ -9799,8 +9805,62 @@ async function loadCallbacks(){
           ${c.account_id ? `<button class="cn-chip" onclick="cuOpen(${c.account_id})">Open</button>` : ''}
           <button class="cn-chip" onclick="callbackDone(${c.call_id}, this)">Called back</button>
         </div>
-      </div>`).join('');
+      </div>`;
+    box.innerHTML = r.calls.map(cbRow).join('')
+      + (mgr.length ? `<div style="font-size:11.5px;font-weight:650;color:var(--text3);text-transform:uppercase;
+            letter-spacing:.05em;margin:14px 0 4px;">Manager line · ${mgr.length} — only managers see these</div>`
+          + mgr.map(cbRow).join('') : '');
   }catch(e){ /* the rest of the page matters more */ }
+}
+
+/* Which business lines' missed calls go on the call-back list. The phone
+   system answers for several businesses; a manager ticks the ones that are
+   ours. The Manager line is always separate and only for managers. */
+let cbLines = null;
+function cbLinesOpen(){
+  if(!cbLines){ showToast('Still loading — try again in a moment', true); return; }
+  document.getElementById('ac-out-modal')?.remove();
+  const m = document.createElement('div');
+  m.id = 'ac-out-modal'; m.className = 'ac-out-bg';
+  m.onclick = e => { if(e.target === m) m.remove(); };
+  const list = cbLines.filter(l => !l.manager_line)
+    .sort((a,b) => (b.counted - a.counted) || (b.waiting - a.waiting) || a.name.localeCompare(b.name));
+  const mgrLine = cbLines.filter(l => l.manager_line);
+  m.innerHTML = `<div class="ac-out-box" role="dialog" aria-label="Which lines count" style="max-width:560px;">
+      <div style="font-size:16px;font-weight:650;">Which lines go on the call-back list?</div>
+      <div style="font-size:12.5px;color:var(--text3);margin:6px 0 10px;line-height:1.45;">
+        The phone system answers for every business below. Tick the ones that are ours — their missed callers
+        go on the list for everyone. The number on the right is how many callers are waiting on that line now.
+        ${mgrLine.length ? '<br>The Manager line is always separate and only managers see it.' : ''}</div>
+      <div style="max-height:52vh;overflow:auto;border:1px solid var(--border);border-radius:10px;">
+        ${list.map(l => `<label style="display:flex;gap:10px;align-items:flex-start;padding:9px 12px;border-bottom:1px solid var(--border);cursor:pointer;${l.disabled?'opacity:.6;':''}">
+          <input type="checkbox" class="cbl" value="${l.id}" ${l.counted?'checked':''} style="margin-top:3px;">
+          <span style="flex:1;min-width:0;">
+            <b>${esc(l.name)}</b>${l.disabled?' <span style="color:var(--text3);font-size:11px;">(disabled)</span>':''}
+            ${l.caller_id_name && l.caller_id_name.toLowerCase() !== l.name.toLowerCase() ? `<span style="color:var(--text3);font-size:11.5px;"> · shows as "${esc(l.caller_id_name)}"</span>` : ''}
+            <div style="font-size:11px;color:var(--text3);word-break:break-all;">${esc((l.numbers||[]).join(', ')) || 'no numbers'}</div>
+          </span>
+          <span style="font-variant-numeric:tabular-nums;font-weight:650;${l.waiting?'color:var(--red);':'color:var(--text3);'}">${l.waiting}</span>
+        </label>`).join('')}
+      </div>
+      <div id="cbl-err" style="color:var(--red);font-size:12px;min-height:16px;margin-top:6px;"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:4px;flex-wrap:wrap;">
+        <button class="btn btn-secondary" style="margin-right:auto;" onclick="cbLinesSave(true)">Back to ProClick only</button>
+        <button class="btn btn-secondary" onclick="document.getElementById('ac-out-modal').remove()">Cancel</button>
+        <button class="btn btn-primary" onclick="cbLinesSave(false)">Save</button>
+      </div></div>`;
+  document.body.appendChild(m);
+}
+async function cbLinesSave(reset){
+  const ids = [...document.querySelectorAll('.cbl:checked')].map(x => +x.value);
+  if(!reset && !ids.length){ document.getElementById('cbl-err').textContent = 'Tick at least one line.'; return; }
+  try{
+    const r = await API.post('/api/callbacks/lines', reset ? {reset: true} : {ids});
+    if(r.error || r.ok === false){ document.getElementById('cbl-err').textContent = r.error || 'Could not save.'; return; }
+    document.getElementById('ac-out-modal')?.remove();
+    showToast(r.meaning || 'Saved');
+    loadCallbacks(); loadWaiting();
+  }catch(e){ document.getElementById('cbl-err').textContent = e.message; }
 }
 
 async function callbackDone(callId, btn){
@@ -9863,10 +9923,12 @@ async function loadWaiting(){
       const m = await API.get('/api/callbacks?hours=48');
       const strip = document.getElementById('lv-missed-strip');
       if(strip && !m.error){
-        strip.innerHTML = m.count
+        const mc = m.manager_count || 0;
+        strip.innerHTML = (m.count
           ? `<div class="big" style="font-size:22px;color:var(--red);">${m.count}</div>
              <div class="lab">to call back</div>`
-          : `<div class="lab" style="color:var(--green);">nobody waiting for a call back</div>`;
+          : `<div class="lab" style="color:var(--green);">nobody waiting for a call back</div>`)
+          + (mc ? `<div class="lab" style="margin-top:2px;">+${mc} on the Manager line</div>` : '');
       }
     }catch(e){}
   }catch(e){ /* the floor board matters more than this strip */ }

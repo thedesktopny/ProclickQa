@@ -9169,10 +9169,71 @@ def callbacks_route():
         hours = min(168, max(1, int(request.args.get('hours') or 48)))
     except Exception:
         hours = 48
+    p = _portal_user(request.headers.get('X-Portal-Ticket', ''))
+    # Everyone sees ProClick's lines only. The Manager line's calls go to
+    # managers and admins, and to anyone the CMS has enrolled on that line.
+    scope = 'manager' if (not p or p.get('m') or p.get('a')) else 'proclick'
+    if scope == 'proclick' and p and p.get('e'):
+        try:
+            if any('manager' in n.lower() for n in cms_db.employee_company_names(p.get('e'))):
+                scope = 'manager'
+        except Exception:
+            pass
+    ours = _callback_lines()
     try:
-        return jsonify(cms_db.callback_list(hours=hours))
+        out = _shared('callbacks:%s:%s' % (hours, scope), 15,
+                      lambda: cms_db.callback_list(hours=hours, scope=scope, ours=ours))
+        if p and not (p.get('m') or p.get('a')):
+            out.pop('lines', None)       # the line list is for managers and admins
+        return jsonify(out)
     except Exception as e:
         return jsonify({'error': str(e)[:200], 'calls': [], 'count': 0}), 400
+
+
+def _callback_lines():
+    """The business lines whose missed calls go on the call-back list, as a
+    manager chose them — or None for the default (ProClick's own lines)."""
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute("SELECT value FROM app_settings WHERE key = 'callback_lines'")
+        r = c.fetchone(); conn.close()
+        if r and r[0]:
+            v = json.loads(r[0])
+            if isinstance(v, list):
+                return [int(x) for x in v]
+    except Exception:
+        pass
+    return None
+
+
+@app.route('/api/callbacks/lines', methods=['POST'])
+@portal_manager_only
+def callback_lines_save():
+    """Which business lines count as ours on the call-back list."""
+    d = request.json or {}
+    try:
+        ids = sorted({int(x) for x in (d.get('ids') or [])})
+    except Exception:
+        return jsonify({'ok': False, 'error': 'Bad list.'}), 400
+    conn = get_db(); c = conn.cursor()
+    if d.get('reset'):
+        c.execute("DELETE FROM app_settings WHERE key = 'callback_lines'")
+    else:
+        c.execute('''INSERT INTO app_settings (key, value, updated_at)
+                     VALUES ('callback_lines', %s, CURRENT_TIMESTAMP)
+                     ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=CURRENT_TIMESTAMP''',
+                  (json.dumps(ids),))
+    conn.commit(); conn.close()
+    _shared_bust()
+    try:
+        import cms_write
+        cms_write._log(_who(), {'table': 'app_settings', 'action': 'callback_lines',
+                                'values': {'ids': ids, 'reset': bool(d.get('reset'))},
+                                'committed': True})
+    except Exception:
+        pass
+    return jsonify({'ok': True, 'meaning': 'Saved — the call-back list now counts %s.'
+                    % ('ProClick\'s own lines' if d.get('reset') else '%d line(s)' % len(ids))})
 
 
 @app.route('/api/callbacks/<int:call_id>/done', methods=['POST'])
@@ -9182,6 +9243,7 @@ def callback_done(call_id):
     MarkCallResolved does, so both systems agree on what is outstanding."""
     import cms_write
     who = _who()
+    _shared_bust()
     try:
         out = cms_write.update('PhoneCallsLog', call_id,
                                {'Resolved': True,
@@ -9192,6 +9254,7 @@ def callback_done(call_id):
     except Exception as e:
         return jsonify({'ok': False, 'error': 'Could not mark it done.',
                         'raw_error': str(e)[:300]}), 400
+    _shared_bust()
     return jsonify(out), (200 if out.get('ok') else 400)
 
 
