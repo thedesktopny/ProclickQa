@@ -1947,7 +1947,7 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
     <div class="page-title">💬 SMS Numbers</div>
     <div class="topbar-right">
       <input id="sn-search" class="cms-in" style="width:200px;"
-             placeholder="number or customer…" oninput="snRender()">
+             placeholder="number or customer…" oninput="snRender(); snSearchLookup()">
       <span id="sn-count" style="font-size:11.5px;color:var(--text3);"></span>
       <button class="btn btn-outline" onclick="loadSmsNumbers()">Refresh</button>
     </div>
@@ -7036,12 +7036,28 @@ async function snWebhook(key, webhook){
   }catch(e){ snSay(key, 'Failed: ' + e.message, 'var(--red)'); }
 }
 
+/* Typing a whole number in the search box at the top opens it in "Manage
+   one number" right there — with the test button — so nobody has to scroll
+   down the long list to find it. */
+let snSearchTimer = null;
+function snSearchLookup(){
+  clearTimeout(snSearchTimer);
+  const d = (document.getElementById('sn-search').value || '').replace(/\D/g, '');
+  if(d.length < 10) return;
+  snSearchTimer = setTimeout(() => {
+    document.getElementById('nm-number').value = d.slice(-10);
+    nmLookup(d.slice(-10));
+    window.scrollTo({top: 0, behavior: 'smooth'});
+  }, 400);
+}
+
 async function snTest(key){
-  const to = prompt('Send a test message from ' + key + ' to which number?');
+  const to = prompt('Send a test message from ' + key + ' to which number?', '3476752334');
   if(!to) return;
   snSay(key, 'Sending…');
   try{
-    const r = await API.post('/api/sms-numbers/' + key + '/test', {to});
+    // a test changes nothing about the number's campaign
+    const r = await API.post('/api/sms-numbers/' + key + '/test', {to, leave_campaign: true});
     snSay(key, (r.ok ? '✅ ' : '❌ ') + (r.meaning || '')
           + (r.answer ? '\n' + JSON.stringify(r.answer) : ''),
           r.ok ? 'var(--green)' : 'var(--red)');
