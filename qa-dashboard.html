@@ -6858,10 +6858,29 @@ function nmRender(msg, ok){
       ${row('Campaigns now', camps)}
       ${(r.warnings||[]).map(w=>`<div style="color:var(--yellow);margin-top:6px;">⚠️ ${esc(w)}</div>`).join('')}
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:12px;">${acts.join('')}
+        ${r.at_bulkvs ? `<button class="cn-chip" onclick="nmTestText()">📱 Text a test to 347-675-2334</button>` : ''}
         <button class="cn-chip" onclick="nmLookup('${r.number}')">Refresh</button></div>
       ${msg ? `<div style="margin-top:10px;color:${ok?'var(--green)':'var(--red)'};">${esc(msg)}</div>` : ''}
     </div>`;
 }
+/* Sends one real text from this number to David's phone, exactly as the
+   number is set up now — nothing about its campaign is changed. */
+async function nmTestText(){
+  const r = nmInfo; if(!r) return;
+  if(!confirm('Send a test text from ' + r.number + ' to 347-675-2334?'
+      + (r.campaign ? '' : '\n\nThis number is NOT on a campaign, so carriers will probably block it.'))) return;
+  nmRender('Sending…', true);
+  try{
+    const res = await API.post('/api/sms-numbers/' + r.number + '/test', {leave_campaign: true});
+    if(res.ok){
+      nmRender('✅ BulkVS accepted it (' + (res.campaign || 'campaign unknown') + '). Check your phone — '
+        + 'if nothing arrives within a couple of minutes, the carrier blocked it after BulkVS took it.', true);
+    } else {
+      nmRender('❌ ' + (res.error || res.meaning || 'Not sent.') + (res.campaign ? ' — ' + res.campaign : ''), false);
+    }
+  }catch(e){ nmRender('❌ ' + e.message, false); }
+}
+
 async function nmAct(action){
   const r = nmInfo; if(!r) return;
   const others = (r.campaigns||[]).filter(c => c.tcr !== r.campaign);

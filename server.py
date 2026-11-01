@@ -8209,25 +8209,36 @@ def sms_number_webhook(number):
 def sms_number_test(number):
     """Send a real message from this number, to prove it works end to end."""
     d = request.json or {}
-    to = ''.join(ch for ch in (d.get('to') or '') if ch.isdigit())
+    # David's own phone unless another number is given
+    to = ''.join(ch for ch in (d.get('to') or os.getenv('SMS_TEST_TO', '3476752334')) if ch.isdigit())
     if len(to) < 10:
         return jsonify({'ok': False, 'error': 'Give a number to send the test to.'}), 400
-    text = (d.get('message') or 'ProClick test message — please ignore.')[:300]
     frm = ''.join(ch for ch in number if ch.isdigit())[-10:]
+    text = (d.get('message') or ('ProClick test from %s-%s-%s — if you got this, the number can send.'
+                                 % (frm[:3], frm[3:6], frm[6:])))[:300]
 
     auth = os.getenv('BULKVS_AUTH', '').strip()
     if not auth:
         return jsonify({'ok': False, 'error': 'BULKVS_AUTH is not set'}), 400
-    # the same campaign step a real send takes, so a test proves the real path
     import cms_write
     campaign = None
-    try:
-        plan = cms_write.campaign_plan(frm)
-        if plan['step'] in ('join', 'swap'):
-            cms_write.apply_campaign_plan(frm, plan)
-        campaign = plan.get('meaning')
-    except Exception as e:
-        campaign = 'Campaign step failed: ' + str(e)[:160]
+    if d.get('leave_campaign'):
+        # a plain test: send as the number is now and change nothing about it
+        try:
+            rec = cms_write.bv_record(frm)
+            campaign = ('on %s' % cms_write._rec_tcr(rec)) if rec and cms_write._rec_tcr(rec) else \
+                       'NOT on a campaign — carriers usually block texts from a number with no campaign'
+        except Exception:
+            campaign = None
+    else:
+        # the same campaign step a real send takes, so a test proves the real path
+        try:
+            plan = cms_write.campaign_plan(frm)
+            if plan['step'] in ('join', 'swap'):
+                cms_write.apply_campaign_plan(frm, plan)
+            campaign = plan.get('meaning')
+        except Exception as e:
+            campaign = 'Campaign step failed: ' + str(e)[:160]
     try:
         answer = cms_write._send_via_bulkvs({'From': frm, 'To': [to[-10:]], 'Message': text})
     except Exception as e:
@@ -8238,7 +8249,8 @@ def sms_number_test(number):
     ok = any(str(x.get('Status', '')).upper() in ('SUCCESS', 'OK', 'QUEUED', 'ACCEPTED')
              for x in results if isinstance(x, dict)) or bool(
                  (answer or {}).get('RefId') or (answer or {}).get('RefID'))
-    return jsonify({'ok': ok, 'answer': answer, 'campaign': campaign,
+    _log_admin_action('sms_test', {'from': frm, 'to': to[-10:], 'accepted': ok})
+    return jsonify({'ok': ok, 'answer': answer, 'campaign': campaign, 'to': to[-10:],
                     'meaning': (('Sent from %s to %s.' % (frm, to[-10:])) if ok
                                 else 'The texting service did not accept it.')
                                + ('\n   campaign: ' + campaign if campaign else '')})
