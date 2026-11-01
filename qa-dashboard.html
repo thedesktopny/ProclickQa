@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script>try{if(localStorage.getItem('vg_theme')==='light')document.documentElement.setAttribute('data-theme','light');}catch(e){}</script>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <!-- Cardknox's hosted card fields are loaded only when a card is actually
      being added, and only if the key for them is set. Loading them on every
@@ -24,6 +25,21 @@
      interface looked washed out; these are 17.5, 9.7 and 5.3. */
   --text:#F2F4FF;--text2:#AEB6E4;--text3:#7A84B8;
 }
+:root{color-scheme:dark;}
+/* Light screen — chosen per person with the ☀️ button, remembered in this
+   browser. Same layout, only the colours change. Status colours are darker
+   than the dark-screen ones so they stay readable on white. */
+html[data-theme="light"]{
+  color-scheme:light;
+  --bg:#F3F5FA;--surface:#FFFFFF;--surface2:#EDF0F7;--border:#D6DCEA;
+  --accent:#3555D6;--accent2:#6D28D9;--green:#0A8558;--yellow:#A86200;
+  --red:#D02F2F;--purple:#6D3FE0;--cyan:#0E7490;
+  --text:#121833;--text2:#39436B;--text3:#5A6389;
+}
+html[data-theme="light"] .nav-item.active{background:rgba(53,85,214,.10);}
+html[data-theme="light"] .avatar, html[data-theme="light"] .logo-icon{color:#fff;}
+html[data-theme="light"] .modal, html[data-theme="light"] .ac-out-bg{background:rgba(20,26,51,.35);}
+html[data-theme="light"] ::-webkit-scrollbar-thumb{background:#C5CCDD;}
 body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);display:flex;min-height:100vh;font-size:13px;}
 /* SIDEBAR */
 .sidebar{width:220px;background:var(--surface);border-right:1px solid var(--border);display:flex;flex-direction:column;padding:24px 0;position:fixed;height:100vh;z-index:100;overflow:hidden;}
@@ -1216,7 +1232,8 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
       <div class="user-name" id="sidebar-name">David</div>
       <div class="user-role" id="sidebar-role">Admin</div>
     </div>
-    <button onclick="doLogout()" style="margin-left:auto;background:none;border:none;color:var(--text3);cursor:pointer;font-size:16px;" title="Logout">⏻</button>
+    <button id="theme-btn" onclick="toggleTheme()" style="margin-left:auto;background:none;border:none;color:var(--text3);cursor:pointer;font-size:16px;" title="Light / dark screen">☀️</button>
+    <button onclick="doLogout()" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:16px;" title="Logout">⏻</button>
   </div>
 </aside>
 
@@ -2197,6 +2214,27 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
     </div>
   </div>
   <div style="padding:18px 28px 44px;"><div id="al-body"></div></div>
+</div>
+
+<div class="page" id="page-clocker">
+  <div class="topbar">
+    <button class="navtoggle" onclick="toggleNav()" aria-label="Menu">☰</button>
+    <div class="page-title">🕘 Employee Clocker</div>
+    <div class="topbar-right" style="flex-wrap:wrap;gap:8px;">
+      <select id="ck-agent" class="cms-in" onchange="ckLoad()" style="max-width:200px;"><option value="">Everyone</option></select>
+      <input type="date" id="ck-from" class="cms-in" onchange="ckLoad()">
+      <span style="color:var(--text3);font-size:12px;">to</span>
+      <input type="date" id="ck-to" class="cms-in" onchange="ckLoad()">
+      <button class="cn-chip" onclick="ckQuick(0)">Today</button>
+      <button class="cn-chip" onclick="ckQuick(1)">Yesterday</button>
+      <button class="cn-chip" onclick="ckQuick(7)">Last 7 days</button>
+      <button class="cn-chip" onclick="ckCsv()">⬇ CSV</button>
+    </div>
+  </div>
+  <div style="padding:18px 28px 44px;">
+    <div id="ck-now"></div>
+    <div id="ck-body" style="margin-top:16px;"></div>
+  </div>
 </div>
 
 <div class="modal" id="cms-agent-modal">
@@ -5727,6 +5765,8 @@ function alRender(){
     `${list.length} of ${alData.agents.length}`;
   const add = document.getElementById('al-add');
   if(add) add.style.display = portalIsManager ? '' : 'none';
+  const ttl = document.querySelector('#page-agent-list .page-title');
+  if(ttl) ttl.textContent = portalIsManager ? '📇 Employees' : '📇 Agents';
   // The name on the phone is often not the person's own name, which is the
   // whole reason this list is looked at — so it sits right beside it.
   const differs = a => a.phone_name && a.phone_name.trim().toLowerCase() !== (a.first||'').trim().toLowerCase()
@@ -5750,7 +5790,7 @@ function alRender(){
   }
   document.getElementById('al-body').innerHTML = list.length ? `
     <div class="card" style="padding:0;"><div class="table-wrap"><table class="data-table al-table">
-      <thead><tr><th>Agent</th><th>Phone name</th><th class="n">Ext</th><th>Role</th><th>Team leader</th>${portalIsManager?'<th></th>':''}</tr></thead>
+      <thead><tr><th>Agent</th><th>Phone name</th><th class="n">Ext</th><th>Role</th><th>Team leader</th><th>Status</th>${portalIsManager?'<th></th>':''}</tr></thead>
       <tbody>${list.map(a=>`<tr style="cursor:pointer;${a.left_firm?'opacity:.55;':''}" onclick="portalOpenAgent(${a.id})">
         <td><b>${esc(a.name)}</b></td>
         <td>${a.phone_name ? `<span style="${differs(a)?'color:var(--accent);font-weight:600;':''}">${esc(a.phone_name)}</span>`
@@ -5758,11 +5798,221 @@ function alRender(){
         <td class="n" style="font-variant-numeric:tabular-nums;">${esc(a.extension)||'—'}</td>
         <td style="font-size:12px;color:var(--text3);">${a.left_firm?'former':((a.roles||[]).join(', ') || (a.qa?'QA':'agent'))}</td>
         <td style="font-size:12px;">${esc(alLeaderName(a.id) || '')}</td>
-        ${portalIsManager ? `<td style="text-align:right;"><button class="cn-chip"
-            onclick="event.stopPropagation();cmsEditAgent(${a.id})">Edit</button></td>` : ''}
+        <td style="font-size:12px;white-space:nowrap;">${a.left_firm ? '<span style="color:var(--red)">Disabled</span>'
+              : a.locked ? '<span style="color:var(--yellow)">Locked</span>'
+              : '<span style="color:var(--green)">Active</span>'}</td>
+        ${portalIsManager ? `<td style="text-align:right;white-space:nowrap;">
+          ${a.left_firm ? '' : `<button class="cn-chip" onclick="event.stopPropagation();cmsEditAgent(${a.id})">Edit</button>`}
+          ${a.locked && !a.left_firm ? `<button class="cn-chip" onclick="event.stopPropagation();alUnlock(${a.id})">Unlock</button>` : ''}
+          ${a.left_firm
+            ? `<button class="cn-chip" onclick="event.stopPropagation();alEnable(${a.id})">Enable</button>`
+            : `<button class="cn-chip" style="color:var(--red)" onclick="event.stopPropagation();alDisableAsk(${a.id})">Disable</button>`}
+          </td>` : ''}
       </tr>`).join('')}</tbody></table></div></div>
-    <div style="font-size:11.5px;color:var(--text3);margin-top:8px;">Phone names in blue are different from the person's own name.</div>`
+    <div style="font-size:11.5px;color:var(--text3);margin-top:8px;">Phone names in blue are different from the person's own name.
+      Disabled people are hidden — tick “include former staff” to see them and enable someone again.</div>`
     : '<div style="color:var(--text3);font-size:13px;">Nobody matches that.</div>';
+}
+
+/* ── Disable / enable an agent ─────────────────────────────────────────────
+   What the old CMS does when someone leaves: they are marked as left and their
+   sign-in is locked. Here it also ends their shift if they are on the clock,
+   signs them out of any open session, and takes them off the schedule. */
+function alFind(id){ return ((alData && alData.agents) || []).find(x => x.id === id) || {}; }
+function alDisableAsk(id){
+  const a = alFind(id), name = esc(a.name || 'this person');
+  document.getElementById('ac-out-modal')?.remove();
+  const m = document.createElement('div');
+  m.id = 'ac-out-modal'; m.className = 'ac-out-bg';
+  m.onclick = e => { if(e.target === m) m.remove(); };
+  m.innerHTML = `<div class="ac-out-box" role="dialog" aria-label="Disable agent">
+      <div style="font-size:16px;font-weight:650;">Disable ${name}?</div>
+      <div style="font-size:12.5px;color:var(--text3);margin:6px 0 12px;line-height:1.5;">
+        They will not be able to sign in to the old CMS or this one. If they are on the clock, their shift ends now,
+        and they come off the schedule from today. Their calls, notes and pay history stay.
+        You can enable them again later.</div>
+      <textarea id="al-dis-reason" rows="2" maxlength="200" placeholder="Why? (e.g. resigned, let go) — optional"></textarea>
+      <div id="al-dis-err" style="color:var(--red);font-size:12px;min-height:16px;margin-top:6px;"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:4px;">
+        <button class="btn btn-secondary" onclick="document.getElementById('ac-out-modal').remove()">Cancel</button>
+        <button class="btn btn-primary" id="al-dis-go" style="background:var(--red);border-color:var(--red);"
+          onclick="alDisableDo(${id})">Disable</button>
+      </div></div>`;
+  document.body.appendChild(m);
+  document.getElementById('al-dis-reason').focus();
+}
+async function alDisableDo(id){
+  const btn = document.getElementById('al-dis-go'), err = document.getElementById('al-dis-err');
+  btn.disabled = true; btn.textContent = 'Disabling…'; err.textContent = '';
+  try{
+    const r = await API.post('/api/agents/' + id + '/disable',
+      {reason: (document.getElementById('al-dis-reason').value || '').trim()});
+    if(r.error || r.ok === false){
+      err.textContent = r.error || 'Could not disable them.';
+      btn.disabled = false; btn.textContent = 'Disable'; return;
+    }
+    document.getElementById('ac-out-modal')?.remove();
+    showToast(r.meaning || 'Disabled');
+    loadAgentList();
+  }catch(e){ err.textContent = e.message; btn.disabled = false; btn.textContent = 'Disable'; }
+}
+async function alEnable(id){
+  const a = alFind(id);
+  if(!confirm('Enable ' + (a.name || 'this person') + ' again? They will be able to sign in.')) return;
+  try{
+    const r = await API.post('/api/agents/' + id + '/enable', {});
+    if(r.error || r.ok === false){ showToast(r.error || 'Could not enable them.', true); return; }
+    showToast(r.meaning || 'Enabled');
+    loadAgentList();
+  }catch(e){ showToast(e.message, true); }
+}
+async function alUnlock(id){
+  const a = alFind(id);
+  if(!confirm('Unlock ' + (a.name || 'this person') + '? They will be able to sign in again.')) return;
+  try{
+    const r = await API.post('/api/employees/' + id + '/unlock', {});
+    if(r.error || r.ok === false){ showToast(r.error || 'Could not unlock.', true); return; }
+    showToast(r.meaning || 'Unlocked');
+    loadAgentList();
+  }catch(e){ showToast(e.message, true); }
+}
+
+/* ── Employee Clocker ──────────────────────────────────────────────────────
+   The old CMS's admin page: every clock-in, break and clock-out, newest first.
+   Times are New York time, as the CMS stores them. */
+let ckData = null;
+function ckNyDate(daysBack){
+  const d = new Date(Date.now() - (daysBack||0) * 864e5);
+  return d.toLocaleDateString('en-CA', {timeZone: 'America/New_York'});
+}
+function ckWhen(s){
+  // a New York wall-clock time from the CMS: show it as is, never converted
+  const m = String(s||'').match(/^(\d{4})-(\d\d)-(\d\d)[T ](\d\d):(\d\d)/);
+  if(!m) return s || '';
+  let h = +m[4]; const ap = h >= 12 ? 'PM' : 'AM'; h = h % 12 || 12;
+  return `${h}:${m[5]} ${ap}`;
+}
+function ckDay(s){
+  const m = String(s||'').match(/^(\d{4})-(\d\d)-(\d\d)/);
+  if(!m) return '';
+  const d = new Date(+m[1], +m[2]-1, +m[3]);
+  return d.toLocaleDateString(undefined, {weekday:'long', month:'short', day:'numeric', year:'numeric'});
+}
+function ckDur(sec){
+  if(sec == null) return '';
+  sec = Math.max(0, Math.round(sec));
+  const h = Math.floor(sec/3600), m = Math.floor(sec%3600/60), s2 = sec % 60;
+  return h ? `${h}h ${String(m).padStart(2,'0')}m` : `${m}m ${String(s2).padStart(2,'0')}s`;
+}
+async function ckOpen(){
+  if(!document.getElementById('ck-from').value){
+    document.getElementById('ck-from').value = ckNyDate(0);
+    document.getElementById('ck-to').value = ckNyDate(0);
+  }
+  const sel = document.getElementById('ck-agent');
+  if(sel.options.length <= 1){
+    try{
+      const r = await API.get('/api/agent-list?include_left=1');
+      sel.innerHTML = '<option value="">Everyone</option>' + (r.agents||[])
+        .sort((a,b) => a.left_firm - b.left_firm || a.name.localeCompare(b.name))
+        .map(a => `<option value="${a.id}">${esc(a.name)}${a.extension?' · '+esc(a.extension):''}${a.left_firm?' (disabled)':''}</option>`).join('');
+    }catch(e){}
+  }
+  ckLoad();
+}
+function ckQuick(days){
+  document.getElementById('ck-from').value = ckNyDate(days === 1 ? 1 : days ? days - 1 : 0);
+  document.getElementById('ck-to').value = ckNyDate(days === 1 ? 1 : 0);
+  ckLoad();
+}
+async function ckLoad(){
+  const body = document.getElementById('ck-body'), now = document.getElementById('ck-now');
+  const f = document.getElementById('ck-from').value, t = document.getElementById('ck-to').value || f;
+  const who = document.getElementById('ck-agent').value;
+  body.innerHTML = '<div style="color:var(--text3);font-size:13px;">Loading…</div>';
+  try{
+    const r = await API.get(`/api/clocker?from=${f}&to=${t}` + (who ? '&employee_id=' + who : ''));
+    if(r.error){ body.innerHTML = `<div style="color:var(--red)">${esc(r.error)}</div>`; return; }
+    ckData = r; ckRender();
+  }catch(e){ body.innerHTML = `<div style="color:var(--red)">${esc(e.message)}</div>`; now.innerHTML = ''; }
+}
+function ckLabel(e){
+  if(e.kind === 'in')    return '<span style="color:var(--green);font-weight:600;">● Clocked in</span>';
+  if(e.kind === 'back')  return '<span style="color:var(--green);">↩ Back from break</span>';
+  if(e.kind === 'break') return '<span style="color:var(--yellow);font-weight:600;">☕ Break</span>';
+  if(e.kind === 'out')   return '<span style="color:var(--red);font-weight:600;">■ Clocked out</span>';
+  return esc(String(e.status));
+}
+function ckDetail(e){
+  const bits = [];
+  if(e.kind === 'break'){
+    if(e.break_minutes) bits.push(e.break_minutes + 'm planned');
+    if(e.break_reason) bits.push(esc(e.break_reason));
+    if(e.lasted_seconds != null){
+      const over = e.break_minutes && e.lasted_seconds > e.break_minutes * 60 + 59;
+      bits.push(`<span style="${over?'color:var(--red);font-weight:600;':''}">took ${ckDur(e.lasted_seconds)}${over?' — over':''}</span>`);
+    } else bits.push('<span style="color:var(--yellow)">still on break</span>');
+  }
+  if(e.kind === 'out' && e.ended_by)
+    bits.push(`<span style="color:var(--yellow)">logged out by ${esc(e.ended_by)}${e.ended_reason?': '+esc(e.ended_reason):''}</span>`);
+  return bits.join(' · ');
+}
+function ckRender(){
+  const r = ckData; if(!r) return;
+  const who = document.getElementById('ck-agent').value;
+  const on = (r.on_now||[]).filter(p => !who || String(p.employee_id) === who);
+  document.getElementById('ck-now').innerHTML = `
+    <div style="font-size:12px;font-weight:650;color:var(--text3);text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px;">
+      On the clock now · ${on.length}</div>
+    ${on.length ? `<div style="display:flex;flex-wrap:wrap;gap:8px;">${on.map(p => `
+      <div class="card" style="padding:10px 12px;display:flex;align-items:center;gap:10px;min-width:220px;">
+        <div style="flex:1;">
+          <div style="font-size:13px;font-weight:600;">${esc(p.name)} <span style="color:var(--text3);font-weight:400;">${esc(p.extension)}</span></div>
+          <div style="font-size:11.5px;color:${p.status==='break'?'var(--yellow)':'var(--green)'};">
+            ${p.status==='break' ? '☕ on break' : '● working'} since ${ckWhen(p.since)} · ${ckDur(p.seconds)}</div>
+        </div>
+        <button class="cn-chip" style="color:var(--red)"
+          onclick="acLogOutAsk(${p.employee_id}, ${esc(JSON.stringify(esc(p.name)))}, false)">Log out</button>
+      </div>`).join('')}</div>` : '<div style="color:var(--text3);font-size:13px;">Nobody is clocked in.</div>'}`;
+  const ev = r.events || [];
+  if(!ev.length){
+    document.getElementById('ck-body').innerHTML = '<div style="color:var(--text3);font-size:13px;">No clock activity in these dates.</div>';
+    return;
+  }
+  let html = '', day = '';
+  for(const e of ev){
+    const d = String(e.at).slice(0,10);
+    if(d !== day){
+      day = d;
+      html += `<tr><td colspan="4" style="background:var(--surface2);font-size:12px;font-weight:650;padding:7px 12px;">${ckDay(e.at)}</td></tr>`;
+    }
+    html += `<tr>
+      <td style="white-space:nowrap;font-variant-numeric:tabular-nums;">${ckWhen(e.at)}</td>
+      <td><b>${esc(e.name)}</b> <span style="color:var(--text3);font-size:12px;">${esc(e.extension)}</span></td>
+      <td style="white-space:nowrap;">${ckLabel(e)}</td>
+      <td style="font-size:12px;color:var(--text2);">${ckDetail(e)}</td></tr>`;
+  }
+  document.getElementById('ck-body').innerHTML = `
+    <div style="font-size:12px;font-weight:650;color:var(--text3);text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px;">
+      Clock history · ${ev.length}${r.truncated?' (first 3,000 — narrow the dates)':''} · New York time</div>
+    <div class="card" style="padding:0;"><div class="table-wrap"><table class="data-table">
+      <thead><tr><th>Time</th><th>Who</th><th>What</th><th>Details</th></tr></thead>
+      <tbody>${html}</tbody></table></div></div>`;
+}
+function ckCsv(){
+  if(!ckData || !(ckData.events||[]).length){ showToast('Nothing to download', true); return; }
+  const q = v => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
+  const name = {in:'Clocked in', back:'Back from break', break:'Break', out:'Clocked out'};
+  const rows = [['Time (New York)','Agent','Extension','What','Break minutes planned','Break reason','Break took (minutes)','Logged out by','Reason']]
+    .concat(ckData.events.slice().reverse().map(e => [String(e.at).slice(0,19).replace('T',' '), e.name, e.extension,
+      name[e.kind] || e.status, e.kind==='break' ? (e.break_minutes||'') : '', e.kind==='break' ? (e.break_reason||'') : '',
+      e.kind==='break' && e.lasted_seconds != null ? (e.lasted_seconds/60).toFixed(1) : '',
+      e.ended_by || '', e.ended_reason || '']));
+  const blob = new Blob([rows.map(r => r.map(q).join(',')).join('\n')], {type:'text/csv'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `clocker_${ckData.from}_to_${ckData.to}.csv`;
+  a.click();
 }
 
 function portalOpenAgent(id){
@@ -5856,6 +6106,7 @@ function portalApply(name, isManager){
     'time-report':  ['⏰', 'Timesheet'],
     'payroll':      ['💵', 'Payroll'],
     'agent-list':   ['📇', 'Agents'],
+    'clocker':      ['🕘', 'Employee Clocker'],
     'packages':     ['📦', 'Packages'],
     'company-info': ['🔑', 'Info & Logins'],
     'payments':     ['💳', 'Payments'],
@@ -5875,13 +6126,16 @@ function portalApply(name, isManager){
 
      Order within a section is deliberate, not alphabetical: the page you open
      most sits at the top. */
+  // Managers and admins find the people side where the old CMS kept it —
+  // under Admin: the agent list (add, edit, disable) and the Employee Clocker.
+  if(isManager) PAGES['agent-list'] = ['📇', 'Employees'];
   const SECTIONS = [
     ['Today',    ['live', 'agent-calls', 'missed', 'staffing']],
-    ['Work',     ['customers', 'agent-list', 'packages', 'company-info',
+    ['Work',     ['customers', ...(isManager ? [] : ['agent-list']), 'packages', 'company-info',
                   'skin-block']],
     ['Pay',      ['time-report', 'payroll', 'payments']],
     ['Quality',  ['calls', 'human-review', 'call-notes', 'notes', 'analytics']],
-    ['Settings', ['cms-settings', 'teams', 'qa-assign', 'sms-numbers']],
+    ['Admin',    [...(isManager ? ['agent-list'] : []), 'clocker', 'teams', 'cms-settings', 'qa-assign', 'sms-numbers']],
   ];
   const item = (p, active) =>
     `<div class="nav-item${active?' active':''}" data-page="${p}" onclick="showPage('${p}')">`
@@ -5907,9 +6161,11 @@ function portalApply(name, isManager){
             + rest.map(p => item(p, false)).join('') + '</div>';
     }
     html += '<div class="nav-section"><div class="nav-label">Account</div>'
+          + '<div class="nav-item" id="theme-nav" onclick="toggleTheme()"><span class="icon">☀️</span>Light screen</div>'
           + '<div class="nav-item" onclick="portalSignOut()"><span class="icon">↩︎</span>Sign out</div>'
           + '</div>';
     scroll.innerHTML = html;
+    themeLabels();
   }
   // banners about QA call processing mean nothing here
   ['processing-paused-banner','ot-active-banner','retry-log-panel'].forEach(id=>{
@@ -6969,6 +7225,7 @@ function showPage(id){
   if(id==='customers') cuLoadRecent();
   wbRefresh();
   if(id==='agent-list'){ loadTeamsQuietly().then(loadAgentList); }
+  if(id==='clocker') ckOpen();
   if(id==='packages') loadPackages();
   if(id==='company-info') loadCompanyInfo();
   if(id!=='live') clearInterval(lvTimer);
@@ -11849,6 +12106,7 @@ async function acLogOutDo(id){
     document.getElementById('ac-out-modal')?.remove();
     acLoggedOut[id] = Date.now();
     showToast((j.agent || 'Agent') + ' is logged out');
+    if(document.getElementById('page-clocker')?.classList.contains('active')) ckLoad();
     if(j.phone_warning) setTimeout(()=>showToast(j.phone_warning, true), 1500);
     acLoadLive();
   }catch(e){ err.textContent = e.message; btn.disabled = false; btn.textContent = 'Log out'; }
@@ -15434,6 +15692,23 @@ async function doLogin(){
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
 function set(id,val){const el=document.getElementById(id);if(el)el.textContent=val;}
+/* Light or dark screen, remembered in this browser for whoever uses it. */
+function themeIsLight(){ return document.documentElement.getAttribute('data-theme') === 'light'; }
+function themeLabels(){
+  const light = themeIsLight();
+  const b = document.getElementById('theme-btn');
+  if(b){ b.textContent = light ? '🌙' : '☀️'; b.title = light ? 'Switch to dark screen' : 'Switch to light screen'; }
+  const n = document.getElementById('theme-nav');
+  if(n) n.innerHTML = light ? '<span class="icon">🌙</span>Dark screen' : '<span class="icon">☀️</span>Light screen';
+}
+function toggleTheme(){
+  const light = !themeIsLight();
+  if(light) document.documentElement.setAttribute('data-theme', 'light');
+  else document.documentElement.removeAttribute('data-theme');
+  try{ localStorage.setItem('vg_theme', light ? 'light' : 'dark'); }catch(e){}
+  themeLabels();
+}
+document.addEventListener('DOMContentLoaded', themeLabels);
 function showModal(id){document.getElementById(id).style.display='flex';}
 function hideModal(id){document.getElementById(id).style.display='none';}
 
