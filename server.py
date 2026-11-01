@@ -71,6 +71,50 @@ def make_session_permanent():
         return '', 204
 
 
+# ─── Smaller downloads ───────────────────────────────────────────────────────
+# Pages and data went out uncompressed: the portal page alone is ~880 KB and a
+# long call list or customer record a few hundred more. Text squeezes to a
+# fifth of its size or less, which matters most to the agents connecting from
+# far away. Registered first so it runs last, after everything else has set
+# the reply. Files (recordings, images) are left alone.
+import gzip as _gzip
+_GZ_TYPES = ('application/json', 'application/javascript', 'image/svg+xml')
+_GZ_CACHE = {}
+
+
+@app.after_request
+def _compress(resp):
+    try:
+        if resp.direct_passthrough or resp.is_streamed or resp.status_code != 200:
+            return resp
+        if resp.headers.get('Content-Encoding'):
+            return resp
+        if 'gzip' not in (request.headers.get('Accept-Encoding') or '').lower():
+            return resp
+        mt = resp.mimetype or ''
+        if not (mt.startswith('text/') or mt in _GZ_TYPES):
+            return resp
+        data = resp.get_data()
+        if len(data) < 1400:
+            return resp
+        tag = resp.headers.get('ETag')
+        gz = _GZ_CACHE.get(tag) if tag else None
+        if gz is None:
+            gz = _gzip.compress(data, 6)
+            if tag:
+                if len(_GZ_CACHE) > 20:
+                    _GZ_CACHE.clear()
+                _GZ_CACHE[tag] = gz
+        resp.set_data(gz)
+        resp.headers['Content-Encoding'] = 'gzip'
+        resp.headers['Content-Length'] = str(len(gz))
+        vary = resp.headers.get('Vary')
+        resp.headers['Vary'] = (vary + ', Accept-Encoding') if vary else 'Accept-Encoding'
+    except Exception:
+        pass
+    return resp
+
+
 # ─── How long requests take, so "it's slow" can be pinned to something ───────
 import collections as _collections
 import re as _re_speed
@@ -93,6 +137,40 @@ def _time_request(resp):
     except Exception:
         pass
     return resp
+
+
+# ─── One answer shared by everyone looking at the same thing ────────────────
+# The Live page refreshes every 15 seconds for every person who has it open,
+# and it is the first page everyone lands on. Each refresh used to run the
+# whole floor read against the CMS on its own — thirty people meant thirty
+# copies of the same queries every 15 seconds, which slowed every page.
+# Now the answer is worked out once and handed to everyone who asks within a
+# few seconds; if it is being worked out right now, they wait for that one
+# rather than starting another. Clocking in, breaks and DND clear it at once.
+_SHARED = {}
+_SHARED_LOCKS = {}
+_SHARED_GUARD = threading.Lock()
+
+
+def _shared(key, ttl, fn):
+    import copy as _copy
+    hit = _SHARED.get(key)
+    if hit and time.time() - hit[0] < ttl:
+        return _copy.deepcopy(hit[1])
+    with _SHARED_GUARD:
+        lock = _SHARED_LOCKS.setdefault(key, threading.Lock())
+    with lock:
+        hit = _SHARED.get(key)            # someone may have just done it
+        if hit and time.time() - hit[0] < ttl:
+            return _copy.deepcopy(hit[1])
+        val = fn()
+        _SHARED[key] = (time.time(), val)
+        return _copy.deepcopy(val)
+
+
+def _shared_bust():
+    _SHARED.clear()
+
 CORS(app, resources={r"/api/*": {"origins": "*", "allow_headers": ["Content-Type", "Authorization", "X-Auth-Token"], "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"]}})
 
 ADMIN_USERNAME = os.getenv('ADMIN_USERNAME', 'david')
@@ -119,9 +197,109 @@ def is_processing_paused():
     conn.close()
     return row and row[0] == 'true'
 
+# ─── Reusing database connections ────────────────────────────────────────────
+# Every get_db() used to open a brand-new encrypted connection to Postgres and
+# throw it away a moment later — a handful of network round trips each time,
+# and a busy page does it several times. Now a closed connection goes back on
+# a shelf and the next request takes it. Before it goes back it is wiped:
+# anything unfinished is rolled back, any lock released, any setting reset, so
+# the next user gets it exactly as fresh as a new one. A connection that has
+# sat unused for a while is checked before being handed out, and a broken one
+# is thrown away and replaced. DB_REUSE=0 in the app settings turns it all off.
+_PG_IDLE = []
+_PG_GUARD = threading.RLock()   # re-entrant: a forgotten connection can be shelved by the garbage collector mid-shelve
+_PG_KEEP = 12
+
+
+def _pg_fresh():
+    return psycopg2.connect(DATABASE_URL, sslmode='require',
+                            keepalives=1, keepalives_idle=30,
+                            keepalives_interval=10, keepalives_count=3)
+
+
+class _PooledPg(object):
+    """Looks and behaves like a psycopg2 connection; close() shelves it."""
+    __slots__ = ('_c', '_done')
+
+    def __init__(self, c):
+        self._c = c
+        self._done = False
+
+    def __getattr__(self, name):
+        return getattr(self._c, name)
+
+    def __setattr__(self, name, value):
+        if name in ('_c', '_done'):
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._c, name, value)
+
+    def __enter__(self):
+        return self._c.__enter__()
+
+    def __exit__(self, *a):
+        return self._c.__exit__(*a)
+
+    def close(self):
+        if self._done:
+            return
+        self._done = True
+        c = self._c
+        try:
+            if c.closed:
+                return
+            c.rollback()
+            c.autocommit = True
+            cur = c.cursor()
+            cur.execute('DISCARD ALL')   # locks, settings, temp tables — all back to new
+            cur.close()
+            c.autocommit = False
+        except Exception:
+            try:
+                c.close()
+            except Exception:
+                pass
+            return
+        with _PG_GUARD:
+            if len(_PG_IDLE) < _PG_KEEP:
+                _PG_IDLE.append((c, time.time()))
+                return
+        try:
+            c.close()
+        except Exception:
+            pass
+
+    def __del__(self):
+        # a connection somebody forgot to close still comes back, cleaned
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
 def get_db():
-    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-    return conn
+    if os.getenv('DB_REUSE', '1') == '0':
+        return psycopg2.connect(DATABASE_URL, sslmode='require')
+    while True:
+        with _PG_GUARD:
+            item = _PG_IDLE.pop() if _PG_IDLE else None
+        if item is None:
+            return _PooledPg(_pg_fresh())
+        c, since = item
+        if c.closed:
+            continue
+        if time.time() - since > 20:
+            try:
+                c.autocommit = True
+                cur = c.cursor(); cur.execute('SELECT 1'); cur.close()
+                c.autocommit = False
+            except Exception:
+                try:
+                    c.close()
+                except Exception:
+                    pass
+                continue
+        return _PooledPg(c)
 
 def download_recording(url, dest_path, timeout=60, retries=2):
     """
@@ -3666,6 +3844,176 @@ def _build_shifts_from_events(events):
         shifts.append(cur)  # still clocked in
     return shifts
 
+# ─── The nights the clocks change ───────────────────────────────────────────
+# The CMS writes New York wall-clock time with no zone. On the night the clocks
+# go back, 1:00–2:00 AM happens twice, so a shift of 9:59 PM to "1:00 AM"
+# that really lasted four hours reads as three — the agent loses an hour of
+# pay. In spring the reverse: an hour vanishes and a shift reads an hour long.
+#
+# Fix: for a shift that was already running when the clocks changed, every
+# clock time after the change is moved onto the clock the shift started on
+# (+1 hour in autumn, -1 hour in spring). The hours then come out as actually
+# worked, the clock-out lines up with the schedule as written ("10 PM to
+# 2 AM"), and the shift is labelled so nobody wonders why. Shifts that start
+# after the change are untouched.
+#
+# Which of the two 1:xx AMs a clock time belongs to is worked out from the
+# order the CMS saved the rows in (its row number only ever goes up): once the
+# times go backwards, or pass 2:00 AM, the clocks have changed. A time that
+# still cannot be placed is counted as the second 1:xx and the shift says so.
+_NY_ZONE = None
+
+
+def _ny_zone():
+    global _NY_ZONE
+    if _NY_ZONE is None:
+        from zoneinfo import ZoneInfo
+        _NY_ZONE = ZoneInfo('America/New_York')
+    return _NY_ZONE
+
+
+def _dst_changes(d0, d1):
+    """[(date, 'back'|'forward', change moment in UTC)] between two dates."""
+    from datetime import timezone as _tz
+    z = _ny_zone()
+    out, d = [], d0
+    while d <= d1:
+        a = datetime(d.year, d.month, d.day, 0, 30, tzinfo=z).utcoffset()
+        b = datetime(d.year, d.month, d.day, 4, 0, tzinfo=z).utcoffset()
+        if a != b:
+            back = b < a
+            # the moment itself: 2:00 AM on the old clock
+            moment = (datetime(d.year, d.month, d.day, 2, 0) - a).replace(tzinfo=_tz.utc)
+            out.append((d, 'back' if back else 'forward', moment))
+        d += timedelta(days=1)
+    return out
+
+
+def _dst_fix(events):
+    """Adjusts event_time in place for shifts running through a clock change.
+    Returns {employee_name: [{'login': naive, 'unsure': bool, 'way': ..}]}."""
+    from datetime import timezone as _tz
+    if not events:
+        return {}
+    times = [e['event_time'] for e in events if e.get('event_time')]
+    changes = _dst_changes(min(times).date(), max(times).date())
+    if not changes:
+        return {}
+    z = _ny_zone()
+    marks = {}
+    for day, way, moment in changes:
+        # 1. which of the two 1:xx AMs each event on that night belongs to
+        fold, unsure = {}, set()
+        if way == 'back':
+            night = sorted((e for e in events
+                            if e['event_time'].date() == day and e['event_time'].hour < 3),
+                           key=lambda e: (e.get('ord') or 0))
+            post, top, by_drop = False, None, False
+            pending = []
+            for e in night:
+                t = e['event_time']
+                if not post:
+                    if t.hour >= 2:
+                        post = True
+                    elif top is not None and t < top - timedelta(minutes=2):
+                        post, by_drop = True, True
+                if post:
+                    fold[id(e)] = 1
+                else:
+                    fold[id(e)] = 0
+                    top = t if top is None else max(top, t)
+                    if t.hour == 1:
+                        pending.append(e)
+            # a 1:xx seen before the times went backwards is certainly the first
+            # one; otherwise it could be either — count it as the second
+            if not by_drop:
+                for e in pending:
+                    fold[id(e)] = 1
+                    unsure.add(id(e))
+
+        def real(e):
+            t = e['event_time']
+            f = fold.get(id(e), 0)
+            return t.replace(tzinfo=z, fold=f).astimezone(_tz.utc)
+
+        shift = timedelta(hours=1) if way == 'back' else timedelta(hours=-1)
+        near = [e for e in events if abs((e['event_time'] - datetime(day.year, day.month, day.day, 2)).total_seconds()) < 36 * 3600]
+        per = {}
+        for e in near:
+            per.setdefault(e['employee_name'], []).append(e)
+        for name, evs in per.items():
+            evs.sort(key=lambda e: (real(e), e.get('ord') or 0))
+            in_shift, started_before, login = False, False, None
+            moved, was_unsure = [], False
+            plan = []
+            for e in evs:
+                st = e['status']
+                if not in_shift and st in ('In', 'OnBreak'):
+                    in_shift, login = True, e['event_time']
+                    started_before = real(e) < moment
+                    moved, was_unsure = [], False
+                if in_shift and started_before and real(e) >= moment:
+                    moved.append(e)
+                if id(e) in unsure:
+                    was_unsure = True
+                if in_shift and st == 'Out':
+                    if moved:
+                        plan.append((login, list(moved), was_unsure))
+                    in_shift, moved = False, []
+            if in_shift and started_before and moved:
+                plan.append((login, list(moved), was_unsure))
+            for login, mv, uns in plan:
+                new = {id(e): e['event_time'] + shift for e in mv}
+                # never let the move put a time after something that came later
+                later = [e for e in evs if real(e) > real(mv[-1]) and id(e) not in new]
+                if later and max(new.values()) > min(e['event_time'] for e in later):
+                    continue
+                for e in mv:
+                    e['event_time'] = new[id(e)]
+                marks.setdefault(name, []).append({'login': login, 'way': way,
+                                                   'unsure': uns, 'day': day})
+    return marks
+
+
+def _dst_fix_calls(calls_by_name, marks):
+    """Moves call times the same way for the shifts that were moved, so 'took
+    calls' checks line up. A copy — the cached original is left alone."""
+    out = dict(calls_by_name)
+    for name, ms in marks.items():
+        spans = calls_by_name.get(name)
+        if not spans:
+            continue
+        new = []
+        for s0, s1 in spans:
+            for m in ms:
+                d2 = datetime(m['day'].year, m['day'].month, m['day'].day, 2)
+                if m['way'] == 'back' and s0 and s0 >= d2 and s0 < d2 + timedelta(hours=10) and s0 > m['login']:
+                    s0, s1 = s0 + timedelta(hours=1), (s1 + timedelta(hours=1) if s1 else s1)
+                    break
+                if m['way'] == 'forward' and s0 and s0 >= d2 + timedelta(hours=1) and s0 < d2 + timedelta(hours=10) and s0 > m['login']:
+                    s0, s1 = s0 - timedelta(hours=1), (s1 - timedelta(hours=1) if s1 else s1)
+                    break
+            new.append((s0, s1))
+        out[name] = new
+    return out
+
+
+def _dst_notes(rows, marks):
+    for r in rows:
+        ms = marks.get(r.get('employee_name'))
+        if not ms or not r.get('actual_in'):
+            continue
+        for m in ms:
+            if r['actual_in'][:19] == m['login'].isoformat()[:19]:
+                note = ('Clocks went %s an hour during this shift — times after the change are shown '
+                        'on the clock the shift started on, so the hours are the hours actually worked'
+                        % ('back' if m['way'] == 'back' else 'forward'))
+                if m['unsure']:
+                    note += '. One clock time fell in the hour that happened twice and could not be placed for certain — check it'
+                r.setdefault('issues', []).append(note)
+                break
+
+
 DEFAULT_OT_MULTIPLIER = 1.5
 
 def _subtract_intervals(base, subs):
@@ -5704,7 +6052,7 @@ def _setting(key, default=''):
 PORTAL_PAGES = ['live', 'missed', 'customers', 'agent-calls',
                 'agent-list', 'packages', 'company-info',
                 'skin-block']   # everyone
-PORTAL_MANAGER_PAGES = ['cms-settings', 'qa-assign', 'staffing', 'time-report', 'payroll', 'teams']           # managers and admins
+PORTAL_MANAGER_PAGES = ['cms-settings', 'qa-assign', 'staffing', 'time-report', 'payroll', 'teams', 'clocker']           # managers and admins
 PORTAL_ADMIN_PAGES = ['payments', 'sms-numbers']                            # admins only — real money
 # QA reviewers additionally get the monitoring side. They are doing QA work, so
 # they need the same call review tools the QA dashboard has.
@@ -6094,7 +6442,7 @@ def _auto_clock(employee_id, action, name):
         r = cms_write.clock(employee_id, action, {'name': '%s (signed %s)' % (name or 'agent', action),
                                                   'employee_id': employee_id})
         try:
-            _LIVE_SYNC_AT.clear()
+            _LIVE_SYNC_AT.clear(); _shared_bust()
         except Exception:
             pass
         return {'done': bool(r.get('ok')), 'status': r.get('status'), 'since': r.get('since'),
@@ -7156,6 +7504,153 @@ def update_agent_route(employee_id):
         return jsonify({'ok': False, 'error': 'Could not save the change.',
                         'raw_error': str(e)[:300]}), 400
     return jsonify(out), (200 if out.get('ok') else 400)
+
+
+def _employee_roles(employee_id):
+    """The CMS roles behind an employee, lower-cased."""
+    import cms_db
+    conn = cms_db._connect(); cu = conn.cursor()
+    try:
+        cu.execute("""SELECT r.Name FROM Employee e
+                      JOIN AspNetUserRoles ur ON ur.UserId = e.AspNetUserId
+                      JOIN AspNetRoles r ON r.Id = ur.RoleId
+                      WHERE e.Id = %s""", (int(employee_id),))
+        return [str(x[0]).lower() for x in cu.fetchall()]
+    finally:
+        conn.close()
+
+
+@app.route('/api/agents/<int:employee_id>/disable', methods=['POST'])
+@portal_manager_only
+def disable_agent_route(employee_id):
+    """Someone has left: disable them, exactly as the old CMS does — LeftFirm
+    set and their sign-in locked. Then the things the old CMS left hanging are
+    tidied too: if they are on the clock the shift is ended, any session they
+    have open here stops working at once, and they come off the schedule from
+    today. Nothing is deleted; Enable undoes it."""
+    import cms_write
+    d = request.json or {}
+    reason = (d.get('reason') or '').strip()[:200]
+    who = _who()
+    p = _portal_user(request.headers.get('X-Portal-Ticket', '')) or {}
+    if p.get('e') and int(p.get('e')) == int(employee_id):
+        return jsonify({'ok': False, 'error': 'You cannot disable yourself.'}), 400
+    try:
+        roles = ' '.join(_employee_roles(employee_id))
+    except Exception:
+        roles = ''
+    if ('admin' in roles or 'owner' in roles or 'manager' in roles) and p and not p.get('a'):
+        return jsonify({'ok': False, 'error': 'Only an admin can disable a manager or an admin.'}), 403
+
+    # end their shift first, while they still count as an employee
+    clocked = None
+    try:
+        st = cms_write.clock_status(employee_id)
+        if st.get('status') in ('in', 'break'):
+            r = cms_write.clock(employee_id, 'out', who, reason='disabled: ' + (reason or 'left'),
+                                logged_out_by=who.get('name') or 'manager')
+            clocked = bool(r.get('ok'))
+    except Exception as e:
+        print('[disable] could not clock out: ' + str(e)[:160])
+        clocked = False
+    try:
+        out = cms_write.set_disabled(employee_id, True, who, reason)
+    except cms_write.WriteRefused as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'Could not disable them.',
+                        'raw_error': str(e)[:300]}), 400
+    if out.get('ok'):
+        if out.get('user_id'):
+            revoke_portal_sessions(out['user_id'], 'disabled: ' + (reason or 'left'))
+        try:
+            _sync_left_firm_removals(force=True)
+        except Exception as e:
+            print('[disable] schedule sync: ' + str(e)[:160])
+        try:
+            _LIVE_SYNC_AT.clear(); _shared_bust()
+        except Exception:
+            pass
+        out['clocked_out'] = clocked
+        if clocked:
+            out['meaning'] += ' Their shift was ended.'
+        elif clocked is False:
+            out['meaning'] += ' Their shift could NOT be ended — end it on Employee Clocker.'
+    return jsonify(out), (200 if out.get('ok') else 400)
+
+
+@app.route('/api/agents/<int:employee_id>/enable', methods=['POST'])
+@portal_manager_only
+def enable_agent_route(employee_id):
+    """Bring back someone who was disabled: LeftFirm cleared, sign-in unlocked,
+    and back on the schedule if they were taken off it automatically."""
+    import cms_write
+    p = _portal_user(request.headers.get('X-Portal-Ticket', '')) or {}
+    try:
+        roles = ' '.join(_employee_roles(employee_id))
+    except Exception:
+        roles = ''
+    if ('admin' in roles or 'owner' in roles or 'manager' in roles) and p and not p.get('a'):
+        return jsonify({'ok': False, 'error': 'Only an admin can re-enable a manager or an admin.'}), 403
+    try:
+        out = cms_write.set_disabled(employee_id, False, _who())
+    except cms_write.WriteRefused as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'Could not enable them.',
+                        'raw_error': str(e)[:300]}), 400
+    if out.get('ok'):
+        try:
+            _sync_left_firm_removals(force=True)
+        except Exception:
+            pass
+    return jsonify(out), (200 if out.get('ok') else 400)
+
+
+@app.route('/api/clocker', methods=['GET'])
+@portal_manager_only
+def clocker_route():
+    """The Employee Clocker: every clock-in, break and clock-out in a date
+    range, plus who is on the clock right now."""
+    import cms_db, json as _json
+    today = _ny_now().date()
+    df = (request.args.get('from') or '')[:10] or str(today)
+    dt = (request.args.get('to') or '')[:10] or df
+    try:
+        if (datetime.fromisoformat(dt) - datetime.fromisoformat(df)).days > 62:
+            return jsonify({'error': 'Pick two months or less.'}), 400
+    except Exception:
+        return jsonify({'error': 'Those dates are not right.'}), 400
+    emp = request.args.get('employee_id')
+    try:
+        events = cms_db.clocker_events(df, dt, int(emp) if emp else None)
+        now = cms_db.clocked_on_now()
+    except Exception as e:
+        return jsonify({'error': 'Could not read the CMS: ' + str(e)[:200]}), 400
+    # who ended someone else's shift, and why — kept in our own audit log
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute("""SELECT row_id, who, after_json FROM cms_audit
+                     WHERE action = 'clock_out_by_leader' AND committed
+                       AND at >= %s::date - INTERVAL '1 day' AND at < %s::date + INTERVAL '2 day'""",
+                  (df, dt))
+        by_row = {}
+        for rid, who, aj in c.fetchall():
+            try:
+                v = _json.loads(aj or '{}')
+            except Exception:
+                v = {}
+            if rid:
+                by_row[int(rid)] = {'by': v.get('logged_out_by') or who, 'reason': v.get('reason')}
+        conn.close()
+        for e in events:
+            if e['id'] in by_row:
+                e['ended_by'] = by_row[e['id']]['by']
+                e['ended_reason'] = by_row[e['id']]['reason']
+    except Exception as e:
+        print('[clocker] audit: ' + str(e)[:140])
+    return jsonify({'from': df, 'to': dt, 'events': events, 'on_now': now,
+                    'truncated': len(events) >= 3000})
 
 
 EDITABLE_SETTINGS = {'PaymentType', 'CallStatusSelection', 'Question',
@@ -9457,14 +9952,25 @@ def customer_profile_route(account_id):
         return jsonify({'error': str(e)[:240]}), 400
 
 
+@app.route('/api/customers/<int:account_id>/texts/latest', methods=['GET'])
+@portal_or_manager
+def customer_texts_latest(account_id):
+    """Just the texts, for the Texts tab's check for new messages."""
+    import cms_db
+    try:
+        return jsonify({'sms': cms_db.account_texts(account_id)})
+    except Exception as e:
+        return jsonify({'error': str(e)[:240]}), 400
+
+
 @app.route('/api/live', methods=['GET'])
 @portal_or_manager
 def live_route():
     """The whole floor in one read — agents, calls in progress, and the feed."""
     import cms_db
     try:
-        out = cms_db.live_snapshot()
-        out['as_of'] = datetime.utcnow().isoformat() + 'Z'
+        out = _shared('live', 5, lambda: dict(cms_db.live_snapshot(),
+                                              as_of=datetime.utcnow().isoformat() + 'Z'))
 
         # Money is for admins. Agents have no reason to see the day's takings,
         # and hiding the card in the page would not do — the figure travels in
@@ -9498,8 +10004,8 @@ def agents_live_route():
     """Who is on shift and on the phone right now."""
     import cms_db
     try:
-        return jsonify({'agents': cms_db.agents_live(),
-                        'as_of': datetime.utcnow().isoformat() + 'Z'})
+        return jsonify(_shared('agents_live', 5, lambda: {
+            'agents': cms_db.agents_live(), 'as_of': datetime.utcnow().isoformat() + 'Z'}))
     except Exception as e:
         return jsonify({'error': str(e)[:240]}), 400
 
@@ -9909,6 +10415,7 @@ def _payroll_tables():
                         break_minutes NUMERIC, break_reason TEXT,
                         UNIQUE (employee_id, event_time, status))""")
         c.execute("CREATE INDEX IF NOT EXISTS clocker_live_time_idx ON clocker_live (event_time)")
+        c.execute('ALTER TABLE clocker_live ADD COLUMN IF NOT EXISTS cms_id BIGINT')
         c.execute("""CREATE TABLE IF NOT EXISTS pay_runs (
                         id SERIAL PRIMARY KEY,
                         period_start DATE NOT NULL, period_end DATE NOT NULL,
@@ -10118,10 +10625,10 @@ def _payroll_live_sync_locked(date_from, date_to, key):
             c.execute('DELETE FROM clocker_live WHERE event_time >= %s AND event_time < %s', (d0, d1))
             # all rows in a handful of round trips, not one per event
             from psycopg2.extras import execute_values
-            execute_values(c, """INSERT INTO clocker_live (employee_id, event_time, status, break_minutes, break_reason)
+            execute_values(c, """INSERT INTO clocker_live (employee_id, event_time, status, break_minutes, break_reason, cms_id)
                                 VALUES %s ON CONFLICT DO NOTHING""",
                            [(e['employee_id'], e['event_time'], e['status'],
-                             e['break_minutes'], e['break_reason']) for e in events], page_size=1000)
+                             e['break_minutes'], e['break_reason'], e.get('cms_id')) for e in events], page_size=1000)
             conn.commit()
         finally:
             conn.close()
@@ -10433,7 +10940,7 @@ def clock_action():
         return jsonify({'ok': False, 'error': 'Could not save that: ' + str(e)[:200]}), 400
     # the Live floor and the Timesheet read these rows — let them see it at once
     try:
-        _LIVE_SYNC_AT.clear()
+        _LIVE_SYNC_AT.clear(); _shared_bust()
     except Exception:
         pass
     return jsonify(out), (200 if out.get('ok') else 400)
@@ -10472,7 +10979,7 @@ def clock_agent_out():
     except Exception as e:
         return jsonify({'ok': False, 'error': 'Could not log them out: ' + str(e)[:200]}), 400
     try:
-        _LIVE_SYNC_AT.clear()
+        _LIVE_SYNC_AT.clear(); _shared_bust()
     except Exception:
         pass
     out['agent'] = st.get('name')
@@ -10548,7 +11055,7 @@ def payroll_pay_method_set():
             conn.commit(); conn.close()
         except Exception:
             pass
-        _LIVE_SYNC_AT.clear()
+        _LIVE_SYNC_AT.clear(); _shared_bust()
     return jsonify(out), (200 if out.get('ok') else 400)
 
 
@@ -10596,7 +11103,7 @@ def payroll_people_links():
         c.execute("UPDATE payroll_people SET employee_name = %s, link_source = 'set by hand' WHERE employee_id = %s",
                   (name, eid))
         conn.commit(); conn.close()
-        _LIVE_SYNC_AT.clear(); _CALLS_CACHE.clear()
+        _LIVE_SYNC_AT.clear(); _shared_bust(); _CALLS_CACHE.clear()
         return jsonify({'saved': True})
     c.execute("""SELECT employee_id, employee_name, first_name, last_name, extension,
                         hourly_rate, payment_type, left_firm, link_source
@@ -10966,7 +11473,8 @@ def _time_report_data(date_from, date_to, employee='', grace=5, source='auto'):
 
     # Pull events with a 1-day pad so shifts crossing midnight are complete
     if use_live:
-        q = """SELECT p.employee_name, l.event_time, l.status, l.break_minutes, l.seq AS ord
+        q = """SELECT p.employee_name, l.event_time, l.status, l.break_minutes,
+                      COALESCE(l.cms_id, l.seq) AS ord
                FROM clocker_live l JOIN payroll_people p ON p.employee_id = l.employee_id"""
         col = 'l.event_time'; namecol = 'p.employee_name'
     else:
@@ -11074,6 +11582,17 @@ def _time_report_data(date_from, date_to, employee='', grace=5, source='auto'):
             if not _calls:
                 _calls = None
         return {'unscheduled_is_ot': _name in scheduled_names, 'calls': _calls}
+
+    # The night the clocks change, put the times of any shift running through
+    # the change onto the clock it started on, so its hours are the hours
+    # actually worked (see _dst_fix).
+    dst_marks = {}
+    try:
+        dst_marks = _dst_fix(all_events)
+        if dst_marks and calls_by_name:
+            calls_by_name = _dst_fix_calls(calls_by_name, dst_marks)
+    except Exception as _e:
+        print('[time_report] clock-change fix skipped: ' + str(_e)[:160])
 
     # Group events per employee and reconstruct shifts
     by_emp = {}
@@ -11593,6 +12112,12 @@ def _time_report_data(date_from, date_to, employee='', grace=5, source='auto'):
     totals['phone_deducted_minutes'] = round(_tot_ded_min, 1)
     totals['phone_pay_reduction'] = round(_tot_ded_pay, 2)
     totals['adjusted_total_pay'] = round((totals.get('total_pay') or 0) - _tot_ded_pay, 2)
+
+    if dst_marks:
+        try:
+            _dst_notes(rows, dst_marks)
+        except Exception as _e:
+            print('[time_report] clock-change notes: ' + str(_e)[:160])
 
     # Shifts a team leader or manager ended for the agent: say so on the shift,
     # with who did it and why, so the early finish is not read as the agent's.
@@ -12396,6 +12921,9 @@ def _portal_host_guard():
     return jsonify({'error': 'Not available on this address'}), 404
 
 
+_PAGE_CACHE = {}
+
+
 def _serve_page(path_, transform=None):
     """Serves a page so the browser always has the current version without
     downloading it every time.
@@ -12407,14 +12935,27 @@ def _serve_page(path_, transform=None):
     is what caused the wrong login to appear.
     """
     import hashlib
+    # read and fingerprint the file once per version, not on every visit
     try:
-        with open(path_, 'r', encoding='utf-8') as fh:
-            html = fh.read()
+        key = (path_, os.path.getmtime(path_), transform.__code__ if transform else None)
     except Exception:
-        return 'Page missing', 500
-    if transform:
-        html = transform(html)
-    tag = '"%s"' % hashlib.md5(html.encode('utf-8')).hexdigest()[:16]
+        key = None
+    hit = _PAGE_CACHE.get(key) if key else None
+    if hit:
+        html, tag = hit
+    else:
+        try:
+            with open(path_, 'r', encoding='utf-8') as fh:
+                html = fh.read()
+        except Exception:
+            return 'Page missing', 500
+        if transform:
+            html = transform(html)
+        tag = '"%s"' % hashlib.md5(html.encode('utf-8')).hexdigest()[:16]
+        if key:
+            if len(_PAGE_CACHE) > 20:
+                _PAGE_CACHE.clear()
+            _PAGE_CACHE[key] = (html, tag)
     if request.headers.get('If-None-Match') == tag:
         resp = make_response('', 304)
     else:

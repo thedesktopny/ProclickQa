@@ -130,9 +130,8 @@ def _make_read_friendly(conn, kind_):
         return
     try:
         cu = conn.cursor()
-        cu.execute('SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED')
-        cu.execute('SET LOCK_TIMEOUT 15000')
-        cu.execute('SET DEADLOCK_PRIORITY LOW')   # if there is a fight, we lose it, not the CMS
+        # if there is a fight, we lose it, not the CMS
+        cu.execute(_READ_SETUP)
     except Exception as e:
         print('[cms] could not set read options: ' + str(e)[:120])
 
@@ -159,18 +158,118 @@ def _retrying(fn, attempts=3):
     raise last
 
 
+# ─── Reusing CMS connections ────────────────────────────────────────────────
+# Opening a SQL Server connection is a login: several round trips to the CMS
+# server before the first question can even be asked, and a busy page used to
+# do that several times over. A closed connection now goes back on a shelf and
+# the next read takes it. Before it is shelved anything unfinished is rolled
+# back (which also releases any lock), and before it is handed out again it is
+# set back to the harmless read settings below — that same step proves it is
+# still alive, and a dead one is thrown away. Writes set their own isolation
+# level as before. CMS_REUSE=0 in the app settings turns this off.
+import threading as _threading
+import time as _time
+_MS_IDLE = []
+_MS_GUARD = _threading.RLock()
+_MS_KEEP = 10
+_READ_SETUP = ('SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED; '
+               'SET LOCK_TIMEOUT 15000; SET DEADLOCK_PRIORITY LOW')
+
+
+class _PooledMs(object):
+    __slots__ = ('_c', '_done')
+
+    def __init__(self, c):
+        object.__setattr__(self, '_c', c)
+        object.__setattr__(self, '_done', False)
+
+    def __getattr__(self, name):
+        return getattr(self._c, name)
+
+    def __setattr__(self, name, value):
+        setattr(self._c, name, value)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.close()
+
+    def close(self):
+        if self._done:
+            return
+        object.__setattr__(self, '_done', True)
+        c = self._c
+        try:
+            inner = getattr(c, '_conn', None)
+            if inner is not None and hasattr(inner, 'cancel'):
+                inner.cancel()            # drop any results nobody read
+            c.rollback()
+        except Exception:
+            try:
+                c.close()
+            except Exception:
+                pass
+            return
+        with _MS_GUARD:
+            if len(_MS_IDLE) < _MS_KEEP:
+                _MS_IDLE.append((c, _time.time()))
+                return
+        try:
+            c.close()
+        except Exception:
+            pass
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
+def _from_shelf():
+    while True:
+        with _MS_GUARD:
+            item = _MS_IDLE.pop() if _MS_IDLE else None
+        if item is None:
+            return None
+        c, since = item
+        if _time.time() - since > 300:    # long unused: just start fresh
+            try:
+                c.close()
+            except Exception:
+                pass
+            continue
+        try:
+            cu = c.cursor()
+            cu.execute(_READ_SETUP)
+            return _PooledMs(c)
+        except Exception:
+            try:
+                c.close()
+            except Exception:
+                pass
+
+
 def _connect():
     """Opens a read-only-intent connection, working out the database kind if it
     was not specified. Once one works, that answer is reused."""
     global _DETECTED
     if not configured():
         raise RuntimeError('CMS database settings are missing (CMS_DB_HOST / NAME / USER)')
+    reuse = _DETECTED == 'mssql' and _os_env('CMS_REUSE', '1') != '0'
+    if reuse:
+        got = _from_shelf()
+        if got is not None:
+            return got
     errors = []
     for k in _order_to_try():
         try:
             conn = _open(k)
             _DETECTED = k
             _make_read_friendly(conn, k)
+            if k == 'mssql' and _os_env('CMS_REUSE', '1') != '0':
+                return _PooledMs(conn)
             return conn
         except Exception as e:
             msg = str(e)
@@ -2787,12 +2886,14 @@ def agent_list(include_left=False):
     cu.execute("""SELECT e.Id, e.FirstName, e.LastName, e.Extension, e.PhoneName,
                          e.LeftFirm, e.Created, e.QA, e.WithCamera, e.Gender,
                          e.ExperienceLevel, e.notLogIn, e.ScheduleId,
+                         CASE WHEN u.LockoutEndDateUtc > GETUTCDATE() THEN 1 ELSE 0 END,
                          STUFF((SELECT ', ' + r.Name
                                 FROM AspNetUserRoles ur
                                 JOIN AspNetRoles r ON r.Id = ur.RoleId
                                 WHERE ur.UserId = e.AspNetUserId
                                 FOR XML PATH('')), 1, 2, '') AS Roles
                   FROM Employee e
+                  LEFT JOIN AspNetUsers u ON u.Id = e.AspNetUserId
                   WHERE %s ORDER BY e.LeftFirm, e.FirstName, e.LastName"""
                % ('1=1' if include_left else 'ISNULL(e.LeftFirm,0) = 0'))
     out = []
@@ -2808,7 +2909,8 @@ def agent_list(include_left=False):
                     'since': _plain(r[6]), 'qa': bool(r[7]), 'camera': bool(r[8]),
                     'experience': (int(r[10]) if r[10] is not None else None),
                     'cannot_log_in': bool(r[11]), 'schedule_id': r[12],
-                    'roles': [x.strip() for x in str(r[13] or '').split(',') if x.strip()]})
+                    'locked': bool(r[13]),
+                    'roles': [x.strip() for x in str(r[14] or '').split(',') if x.strip()]})
     conn.close()
     return {'agents': out, 'includes_former': include_left}
 
@@ -4163,7 +4265,7 @@ def clocker_between(dt_from, dt_to):
     conn = _connect(); cu = conn.cursor()
     try:
         cu.execute("""SELECT EmployeeId, Created, Status, InOut,
-                             BreakMinutes, BreakReason
+                             BreakMinutes, BreakReason, Id
                       FROM EmployeeClocker
                       WHERE Created >= %s AND Created < %s
                       ORDER BY EmployeeId, Created, Id""", (dt_from, dt_to))
@@ -4171,7 +4273,7 @@ def clocker_between(dt_from, dt_to):
     finally:
         conn.close()
     out = []
-    for emp, created, status, inout, bm, br in rows:
+    for emp, created, status, inout, bm, br, rid in rows:
         if emp is None or created is None:
             continue
         st = None
@@ -4187,7 +4289,10 @@ def clocker_between(dt_from, dt_to):
             continue
         out.append({'employee_id': int(emp), 'event_time': created, 'status': st,
                     'break_minutes': (float(bm) if bm not in (None, '') else None),
-                    'break_reason': (str(br).strip() if br not in (None, '') else None)})
+                    'break_reason': (str(br).strip() if br not in (None, '') else None),
+                    # the row number is the true order things happened in — the
+                    # clock time is not, on the night the clocks go back
+                    'cms_id': int(rid) if rid is not None else None})
     return out
 
 
@@ -4216,3 +4321,132 @@ def calls_between(dt_from, dt_to):
             continue
         out.setdefault(int(emp), []).append((start, end or start))
     return out
+
+
+def clocker_events(date_from, date_to, employee_id=None, limit=3000):
+    """The old CMS's admin Employee Clocker page: every clock-in, break and
+    clock-out, newest first, with who and when. Times are New York, as stored.
+
+    A Status 1 row straight after a Status 2 row is someone coming back from a
+    break, not starting a new shift, so it is labelled that way. The day before
+    the range is read too, so the first row in the range is labelled right.
+    """
+    import datetime as _dt
+    d0 = _dt.date.fromisoformat(str(date_from)[:10])
+    d1 = _dt.date.fromisoformat(str(date_to)[:10]) + _dt.timedelta(days=1)
+    look = d0 - _dt.timedelta(days=1)
+    conn = _connect(); cu = conn.cursor()
+    where = 'c.Created >= %s AND c.Created < %s'
+    args = [look.isoformat(), d1.isoformat()]
+    if employee_id:
+        where += ' AND c.EmployeeId = %s'
+        args.append(int(employee_id))
+    cu.execute("""SELECT TOP %d * FROM (
+                    SELECT c.Id, c.EmployeeId, c.Created, c.Status, c.BreakMinutes, c.BreakReason,
+                           LAG(c.Status) OVER (PARTITION BY c.EmployeeId ORDER BY c.Created, c.Id) AS Prev,
+                           LEAD(c.Created) OVER (PARTITION BY c.EmployeeId ORDER BY c.Created, c.Id) AS NextAt,
+                           e.FirstName, e.LastName, e.Extension
+                    FROM EmployeeClocker c
+                    LEFT JOIN Employee e ON e.Id = c.EmployeeId
+                    WHERE %s) x
+                  WHERE x.Created >= %%s
+                  ORDER BY x.Created DESC, x.Id DESC""" % (int(limit), where),
+               tuple(args) + (d0.isoformat(),))
+    out = []
+    while True:
+        r = cu.fetchone()
+        if not r:
+            break
+        status = int(r[3]) if r[3] is not None else None
+        prev = int(r[6]) if r[6] is not None else None
+        if status == 2:
+            kind = 'break'
+        elif status == 1:
+            kind = 'back' if prev == 2 else 'in'
+        elif status == 0:
+            kind = 'out'
+        else:
+            kind = 'other'
+        lasted = None
+        if r[7] is not None and r[2] is not None:
+            try:
+                a, b = r[2], r[7]
+                if isinstance(a, str): a = _dt.datetime.fromisoformat(a[:19])
+                if isinstance(b, str): b = _dt.datetime.fromisoformat(b[:19])
+                lasted = int((b - a).total_seconds())
+            except Exception:
+                lasted = None
+        out.append({'id': int(r[0]), 'employee_id': int(r[1]),
+                    'name': ('%s %s' % (r[8] or '', r[9] or '')).strip() or ('#%s' % r[1]),
+                    'extension': (r[10] or '').strip(),
+                    'at': _plain(r[2]), 'kind': kind, 'status': status,
+                    'break_minutes': int(r[4]) if r[4] is not None else None,
+                    'break_reason': r[5], 'lasted_seconds': lasted})
+    conn.close()
+    return out
+
+
+def clocked_on_now(hours=20):
+    """Who is on the clock right now — their latest row is in or on a break,
+    and it is recent enough to be this shift rather than a forgotten clock-out."""
+    conn = _connect(); cu = conn.cursor()
+    cu.execute("""SELECT c.EmployeeId, c.Status, c.Created, c.BreakMinutes, c.BreakReason,
+                         e.FirstName, e.LastName, e.Extension,
+                         DATEDIFF(second, c.Created, GETDATE())
+                  FROM EmployeeClocker c
+                  JOIN (SELECT EmployeeId, MAX(Id) AS mid FROM EmployeeClocker
+                        WHERE Created > DATEADD(hour, -%d, GETDATE()) GROUP BY EmployeeId) m
+                    ON m.mid = c.Id
+                  LEFT JOIN Employee e ON e.Id = c.EmployeeId
+                  WHERE c.Status IN (1, 2)
+                  ORDER BY e.FirstName, e.LastName""" % int(hours))
+    out = []
+    while True:
+        r = cu.fetchone()
+        if not r:
+            break
+        out.append({'employee_id': int(r[0]), 'status': 'break' if r[1] == 2 else 'in',
+                    'since': _plain(r[2]), 'break_minutes': r[3], 'break_reason': r[4],
+                    'name': ('%s %s' % (r[5] or '', r[6] or '')).strip(),
+                    'extension': (r[7] or '').strip(), 'seconds': int(r[8] or 0)})
+    conn.close()
+    return out
+
+
+def account_texts(account_id):
+    """Only the texts for one account — what the Texts tab checks every few
+    seconds for new messages. The full customer read pulls calls, payments,
+    notes and more; doing all of that every ten seconds just to spot a new text
+    was the heaviest thing an open customer page did."""
+    def layout(url):
+        u = str(url or '').lower().split('?')[0]
+        return u.endswith('.smil') or u.endswith('.xml') or 'smil' in u.rsplit('/', 1)[-1]
+
+    def picture(url):
+        u = str(url or '').lower().split('?')[0]
+        return u.endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic', '.bmp'))
+
+    conn = _connect()
+    try:
+        cu = conn.cursor()
+        cu.execute("""SELECT TOP 300 smsDate, InOut, ContactNumber, message, MediaURL, ISNULL(smsNotRead, 0)
+                      FROM SMSLog WHERE AccountId = %s ORDER BY smsDate DESC""", (int(account_id),))
+        out = []
+        while True:
+            r = cu.fetchone()
+            if not r:
+                break
+            if layout(r[4]):
+                continue
+            out.append({'when': _plain(r[0]), 'direction': r[1], 'from_to': r[2],
+                        'message': r[3], 'media': r[4], 'unread': bool(r[5]),
+                        'is_picture': picture(r[4])})
+        return out
+    finally:
+        conn.close()
+
+
+
+def _os_env(k, default=''):
+    import os
+    return os.getenv(k, default)
