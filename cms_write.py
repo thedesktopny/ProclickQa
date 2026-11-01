@@ -2471,7 +2471,16 @@ def _rec_webhook(r):
     return (m.get('Webhook') or m.get('WebHook') or r.get('Webhook') or r.get('WebHook') or '')
 
 
-CMS_WEBHOOKS = ('WebHook1', 'WebHook2')
+# The BulkVS webhook profiles that deliver replies to the CMS (all point at the
+# old CMS's ReceiveSMS). Any other name — HelloDeskRTC, WebHook-Assistant —
+# sends texts to some other system. More can be added with CMS_WEBHOOKS_EXTRA
+# (comma-separated) in the app settings, without new code.
+CMS_WEBHOOKS = ('WebHook1', 'WebHook2', 'StaticNumber', 'Default', 'CompaignSMS')
+
+
+def _cms_webhooks():
+    extra = [x.strip() for x in os.getenv('CMS_WEBHOOKS_EXTRA', '').split(',') if x.strip()]
+    return {w.lower() for w in CMS_WEBHOOKS + tuple(extra)}
 
 
 def _rec_external(r):
@@ -2479,7 +2488,7 @@ def _rec_external(r):
     (another system gets its texts). The CMS never moves it, never offers it
     for release, and does not count it as unused."""
     w = (_rec_webhook(r) or '').strip()
-    return bool(w) and w not in CMS_WEBHOOKS
+    return bool(w) and w.lower() not in _cms_webhooks()
 
 
 def _rec_lidb(r):
