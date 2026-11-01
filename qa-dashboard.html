@@ -3986,6 +3986,16 @@ function pollStopAll(){ Object.keys(POLL).forEach(pollStop); }
 document.addEventListener('visibilitychange', ()=>{
   if(document.hidden) Object.values(POLL).forEach(s => { s.wait = 60000; });
   else Object.values(POLL).forEach(s => { s.wait = s.base; });
+  if(!document.hidden){
+    // the page skipped its refreshes while hidden, so catch up on return
+    try{
+      const a = document.querySelector('.page.active');
+      if(a && a.id === 'page-live' && typeof lvTimer !== 'undefined' && lvTimer) loadLive();
+      if(a && a.id === 'page-agent-calls' && typeof acTimer !== 'undefined' && acTimer) acLoadLive();
+      if(typeof smsTimer !== 'undefined' && smsTimer && typeof cuData !== 'undefined' && cuData
+         && document.getElementById('sms-thread')) cuRefreshTexts(cuData.account.id);
+    }catch(e){}
+  }
 });
 
 const API={
@@ -6702,7 +6712,7 @@ async function snLoadHealth(){
         ${probs.length ? '⚠️ ' + probs.length + ' thing' + (probs.length===1?'':'s') + ' to look at' : '✅ Nothing wrong found'}</div>
       ${probs.map(p=>`<div style="font-size:12.5px;color:var(--text2);padding:3px 0;">• ${esc(p.text)}</div>`).join('')}
       <div style="font-size:11.5px;color:var(--text3);margin-top:8px;">
-        ${h.bulkvs_numbers!=null ? h.bulkvs_numbers + ' numbers at BulkVS · ' : ''}${h.accounts_with_numbers||0} customers have a texting number
+        ${h.bulkvs_numbers!=null ? h.bulkvs_numbers + ' numbers at BulkVS · ' : ''}${(h.outside_cms||[]).length ? (h.outside_cms.length + ' used outside the CMS (own webhook — left alone) · ') : ''}${h.accounts_with_numbers||0} customers have a texting number
         ${next ? ' · next to be taken off when both are full: <b>'+esc(next.number)+'</b> (on since '+new Date(next.since).toLocaleString()+')' : ''}</div>
     </div>
     <details class="card" style="padding:12px 18px;margin-bottom:10px;">
@@ -6730,6 +6740,7 @@ const SA_FILTERS = [
   ['idle365', 'No activity in a year'],
   ['never', 'Never used'],
   ['nobody', 'Not on any customer'],
+  ['outside', 'Used outside the CMS'],
   ['inactive', 'Customer has texting off'],
   ['missing', 'Missing at BulkVS'],
 ];
@@ -6739,6 +6750,7 @@ function saMatch(x, f){
   if(f === 'idle365') return saDays(x.last_activity) > 365;
   if(f === 'never') return !x.last_activity;
   if(f === 'nobody') return x.where === 'nobody';
+  if(f === 'outside') return x.where === 'outside the CMS';
   if(f === 'inactive') return x.where.startsWith('customer') && x.active === false;
   if(f === 'missing') return x.at_bulkvs === false && x.where !== 'nobody';
   return true;
@@ -6839,7 +6851,7 @@ function nmRender(msg, ok){
       ${row('Static', r.static_tcr ? '✅ static on '+esc(r.static_tcr) : 'no')}
       ${row('Put on by the CMS', r.put_on_by_cms_at ? when(r.put_on_by_cms_at) : (r.campaign ? 'no — Lidb "'+esc(r.lidb||'')+'"' : '—'))}
       ${row('Webhook', esc(r.webhook||'—'))}
-      ${row('SMS / MMS', (r.sms_enabled===false?'<span class="neg">SMS off</span>':'SMS on') + ' · ' + (r.mms_enabled===false?'MMS off':'MMS on'))}
+      ${row('SMS / MMS', !r.at_bulkvs ? '—' : (r.sms_enabled===false?'<span class="neg">SMS off</span>':'SMS on') + ' · ' + (r.mms_enabled===false?'MMS off':'MMS on'))}
       ${row('Customer', (r.customers||[]).map(c=>`<a href="#" style="color:var(--accent)" onclick="showPage('customers');cuOpen(${c.account_id});return false;">${esc(c.customer)}</a>${c.active?'':' (texting off)'}`).join(', ') || (r.in_pool ? 'spare pool' : 'nobody'))}
       ${row('Last sent / received', when(r.last_sent) + ' / ' + when(r.last_received))}
       ${row('Campaigns now', camps)}
@@ -9131,7 +9143,7 @@ let lvTimer = null, lvData = null, lvKindFilter = 'all', lvSeen = new Set(), lvF
 
 function lvAutoToggle(){
   clearInterval(lvTimer);
-  if(document.getElementById('lv-auto').checked) lvTimer = setInterval(loadLive, 15000);
+  if(document.getElementById('lv-auto').checked) lvTimer = setInterval(()=>{ if(!document.hidden) loadLive(); }, 15000);
 }
 function lvKind(k, btn){
   lvKindFilter = k;
@@ -11362,7 +11374,7 @@ function cuPaste(ev){
 let smsTimer = null;
 async function cuRefreshTexts(accountId){
   try{
-    const r = await API.get('/api/customers/' + accountId);
+    const r = await API.get('/api/customers/' + accountId + '/texts/latest');
     if(!r || !r.sms || !cuData || cuData.account.id !== accountId) return;
     const key = m => m.when + '|' + (m.message || '') + '|' + (m.from_to || '');
     const seen = new Set((cuData.sms || []).map(key));
@@ -11799,6 +11811,7 @@ function cuTab(which){
     smsTimer = setInterval(()=>{
       const still = document.getElementById('sms-thread');
       if(!still || !cuData || cuData.account.id !== a.id){ clearInterval(smsTimer); return; }
+      if(document.hidden) return;          // nobody is looking — check when they come back
       cuRefreshTexts(a.id);
     }, 10000);
   }
@@ -11993,7 +12006,7 @@ let acTimer = null, acSelected = null;
 
 function acAutoToggle(){
   clearInterval(acTimer);
-  if(document.getElementById('ac-auto').checked) acTimer = setInterval(acLoadLive, 30000);
+  if(document.getElementById('ac-auto').checked) acTimer = setInterval(()=>{ if(!document.hidden) acLoadLive(); }, 30000);
 }
 
 async function acLoadLive(){

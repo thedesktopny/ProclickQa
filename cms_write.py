@@ -1693,6 +1693,80 @@ def unlock_login(employee_id, who=None):
     return out
 
 
+def set_disabled(employee_id, disabled, who=None, reason=None):
+    """Disable someone who has left, or bring them back — what the old CMS
+    does under Employees: LeftFirm on the Employee row, and the sign-in locked
+    with ASP.NET Identity's own lockout so they cannot get into the old CMS or
+    this one. Nothing is deleted: their calls, notes and pay history stay, and
+    enabling them again undoes both halves.
+
+    Both changes go in ONE transaction and are read back, so nobody is left
+    'disabled' but still able to sign in.
+    """
+    conn = cms_db._connect()
+    out = {'table': 'Employee', 'action': 'disable' if disabled else 'enable',
+           'dry_run': False,
+           'values': {'employee_id': employee_id,
+                      'reason': (reason or '')[:200]}}
+    try:
+        cu = conn.cursor()
+        cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        cu.execute("""SELECT TOP 1 FirstName, LastName, AspNetUserId, ISNULL(LeftFirm, 0)
+                      FROM Employee WHERE Id = %s""", (int(employee_id),))
+        r = cu.fetchone()
+        if not r:
+            conn.close()
+            raise WriteRefused('No such employee.')
+        name = ('%s %s' % (r[0] or '', r[1] or '')).strip() or ('#%s' % employee_id)
+        user_id = str(r[2]) if r[2] else None
+        if bool(r[3]) == bool(disabled):
+            conn.close()
+            raise WriteRefused('%s is already %s.' % (name, 'disabled' if disabled else 'active'))
+
+        cu.execute('UPDATE Employee SET LeftFirm = %s WHERE Id = %s',
+                   (1 if disabled else 0, int(employee_id)))
+        if user_id:
+            if disabled:
+                cu.execute("""UPDATE [AspNetUsers]
+                              SET LockoutEnabled = 1,
+                                  LockoutEndDateUtc = '9999-12-30 00:00:00'
+                              WHERE Id = %s""", (user_id,))
+            else:
+                cu.execute('UPDATE [AspNetUsers] SET LockoutEndDateUtc = NULL WHERE Id = %s',
+                           (user_id,))
+        conn.commit()
+
+        check = conn.cursor()
+        check.execute("""SELECT ISNULL(e.LeftFirm, 0), u.LockoutEndDateUtc
+                         FROM Employee e LEFT JOIN AspNetUsers u ON u.Id = e.AspNetUserId
+                         WHERE e.Id = %s""", (int(employee_id),))
+        back = check.fetchone()
+        left_ok = bool(back and bool(back[0]) == bool(disabled))
+        locked = bool(back and back[1] and str(back[1]).startswith('9999'))
+        if not left_ok or (user_id and disabled and not locked):
+            raise RuntimeError('the change did not save completely')
+
+        out.update({'ok': True, 'committed': True, 'name': name, 'user_id': user_id,
+                    'meaning': ('%s is disabled and can no longer sign in.' % name) if disabled
+                               else ('%s is active again and can sign in.' % name)})
+    except WriteRefused:
+        raise
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        out.update({'ok': False, 'committed': False,
+                    'error': _explain(e), 'raw_error': str(e)[:300]})
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    _log(who, out)
+    return out
+
+
 def create_agent(fields, who, dry_run=True):
     """Create a person who can sign in and take calls.
 
@@ -2356,7 +2430,35 @@ def _ten(n):
 
 
 def _rec_tn(r):
-    return _ten(r.get('TN') or r.get('Tn') or r.get('tn'))
+    return _ten(r.get('TN') or r.get('Tn') or r.get('tn') or r.get('Number')
+                or r.get('number') or r.get('Telephone Number') or r.get('TelephoneNumber'))
+
+
+def _rec_is(r, ten):
+    """Is this BulkVS record about this number? Checked on the number field,
+    and failing that on any top-level value that is that number."""
+    if not isinstance(r, dict):
+        return False
+    if _rec_tn(r) == ten:
+        return True
+    for v in r.values():
+        if isinstance(v, (str, int)) and _ten(v) == ten and len(''.join(ch for ch in str(v) if ch.isdigit())) in (10, 11):
+            return True
+    return False
+
+
+def _as_records(ans):
+    """BulkVS answers with a list, a single record, or a list wrapped in an
+    object depending on the call — all turned into a list of records."""
+    if isinstance(ans, list):
+        return [r for r in ans if isinstance(r, dict)]
+    if isinstance(ans, dict):
+        if any(k in ans for k in ('TN', 'Tn', 'tn', 'Number', 'Telephone Number')):
+            return [ans]
+        for v in ans.values():
+            if isinstance(v, list) and v and isinstance(v[0], dict):
+                return [r for r in v if isinstance(r, dict)]
+    return []
 
 
 def _rec_tcr(r):
@@ -2367,6 +2469,17 @@ def _rec_tcr(r):
 def _rec_webhook(r):
     m = r.get('Messaging') or {}
     return (m.get('Webhook') or m.get('WebHook') or r.get('Webhook') or r.get('WebHook') or '')
+
+
+CMS_WEBHOOKS = ('WebHook1', 'WebHook2')
+
+
+def _rec_external(r):
+    """A number set by hand to some other webhook is used outside the CMS
+    (another system gets its texts). The CMS never moves it, never offers it
+    for release, and does not count it as unused."""
+    w = (_rec_webhook(r) or '').strip()
+    return bool(w) and w not in CMS_WEBHOOKS
 
 
 def _rec_lidb(r):
@@ -2395,7 +2508,7 @@ def bv_all_records(fresh=False):
     if not fresh and _BV_ALL['records'] is not None and _t.time() - _BV_ALL['at'] < 600:
         return _BV_ALL['records']
     ans = _bv('GET', '/tnRecord', timeout=40)
-    recs = [r for r in (ans if isinstance(ans, list) else [ans]) if isinstance(r, dict)]
+    recs = _as_records(ans)
     _BV_ALL.update(at=_t.time(), records=recs)
     return recs
 
@@ -2426,23 +2539,41 @@ def bv_record(number, fresh=False):
     honoured, so the answer is checked to be about this number before it is
     believed, and the whole list is searched if it is not."""
     ten = _ten(number)
+    tried = _BV_LOOKUP[ten] = []
     if not fresh and _BV_ALL.get('records') is not None:
         import time as _t
         if _t.time() - _BV_ALL['at'] < 600:
             for r in _BV_ALL['records']:
-                if _rec_tn(r) == ten:
+                if _rec_is(r, ten):
                     return r
+    # ask about this one number, in both spellings BulkVS has been seen to use
+    for q in ('?Number=1' + ten, '?Number=' + ten):
+        try:
+            ans = _bv('GET', '/tnRecord' + q)
+            rows = _as_records(ans)
+            for r in rows:
+                if _rec_is(r, ten):
+                    return r
+            tried.append('%s: %d row(s), none for this number%s' % (
+                q, len(rows), (' (fields: %s)' % ', '.join(list(rows[0].keys())[:8])) if rows else
+                (' (answer: %s)' % str(ans)[:120] if ans not in ([], {}, '') else '')))
+        except BulkVSError as e:
+            tried.append('%s: refused — %s' % (q, str(e)[:120]))
+        except Exception as e:
+            tried.append('%s: failed — %s' % (q, str(e)[:120]))
+    # and the full list, freshly, before saying it is not there
     try:
-        ans = _bv('GET', '/tnRecord?Number=1' + ten)
-        for r in (ans if isinstance(ans, list) else [ans]):
-            if isinstance(r, dict) and _rec_tn(r) == ten:
+        recs = bv_all_records(fresh=True)
+        for r in recs:
+            if _rec_is(r, ten):
                 return r
-    except BulkVSError:
-        pass
-    for r in bv_all_records():
-        if _rec_tn(r) == ten:
-            return r
+        tried.append('full list: %d numbers, this one not among them' % len(recs))
+    except Exception as e:
+        tried.append('full list: failed — %s' % str(e)[:120])
     return None
+
+
+_BV_LOOKUP = {}
 
 
 def bv_campaigns():
@@ -2585,7 +2716,7 @@ def _put_on_campaign(ten, tcr, lidb=None, webhook=None, removed_already=0):
         body = {'TN': '1' + ten, 'Lidb': lidb or _dt.now().strftime('%Y%m%d%H%M'),
                 'Webhook': webhook or 'WebHook2', 'Tcr': tcr}
     else:
-        body = {'TN': '1' + ten, 'Lidb': 'PROCLICK', 'Webhook': webhook or 'WebHook1', 'Tcr': ''}
+        body = {'TN': '1' + ten, 'Lidb': lidb or 'PROCLICK', 'Webhook': webhook or 'WebHook1', 'Tcr': ''}
     _bv('POST', '/tnRecord', body)
     _patch_cached(ten, tcr=body['Tcr'], lidb=body['Lidb'], webhook=body['Webhook'])
     _ACTIVITY['data'] = None
@@ -2996,13 +3127,17 @@ def sms_health():
                                     'text': 'Spare %s is not at BulkVS — handing it out would fail'
                                             % _ten(p['number'])})
     ours = set(acct_by) | {_ten(p['number']) for p in pool} | set(statics)
-    orphans = []
+    orphans, external = [], []
     for r in recs:
         routing = r.get('Routing') or {}
         trunk = routing.get('Trunk Group') or r.get('Trunk Group') or ''
         if trunk == SMS_TRUNK and _rec_tn(r) not in ours:
-            orphans.append(_rec_tn(r))
+            if _rec_external(r):
+                external.append(_rec_tn(r))
+            else:
+                orphans.append(_rec_tn(r))
     out['not_in_cms'] = orphans
+    out['outside_cms'] = external
     if orphans:
         out['problems'].append({'kind': 'orphans',
                                 'text': '%d texting numbers at BulkVS belong to nobody in the CMS (you may be paying for them)'
@@ -3090,6 +3225,9 @@ def sms_activity(fresh=False):
                     x = row(ten)
                     x['at_bulkvs'] = True
                     x['campaign'] = _rec_tcr(r) or None
+                    x['webhook'] = _rec_webhook(r) or None
+                    if _rec_external(r) and x['where'] == 'nobody':
+                        x['where'] = 'outside the CMS'
             for x in rows.values():
                 if x['at_bulkvs'] is None:
                     x['at_bulkvs'] = False
@@ -3152,8 +3290,11 @@ def number_info(number):
            'limit': CAMPAIGN_LIMIT, 'record': rec}
     # plain-language warnings, so a problem is visible before anything is touched
     w = []
+    out['lookup'] = list(_BV_LOOKUP.get(ten) or [])
     if rec is None:
-        w.append('BulkVS does not have this number.')
+        w.append('BulkVS did not return this number when asked (%s). If BulkVS\'s own '
+                 'website shows it, send a screenshot of this box — the details above say '
+                 'exactly what BulkVS answered.' % ('; '.join(out['lookup']) or 'no answer'))
     else:
         if m.get('Sms') is False:
             w.append('SMS is switched OFF for this number at BulkVS — it cannot text at all.')
@@ -3164,9 +3305,20 @@ def number_info(number):
             w.append('It is on %s but is not on the CMS\'s static list, and was not put there by '
                      'the CMS (Lidb "%s"). If it is meant to be static, press "Make static" so the '
                      'CMS knows to leave it alone.' % (out['campaign'], out['lidb'] or 'blank'))
-        if out['webhook'] not in ('WebHook1', 'WebHook2'):
-            w.append('Its webhook is "%s", not WebHook1 or WebHook2 — replies to it may not reach '
-                     'the CMS.' % (out['webhook'] or 'blank'))
+        if _rec_external(rec):
+            out['outside_cms'] = True
+            w.append('Used outside the CMS: its webhook is "%s", so its texts go to that system, not the CMS. '
+                     'The CMS leaves it alone — it never takes it off %s or offers to release it. '
+                     'It does still use one of the %d places on that campaign.'
+                     % (out['webhook'], out['campaign'] or 'its campaign', CAMPAIGN_LIMIT)
+                     if out['campaign'] else
+                     'Used outside the CMS: its webhook is "%s", so its texts go to that system, not the CMS. '
+                     'The CMS leaves it alone.' % out['webhook'])
+            if customers:
+                w.append('But a CMS customer has this number — their replies will not show in the CMS '
+                         'unless the webhook is changed to WebHook1 at BulkVS.')
+        elif not out['webhook']:
+            w.append('It has no webhook at BulkVS — replies to it go nowhere.')
     for c in camps:
         if c['count'] is not None and c['count'] > CAMPAIGN_LIMIT:
             w.append('%s has %d numbers, over the limit of %d. The next automatic swap on it '
@@ -3236,16 +3388,21 @@ def number_campaign_action(number, action, who, tcr=None, reason=None):
                                    'mean to take it off.' % (ten, static))
             if not current:
                 raise WriteRefused('%s is not on a campaign.' % ten)
-            _put_on_campaign(ten, '', webhook=info['webhook'])
+            # a number used outside the CMS keeps its own webhook and caller name
+            _put_on_campaign(ten, '', webhook=info['webhook'],
+                             lidb=info['lidb'] if info.get('outside_cms') else None)
         elif action == 'on':
             if static and static != tcr:
                 raise WriteRefused('%s is static on %s. Remove static first to move it.' % (ten, static))
             if current == tcr:
                 raise WriteRefused('%s is already on %s.' % (ten, tcr))
             moved = 0
+            ext = bool(info.get('outside_cms'))
             if current:
-                _put_on_campaign(ten, '', webhook=info['webhook'])
-            _put_on_campaign(ten, tcr, removed_already=moved)
+                _put_on_campaign(ten, '', webhook=info['webhook'], lidb=info['lidb'] if ext else None)
+            _put_on_campaign(ten, tcr, removed_already=moved,
+                             webhook=info['webhook'] if ext else None,
+                             lidb=info['lidb'] if ext else None)
         elif action == 'make_static':
             if static == tcr and current == tcr:
                 raise WriteRefused('%s is already static on %s.' % (ten, tcr))
