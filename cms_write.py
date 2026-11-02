@@ -2559,7 +2559,10 @@ def _patch_cached(ten, tcr=None, lidb=None, webhook=None, remove=False):
                 return
             m = r.setdefault('Messaging', {})
             if tcr is not None:
-                m['TCR'] = tcr
+                # BulkVS spells it "Tcr" in a record; set every spelling so the
+                # old value can never show through
+                for k in ('Tcr', 'TCR', 'tcr'):
+                    m[k] = tcr
             if webhook is not None:
                 m['Webhook'] = webhook
             if lidb is not None:
@@ -3342,7 +3345,10 @@ def number_info(number):
     if len(ten) != 10:
         raise WriteRefused('Give a ten-digit number.')
     statics = static_numbers()
-    rec = bv_record(ten)
+    listed = None
+    if _BV_ALL.get('records') is not None:
+        listed = next((r for r in _BV_ALL['records'] if _rec_is(r, ten)), None)
+    rec = bv_record(ten, fresh=True)          # asked about this number directly
     camps = campaign_usage()
     conn = cms_db._connect()
     try:
@@ -3377,6 +3383,12 @@ def number_info(number):
     # plain-language warnings, so a problem is visible before anything is touched
     w = []
     out['lookup'] = list(_BV_LOOKUP.get(ten) or [])
+    if rec is not None and listed is not None and (_rec_tcr(listed) or None) != (_rec_tcr(rec) or None):
+        w.append('BulkVS gives two answers: asked about this number alone it says %s, but its full '
+                 'list still says %s. The single answer is the newer one — the list catches up '
+                 'later, and the campaign counts with it.'
+                 % (_rec_tcr(rec) or 'no campaign', _rec_tcr(listed) or 'no campaign'))
+        _patch_cached(ten, tcr=_rec_tcr(rec) or '')
     if rec is None:
         w.append('BulkVS did not return this number when asked (%s). If BulkVS\'s own '
                  'website shows it, send a screenshot of this box — the details above say '
