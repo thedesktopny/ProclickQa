@@ -8242,6 +8242,8 @@ def sms_number_test(number):
     try:
         answer = cms_write._send_via_bulkvs({'From': frm, 'To': [to[-10:]], 'Message': text})
     except Exception as e:
+        cms_write.sms_event('test_send', frm, None, None, False, _who(), to=to[-10:],
+                            campaign_now=campaign, error=str(e)[:240])
         return jsonify({'ok': False, 'error': str(e)[:240], 'campaign': campaign}), 400
     if not isinstance(answer, dict):
         answer = {}
@@ -8250,6 +8252,9 @@ def sms_number_test(number):
              for x in results if isinstance(x, dict)) or bool(
                  (answer or {}).get('RefId') or (answer or {}).get('RefID'))
     _log_admin_action('sms_test', {'from': frm, 'to': to[-10:], 'accepted': ok})
+    cms_write.sms_event('test_send', frm, None, None, bool(ok), _who(), to=to[-10:],
+                        ref=(answer or {}).get('RefId') or (answer or {}).get('RefID'),
+                        campaign_now=campaign, answer=str(answer)[:300])
     return jsonify({'ok': ok, 'answer': answer, 'campaign': campaign, 'to': to[-10:],
                     'meaning': (('Sent from %s to %s.' % (frm, to[-10:])) if ok
                                 else 'The texting service did not accept it.')
@@ -8283,6 +8288,19 @@ def _sms_call(fn, *a, **k):
     if isinstance(out, dict) and out.get('ok') is False:
         return jsonify(out), 400
     return jsonify(out)
+
+
+@app.route('/api/sms/log', methods=['GET'])
+@portal_manager_only
+def sms_log_route():
+    """Everything that happened to texting numbers, newest first."""
+    import cms_write
+    a = request.args
+    try:
+        return jsonify(cms_write.sms_log(a.get('number') or None, a.get('kind') or None,
+                                         min(1000, int(a.get('limit') or 300))))
+    except Exception as e:
+        return jsonify({'error': str(e)[:240], 'events': []}), 400
 
 
 @app.route('/api/sms/health', methods=['GET'])
@@ -13329,6 +13347,11 @@ def _notes_refresher():
                 _NOTES_PASS.update(last=datetime.utcnow().isoformat() + 'Z',
                                    last_result={'error': str(e)[:200]})
                 print('[notes] pass failed: ' + str(e)[:160])
+            try:
+                import cms_write
+                cms_write.sms_watch()           # itself only runs every ten minutes
+            except Exception as e:
+                print('[sms watch] ' + str(e)[:120])
             time.sleep(90)
     threading.Thread(target=loop, daemon=True).start()
 

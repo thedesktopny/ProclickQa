@@ -741,6 +741,8 @@ def send_text(account_id, message, who, media_url=None, to=None):
            'to': their_number, 'from': our_number, 'dry_run': False,
            'values': {'message': message[:120]}}
     timed_out = False
+    sms_ctx(who=(who or {}).get('name') if isinstance(who, dict) else who,
+            why='needed to send a text from %s' % our_number)
     # The old CMS's step before every send: the number must be on one of the
     # two campaigns. Done here too now — without it a number that had been
     # taken off a campaign could not send from this page.
@@ -771,6 +773,10 @@ def send_text(account_id, message, who, media_url=None, to=None):
                                     'getting it ready. The message will go out automatically within '
                                     'a few minutes and then appear here.' % our_number)})
             _log(who, out, before=None)
+            sms_event('send', our_number, (out.get('campaign') or {}).get('tcr'), account_id, None, who,
+                      to=their_number, queued=True, step=(out.get('campaign') or {}).get('step'),
+                      picture=bool(media_url), why='BulkVS said "not ready yet" — retrying in the background')
+            sms_ctx(why=None, who=None)
             return out
         except Exception as e:
             # A timeout means we stopped waiting, not that nothing happened.
@@ -832,15 +838,27 @@ def send_text(account_id, message, who, media_url=None, to=None):
         except Exception:
             pass
     _log(who, out, before=None)
+    sms_event('send', our_number, (out.get('campaign') or {}).get('tcr'), account_id, bool(out.get('ok')), who,
+              to=their_number, ref=out.get('ref'), step=(out.get('campaign') or {}).get('step'),
+              unconfirmed=out.get('unconfirmed'), picture=bool(media_url),
+              campaign_warning=out.get('campaign_warning'),
+              error=out.get('raw_error') or out.get('error'))
+    sms_ctx(why=None, who=None)
     return out
 
 
 def _send_later(body, account_id, our_number, their_number, message, media_url, who):
     import threading
 
+    import time as _tt
+    started = _tt.time()
+
     def run():
         try:
             answer = _send_via_bulkvs(body, tries=20, wait=15)
+            sms_event('send_later', our_number, None, account_id, True, who, to=their_number,
+                      waited_seconds=int(_tt.time() - started),
+                      why='went out after BulkVS had said "not ready yet"')
             c = cms_db._connect()
             try:
                 k = c.cursor()
@@ -857,6 +875,9 @@ def _send_later(body, account_id, our_number, their_number, message, media_url, 
                        'committed': True, 'values': {'to': their_number, 'from': our_number,
                                                      'message': (message or '')[:120]}})
         except Exception as e:
+            sms_event('send_later', our_number, None, account_id, False, who, to=their_number,
+                      waited_seconds=int(_tt.time() - started), error=str(e)[:200],
+                      why='gave up — BulkVS kept saying "not ready yet"')
             _log(who, {'table': 'SMSLog', 'action': 'send_text_delayed', 'account_id': account_id,
                        'committed': False, 'error': 'Never sent: ' + str(e)[:200],
                        'values': {'to': their_number, 'from': our_number,
@@ -2730,6 +2751,152 @@ def campaign_plan(number, statics=None):
 
 import threading as _threading
 import contextlib as _contextlib
+# ─── Texting log ─────────────────────────────────────────────────────────────
+# Every thing that happens to a texting number, with the time it happened:
+# put on or taken off a campaign (and why — a send, a person, a test), made
+# static, given to a customer, bought, and every text sent from it with what
+# BulkVS answered. A watcher adds what nobody here did: numbers the old CMS
+# moved, and the moment BulkVS's campaign counts catch up — which is how long
+# registration with the carriers really takes. Kept in VoiceGuard's own
+# database; never blocks or breaks the thing being logged.
+_SMS_CTX = _threading.local()
+
+
+def sms_ctx(**kw):
+    """Who and why, for the log entries made by whatever runs next in this
+    thread (the low-level campaign change does not know who asked)."""
+    for k, v in kw.items():
+        setattr(_SMS_CTX, k, v)
+
+
+def _sms_ctx_get():
+    return {'who': getattr(_SMS_CTX, 'who', None), 'why': getattr(_SMS_CTX, 'why', None)}
+
+
+_SMS_LOG_READY = {'ok': False}
+
+
+def _sms_table(conn, c):
+    if _SMS_LOG_READY['ok']:
+        return
+    c.execute("""CREATE TABLE IF NOT EXISTS sms_events (
+                    id BIGSERIAL PRIMARY KEY, at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    kind TEXT NOT NULL, number TEXT, campaign TEXT, account_id INTEGER,
+                    who TEXT, ok BOOLEAN, detail JSONB)""")
+    c.execute('CREATE INDEX IF NOT EXISTS sms_events_number ON sms_events (number, at)')
+    c.execute('CREATE INDEX IF NOT EXISTS sms_events_at ON sms_events (at)')
+    conn.commit()
+    _SMS_LOG_READY['ok'] = True
+
+
+def sms_event(kind, number=None, campaign=None, account_id=None, ok=None, who=None, **detail):
+    try:
+        import json as _json
+        from server import get_db
+        conn = get_db(); c = conn.cursor()
+        _sms_table(conn, c)
+        ctx = _sms_ctx_get()
+        name = who.get('name') if isinstance(who, dict) else who
+        if not detail.get('why') and ctx['why']:
+            detail['why'] = ctx['why']
+        c.execute("""INSERT INTO sms_events (kind, number, campaign, account_id, who, ok, detail)
+                     VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                  (kind, _ten(number) if number else None, campaign or None, account_id,
+                   (name or ctx['who'] or None), ok,
+                   _json.dumps({k: v for k, v in detail.items() if v is not None}, default=str)))
+        conn.commit(); conn.close()
+    except Exception as e:
+        print('[sms log] ' + str(e)[:160])
+
+
+_WATCH = {'at': 0, 'tcr': None, 'counts': None}
+
+
+def sms_watch(force=False, every=600):
+    """Every ten minutes: compare each number's campaign with last time, and
+    each campaign's counts. Changes nobody here made are logged as coming from
+    outside (the old CMS, or someone at BulkVS); the moment BulkVS's count
+    catches up with what is set is logged as registration finishing, with how
+    long each waiting number took."""
+    import time as _t
+    if not force and _t.time() - _WATCH['at'] < every:
+        return None
+    _WATCH['at'] = _t.time()
+    if not bv_configured():
+        return None
+    try:
+        recs = bv_all_records(fresh=True)
+        camps = bv_campaigns()
+    except Exception as e:
+        print('[sms watch] ' + str(e)[:160])
+        return None
+    now = {_rec_tn(r): (_rec_tcr(r) or '') for r in recs if _rec_tn(r)}
+    assigned = {}
+    for t in now.values():
+        if t:
+            assigned[t] = assigned.get(t, 0) + 1
+    counts = {c['tcr']: {'bulkvs': c['count'], 'assigned': assigned.get(c['tcr'], 0)} for c in camps}
+    prev, prev_counts = _WATCH['tcr'], _WATCH['counts']
+    _WATCH['tcr'], _WATCH['counts'] = now, counts
+    if prev is None:
+        return {'first_look': True}
+    # which changes were ours? anything logged in the last 20 minutes
+    ours = set()
+    try:
+        from server import get_db
+        conn = get_db(); c = conn.cursor()
+        c.execute("""SELECT number FROM sms_events WHERE kind IN ('campaign_on','campaign_off')
+                     AND at > NOW() - INTERVAL '20 minutes'""")
+        ours = {r[0] for r in c.fetchall()}
+        conn.close()
+    except Exception:
+        pass
+    changed = 0
+    for ten, t in now.items():
+        old = prev.get(ten)
+        if old is None or old == t or ten in ours:
+            continue
+        changed += 1
+        sms_event('seen_on' if t else 'seen_off', ten, t or old, ok=True, who='outside the new CMS',
+                  why='changed by the old CMS or at BulkVS', before=old or 'no campaign',
+                  after=t or 'no campaign')
+    for tcr, v in counts.items():
+        pv = (prev_counts or {}).get(tcr)
+        if pv and (pv['bulkvs'] != v['bulkvs'] or pv['assigned'] != v['assigned']):
+            sms_event('campaign_count', None, tcr, ok=True, who='watcher',
+                      bulkvs_count=v['bulkvs'], set_to_it=v['assigned'],
+                      before_bulkvs=pv['bulkvs'], before_set=pv['assigned'],
+                      pending=max(0, v['assigned'] - (v['bulkvs'] or 0)))
+            # caught up: everything put on this campaign and still waiting is
+            # now registered — log how long each one took
+            if v['bulkvs'] is not None and v['bulkvs'] >= v['assigned']:
+                _sms_mark_registered(tcr)
+    return {'changed': changed}
+
+
+def _sms_mark_registered(tcr):
+    try:
+        from server import get_db
+        conn = get_db(); c = conn.cursor()
+        c.execute("""SELECT e.number, MAX(e.at) FROM sms_events e
+                     WHERE e.kind = 'campaign_on' AND e.campaign = %s AND e.at > NOW() - INTERVAL '7 days'
+                       AND NOT EXISTS (SELECT 1 FROM sms_events r WHERE r.kind = 'registered'
+                                       AND r.number = e.number AND r.at > e.at)
+                       AND NOT EXISTS (SELECT 1 FROM sms_events o WHERE o.kind = 'campaign_off'
+                                       AND o.number = e.number AND o.at > e.at)
+                     GROUP BY e.number""", (tcr,))
+        waiting = c.fetchall()
+        conn.close()
+    except Exception:
+        return
+    import datetime as _d
+    for number, put_on in waiting:
+        mins = int((_d.datetime.now(_d.timezone.utc) - put_on).total_seconds() // 60)
+        sms_event('registered', number, tcr, ok=True, who='watcher', minutes=mins,
+                  why='BulkVS\'s count for %s caught up — about %d min after it was put on '
+                      '(measured to within 10 min)' % (tcr, mins))
+
+
 _CAMPAIGN_THREAD_LOCK = _threading.Lock()
 
 
@@ -2782,9 +2949,19 @@ def _put_on_campaign(ten, tcr, lidb=None, webhook=None, removed_already=0):
                 'Webhook': webhook or 'WebHook2', 'Tcr': tcr}
     else:
         body = {'TN': '1' + ten, 'Lidb': lidb or 'PROCLICK', 'Webhook': webhook or 'WebHook1', 'Tcr': ''}
-    _bv('POST', '/tnRecord', body)
+    try:
+        _bv('POST', '/tnRecord', body)
+    except Exception as e:
+        sms_event('campaign_on' if tcr else 'campaign_off', ten, tcr or None, ok=False,
+                  error=str(e)[:200], webhook=body['Webhook'], lidb=body['Lidb'])
+        raise
     _patch_cached(ten, tcr=body['Tcr'], lidb=body['Lidb'], webhook=body['Webhook'])
     _ACTIVITY['data'] = None
+    if tcr:
+        sms_event('campaign_on', ten, tcr, ok=True, webhook=body['Webhook'], lidb=body['Lidb'],
+                  campaign_count_before=camps.get(tcr))
+    else:
+        sms_event('campaign_off', ten, None, ok=True, webhook=body['Webhook'])
     _t.sleep(0.5)
 
 
@@ -2792,8 +2969,12 @@ def apply_campaign_plan(number, plan):
     """Carries out the campaign step. The plan is worked out again inside the
     lock, from fresh BulkVS figures, so it cannot act on a stale picture."""
     ten = _ten(number)
+    if not getattr(_SMS_CTX, 'why', None):
+        sms_ctx(why='needed to send a text from %s' % ten)
     with _campaign_lock():
         plan = campaign_plan(ten)
+        if plan['step'] == 'swap':
+            sms_ctx(why='taken off to make room for %s, which needed to send' % ten)
         if plan['step'] == 'join':
             _put_on_campaign(ten, plan['tcr'])
         elif plan['step'] == 'swap':
@@ -2801,6 +2982,7 @@ def apply_campaign_plan(number, plan):
             for out_ in [plan['move_out']] + list(plan.get('extra_out') or []):
                 _put_on_campaign(out_, '')
                 gone += 1
+            sms_ctx(why='needed to send a text from %s' % ten)
             _put_on_campaign(ten, plan['tcr'], removed_already=gone)
     return plan
 
@@ -3513,24 +3695,17 @@ def number_campaign_action(number, action, who, tcr=None, reason=None):
                 if current:
                     _put_on_campaign(ten, '', webhook=info['webhook'])
                 _put_on_campaign(ten, tcr, lidb='STATIC', webhook=info['webhook'] or 'WebHook1')
-            else:
-                # already on it — just mark it so the CMS never moves it
-                import time as _t
-                _bv('POST', '/tnRecord', {'TN': '1' + ten, 'Lidb': 'STATIC',
-                                          'Webhook': info['webhook'] or 'WebHook1', 'Tcr': tcr})
-                _BV_ALL['records'] = None
-                _t.sleep(0.5)
+            # Already on that campaign: only the CMS's static list changes.
+            # Nothing is sent to BulkVS — sending the campaign again can make
+            # BulkVS register the number all over again, which takes hours and
+            # stops it delivering meanwhile.
             _set_static_row(ten, tcr, True)
         elif action == 'unstatic':
             if not static:
                 raise WriteRefused('%s is not static.' % ten)
+            # Only the CMS's static list changes; the number stays exactly as it
+            # is at BulkVS (re-sending its campaign can restart registration).
             _set_static_row(ten, None, False)
-            if current:
-                # stays on its campaign, but now as a rotating number the CMS may move
-                from datetime import datetime as _dt
-                _bv('POST', '/tnRecord', {'TN': '1' + ten, 'Lidb': _dt.now().strftime('%Y%m%d%H%M'),
-                                          'Webhook': info['webhook'] or 'WebHook2', 'Tcr': current})
-                _BV_ALL['records'] = None
         after = number_info(ten)
     expected = {'off': None, 'on': tcr, 'make_static': tcr, 'unstatic': current}[action]
     confirmed = (after['campaign'] or None) == (expected or None)
@@ -3542,7 +3717,7 @@ def number_campaign_action(number, action, who, tcr=None, reason=None):
         'off': 'Took %s off %s.' % (ten, current),
         'on': 'Put %s on %s.' % (ten, tcr),
         'make_static': '%s is now static on %s — the CMS will never move it.' % (ten, tcr),
-        'unstatic': '%s is no longer static. It stays on %s, but the CMS may now move it.'
+        'unstatic': '%s is no longer static. It stays on %s at BulkVS — nothing there was changed.'
                     % (ten, current or 'no campaign'),
     }[action]
     if not confirmed:
@@ -3662,3 +3837,93 @@ def delete_personal_info(info_id, who):
            'values': {'account_id': before['account_id'], 'title': before['title']}}
     _log(who, out)
     return out
+
+
+# ─── Texting log: the actions people take ───────────────────────────────────
+# Wrapped here rather than threaded through each function, so the log can
+# never change what those functions do.
+def _logged(kind, fn, number_of):
+    import functools
+
+    @functools.wraps(fn)
+    def run(*a, **k):
+        who = k.get('who') if 'who' in k else (a[1] if len(a) > 1 else None)
+        sms_ctx(who=(who or {}).get('name') if isinstance(who, dict) else who)
+        try:
+            out = fn(*a, **k)
+        except WriteRefused as e:
+            sms_event(kind, number_of(a, k, None), ok=False, who=who, error=str(e)[:200], refused=True)
+            sms_ctx(who=None, why=None)
+            raise
+        except Exception as e:
+            sms_event(kind, number_of(a, k, None), ok=False, who=who, error=str(e)[:200])
+            sms_ctx(who=None, why=None)
+            raise
+        if isinstance(out, dict):
+            sms_event(kind, number_of(a, k, out), out.get('tcr') or (out.get('values') or {}).get('to'),
+                      out.get('account_id') or (a[0] if kind in ('texting_on', 'texting_off') else None),
+                      bool(out.get('ok')), who,
+                      error=out.get('error'), bought_first=out.get('bought_first'),
+                      refill=out.get('refill'), released=out.get('released'),
+                      meaning=out.get('meaning'), reason=(out.get('values') or {}).get('reason'))
+        sms_ctx(who=None, why=None)
+        return out
+    return run
+
+
+order_number = _logged('bought', order_number, lambda a, k, o: (o or {}).get('number'))
+activate_texting = _logged('texting_on', activate_texting, lambda a, k, o: (o or {}).get('number'))
+disable_texting = _logged('texting_off', disable_texting,
+                          lambda a, k, o: ((o or {}).get('values') or {}).get('number'))
+
+_number_campaign_action_inner = number_campaign_action
+
+
+def number_campaign_action(number, action, who, tcr=None, reason=None):
+    sms_ctx(who=(who or {}).get('name') if isinstance(who, dict) else who,
+            why='by hand: %s — %s' % ({'off': 'taken off', 'on': 'put on', 'make_static': 'made static',
+                                       'unstatic': 'static removed'}.get(action, action), reason or ''))
+    try:
+        out = _number_campaign_action_inner(number, action, who, tcr=tcr, reason=reason)
+    except Exception as e:
+        sms_event('manual_' + str(action), number, tcr, ok=False, who=who, error=str(e)[:200],
+                  reason=reason, refused=isinstance(e, WriteRefused))
+        sms_ctx(who=None, why=None)
+        raise
+    if action in ('make_static', 'unstatic'):
+        sms_event('static_on' if action == 'make_static' else 'static_off', number,
+                  (out.get('values') or {}).get('to'), ok=True, who=who, reason=reason)
+    sms_ctx(who=None, why=None)
+    return out
+
+
+def sms_log(number=None, kind=None, limit=300):
+    """The texting log, newest first, plus how long registration has taken."""
+    from server import get_db
+    conn = get_db(); c = conn.cursor()
+    _sms_table(conn, c)
+    where, args = [], []
+    if number:
+        where.append('number = %s'); args.append(_ten(number))
+    if kind:
+        where.append('kind = %s'); args.append(kind)
+    c.execute("""SELECT id, at, kind, number, campaign, account_id, who, ok, detail
+                 FROM sms_events %s ORDER BY at DESC, id DESC LIMIT %d"""
+              % (('WHERE ' + ' AND '.join(where)) if where else '', int(limit)), tuple(args))
+    rows = [{'id': r[0], 'at': r[1].isoformat() if r[1] else None, 'kind': r[2], 'number': r[3],
+             'campaign': r[4], 'account_id': r[5], 'who': r[6], 'ok': r[7], 'detail': r[8] or {}}
+            for r in c.fetchall()]
+    c.execute("""SELECT (detail->>'minutes')::int FROM sms_events
+                 WHERE kind = 'registered' AND at > NOW() - INTERVAL '60 days'""")
+    mins = sorted(x[0] for x in c.fetchall() if x[0] is not None)
+    c.execute("""SELECT COUNT(*), COUNT(*) FILTER (WHERE ok IS FALSE),
+                        COUNT(*) FILTER (WHERE detail->>'queued' = 'true')
+                 FROM sms_events WHERE kind = 'send' AND at > NOW() - INTERVAL '7 days'""")
+    sends = c.fetchone()
+    conn.close()
+    timing = None
+    if mins:
+        timing = {'count': len(mins), 'shortest': mins[0], 'longest': mins[-1],
+                  'middle': mins[len(mins) // 2]}
+    return {'events': rows, 'registration_minutes': timing,
+            'sends_7d': {'total': sends[0], 'failed': sends[1], 'waited': sends[2]}}

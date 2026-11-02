@@ -1984,6 +1984,28 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
         <button class="cn-chip" onclick="saLoad(false)">Show</button></div>
     </div>
     <div style="font-size:13px;font-weight:650;margin:22px 0 10px;">Every number</div>
+    <div class="card" style="padding:16px 18px;margin-top:14px;">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <div style="font-size:14px;font-weight:650;">Texting log</div>
+        <span style="font-size:11.5px;color:var(--text3);">everything that happens to a number, with the time</span>
+        <input id="slog-number" class="cms-in" style="width:150px;margin-left:auto;" placeholder="one number…"
+               onkeydown="if(event.key==='Enter')slogLoad()">
+        <select id="slog-kind" class="cms-in" style="width:auto;" onchange="slogLoad()">
+          <option value="">Everything</option>
+          <option value="send">Texts sent</option>
+          <option value="campaign_on">Put on a campaign</option>
+          <option value="campaign_off">Taken off a campaign</option>
+          <option value="registered">Registration finished</option>
+          <option value="campaign_count">Campaign counts changing</option>
+          <option value="seen_on">Changed outside the new CMS (on)</option>
+          <option value="seen_off">Changed outside the new CMS (off)</option>
+          <option value="test_send">Test texts</option>
+        </select>
+        <button class="cn-chip" onclick="slogLoad()">Refresh</button>
+      </div>
+      <div id="slog-summary" style="font-size:12px;color:var(--text2);margin:10px 0 6px;"></div>
+      <div id="slog-body" style="font-size:12.5px;color:var(--text3);">Loading…</div>
+    </div>
     <div id="sn-body"></div>
   </div>
 </div>
@@ -6897,6 +6919,8 @@ function nmRender(msg, ok){
       ${row('Last sent / received', when(r.last_sent) + ' / ' + when(r.last_received))}
       ${row('Campaigns now', camps)}
       ${(r.warnings||[]).map(w=>`<div style="color:var(--yellow);margin-top:6px;">⚠️ ${esc(w)}</div>`).join('')}
+      <details style="margin-top:8px;" ontoggle="if(this.open)nmHistory('${r.number}')"><summary style="cursor:pointer;color:var(--text3);font-size:12px;">History of this number</summary>
+        <div id="nm-history" style="margin-top:6px;font-size:12px;"></div></details>
       ${r.record ? `<details style="margin-top:8px;"><summary style="cursor:pointer;color:var(--text3);font-size:12px;">Everything BulkVS has on this number</summary>
         <pre style="white-space:pre-wrap;font-size:11.5px;background:var(--surface2);padding:10px;border-radius:8px;margin-top:6px;">${esc(JSON.stringify(r.record, null, 2))}</pre></details>` : ''}
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:12px;">${acts.join('')}
@@ -6907,6 +6931,68 @@ function nmRender(msg, ok){
 }
 /* Sends one real text from this number to David's phone, exactly as the
    number is set up now — nothing about its campaign is changed. */
+/* ── Texting log ───────────────────────────────────────────────────────── */
+function slogWhat(e){
+  const d = e.detail || {}, c = e.campaign ? esc(e.campaign) : '';
+  const t10 = String(d.to || '').replace(/\D/g, '').slice(-10);
+  const to = t10.length === 10 ? `(${t10.slice(0,3)}) ${t10.slice(3,6)}-${t10.slice(6)}` : esc(d.to || '');
+  switch(e.kind){
+    case 'campaign_on':  return `Put on <b>${c}</b>`;
+    case 'campaign_off': return `Taken off its campaign`;
+    case 'seen_on':      return `Put on <b>${c}</b> <span style="color:var(--yellow)">outside the new CMS</span>`;
+    case 'seen_off':     return `Taken off ${c} <span style="color:var(--yellow)">outside the new CMS</span>`;
+    case 'registered':   return `<b style="color:var(--green)">Registered on ${c}</b> — about ${d.minutes} min after it was put on`;
+    case 'campaign_count': return `<b>${c}</b> count: BulkVS ${d.before_bulkvs} → ${d.bulkvs_count}, set to it ${d.before_set} → ${d.set_to_it}${d.pending ? ` · <span style="color:var(--yellow)">${d.pending} still registering</span>` : ''}`;
+    case 'send':         return `Text to ${to}${d.picture ? ' 📷' : ''}${d.step === 'join' ? ' · joined ' + c : d.step === 'swap' ? ' · swapped onto ' + c : ''}${d.queued ? ' · <span style="color:var(--yellow)">BulkVS said not ready — retrying</span>' : ''}`;
+    case 'send_later':   return e.ok ? `Delayed text to ${to} went out after ${d.waited_seconds}s` : `Delayed text to ${to} <b style="color:var(--red)">never went</b> (tried ${d.waited_seconds}s)`;
+    case 'test_send':    return `Test text to ${to}`;
+    case 'static_on':    return `Made static${c ? ' on ' + c : ''}`;
+    case 'static_off':   return `Static removed`;
+    case 'texting_on':   return `Texting turned on for customer #${e.account_id}${d.bought_first ? ' (number bought first)' : ''}`;
+    case 'texting_off':  return `Texting turned off for customer #${e.account_id}${d.released ? ' — number released' : ''}`;
+    case 'bought':       return `Bought a new number`;
+    default:             return esc(e.kind.replace(/_/g, ' '));
+  }
+}
+function slogRows(events, showNumber){
+  if(!events.length) return '<div style="color:var(--text3);">Nothing logged yet.</div>';
+  return `<div style="max-height:420px;overflow:auto;border:1px solid var(--border);border-radius:10px;">
+    <table class="data-table" style="font-size:12px;"><thead><tr><th>When</th>${showNumber ? '<th>Number</th>' : ''}<th>What happened</th><th>By</th><th>Result</th></tr></thead><tbody>
+    ${events.map(e => { const d = e.detail || {};
+      const res = e.ok === false ? `<span style="color:var(--red)">✗ ${esc(String(d.error || 'failed').slice(0, 140))}</span>`
+                : e.ok === true ? `<span style="color:var(--green)">✓</span>${d.ref ? ' <span style="color:var(--text3)">ref ' + esc(String(d.ref).slice(0, 14)) + '</span>' : ''}${d.unconfirmed ? ' (not confirmed)' : ''}` : '<span style="color:var(--text3)">…</span>';
+      return `<tr><td style="white-space:nowrap;font-variant-numeric:tabular-nums;">${new Date(e.at).toLocaleString([], {month:'short', day:'numeric', hour:'numeric', minute:'2-digit'})}</td>
+        ${showNumber ? `<td style="white-space:nowrap;">${e.number ? `<a href="#" style="color:var(--accent)" onclick="document.getElementById('nm-number').value='${e.number}';nmLookup('${e.number}');window.scrollTo({top:0,behavior:'smooth'});return false;">${esc(e.number)}</a>` : ''}</td>` : ''}
+        <td>${slogWhat(e)}${d.why ? `<div style="font-size:11px;color:var(--text3);">${esc(d.why)}</div>` : ''}</td>
+        <td style="font-size:11.5px;color:var(--text3);">${esc(e.who || '')}</td>
+        <td>${res}</td></tr>`; }).join('')}
+    </tbody></table></div>`;
+}
+async function slogLoad(){
+  const body = document.getElementById('slog-body'); if(!body) return;
+  const n = (document.getElementById('slog-number').value || '').replace(/\D/g, '').slice(-10);
+  const k = document.getElementById('slog-kind').value;
+  body.textContent = 'Loading…';
+  try{
+    const r = await API.get('/api/sms/log?limit=300' + (n ? '&number=' + n : '') + (k ? '&kind=' + k : ''));
+    if(r.error){ body.innerHTML = `<span style="color:var(--red)">${esc(r.error)}</span>`; return; }
+    const t = r.registration_minutes, s7 = r.sends_7d || {};
+    document.getElementById('slog-summary').innerHTML =
+      (t ? `⏱ Registration measured ${t.count} time${t.count === 1 ? '' : 's'}: usually about <b>${t.middle} min</b> (shortest ${t.shortest}, longest ${t.longest}).`
+         : '⏱ No registration timings measured yet — they appear as numbers go on campaigns and BulkVS catches up.')
+      + ` &nbsp; Texts in the last 7 days: <b>${s7.total || 0}</b>${s7.failed ? `, <span style="color:var(--red)">${s7.failed} failed</span>` : ''}${s7.waited ? `, ${s7.waited} had to wait for BulkVS` : ''}.`;
+    body.innerHTML = slogRows(r.events || [], true);
+  }catch(e){ body.textContent = e.message; }
+}
+async function nmHistory(num){
+  const box = document.getElementById('nm-history'); if(!box) return;
+  box.textContent = 'Loading…';
+  try{
+    const r = await API.get('/api/sms/log?limit=40&number=' + num);
+    box.innerHTML = slogRows(r.events || [], false);
+  }catch(e){ box.textContent = e.message; }
+}
+
 async function nmTestText(){
   const r = nmInfo; if(!r) return;
   if(!confirm('Send a test text from ' + r.number + ' to 347-675-2334?'
@@ -7306,7 +7392,7 @@ function showPage(id){
   if(id==='live'){ loadLive(); loadWaiting(); loadCallbacks(); lvAutoToggle(); loadCallFlow(); cfAutoToggle(); }
   if(id==='missed') loadMissed();
   if(id==='teams') loadTeams();
-  if(id==='sms-numbers') loadSmsNumbers();
+  if(id==='sms-numbers'){ loadSmsNumbers(); slogLoad(); }
   if(id==='skin-block') sbOpen();
   if(id==='staffing') loadStaffing();
   if(id==='qa-assign') loadQaAssign();
