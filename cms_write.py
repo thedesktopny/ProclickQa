@@ -2867,11 +2867,42 @@ def sms_watch(force=False, every=600):
                       bulkvs_count=v['bulkvs'], set_to_it=v['assigned'],
                       before_bulkvs=pv['bulkvs'], before_set=pv['assigned'],
                       pending=max(0, v['assigned'] - (v['bulkvs'] or 0)))
-            # caught up: everything put on this campaign and still waiting is
-            # now registered — log how long each one took
-            if v['bulkvs'] is not None and v['bulkvs'] >= v['assigned']:
+            # BulkVS has caught up: what it counts equals what is set. Every
+            # number put on and still waiting is now registered, and every
+            # number taken off has now freed its place — log how long each took.
+            if v['bulkvs'] is not None and v['bulkvs'] == v['assigned']:
                 _sms_mark_registered(tcr)
+                _sms_mark_freed(tcr)
     return {'changed': changed}
+
+
+def _sms_mark_freed(tcr):
+    """Numbers taken off this campaign whose place BulkVS has now let go of.
+    A take-off logged without its campaign counts if that number's last known
+    campaign was this one."""
+    try:
+        from server import get_db
+        conn = get_db(); c = conn.cursor()
+        c.execute("""SELECT e.number, MAX(e.at) FROM sms_events e
+                     WHERE e.kind IN ('campaign_off', 'seen_off') AND e.ok IS NOT FALSE
+                       AND e.at > NOW() - INTERVAL '7 days'
+                       AND COALESCE(e.campaign,
+                             (SELECT p.campaign FROM sms_events p WHERE p.number = e.number
+                                AND p.campaign IS NOT NULL AND p.at < e.at
+                                ORDER BY p.at DESC LIMIT 1)) = %s
+                       AND NOT EXISTS (SELECT 1 FROM sms_events f WHERE f.kind = 'freed'
+                                       AND f.number = e.number AND f.at > e.at)
+                     GROUP BY e.number""", (tcr,))
+        waiting = c.fetchall()
+        conn.close()
+    except Exception:
+        return
+    import datetime as _d
+    for number, taken_off in waiting:
+        mins = int((_d.datetime.now(_d.timezone.utc) - taken_off).total_seconds() // 60)
+        sms_event('freed', number, tcr, ok=True, who='watcher', minutes=mins,
+                  why='BulkVS\'s count for %s dropped — its place was free about %d min after it '
+                      'was taken off (measured to within 10 min)' % (tcr, mins))
 
 
 def _sms_mark_registered(tcr):
@@ -2949,10 +2980,17 @@ def _put_on_campaign(ten, tcr, lidb=None, webhook=None, removed_already=0):
                 'Webhook': webhook or 'WebHook2', 'Tcr': tcr}
     else:
         body = {'TN': '1' + ten, 'Lidb': lidb or 'PROCLICK', 'Webhook': webhook or 'WebHook1', 'Tcr': ''}
+    # which campaign it is leaving, for the log (so the wait until BulkVS frees
+    # the place can be measured)
+    prev_tcr = getattr(_SMS_CTX, 'prev', None)
+    if not tcr and not prev_tcr and _BV_ALL.get('records') is not None:
+        r0 = next((r for r in _BV_ALL['records'] if _rec_is(r, ten)), None)
+        prev_tcr = _rec_tcr(r0) if r0 else None
+    sms_ctx(prev=None)
     try:
         _bv('POST', '/tnRecord', body)
     except Exception as e:
-        sms_event('campaign_on' if tcr else 'campaign_off', ten, tcr or None, ok=False,
+        sms_event('campaign_on' if tcr else 'campaign_off', ten, tcr or prev_tcr or None, ok=False,
                   error=str(e)[:200], webhook=body['Webhook'], lidb=body['Lidb'])
         raise
     _patch_cached(ten, tcr=body['Tcr'], lidb=body['Lidb'], webhook=body['Webhook'])
@@ -2961,7 +2999,7 @@ def _put_on_campaign(ten, tcr, lidb=None, webhook=None, removed_already=0):
         sms_event('campaign_on', ten, tcr, ok=True, webhook=body['Webhook'], lidb=body['Lidb'],
                   campaign_count_before=camps.get(tcr))
     else:
-        sms_event('campaign_off', ten, None, ok=True, webhook=body['Webhook'])
+        sms_event('campaign_off', ten, prev_tcr or None, ok=True, webhook=body['Webhook'])
     _t.sleep(0.5)
 
 
@@ -2980,6 +3018,7 @@ def apply_campaign_plan(number, plan):
         elif plan['step'] == 'swap':
             gone = 0
             for out_ in [plan['move_out']] + list(plan.get('extra_out') or []):
+                sms_ctx(prev=plan['tcr'])
                 _put_on_campaign(out_, '')
                 gone += 1
             sms_ctx(why='needed to send a text from %s' % ten)
@@ -3673,6 +3712,7 @@ def number_campaign_action(number, action, who, tcr=None, reason=None):
                                    'mean to take it off.' % (ten, static))
             if not current:
                 raise WriteRefused('%s is not on a campaign.' % ten)
+            sms_ctx(prev=current)
             # a number used outside the CMS keeps its own webhook and caller name
             _put_on_campaign(ten, '', webhook=info['webhook'],
                              lidb=info['lidb'] if info.get('outside_cms') else None)
@@ -3684,6 +3724,7 @@ def number_campaign_action(number, action, who, tcr=None, reason=None):
             moved = 0
             ext = bool(info.get('outside_cms'))
             if current:
+                sms_ctx(prev=current)
                 _put_on_campaign(ten, '', webhook=info['webhook'], lidb=info['lidb'] if ext else None)
             _put_on_campaign(ten, tcr, removed_already=moved,
                              webhook=info['webhook'] if ext else None,
@@ -3913,17 +3954,19 @@ def sms_log(number=None, kind=None, limit=300):
     rows = [{'id': r[0], 'at': r[1].isoformat() if r[1] else None, 'kind': r[2], 'number': r[3],
              'campaign': r[4], 'account_id': r[5], 'who': r[6], 'ok': r[7], 'detail': r[8] or {}}
             for r in c.fetchall()]
-    c.execute("""SELECT (detail->>'minutes')::int FROM sms_events
-                 WHERE kind = 'registered' AND at > NOW() - INTERVAL '60 days'""")
-    mins = sorted(x[0] for x in c.fetchall() if x[0] is not None)
+    def _mins(kind):
+        c.execute("""SELECT (detail->>'minutes')::int FROM sms_events
+                     WHERE kind = %s AND at > NOW() - INTERVAL '60 days'""", (kind,))
+        return sorted(x[0] for x in c.fetchall() if x[0] is not None)
+    mins = _mins('registered')
+    fmins = _mins('freed')
     c.execute("""SELECT COUNT(*), COUNT(*) FILTER (WHERE ok IS FALSE),
                         COUNT(*) FILTER (WHERE detail->>'queued' = 'true')
                  FROM sms_events WHERE kind = 'send' AND at > NOW() - INTERVAL '7 days'""")
     sends = c.fetchone()
     conn.close()
-    timing = None
-    if mins:
-        timing = {'count': len(mins), 'shortest': mins[0], 'longest': mins[-1],
-                  'middle': mins[len(mins) // 2]}
-    return {'events': rows, 'registration_minutes': timing,
+    def _sum(m):
+        return {'count': len(m), 'shortest': m[0], 'longest': m[-1], 'middle': m[len(m) // 2]} if m else None
+    timing = _sum(mins)
+    return {'events': rows, 'registration_minutes': timing, 'freeing_minutes': _sum(fmins),
             'sends_7d': {'total': sends[0], 'failed': sends[1], 'waited': sends[2]}}

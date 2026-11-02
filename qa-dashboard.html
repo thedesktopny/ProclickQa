@@ -1996,6 +1996,7 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
           <option value="campaign_on">Put on a campaign</option>
           <option value="campaign_off">Taken off a campaign</option>
           <option value="registered">Registration finished</option>
+          <option value="freed">Place freed after taking off</option>
           <option value="campaign_count">Campaign counts changing</option>
           <option value="seen_on">Changed outside the new CMS (on)</option>
           <option value="seen_off">Changed outside the new CMS (off)</option>
@@ -6938,10 +6939,11 @@ function slogWhat(e){
   const to = t10.length === 10 ? `(${t10.slice(0,3)}) ${t10.slice(3,6)}-${t10.slice(6)}` : esc(d.to || '');
   switch(e.kind){
     case 'campaign_on':  return `Put on <b>${c}</b>`;
-    case 'campaign_off': return `Taken off its campaign`;
+    case 'campaign_off': return `Taken off ${c || 'its campaign'}`;
     case 'seen_on':      return `Put on <b>${c}</b> <span style="color:var(--yellow)">outside the new CMS</span>`;
     case 'seen_off':     return `Taken off ${c} <span style="color:var(--yellow)">outside the new CMS</span>`;
     case 'registered':   return `<b style="color:var(--green)">Registered on ${c}</b> — about ${d.minutes} min after it was put on`;
+    case 'freed':        return `<b style="color:var(--green)">Place on ${c} freed</b> — about ${d.minutes} min after it was taken off`;
     case 'campaign_count': return `<b>${c}</b> count: BulkVS ${d.before_bulkvs} → ${d.bulkvs_count}, set to it ${d.before_set} → ${d.set_to_it}${d.pending ? ` · <span style="color:var(--yellow)">${d.pending} still registering</span>` : ''}`;
     case 'send':         return `Text to ${to}${d.picture ? ' 📷' : ''}${d.step === 'join' ? ' · joined ' + c : d.step === 'swap' ? ' · swapped onto ' + c : ''}${d.queued ? ' · <span style="color:var(--yellow)">BulkVS said not ready — retrying</span>' : ''}`;
     case 'send_later':   return e.ok ? `Delayed text to ${to} went out after ${d.waited_seconds}s` : `Delayed text to ${to} <b style="color:var(--red)">never went</b> (tried ${d.waited_seconds}s)`;
@@ -6976,10 +6978,13 @@ async function slogLoad(){
   try{
     const r = await API.get('/api/sms/log?limit=300' + (n ? '&number=' + n : '') + (k ? '&kind=' + k : ''));
     if(r.error){ body.innerHTML = `<span style="color:var(--red)">${esc(r.error)}</span>`; return; }
-    const t = r.registration_minutes, s7 = r.sends_7d || {};
+    const t = r.registration_minutes, f = r.freeing_minutes, s7 = r.sends_7d || {};
     document.getElementById('slog-summary').innerHTML =
-      (t ? `⏱ Registration measured ${t.count} time${t.count === 1 ? '' : 's'}: usually about <b>${t.middle} min</b> (shortest ${t.shortest}, longest ${t.longest}).`
-         : '⏱ No registration timings measured yet — they appear as numbers go on campaigns and BulkVS catches up.')
+      (t ? `⏱ Putting on (until registered) measured ${t.count} time${t.count === 1 ? '' : 's'}: usually about <b>${t.middle} min</b> (shortest ${t.shortest}, longest ${t.longest}).`
+         : '⏱ No put-on timings yet — they appear as numbers go on campaigns and BulkVS catches up.')
+      + '<br>' + (f ? `⏱ Taking off (until the place is free) measured ${f.count} time${f.count === 1 ? '' : 's'}: usually about <b>${f.middle} min</b> (shortest ${f.shortest}, longest ${f.longest}).`
+         : '⏱ No take-off timings yet — they appear once BulkVS lets go of a number\'s place.')
+      + '<br>'
       + ` &nbsp; Texts in the last 7 days: <b>${s7.total || 0}</b>${s7.failed ? `, <span style="color:var(--red)">${s7.failed} failed</span>` : ''}${s7.waited ? `, ${s7.waited} had to wait for BulkVS` : ''}.`;
     body.innerHTML = slogRows(r.events || [], true);
   }catch(e){ body.textContent = e.message; }
