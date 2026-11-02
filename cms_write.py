@@ -2414,6 +2414,10 @@ try:
     CAMPAIGN_LIMIT = max(1, min(49, int(os.getenv('CAMPAIGN_LIMIT', '49'))))
 except Exception:
     CAMPAIGN_LIMIT = 49
+# What the carriers themselves allow. CAMPAIGN_LIMIT can sit below it to keep
+# places spare (47 since the old CMS was set to 47 too); only going past THIS
+# number means texts cannot be registered.
+CARRIER_MAX = 49
                               # (BulkVS's own ceiling is 49; one kept spare for safety)
 NOT_READY_CODE = '7401'       # BulkVS: the number is not ready to send yet
 
@@ -3322,7 +3326,7 @@ def sms_health():
     campaigns, the static numbers, which number would be taken off next, the
     spare pool, and anything that disagrees between the CMS and BulkVS."""
     from collections import Counter
-    out = {'configured': bv_configured(), 'campaign_limit': CAMPAIGN_LIMIT, 'problems': []}
+    out = {'configured': bv_configured(), 'campaign_limit': CAMPAIGN_LIMIT, 'carrier_max': CARRIER_MAX, 'problems': []}
     statics = static_numbers()
     conn = cms_db._connect()
     try:
@@ -3376,11 +3380,11 @@ def sms_health():
                          'free': (CAMPAIGN_LIMIT - _used(c)) if c['count'] is not None else None}
                         for c in camps]
     for c in out['campaigns']:
-        if c['count'] is not None and c['count'] > CAMPAIGN_LIMIT:
+        if c['count'] is not None and c['count'] > CARRIER_MAX:
             out['problems'].append({'kind': 'over_limit', 'text': (
                 '%s has %d numbers set to it, over the carriers\' limit of %d — %d of them can never be '
                 'registered and will not deliver. Take the newest extras off.'
-                % (c['tcr'], c['count'], CAMPAIGN_LIMIT, c['count'] - CAMPAIGN_LIMIT))})
+                % (c['tcr'], c['count'], CARRIER_MAX, c['count'] - CARRIER_MAX))})
         elif c['pending']:
             out['problems'].append({'kind': 'pending', 'text': (
                 '%s: %d number(s) still being registered with the carriers (BulkVS counts %d of %d set)'
@@ -3643,10 +3647,10 @@ def number_info(number):
             w.append('%s: %d number(s) are set to it but the carriers have not finished registering '
                      'them (BulkVS counts %s). Until they finish, texts from those numbers may not '
                      'arrive.' % (c['tcr'], c['pending'], c.get('bulkvs_count')))
-        if c['count'] is not None and c['count'] > CAMPAIGN_LIMIT:
+        if c['count'] is not None and c['count'] > CARRIER_MAX:
             w.append('%s has %d numbers set to it — over the carriers\' limit of %d. The extra ones '
                      'cannot be registered and will not deliver; take the extras off.'
-                     % (c['tcr'], c['count'], CAMPAIGN_LIMIT))
+                     % (c['tcr'], c['count'], CARRIER_MAX))
     out['warnings'] = w
     return out
 

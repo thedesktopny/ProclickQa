@@ -6747,7 +6747,7 @@ async function snLoadHealth(){
   const lim = h.campaign_limit || 49;
   const camp = (h.campaigns||[]).map(c=>{
     const pct = c.count!=null ? Math.min(100, Math.round(c.count/lim*100)) : 0;
-    const col = c.count>lim ? 'var(--red)' : c.count>=lim ? 'var(--yellow)' : 'var(--green)';
+    const col = c.count>(h.carrier_max||49) ? 'var(--red)' : c.count>=lim ? 'var(--yellow)' : 'var(--green)';
     return `<div class="card" style="padding:14px 16px;flex:1;min-width:200px;cursor:pointer;" title="Show every number on ${esc(c.tcr)}"
          onclick="snCampaignList('${esc(c.tcr)}')">
       <div style="font-size:11px;color:var(--text3);letter-spacing:.06em;">CAMPAIGN <span style="float:right;color:var(--accent);letter-spacing:0;">see all numbers ›</span></div>
@@ -6757,7 +6757,7 @@ async function snLoadHealth(){
         <div style="height:100%;width:${pct}%;background:${col};"></div></div>
       ${c.pending ? `<div style="font-size:11.5px;color:var(--yellow);margin-bottom:3px;">${c.pending} still registering with the carriers (BulkVS counts ${c.bulkvs_count})</div>` : ''}
       <div style="font-size:11.5px;color:var(--text3);">${c.static} static · ${Math.max(0,(c.counted_here||0)-c.static)} rotating
-        ${c.free!=null ? ' · '+(c.free>0? c.free+' free' : c.free===0 ? '<b style="color:var(--yellow)">full</b>' : '<b style="color:var(--red)">'+(-c.free)+' over the limit</b>') : ''}</div></div>`;
+        ${c.free!=null ? ' · '+(c.free>0? c.free+' free' : c.free===0 ? '<b style="color:var(--yellow)">full</b>' : (c.count <= (h.carrier_max||49) ? '<b style="color:var(--yellow)">full</b> · '+(-c.free)+' above '+lim+', comes down as numbers rotate' : '<b style="color:var(--red)">'+(c.count-(h.carrier_max||49))+' over the carriers\' limit</b>')) : ''}</div></div>`;
   }).join('');
   snHealth = h;
   const probs = (h.problems||[]);
