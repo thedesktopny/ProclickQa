@@ -9486,6 +9486,35 @@ def waiting_route():
         return jsonify({'error': str(e)[:200], 'count': 0, 'waiting': []}), 400
 
 
+@app.route('/api/waiting/why', methods=['GET'])
+@portal_or_manager
+def waiting_why_route():
+    """Why each caller is still waiting: the line they dialled, who it already
+    rang, and what everyone who answers that line is doing right now."""
+    import cms_db
+    if not _can_hear_recordings():
+        return jsonify({'error': 'For team leaders, QA and managers.'}), 403
+    try:
+        out = _shared('waiting_why', 5, cms_db.waiting_why)
+    except Exception as e:
+        return jsonify({'error': str(e)[:200], 'waiting': []}), 400
+    # Does the phone system itself still show the caller? Only worth saying when
+    # it is actually sending us events; otherwise we simply do not know.
+    seen = _LIVE_CALLS.get('events_seen', {}) or {}
+    feed_on = bool(seen.get('start') or seen.get('queue'))
+    open_on_phone = set()
+    for c in _LIVE_CALLS.get('by_uniq', {}).values():
+        if not c.get('picked_up') and not c.get('outbound'):
+            d = ''.join(ch for ch in str(c.get('phone') or '') if ch.isdigit())[-10:]
+            if d:
+                open_on_phone.add(d)
+    for x in out.get('waiting', []):
+        d = ''.join(ch for ch in str(x.get('phone') or '') if ch.isdigit())[-10:]
+        x['phone_system_still_has_it'] = (d in open_on_phone) if feed_on else None
+    out['phone_feed_on'] = feed_on
+    return jsonify(out)
+
+
 @app.route('/api/queue-kinds', methods=['GET'])
 @portal_manager_only
 def queue_kinds_route():

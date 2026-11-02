@@ -2108,6 +2108,7 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
     <pre id="why-popup" style="white-space:pre-wrap;font-size:11.5px;color:var(--text2);
          margin:0 0 12px;line-height:1.8;"></pre>
     <div id="lv-waiting" class="lv-waiting"></div>
+    <div id="lv-why" class="card" style="display:none;padding:14px 18px;margin:-6px 0 14px;"></div>
     <div class="card" id="lv-callbacks-card" style="padding:16px 20px;margin-bottom:14px;display:none;">
       <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;">
         <h2 class="payh" style="margin:0;">📞 To call back</h2>
@@ -10074,6 +10075,119 @@ async function callbackDone(callId, btn){
   }
 }
 
+let WT_OPEN = false, WT_BUSY = false;
+function wtWhyToggle(){ WT_OPEN ? wtWhyClose() : (WT_OPEN = true, wtWhyLoad(), loadWaiting()); }
+function wtWhyClose(){
+  WT_OPEN = false;
+  const el = document.getElementById('lv-why');
+  if(el){ el.style.display = 'none'; el.innerHTML = ''; }
+  loadWaiting();
+}
+function wtClock(s){ s = Math.max(0, s|0); return Math.floor(s/60) + ':' + String(s%60).padStart(2,'0'); }
+function wtNames(list, max){
+  max = max || 6;
+  const shown = list.slice(0, max).map(a => esc(a.name) + (a.extension ? ' <span style="color:var(--text3)">(' + esc(a.extension) + ')</span>' : '')).join(', ');
+  return shown + (list.length > max ? ' +' + (list.length - max) + ' more' : '');
+}
+async function wtWhyLoad(){
+  const el = document.getElementById('lv-why');
+  if(!el || WT_BUSY) return;
+  el.style.display = '';
+  if(!el.innerHTML) el.innerHTML = '<div style="color:var(--text3);font-size:12.5px;">Checking each caller…</div>';
+  WT_BUSY = true;
+  let r;
+  try{ r = await API.get('/api/waiting/why'); }
+  catch(e){ r = {error: e.message}; }
+  WT_BUSY = false;
+  if(!WT_OPEN) return;
+  if(r.error){ el.innerHTML = '<div style="color:var(--red);font-size:12.5px;">' + esc(r.error) + '</div>'; return; }
+
+  const f = r.floor || {};
+  const off = r.free_phone_off || [];
+  let h = '<div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:8px;">'
+    + '<h2 class="payh" style="margin:0;">Why are they waiting?</h2>'
+    + '<span style="font-size:11.5px;color:var(--text3);">Updates by itself while open</span>'
+    + '<button class="cn-chip" style="margin-left:auto;" onclick="wtWhyClose()">Close</button></div>';
+
+  // the whole floor, split the way the phone system sees it
+  h += '<div style="font-size:12.5px;color:var(--text2);margin-bottom:10px;line-height:1.7;">'
+    + 'On shift right now: <b>' + (f.free||0) + '</b> really free · '
+    + (f.on_call||0) + ' on a call · ' + (f.ringing||0) + ' ringing · '
+    + (f.break||0) + ' on break · ' + (f.dnd||0) + ' do not disturb'
+    + (off.length ? ' · <b style="color:var(--yellow)">' + off.length + ' phone not connected</b>' : '')
+    + '</div>';
+  if(off.length){
+    h += '<div style="font-size:12px;color:var(--yellow);margin:-4px 0 10px;line-height:1.6;">'
+      + '📵 Clocked in but their phone is not connected, so no call can reach them (they still count as "free" on the board): '
+      + wtNames(off, 12) + '</div>';
+  }
+
+  const rows = r.waiting || [];
+  if(!rows.length){
+    h += '<div style="font-size:12.5px;color:var(--green);">Nobody is holding right now.</div>';
+  }
+  rows.forEach(x => {
+    const who = x.enrolled_now || {};
+    const free = who.free || [];
+    const busy = (who.on_call||[]).length + (who.ringing||[]).length;
+    const away = (who.break||[]).length + (who.dnd||[]).length;
+    const offl = who.phone_off || [];
+    const tried = x.tried || [];
+    const noAns = tried.filter(t => t.result !== 'rang');
+    const lastAgo = (x.quiet_seconds == null) ? null : x.quiet_seconds;
+
+    // the plain-language answer first
+    let why, tone = 'var(--text)';
+    if(x.phone_system_still_has_it === false){
+      why = 'The phone system no longer has this caller — they most likely hung up and the old CMS never closed the call. Not a real wait; it drops off by itself after 30 minutes.';
+      tone = 'var(--text3)';
+    }else if(x.company_id && x.enrolled_total === 0){
+      why = 'Nobody is set up to answer this line in the CMS, so the phone system has no one to send it to.';
+      tone = 'var(--red)';
+    }else if(x.company_id && !free.length){
+      why = 'Everyone who answers this line is busy or away (' + busy + ' on a call, ' + away + ' on break / do not disturb'
+          + (offl.length ? ', ' + offl.length + ' phone not connected' : '') + ').'
+          + (x.free_not_enrolled ? ' ' + x.free_not_enrolled + ' other agent' + (x.free_not_enrolled===1?' is':'s are') + ' free but not set up for this line.' : '');
+      tone = 'var(--yellow)';
+    }else if(free.length && noAns.length){
+      why = 'It is ringing people who are free, and they are not picking up.';
+      tone = 'var(--red)';
+    }else if(free.length && !tried.length){
+      why = 'People who answer this line are free, but the phone system has not rung anyone yet'
+          + (lastAgo != null && lastAgo > 90 ? ' — nothing has happened on this call for ' + wtClock(lastAgo) + ', it may be stuck.' : '.');
+      tone = 'var(--red)';
+    }else if(!x.company_id){
+      why = 'This number is not listed under any business in the CMS, so it is not clear who should answer it.';
+      tone = 'var(--yellow)';
+    }else{
+      why = 'It is being offered to free people right now.';
+    }
+
+    h += '<div style="border-top:1px solid var(--border);padding:10px 0;">'
+      + '<div style="font-size:13px;"><b>' + esc(x.phone || 'unknown') + '</b>'
+      + (x.caller_name ? ' · ' + esc(x.caller_name) : '')
+      + ' · waiting <b>' + wtClock(x.seconds) + '</b>'
+      + ' · dialled ' + esc(x.called || '?') + (x.line ? ' <span style="color:var(--text3)">(' + esc(x.line) + ')</span>' : '')
+      + '</div>'
+      + '<div style="font-size:12.5px;color:' + tone + ';margin-top:4px;">' + why + '</div>'
+      + '<div style="font-size:12px;color:var(--text2);margin-top:6px;line-height:1.7;">'
+      + '<b>Rang so far:</b> ' + (tried.length
+          ? tried.map(t => esc(t.name || ('ext ' + t.extension)) + ' <span style="color:' + (t.result==='rang' ? 'var(--accent)">ringing now' : 'var(--red)">' + esc(t.result)) + '</span>').join(' · ')
+          : '<span style="color:var(--text3)">nobody yet</span>')
+      + (x.company_id ? '<br><b>Answer this line (' + (x.enrolled_total||0) + ' set up):</b> '
+          + (free.length ? '<span style="color:var(--green)">free: ' + wtNames(free) + '</span>' : '<span style="color:var(--text3)">none free</span>')
+          + (busy ? ' · ' + busy + ' on a call' : '')
+          + (away ? ' · ' + away + ' on break / do not disturb' : '')
+          + (offl.length ? ' · <span style="color:var(--yellow)">phone not connected: ' + wtNames(offl) + '</span>' : '')
+        : '')
+      + '</div></div>';
+  });
+  if(r.phone_feed_on === false){
+    h += '<div style="font-size:11px;color:var(--text3);margin-top:6px;">The phone system is not sending live events here, so a caller who already hung up may still show until the CMS closes the call.</div>';
+  }
+  el.innerHTML = h;
+}
+
 async function loadWaiting(){
   const box = document.getElementById('lv-waiting');
   if(!box) return;
@@ -10096,10 +10210,11 @@ async function loadWaiting(){
       .map(([num, count]) => `<span class="lv-qchip">${esc(num)}: <b>${count}</b></span>`)
       .join('');
 
-    box.innerHTML = `<div class="lv-hold ${cls}">
+    box.innerHTML = `<div class="lv-hold ${cls}" ${n ? `onclick="wtWhyToggle()" style="cursor:pointer;" title="Click to see why they are waiting"` : ''}>
       <div>
         <div class="big" style="color:${n ? (cls==='bad'?'var(--red)':'var(--yellow)') : 'var(--text)'}">${n}</div>
         <div class="lab">${n === 1 ? 'caller waiting' : 'callers waiting'}</div>
+        ${n ? `<div class="lab" style="color:var(--accent);text-decoration:underline;">${WT_OPEN ? 'hide why ▴' : 'why? ▾'}</div>` : ''}
       </div>
       ${longest ? `<div>
         <div class="big" style="font-size:22px;color:${longest>=120?'var(--red)':'var(--text2)'};">
@@ -10109,6 +10224,8 @@ async function loadWaiting(){
       <div id="lv-missed-strip" style="margin-left:${chips ? '10px' : 'auto'};
            text-align:right;"></div>
     </div>`;
+
+    if(WT_OPEN){ if(n) wtWhyLoad(); else wtWhyClose(); }
 
     // how many people are still owed a call back, alongside the live figures
     try{
@@ -11932,28 +12049,14 @@ function fmtNote(text){
        .replace(/&lt;\/?p&gt;/gi, '\n')
        .replace(/&lt;\/?div&gt;/gi, '\n');
 
-  // make links clickable, shown by site rather than in full
+  // make links clickable, shown IN FULL — agents read what an item is from
+  // the words in its address when no description was written
   s = s.replace(/(https?:\/\/[^\s<]+)/g, (url) => {
-    let label = url;
-    try{
-      const u = new URL(url);
-      const site = u.hostname.replace(/^www\./, '');
-      // pick the part of the path that reads like a product name rather than
-      // the last segment, which on most shops is a size or an id
-      const parts = (u.pathname || '').split('/').filter(Boolean)
-        .filter(p => !/^\d+$/.test(p) && p.length > 3 && !/^(us|en|p|dp|ip|gp|product)$/i.test(p));
-      const best = parts.sort((a, b) => b.length - a.length)[0] || '';
-      const words = decodeURIComponent(best).replace(/[-_+]/g, ' ').replace(/\.\w+$/, '');
-      label = site + (words && words.length > 4 ? ' · ' + words : '');
-      if(label.length > 56) label = label.slice(0, 54) + '…';
-    }catch(e){
-      if(label.length > 52) label = label.slice(0, 50) + '…';
-    }
     // Clicking a link COPIES it — agents open these in an incognito window,
     // not inside the CMS. The small arrow beside it still opens it here.
     // one line on purpose: the newlines in a note are turned into <br> just
     // below, and a line break inside this tag would land in its attributes
-    return '<a href="' + url + '" rel="noopener" onclick="return noteLinkCopy(event, this)" title="Click to copy the link · ' + url + '" style="color:var(--accent);text-decoration:underline;word-break:break-all;cursor:copy;">' + esc(label) + '</a>'
+    return '<a href="' + url + '" rel="noopener" onclick="return noteLinkCopy(event, this)" title="Click to copy the link · ' + url + '" style="color:var(--accent);text-decoration:underline;word-break:break-all;cursor:copy;">' + url + '</a>'
          + '<a href="' + url + '" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="Open in a new tab" style="color:var(--text3);text-decoration:none;margin-left:3px;font-size:.9em;">↗</a>';
   });
 

@@ -4572,3 +4572,139 @@ def account_texts(account_id):
 def _os_env(k, default=''):
     import os
     return os.getenv(k, default)
+
+
+def waiting_why():
+    """For each caller holding right now: which line they dialled, who the
+    phone system already tried, and who is enrolled to answer that line and
+    what each of those people is doing. Answers "why is someone waiting when
+    people are free?" with names instead of guesses."""
+    w = waiting_now()
+    if w.get('error'):
+        return w
+    try:
+        rows, m = companies_full()
+    except Exception:
+        rows, m = [], {}
+    by_id = {r['id']: r for r in rows}
+
+    conn = _connect(); cu = conn.cursor()
+    names = _extension_names(cu)
+
+    # the trail each waiting call has walked so far
+    ids = [x['call_id'] for x in w['waiting']]
+    trail = {}
+    link = _queue_link_column(cu) if ids else None
+    if ids and link:
+        try:
+            marks = ', '.join(['%s'] * len(ids[:40]))
+            cu.execute("""SELECT [%s], Info, Created FROM QueueInfo
+                          WHERE [%s] IN (%s) ORDER BY Id""" % (link, link, marks),
+                       tuple(ids[:40]))
+            for cid, info, created in cu.fetchall():
+                trail.setdefault(int(cid), []).append(((info or '').strip(), created))
+        except Exception as e:
+            w['trail_error'] = str(e)[:160]
+
+    # who is enrolled for which business line
+    comp_ids = set()
+    for x in w['waiting']:
+        x['company_id'] = company_id_for(x['called'], m)
+        if x['company_id']:
+            comp_ids.add(x['company_id'])
+    enrolled = {}
+    if comp_ids:
+        try:
+            marks = ', '.join(['%s'] * len(comp_ids))
+            cu.execute("""SELECT CompanyId, EmployeeId FROM EmployeeCompanyRelations
+                          WHERE ISNULL(Enroled, 0) = 1 AND CompanyId IN (%s)""" % marks,
+                       tuple(comp_ids))
+            for cid, eid in cu.fetchall():
+                enrolled.setdefault(int(cid), set()).add(int(eid or 0))
+        except Exception as e:
+            w['enrolled_error'] = str(e)[:160]
+    conn.close()
+
+    try:
+        live = agents_live()
+    except Exception as e:
+        live = []
+        w['live_error'] = str(e)[:160]
+
+    def state(a):
+        ph = (a.get('phone') or '').upper()
+        if not a.get('clocked_in'):
+            return 'off'
+        if ph in ('IN_USE', 'BUSY', 'ONHOLD'):
+            return 'on_call'
+        if ph == 'RINGING':
+            return 'ringing'
+        if a.get('on_break'):
+            return 'break'
+        if a.get('dnd'):
+            return 'dnd'
+        if ph in ('UNAVAILABLE', 'INVALID', 'UNKNOWN', ''):
+            return 'phone_off'
+        return 'free'
+
+    floor = {}
+    for a in live:
+        s = state(a)
+        a['state'] = s
+        floor[s] = floor.get(s, 0) + 1
+    w['floor'] = floor
+    w['free_phone_off'] = [{'name': a['name'], 'extension': a['extension'],
+                            'phone': a.get('phone') or ''}
+                           for a in live if a['state'] == 'phone_off']
+    by_emp = {a['employee_id']: a for a in live}
+
+    for x in w['waiting']:
+        comp = by_id.get(x['company_id']) if x['company_id'] else None
+        x['line'] = comp['name'] if comp else None
+        tried, last = [], None
+        for info, created in trail.get(x['call_id'], []):
+            low = info.lower()
+            last = created
+            ext = ''.join(ch for ch in info if ch.isdigit())[:6]
+            if low.startswith('calling'):
+                tried.append({'extension': ext, 'name': names.get(ext), 'result': 'rang',
+                              'when': _plain(created)})
+            elif 'did not answer' in low or 'noanswer' in low:
+                for t in tried:
+                    if t['extension'] == ext and t['result'] == 'rang':
+                        t['result'] = 'no answer'
+            elif 'busy' in low or 'congestion' in low or 'unavailable' in low:
+                for t in tried:
+                    if t['extension'] == ext and t['result'] == 'rang':
+                        t['result'] = 'busy / unreachable'
+        x['tried'] = tried
+        x['last_queue_entry'] = _plain(last)
+        # how long nothing has happened on this call, worked out from the
+        # CMS's own clock so a browser in another time zone cannot skew it
+        x['quiet_seconds'] = None
+        try:
+            from datetime import datetime as _dt
+            st = _dt.fromisoformat(str(x['started']))
+            if last is not None:
+                x['quiet_seconds'] = max(0, int(x['seconds'] - (last - st).total_seconds()))
+            else:
+                x['quiet_seconds'] = int(x['seconds'])
+        except Exception:
+            pass
+
+        # who could take this line, and what each of them is doing right now
+        who = {'free': [], 'phone_off': [], 'on_call': [], 'ringing': [],
+               'break': [], 'dnd': []}
+        ids_for_line = enrolled.get(x['company_id'], set()) if x['company_id'] else set()
+        for eid in ids_for_line:
+            a = by_emp.get(eid)
+            if not a or a['state'] == 'off':
+                continue
+            who[a['state']].append({'name': a['name'], 'extension': a['extension']})
+        x['enrolled_total'] = len(ids_for_line)
+        x['enrolled_now'] = who
+        x['free_not_enrolled'] = 0
+        if x['company_id']:
+            x['free_not_enrolled'] = sum(1 for a in live if a['state'] == 'free'
+                                         and a['employee_id'] not in ids_for_line)
+    return w
