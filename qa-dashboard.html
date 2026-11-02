@@ -6673,6 +6673,43 @@ let snData = null;
 
 /* The health check: both campaigns, the static numbers, which number would
    be taken off next, the spare pool, and anything that disagrees. */
+/* Every number on one campaign: the static ones (fixed there) and the
+   rotating ones the CMS put on, with who has each and when it last texted.
+   Built from the numbers' own records at BulkVS. */
+let snHealth = null;
+function snCampaignList(tcr){
+  const h = snHealth; if(!h) return;
+  const c = (h.campaigns||[]).find(x => x.tcr === tcr) || {};
+  const rows = [];
+  (h.static||[]).filter(x => x.bulkvs_tcr === tcr).forEach(x => rows.push({...x, kind: 'static'}));
+  (h.rotating||[]).filter(x => x.tcr === tcr).forEach(x => rows.push({...x, kind: x.movable ? 'rotating' : 'set by hand'}));
+  const when = d => d ? new Date(d).toLocaleDateString() : '—';
+  rows.sort((a,b) => (a.kind > b.kind ? 1 : a.kind < b.kind ? -1 : 0) || String(b.since||'').localeCompare(String(a.since||'')));
+  document.getElementById('ac-out-modal')?.remove();
+  const m = document.createElement('div');
+  m.id = 'ac-out-modal'; m.className = 'ac-out-bg';
+  m.onclick = e => { if(e.target === m) m.remove(); };
+  m.innerHTML = `<div class="ac-out-box" role="dialog" aria-label="Numbers on ${esc(tcr)}" style="max-width:820px;">
+      <div style="display:flex;align-items:baseline;gap:10px;">
+        <div style="font-size:16px;font-weight:650;">${esc(tcr)} — ${rows.length} numbers set to it</div>
+        <button class="btn btn-secondary" style="margin-left:auto;" onclick="document.getElementById('ac-out-modal').remove()">Close</button></div>
+      <div style="font-size:12px;color:var(--text3);margin:6px 0 10px;line-height:1.45;">
+        BulkVS counts ${c.bulkvs_count ?? '?'} as registered with the carriers${c.pending ? ` — <b style="color:var(--yellow)">${c.pending} still registering</b>` : ''}.
+        Click a number to manage or test it.</div>
+      <div style="max-height:60vh;overflow:auto;border:1px solid var(--border);border-radius:10px;">
+        <table class="data-table" style="font-size:12px;"><thead><tr>
+          <th>Number</th><th>Type</th><th>Customer</th><th>Webhook</th><th>Put on</th><th>Last sent</th></tr></thead>
+        <tbody>${rows.map(x => `<tr style="cursor:pointer;" onclick="document.getElementById('ac-out-modal').remove();document.getElementById('nm-number').value='${x.number}';nmLookup('${x.number}');window.scrollTo({top:0,behavior:'smooth'});">
+          <td style="font-variant-numeric:tabular-nums;white-space:nowrap;">${esc(x.number)}</td>
+          <td>${x.kind === 'static' ? '📌 static' : x.kind === 'rotating' ? '🔄 rotating' : '✋ set by hand'}</td>
+          <td>${esc(x.customer || '') || '<span style="color:var(--text3)">nobody</span>'}</td>
+          <td style="${x.outside_cms ? 'color:var(--accent);' : ''}">${esc(x.webhook || '—')}${x.outside_cms ? ' · outside the CMS' : ''}</td>
+          <td style="white-space:nowrap;">${x.since ? when(x.since) : (x.lidb && x.lidb !== 'PROCLICK' ? esc(x.lidb) : '—')}</td>
+          <td style="white-space:nowrap;">${when(x.last_sent)}</td></tr>`).join('')}</tbody></table></div>
+    </div>`;
+  document.body.appendChild(m);
+}
+
 async function snLoadHealth(){
   const box = document.getElementById('sn-health');
   if(!box) return;
@@ -6685,8 +6722,9 @@ async function snLoadHealth(){
   const camp = (h.campaigns||[]).map(c=>{
     const pct = c.count!=null ? Math.min(100, Math.round(c.count/lim*100)) : 0;
     const col = c.count>lim ? 'var(--red)' : c.count>=lim ? 'var(--yellow)' : 'var(--green)';
-    return `<div class="card" style="padding:14px 16px;flex:1;min-width:200px;">
-      <div style="font-size:11px;color:var(--text3);letter-spacing:.06em;">CAMPAIGN</div>
+    return `<div class="card" style="padding:14px 16px;flex:1;min-width:200px;cursor:pointer;" title="Show every number on ${esc(c.tcr)}"
+         onclick="snCampaignList('${esc(c.tcr)}')">
+      <div style="font-size:11px;color:var(--text3);letter-spacing:.06em;">CAMPAIGN <span style="float:right;color:var(--accent);letter-spacing:0;">see all numbers ›</span></div>
       <div style="font-size:17px;font-weight:650;margin:2px 0 8px;">${esc(c.tcr)}</div>
       <div style="font-size:26px;font-weight:700;">${c.count ?? '?'}<span style="font-size:13px;color:var(--text3);font-weight:500;"> of ${lim}</span></div>
       <div style="height:6px;background:var(--surface2);border-radius:4px;margin:8px 0 6px;overflow:hidden;">
@@ -6695,6 +6733,7 @@ async function snLoadHealth(){
       <div style="font-size:11.5px;color:var(--text3);">${c.static} static · ${Math.max(0,(c.counted_here||0)-c.static)} rotating
         ${c.free!=null ? ' · '+(c.free>0? c.free+' free' : c.free===0 ? '<b style="color:var(--yellow)">full</b>' : '<b style="color:var(--red)">'+(-c.free)+' over the limit</b>') : ''}</div></div>`;
   }).join('');
+  snHealth = h;
   const probs = (h.problems||[]);
   const rot = h.rotating || [];
   const next = rot.find(x=>x.movable);

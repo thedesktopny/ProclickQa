@@ -3167,7 +3167,11 @@ def sms_health():
         st = {'number': ten, 'tcr': v['tcr'], 'account_id': v['account_id'],
               'at_bulkvs': r is not None, 'bulkvs_tcr': _rec_tcr(r) if r else None,
               'webhook': _rec_webhook(r) if r else None,
-              'on_its_campaign': bool(r and _rec_tcr(r) == v['tcr'])}
+              'lidb': _rec_lidb(r) if r else None,
+              'outside_cms': bool(r and _rec_external(r)),
+              'customer': (acct_by.get(ten) or [{}])[0].get('customer'),
+              'on_its_campaign': bool(r and _rec_tcr(r) == v['tcr']),
+              **sent.get(ten, {})}
         out['static'].append(st)
         if r is None:
             out['problems'].append({'kind': 'static_missing', 'number': ten,
@@ -3184,6 +3188,7 @@ def sms_health():
                         'since': t.isoformat() if t else None,
                         'movable': t is not None,
                         'lidb': _rec_lidb(r), 'webhook': _rec_webhook(r),
+                        'outside_cms': _rec_external(r),
                         'customer': (acct_by.get(_rec_tn(r)) or [{}])[0].get('customer'),
                         **sent.get(_rec_tn(r), {})})
     rot.sort(key=lambda x: (not x['movable'], x['since'] or ''))
