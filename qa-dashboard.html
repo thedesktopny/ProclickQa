@@ -6925,6 +6925,7 @@ function nmRender(msg, ok){
       ${r.record ? `<details style="margin-top:8px;"><summary style="cursor:pointer;color:var(--text3);font-size:12px;">Everything BulkVS has on this number</summary>
         <pre style="white-space:pre-wrap;font-size:11.5px;background:var(--surface2);padding:10px;border-radius:8px;margin-top:6px;">${esc(JSON.stringify(r.record, null, 2))}</pre></details>` : ''}
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:12px;">${acts.join('')}
+        ${r.in_pool && !(r.customers||[]).length ? `<button class="cn-chip" onclick="nmUnpool()">Take out of the spare pool</button>` : ''}
         ${r.at_bulkvs ? `<button class="cn-chip" onclick="nmTestText()">📱 Text a test to 347-675-2334</button>` : ''}
         <button class="cn-chip" onclick="nmLookup('${r.number}')">Refresh</button></div>
       ${msg ? `<div style="margin-top:10px;color:${ok?'var(--green)':'var(--red)'};">${esc(msg)}</div>` : ''}
@@ -6996,6 +6997,21 @@ async function nmHistory(num){
     const r = await API.get('/api/sms/log?limit=40&number=' + num);
     box.innerHTML = slogRows(r.events || [], false);
   }catch(e){ box.textContent = e.message; }
+}
+
+async function nmUnpool(){
+  const r = nmInfo; if(!r) return;
+  const reason = prompt('Take ' + r.number + ' out of the spare pool?\n\nThe CMS will never give it to a customer after this. '
+                        + 'Nothing changes at BulkVS.\n\nWhy? (kept in the log)');
+  if(reason === null) return;
+  if(reason.trim().length < 3){ nmRender('Write why — at least a few words.', false); return; }
+  try{
+    const res = await API.post('/api/sms/number/' + r.number + '/unpool', {reason});
+    if(res.ok === false || res.error){ nmRender(res.error || 'Not done.', false); return; }
+    await nmLookup(r.number);
+    nmRender('✅ ' + res.meaning, true);
+    snLoadHealth();
+  }catch(e){ nmRender(e.message, false); }
 }
 
 async function nmTestText(){

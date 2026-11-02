@@ -3970,3 +3970,51 @@ def sms_log(number=None, kind=None, limit=300):
     timing = _sum(mins)
     return {'events': rows, 'registration_minutes': timing, 'freeing_minutes': _sum(fmins),
             'sends_7d': {'total': sends[0], 'failed': sends[1], 'waited': sends[2]}}
+
+
+def remove_from_pool(number, who, reason=None):
+    """Take a spare out of the pool so the CMS never hands it to a customer —
+    for a number someone wants to use for something else. Nothing changes at
+    BulkVS; the number is simply no longer a spare."""
+    ten = _ten(number)
+    if len(ten) != 10:
+        raise WriteRefused('Give a ten-digit number.')
+    reason = (reason or '').strip()
+    if len(reason) < 3:
+        raise WriteRefused('Write why — it is kept in the log.')
+    conn = cms_db._connect()
+    try:
+        cu = conn.cursor()
+        cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        col = cms_db.pool_col()
+        cu.execute("SELECT COUNT(*) FROM SMSNumberTable WHERE RIGHT([%s], 10) = %%s" % col, (ten,))
+        if not int(cu.fetchone()[0] or 0):
+            raise WriteRefused('%s is not in the spare pool.' % ten)
+        cu.execute("""SELECT TOP 5 Id, FirstName, LastName, ISNULL(smsActivate,0) FROM Account
+                      WHERE RIGHT(ISNULL(smsNumber,''), 10) = %s""", (ten,))
+        has = cu.fetchone()
+        if has:
+            raise WriteRefused('%s is %s\'s texting number — it cannot be taken for something else.'
+                               % (ten, ('%s %s' % (has[1] or '', has[2] or '')).strip() or '#%s' % has[0]))
+        cu.execute("DELETE FROM SMSNumberTable WHERE RIGHT([%s], 10) = %%s" % col, (ten,))
+        conn.commit()
+    except WriteRefused:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    out = {'table': 'SMSNumberTable', 'action': 'remove_from_pool', 'dry_run': False, 'ok': True,
+           'committed': True, 'values': {'number': ten, 'reason': reason},
+           'meaning': '%s is out of the spare pool — the CMS will never give it to a customer. '
+                      'Nothing changed at BulkVS.' % ten}
+    _log(who, out)
+    sms_event('pool_removed', ten, None, ok=True, who=who, reason=reason,
+              why='taken out of the spare pool: ' + reason)
+    _ACTIVITY['data'] = None
+    return out

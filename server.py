@@ -8392,6 +8392,15 @@ def sms_number_campaign_route(number):
                      _who(), tcr=d.get('tcr'), reason=d.get('reason'))
 
 
+@app.route('/api/sms/number/<number>/unpool', methods=['POST'])
+@portal_admin_only
+def sms_number_unpool_route(number):
+    """Take a spare out of the pool, for use outside the CMS — admins only."""
+    import cms_write
+    d = request.json or {}
+    return _sms_call(cms_write.remove_from_pool, number, _who(), d.get('reason'))
+
+
 @app.route('/api/sms/order', methods=['POST'])
 @portal_manager_only
 def sms_order_route():
