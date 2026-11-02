@@ -4017,4 +4017,20 @@ def remove_from_pool(number, who, reason=None):
     sms_event('pool_removed', ten, None, ok=True, who=who, reason=reason,
               why='taken out of the spare pool: ' + reason)
     _ACTIVITY['data'] = None
+    # Buy a replacement in the same area code, exactly as when a customer
+    # takes a spare — so the pool never runs down.
+    try:
+        sms_ctx(why='replacing %s, taken out of the spare pool' % ten)
+        refill = order_number(ten[:3], who)
+        if refill.get('ok'):
+            out['refill'] = refill.get('number')
+            out['meaning'] += ' A replacement spare was bought: %s.' % refill.get('number')
+        else:
+            out['refill_warning'] = 'Could not buy a replacement spare: ' + str(refill.get('error'))[:160]
+            out['meaning'] += ' ⚠️ ' + out['refill_warning']
+    except Exception as e:
+        out['refill_warning'] = 'Could not buy a replacement spare: ' + str(e)[:160]
+        out['meaning'] += ' ⚠️ ' + out['refill_warning']
+    finally:
+        sms_ctx(why=None)
     return out

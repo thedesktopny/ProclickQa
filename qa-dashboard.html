@@ -7001,8 +7001,8 @@ async function nmHistory(num){
 
 async function nmUnpool(){
   const r = nmInfo; if(!r) return;
-  const reason = prompt('Take ' + r.number + ' out of the spare pool?\n\nThe CMS will never give it to a customer after this. '
-                        + 'Nothing changes at BulkVS.\n\nWhy? (kept in the log)');
+  const reason = prompt('Take ' + r.number + ' out of the spare pool?\n\nThe CMS will never give it to a customer after this, '
+                        + 'and it buys a replacement spare in area code ' + r.number.slice(0,3) + ' (this costs money).\n\nWhy? (kept in the log)');
   if(reason === null) return;
   if(reason.trim().length < 3){ nmRender('Write why — at least a few words.', false); return; }
   try{
