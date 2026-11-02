@@ -3733,9 +3733,16 @@ def number_campaign_action(number, action, who, tcr=None, reason=None):
             if static == tcr and current == tcr:
                 raise WriteRefused('%s is already static on %s.' % (ten, tcr))
             if current != tcr:
+                ext = bool(info.get('outside_cms'))
                 if current:
-                    _put_on_campaign(ten, '', webhook=info['webhook'])
-                _put_on_campaign(ten, tcr, lidb='STATIC', webhook=info['webhook'] or 'WebHook1')
+                    sms_ctx(prev=current)
+                    _put_on_campaign(ten, '', webhook=info['webhook'], lidb=info['lidb'] if ext else None)
+                # Going on now anyway, so the StaticNumber webhook (same address
+                # as WebHook1/2) is set in the same single change — it labels the
+                # number as static at BulkVS at no extra cost. A number used
+                # outside the CMS keeps its own webhook.
+                _put_on_campaign(ten, tcr, lidb=info['lidb'] if ext else 'STATIC',
+                                 webhook=info['webhook'] if ext else 'StaticNumber')
             # Already on that campaign: only the CMS's static list changes.
             # Nothing is sent to BulkVS — sending the campaign again can make
             # BulkVS register the number all over again, which takes hours and
