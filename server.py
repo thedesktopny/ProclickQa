@@ -171,6 +171,62 @@ def _shared(key, ttl, fn):
 def _shared_bust():
     _SHARED.clear()
 
+
+# ─── Call recordings: team leaders, QA, managers and admins only ─────────────
+# A recording can carry a customer's passwords and card details said out loud,
+# and the files are served from an open address — so agents are not given the
+# links at all. They are taken out of every reply an agent receives, not just
+# hidden on the page; the link-maker refuses agents too.
+_REC_KEYS = ('recording', 'recording_url', 'recording_file_url', 'RecordingFileUrl')
+_TL_CACHE = {}
+
+
+def _can_hear_recordings(p=None):
+    p = p if p is not None else _portal_user(request.headers.get('X-Portal-Ticket', ''))
+    if not p:
+        return True                       # the QA dashboard's own sign-in: staff only
+    if p.get('m') or p.get('a') or p.get('q'):
+        return True
+    e = p.get('e')
+    if not e:
+        return False
+    hit = _TL_CACHE.get(e)
+    if hit and time.time() - hit[0] < 300:
+        return hit[1]
+    ok = _team_leader_agents(e) is not None
+    _TL_CACHE[e] = (time.time(), ok)
+    return ok
+
+
+def _strip_recordings(v):
+    if isinstance(v, dict):
+        return {k: (None if k in _REC_KEYS else _strip_recordings(x)) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_strip_recordings(x) for x in v]
+    return v
+
+
+@app.after_request
+def _no_recordings_for_agents(resp):
+    try:
+        if not request.path.startswith('/api/') or resp.mimetype != 'application/json':
+            return resp
+        if resp.direct_passthrough or resp.status_code != 200:
+            return resp
+        if not request.headers.get('X-Portal-Ticket') or _can_hear_recordings():
+            return resp
+        data = resp.get_json(silent=True)
+        if data is None:
+            return resp
+        raw = resp.get_data(as_text=True)
+        if not any(k in raw for k in _REC_KEYS):
+            return resp
+        resp.set_data(json.dumps(_strip_recordings(data)))
+    except Exception:
+        pass
+    return resp
+
+
 CORS(app, resources={r"/api/*": {"origins": "*", "allow_headers": ["Content-Type", "Authorization", "X-Auth-Token"], "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"]}})
 
 ADMIN_USERNAME = os.getenv('ADMIN_USERNAME', 'david')
@@ -10158,6 +10214,8 @@ def recording_link():
     The CMS keeps a relative path like recordings/2026/08/20/abc.wav; the base
     address it hangs off is a setting so it can be corrected without a deploy.
     """
+    if not _can_hear_recordings():
+        return jsonify({'error': 'Recordings are for team leaders, QA and managers.'}), 403
     path = (request.args.get('path') or '').strip()
     if not path:
         return jsonify({'error': 'path required'}), 400
