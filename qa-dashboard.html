@@ -16142,7 +16142,10 @@ function toggleTheme(){
   themeLabels();
 }
 document.addEventListener('DOMContentLoaded', themeLabels);
-function showModal(id){document.getElementById(id).style.display='flex';}
+// the most recently opened window always sits on top — a window opened from
+// inside another (Add a new card from Choose a card) was opening BEHIND it
+let _modalZ = 10000;
+function showModal(id){const el=document.getElementById(id);el.style.zIndex=String(++_modalZ);el.style.display='flex';}
 function hideModal(id){document.getElementById(id).style.display='none';}
 
 function scoreCircle(score){
@@ -16187,7 +16190,7 @@ function formatTranscript(text){
 
 function showToast(msg,isError=false){
   let t=document.getElementById('toast');
-  if(!t){t=document.createElement('div');t.id='toast';t.style.cssText='position:fixed;bottom:24px;right:24px;padding:12px 20px;border-radius:10px;font-size:13px;font-weight:600;z-index:9999;transition:opacity 0.3s;box-shadow:0 4px 20px rgba(0,0,0,0.4)';document.body.appendChild(t);}
+  if(!t){t=document.createElement('div');t.id='toast';t.style.cssText='position:fixed;bottom:24px;right:24px;padding:12px 20px;border-radius:10px;font-size:13px;font-weight:600;z-index:2147483000;transition:opacity 0.3s;box-shadow:0 4px 20px rgba(0,0,0,0.4)';document.body.appendChild(t);}
   t.textContent=msg;t.style.background=isError?'var(--red)':'var(--green)';t.style.color='white';t.style.opacity='1';
   clearTimeout(t._t);t._t=setTimeout(()=>{t.style.opacity='0';},3000);
 }
