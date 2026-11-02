@@ -6769,6 +6769,11 @@ async function snLoadHealth(){
         <div style="font-size:26px;font-weight:700;margin-top:6px;">${(h.pool||{}).count||0}</div>
         <div style="font-size:11.5px;color:var(--text3);margin-top:4px;">
           ${areas.length ? areas.map(([k,v])=>k+': '+v).join(' · ') : 'empty — the next "Turn on texting" will buy one'}</div>
+        ${((h.pool||{}).numbers||[]).length ? `<div style="display:flex;flex-direction:column;gap:3px;margin-top:8px;">${h.pool.numbers.map(p => {
+            const t = String(p.number).replace(/\D/g,'').slice(-10);
+            return `<a href="#" style="color:var(--accent);font-size:12.5px;font-variant-numeric:tabular-nums;" title="Open in Manage one number"
+              onclick="document.getElementById('nm-number').value='${t}';nmLookup('${t}');window.scrollTo({top:0,behavior:'smooth'});return false;">${t.slice(0,3)}-${t.slice(3,6)}-${t.slice(6)}</a>`;
+          }).join('')}</div>` : ''}
         <button class="cn-chip" style="margin-top:10px;" onclick="snOrder()">Buy a number…</button></div>
     </div>
     <div class="card" style="padding:14px 18px;margin-bottom:12px;">
