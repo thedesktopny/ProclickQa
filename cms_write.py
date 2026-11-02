@@ -699,6 +699,22 @@ def send_text(account_id, message, who, media_url=None, to=None):
         conn.close()
         raise WriteRefused('%s has no phone number to text.' % (name or 'This account'))
 
+    # A picture from a number that has MMS switched off at BulkVS is accepted
+    # and then silently never arrives — say so now instead. Only checked when
+    # there is a picture, and only refused when BulkVS clearly says it is off.
+    if media_url:
+        try:
+            rec = bv_record(our_number)
+            if rec and ((rec.get('Messaging') or {}).get('Mms') is False):
+                conn.close()
+                raise WriteRefused('Pictures are switched off for %s at BulkVS (MMS off), so this '
+                                   'picture would never arrive. Send the words only, or turn MMS on '
+                                   'for that number at BulkVS.' % our_number)
+        except WriteRefused:
+            raise
+        except Exception:
+            pass
+
     # the same escaping the CMS applies before sending
     escaped = message
     for ch, code in (('@', '\\u0040'), ('?', '\\u003F'), ('$', '\\u0024'),
@@ -2610,6 +2626,35 @@ def bv_campaigns():
     return out
 
 
+def campaign_usage(max_age=60):
+    """How full each campaign really is. BulkVS's own campaign count only
+    moves once the carriers finish registering a change, which can take hours;
+    meanwhile the numbers' own records already say which campaign they are on.
+    Going by the slow count alone is how a campaign gets overfilled: it still
+    reads 48, so another number is added, and another, and all but one of them
+    can never be registered. So the HIGHER of the two is used — the records
+    are read again if the copy is more than a minute old."""
+    import time as _t
+    camps = bv_campaigns()
+    try:
+        fresh = _BV_ALL.get('records') is None or _t.time() - _BV_ALL['at'] > max_age
+        recs = bv_all_records(fresh=fresh)
+        assigned = {}
+        for r in recs:
+            t = _rec_tcr(r)
+            if t:
+                assigned[t] = assigned.get(t, 0) + 1
+    except Exception:
+        assigned = None
+    for c in camps:
+        c['bulkvs_count'] = c['count']
+        c['assigned'] = (assigned or {}).get(c['tcr']) if assigned is not None else None
+        if c['count'] is not None and c['assigned'] is not None:
+            c['pending'] = max(0, c['assigned'] - c['count'])
+            c['count'] = max(c['count'], c['assigned'])
+    return camps
+
+
 def static_numbers():
     """Numbers fixed to a campaign by hand: AccountSMS with StaticCompign = 1."""
     conn = cms_db._connect()
@@ -2641,7 +2686,7 @@ def campaign_plan(number, statics=None):
     if _rec_tcr(rec):
         return {'step': 'already', 'tcr': _rec_tcr(rec),
                 'meaning': 'Already on campaign %s — it can send.' % _rec_tcr(rec)}
-    camps = bv_campaigns()
+    camps = campaign_usage()
     if not camps or any(c['count'] is None for c in camps):
         # never take a number off on a guess
         return {'step': 'stuck', 'campaigns': camps,
@@ -2722,7 +2767,7 @@ def _put_on_campaign(ten, tcr, lidb=None, webhook=None, removed_already=0):
     import time as _t
     from datetime import datetime as _dt
     if tcr:
-        camps = {c['tcr']: c['count'] for c in bv_campaigns()}
+        camps = {c['tcr']: c['count'] for c in campaign_usage()}
         if tcr not in camps:
             raise WriteRefused('There is no campaign called %s at BulkVS.' % tcr)
         if camps[tcr] is None:
@@ -3094,11 +3139,28 @@ def sms_health():
     by_tn = {_rec_tn(r): r for r in recs}
     camps = bv_campaigns()
     on_camp = Counter(_rec_tcr(r) for r in recs if _rec_tcr(r))
-    out['campaigns'] = [{'tcr': c['tcr'], 'count': c['count'],
+    # the campaign is as full as the HIGHER of BulkVS's count (slow — it waits
+    # for the carriers) and the numbers whose own records say they are on it
+    def _used(c):
+        if c['count'] is None:
+            return None
+        return max(c['count'], on_camp.get(c['tcr'], 0))
+    out['campaigns'] = [{'tcr': c['tcr'], 'count': _used(c), 'bulkvs_count': c['count'],
                          'counted_here': on_camp.get(c['tcr'], 0),
+                         'pending': max(0, on_camp.get(c['tcr'], 0) - (c['count'] or 0)),
                          'static': len([1 for k, v in statics.items() if v['tcr'] == c['tcr']]),
-                         'free': (CAMPAIGN_LIMIT - c['count']) if c['count'] is not None else None}
+                         'free': (CAMPAIGN_LIMIT - _used(c)) if c['count'] is not None else None}
                         for c in camps]
+    for c in out['campaigns']:
+        if c['count'] is not None and c['count'] > CAMPAIGN_LIMIT:
+            out['problems'].append({'kind': 'over_limit', 'text': (
+                '%s has %d numbers set to it, over the carriers\' limit of %d — %d of them can never be '
+                'registered and will not deliver. Take the newest extras off.'
+                % (c['tcr'], c['count'], CAMPAIGN_LIMIT, c['count'] - CAMPAIGN_LIMIT))})
+        elif c['pending']:
+            out['problems'].append({'kind': 'pending', 'text': (
+                '%s: %d number(s) still being registered with the carriers (BulkVS counts %d of %d set)'
+                % (c['tcr'], c['pending'], c['bulkvs_count'] or 0, c['counted_here']))})
     out['static'] = []
     for ten, v in sorted(statics.items()):
         r = by_tn.get(ten)
@@ -3276,7 +3338,7 @@ def number_info(number):
         raise WriteRefused('Give a ten-digit number.')
     statics = static_numbers()
     rec = bv_record(ten)
-    camps = bv_campaigns()
+    camps = campaign_usage()
     conn = cms_db._connect()
     try:
         cu = conn.cursor()
@@ -3303,7 +3365,9 @@ def number_info(number):
            'static_tcr': (statics.get(ten) or {}).get('tcr'),
            'customers': customers, 'in_pool': in_pool,
            'last_sent': cms_db._plain(r[0]), 'last_received': cms_db._plain(r[1]),
-           'campaigns': [{'tcr': c['tcr'], 'count': c['count'], 'limit': CAMPAIGN_LIMIT} for c in camps],
+           'campaigns': [{'tcr': c['tcr'], 'count': c['count'], 'limit': CAMPAIGN_LIMIT,
+                          'bulkvs_count': c.get('bulkvs_count'), 'pending': c.get('pending') or 0}
+                         for c in camps],
            'limit': CAMPAIGN_LIMIT, 'record': rec}
     # plain-language warnings, so a problem is visible before anything is touched
     w = []
@@ -3337,9 +3401,14 @@ def number_info(number):
         elif not out['webhook']:
             w.append('It has no webhook at BulkVS — replies to it go nowhere.')
     for c in camps:
+        if c.get('pending'):
+            w.append('%s: %d number(s) are set to it but the carriers have not finished registering '
+                     'them (BulkVS counts %s). Until they finish, texts from those numbers may not '
+                     'arrive.' % (c['tcr'], c['pending'], c.get('bulkvs_count')))
         if c['count'] is not None and c['count'] > CAMPAIGN_LIMIT:
-            w.append('%s has %d numbers, over the limit of %d. The next automatic swap on it '
-                     'brings it back down.' % (c['tcr'], c['count'], CAMPAIGN_LIMIT))
+            w.append('%s has %d numbers set to it — over the carriers\' limit of %d. The extra ones '
+                     'cannot be registered and will not deliver; take the extras off.'
+                     % (c['tcr'], c['count'], CAMPAIGN_LIMIT))
     out['warnings'] = w
     return out
 

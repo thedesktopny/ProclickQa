@@ -9778,7 +9778,12 @@ MEDIA_MAX_BYTES = 900 * 1024
 MEDIA_TYPES = {
     'image/jpeg': '.jpg', 'image/jpg': '.jpg', 'image/png': '.png',
     'image/gif': '.gif', 'image/bmp': '.bmp', 'application/pdf': '.pdf',
-    'text/vcard': '.vcf', 'video/mp4': '.mp4', 'audio/mpeg': '.mp3',
+    'text/vcard': '.vcf', 'text/x-vcard': '.vcf', 'video/mp4': '.mp4', 'audio/mpeg': '.mp3',
+}
+# what each kind of file must actually start with — a renamed file is refused
+_MEDIA_MAGIC = {
+    '.jpg': (b'\xff\xd8\xff',), '.png': (b'\x89PNG',), '.gif': (b'GIF8',), '.bmp': (b'BM',),
+    '.pdf': (b'%PDF',), '.vcf': (b'BEGIN:VCARD', b'\xef\xbb\xbfBEGIN:VCARD'),
 }
 
 
@@ -9805,6 +9810,12 @@ def media_upload():
                         'error': 'That is %.1f MB. Texts cannot carry more than about '
                                  '900 KB, and under 500 KB is safest.'
                                  % (len(data) / 1048576.0)}), 400
+
+    magic = _MEDIA_MAGIC.get(MEDIA_TYPES[kind])
+    if magic and not any(data.lstrip()[:16].upper().startswith(m.upper()) if MEDIA_TYPES[kind] == '.vcf'
+                         else data.startswith(m) for m in magic):
+        return jsonify({'ok': False, 'error': 'That file is not really a %s — it was not attached.'
+                        % MEDIA_TYPES[kind].lstrip('.').upper()}), 400
 
     name = secrets.token_urlsafe(16) + MEDIA_TYPES[kind]
     try:

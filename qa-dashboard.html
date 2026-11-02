@@ -6691,6 +6691,7 @@ async function snLoadHealth(){
       <div style="font-size:26px;font-weight:700;">${c.count ?? '?'}<span style="font-size:13px;color:var(--text3);font-weight:500;"> of ${lim}</span></div>
       <div style="height:6px;background:var(--surface2);border-radius:4px;margin:8px 0 6px;overflow:hidden;">
         <div style="height:100%;width:${pct}%;background:${col};"></div></div>
+      ${c.pending ? `<div style="font-size:11.5px;color:var(--yellow);margin-bottom:3px;">${c.pending} still registering with the carriers (BulkVS counts ${c.bulkvs_count})</div>` : ''}
       <div style="font-size:11.5px;color:var(--text3);">${c.static} static · ${Math.max(0,(c.counted_here||0)-c.static)} rotating
         ${c.free!=null ? ' · '+(c.free>0? c.free+' free' : c.free===0 ? '<b style="color:var(--yellow)">full</b>' : '<b style="color:var(--red)">'+(-c.free)+' over the limit</b>') : ''}</div></div>`;
   }).join('');
@@ -6836,7 +6837,7 @@ function nmRender(msg, ok){
   const r = nmInfo; if(!r) return;
   const row = (k, v) => `<div style="display:flex;gap:10px;padding:3px 0;"><span style="width:150px;color:var(--text3);">${k}</span><span>${v}</span></div>`;
   const when = d => d ? new Date(d).toLocaleString() : 'never';
-  const camps = (r.campaigns||[]).map(c => `${esc(c.tcr)} ${c.count}/${r.limit}`).join(' · ');
+  const camps = (r.campaigns||[]).map(c => `${esc(c.tcr)} ${c.count}/${r.limit}${c.pending ? ' (' + c.pending + ' still registering)' : ''}`).join(' · ');
   const btn = (label, action, style) => `<button class="cn-chip" style="${style||''}" onclick="nmAct('${action}')">${label}</button>`;
   const acts = [];
   if(r.at_bulkvs){
@@ -11372,14 +11373,23 @@ async function cuNoteSave(){
    half a megabyte, often silently. So the picture is shrunk in the browser
    before it is uploaded — the person just picks a photo and it works, rather
    than being told their picture is too big and left to solve it. */
-let cuMedia = null;
+let cuMedia = [];          // attachments ready to go: [{url, type, bytes, name}]
+const MMS_MAX_FILES = 5;  // per message batch — each goes as its own picture text
 
 const MMS_TARGET_BYTES = 480 * 1024;     // what carriers reliably deliver
+const MMS_MAX_BYTES = 900 * 1024;        // the server refuses anything bigger
 const MMS_MAX_EDGE = 1600;               // plenty for a phone screen
+// what can go in a text; anything else is refused with a reason
+const MMS_OK_TYPES = ['image/jpeg','image/png','image/gif','application/pdf','text/vcard','text/x-vcard'];
 
+/* Every picture leaves as a JPEG or PNG under the carriers' size: big photos
+   are shrunk, and pictures in other formats (WebP, BMP, HEIC where the
+   browser can open it) are converted, so the person never has to. */
 async function cuShrinkPicture(file){
-  if(!file.type.startsWith('image/') || file.type === 'image/gif') return file;
-  if(file.size <= MMS_TARGET_BYTES) return file;
+  const t = (file.type || '').toLowerCase();
+  if(!t.startsWith('image/') || t === 'image/gif') return file;
+  const keep = (t === 'image/jpeg' || t === 'image/png') && file.size <= MMS_TARGET_BYTES;
+  if(keep) return file;
   try{
     const img = await new Promise((ok, no)=>{
       const i = new Image();
@@ -11391,80 +11401,123 @@ async function cuShrinkPicture(file){
     w = Math.round(w * scale); h = Math.round(h * scale);
     const canvas = document.createElement('canvas');
     canvas.width = w; canvas.height = h;
-    canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h);      // no black background on see-through PNGs
+    ctx.drawImage(img, 0, 0, w, h);
     // step the quality down until it fits, rather than guessing once
-    for(const q of [0.82, 0.7, 0.6, 0.5, 0.4]){
+    for(const q of [0.85, 0.75, 0.65, 0.55, 0.45, 0.35]){
       const blob = await new Promise(ok => canvas.toBlob(ok, 'image/jpeg', q));
       if(blob && blob.size <= MMS_TARGET_BYTES){
-        return new File([blob], (file.name || 'photo').replace(/\.\w+$/, '') + '.jpg',
-                        {type: 'image/jpeg'});
+        return new File([blob], (file.name || 'photo').replace(/\.\w+$/, '') + '.jpg', {type: 'image/jpeg'});
       }
     }
-    const last = await new Promise(ok => canvas.toBlob(ok, 'image/jpeg', 0.35));
+    const last = await new Promise(ok => canvas.toBlob(ok, 'image/jpeg', 0.3));
     return last ? new File([last], 'photo.jpg', {type: 'image/jpeg'}) : file;
   }catch(e){
-    return file;      // if anything goes wrong, let the server judge it
+    if(t === 'image/heic' || t === 'image/heif' || /\.hei[cf]$/i.test(file.name || ''))
+      throw new Error('iPhone HEIC photos cannot be opened in this browser — save it as JPEG first, or take a screenshot of it and paste that');
+    return file;      // let the server judge it
   }
 }
 
-async function cuAttach(file){
-  if(!file) return;
+/* Attach one or several files — from the 📎 button, a paste, or a drop. */
+async function cuAttach(files){
+  files = Array.from(files && files.length !== undefined ? files : (files ? [files] : []));
+  if(!files.length) return;
   const out = document.getElementById('sms-out');
-  const box = document.getElementById('sms-attached');
-  out.textContent = 'Preparing the picture…';
-  const original = file.size;
-  const ready = await cuShrinkPicture(file);
-  out.textContent = 'Uploading…';
-  try{
-    const form = new FormData();
-    form.append('file', ready, ready.name || 'attachment');
-    const res = await fetch('/api/media/upload', {
-      method: 'POST',
-      headers: (typeof portalTicket !== 'undefined' && portalTicket)
-        ? {'X-Portal-Ticket': portalTicket}
-        : {'Authorization': 'Bearer ' + getToken()},
-      body: form});
-    const r = await res.json();
-    if(!r.ok){ out.textContent = '❌ ' + r.error; return; }
-    cuMedia = r.url;
-    const kb = Math.round(r.bytes / 1024);
-    const shrunk = original > ready.size
-      ? ` · shrunk from ${Math.round(original/1024)} KB` : '';
-    box.style.display = 'block';
-    box.innerHTML = `
-      <div style="display:flex;gap:10px;align-items:center;background:var(--surface2);
-           border:1px solid var(--border);border-radius:10px;padding:8px 10px;">
-        ${r.type.startsWith('image/')
-          ? `<img src="${esc(r.url)}" style="width:44px;height:44px;object-fit:cover;border-radius:7px;">`
-          : '<span style="font-size:20px;">📄</span>'}
-        <div style="flex:1;min-width:0;font-size:12px;">
-          <div>Attached${shrunk}</div>
-          <div style="color:var(--text3);font-size:11px;">${kb} KB${r.warn ? ' · ' + esc(r.warn) : ''}</div>
-        </div>
-        <button class="cn-chip" onclick="cuUnattach()">Remove</button>
-      </div>`;
-    out.textContent = '';
-  }catch(e){ out.textContent = 'Could not attach that: ' + e.message; }
+  const room = MMS_MAX_FILES - cuMedia.length;
+  if(room <= 0){ out.textContent = `❌ ${MMS_MAX_FILES} attachments is the most for one go — send these first.`; return; }
+  if(files.length > room){
+    out.textContent = `Only the first ${room} attached — ${MMS_MAX_FILES} is the most for one go.`;
+    files = files.slice(0, room);
+  }
+  const problems = [];
+  for(const [i, file] of files.entries()){
+    const t = (file.type || '').toLowerCase();
+    const label = file.name || ('picture ' + (i + 1));
+    if(!t.startsWith('image/') && !MMS_OK_TYPES.includes(t)){
+      problems.push(`${label}: texts can carry pictures, PDFs and contact cards, not this kind of file`);
+      continue;
+    }
+    out.textContent = `Preparing ${files.length > 1 ? (i + 1) + ' of ' + files.length : 'the attachment'}…`;
+    let ready;
+    try{ ready = await cuShrinkPicture(file); }
+    catch(e){ problems.push(label + ': ' + e.message); continue; }
+    if(ready.size > MMS_MAX_BYTES){
+      problems.push(`${label}: ${(ready.size/1048576).toFixed(1)} MB is too big for a text`
+                    + (t === 'image/gif' ? ' (moving GIFs cannot be shrunk)' : ''));
+      continue;
+    }
+    try{
+      const form = new FormData();
+      form.append('file', ready, ready.name || 'attachment');
+      const res = await fetch('/api/media/upload', {
+        method: 'POST',
+        headers: (typeof portalTicket !== 'undefined' && portalTicket)
+          ? {'X-Portal-Ticket': portalTicket}
+          : {'Authorization': 'Bearer ' + getToken()},
+        body: form});
+      const r = await res.json();
+      if(!r.ok){ problems.push(label + ': ' + r.error); continue; }
+      cuMedia.push({url: r.url, type: r.type, bytes: r.bytes, name: label,
+                    shrunk: file.size > ready.size ? file.size : 0, warn: r.warn});
+    }catch(e){ problems.push(label + ': ' + e.message); }
+  }
+  cuRenderAttached();
+  out.textContent = problems.length ? '❌ ' + problems.join(' · ') : '';
+  const box = document.getElementById('sms-text'); if(box) box.focus();
 }
 
-function cuUnattach(){
-  cuMedia = null;
+function cuRenderAttached(){
   const box = document.getElementById('sms-attached');
-  if(box){ box.style.display = 'none'; box.innerHTML = ''; }
+  if(!box) return;
+  if(!cuMedia.length){ box.style.display = 'none'; box.innerHTML = ''; return; }
+  box.style.display = 'block';
+  box.innerHTML = `<div style="display:flex;gap:8px;flex-wrap:wrap;padding-top:8px;">${cuMedia.map((m, i) => `
+    <div style="position:relative;display:flex;gap:8px;align-items:center;background:var(--surface2);
+         border:1px solid var(--border);border-radius:10px;padding:6px 26px 6px 6px;max-width:220px;">
+      ${String(m.type).startsWith('image/')
+        ? `<img src="${esc(m.url)}" style="width:44px;height:44px;object-fit:cover;border-radius:7px;">`
+        : '<span style="font-size:22px;padding:0 6px;">📄</span>'}
+      <div style="min-width:0;font-size:11px;color:var(--text3);">
+        <div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text2);">${esc(m.name)}</div>
+        ${Math.round(m.bytes/1024)} KB${m.shrunk ? ' · shrunk' : ''}${m.warn ? ' · ⚠️' : ''}</div>
+      <button title="Remove" onclick="cuUnattach(${i})" style="position:absolute;top:4px;right:6px;background:none;border:none;
+              color:var(--text3);cursor:pointer;font-size:14px;">×</button>
+    </div>`).join('')}</div>
+    ${cuMedia.length > 1 ? `<div style="font-size:11px;color:var(--text3);margin-top:4px;">Each picture goes as its own text, the words with the first one.</div>` : ''}`;
+}
+
+function cuUnattach(i){
+  if(i === undefined) cuMedia = [];
+  else cuMedia.splice(i, 1);
+  cuRenderAttached();
   const picker = document.getElementById('sms-file');
   if(picker) picker.value = '';
 }
 
-/* Pasting a picture straight into the box — the way people actually do it. */
+/* Pasting pictures straight into the box — one or several at once. A paste
+   of plain text is left alone. */
 function cuPaste(ev){
-  const items = (ev.clipboardData || {}).items || [];
-  for(const item of items){
-    if(item.kind === 'file' && item.type.startsWith('image/')){
-      ev.preventDefault();
-      cuAttach(item.getAsFile());
-      return;
-    }
+  const files = [];
+  for(const item of ((ev.clipboardData || {}).items || [])){
+    if(item.kind === 'file'){ const f = item.getAsFile(); if(f) files.push(f); }
   }
+  if(files.length){ ev.preventDefault(); cuAttach(files); }
+}
+
+/* Dropping files onto the conversation attaches them too. */
+function cuDragOver(ev){
+  if(!ev.dataTransfer || ![...(ev.dataTransfer.types || [])].includes('Files')) return;
+  ev.preventDefault();
+  const c = document.getElementById('sms-compose'); if(c) c.style.outline = '2px dashed var(--accent)';
+}
+function cuDragLeave(){ const c = document.getElementById('sms-compose'); if(c) c.style.outline = ''; }
+function cuDrop(ev){
+  cuDragLeave();
+  if(!ev.dataTransfer || !ev.dataTransfer.files || !ev.dataTransfer.files.length) return;
+  ev.preventDefault();
+  cuAttach(ev.dataTransfer.files);
 }
 
 
@@ -11542,51 +11595,60 @@ async function cuSendText(){
   const box = document.getElementById('sms-text');
   const out = document.getElementById('sms-out');
   const message = (box.value || '').trim();
-  if(!message && !cuMedia){ return; }
+  if(!message && !cuMedia.length){ return; }
+  if(!cuSmsTo || cuSmsTo === 'all'){ out.textContent = 'Pick a conversation, or press + New message, first.'; return; }
 
-  // Show it immediately, greyed, rather than freezing the box while the
-  // texting service thinks about it. Waiting twenty seconds with nothing
-  // happening looks like the application has hung.
-  const media = cuMedia;
-  const pending = cuAddBubble(message, media, true);
+  // The words go with the first picture; every further picture is its own
+  // text. One text per picture is what carriers deliver reliably — several
+  // pictures in one text often arrive as none.
+  const parts = cuMedia.length ? cuMedia.map((m, i) => ({message: i === 0 ? message : '', media: m.url}))
+                               : [{message, media: null}];
+  const keep = cuMedia.slice();
   box.value = '';
   cuUnattach();
   out.textContent = '';
-  try{
-    if(!cuSmsTo || cuSmsTo === 'all'){ if(pending) pending.remove(); box.value = message;
-      out.textContent = 'Pick a conversation, or press + New message, first.'; return; }
-    const r = await API.post(`/api/customers/${cuData.account.id}/texts`,
-                             {message, media_url: media, to: cuSmsTo || undefined});
-    if(r.error || r.ok === false){
-      // put the words back so nothing is lost, and mark the attempt failed
+  let sent = 0;
+  for(const [i, part] of parts.entries()){
+    // Show it immediately, greyed, rather than freezing the box while the
+    // texting service thinks about it.
+    const pending = cuAddBubble(part.message, part.media, true);
+    if(parts.length > 1) out.textContent = `Sending ${i + 1} of ${parts.length}…`;
+    try{
+      const r = await API.post(`/api/customers/${cuData.account.id}/texts`,
+                               {message: part.message, media_url: part.media, to: cuSmsTo || undefined});
+      if(r.error || r.ok === false){
+        if(pending) pending.remove();
+        // put back whatever did not go, so nothing is lost
+        if(i === 0) box.value = message;
+        cuMedia = keep.slice(i); cuRenderAttached();
+        out.textContent = '❌ ' + (r.error || 'Could not send.')
+          + (r.raw_error && r.raw_error !== r.error ? ' — ' + r.raw_error : '')
+          + (sent ? ` (${sent} of ${parts.length} went; the rest are still attached)` : '');
+        return;
+      }
+      sent++;
+      if(r.queued){
+        if(pending){ const st = pending.querySelector('.sms-time'); if(st) st.textContent = 'queued — sending in a few minutes'; }
+        out.textContent = '⏳ ' + r.meaning;
+      } else {
+        if(pending){ pending.style.opacity = ''; const st = pending.querySelector('.sms-time'); if(st) st.textContent = r.unconfirmed ? 'sent · not confirmed' : 'sent just now'; }
+        if(r.campaign && (r.campaign.step === 'join' || r.campaign.step === 'swap')) out.textContent = 'ℹ️ ' + r.campaign.meaning;
+        if(r.campaign_warning) out.textContent = '⚠️ ' + r.campaign_warning;
+      }
+      if(cuData && cuData.sms){
+        cuData.sms.unshift({when: new Date().toISOString(), direction: 'Out',
+                            message: part.message, media: part.media, is_picture: !!part.media, from_to: cuSmsTo});
+      }
+    }catch(e){
       if(pending) pending.remove();
-      box.value = message;
-      out.textContent = '❌ ' + (r.error || 'Could not send.')
-        + (r.raw_error && r.raw_error !== r.error ? ' — ' + r.raw_error : '');
+      if(i === 0) box.value = message;
+      cuMedia = keep.slice(i); cuRenderAttached();
+      out.textContent = 'Failed: ' + e.message;
       return;
     }
-    if(r.queued){
-      if(pending){ const st = pending.querySelector('.sms-time'); if(st) st.textContent = 'queued — sending in a few minutes'; }
-      out.textContent = '⏳ ' + r.meaning;
-      return;
-    }
-    if(pending){ pending.style.opacity = ''; const st = pending.querySelector('.sms-time'); if(st) st.textContent = 'sent just now'; }
-    if(r.campaign && (r.campaign.step === 'join' || r.campaign.step === 'swap')) out.textContent = 'ℹ️ ' + r.campaign.meaning;
-    if(r.campaign_warning) out.textContent = '⚠️ ' + r.campaign_warning;
-    if(r.unconfirmed && pending){
-      const stamp = pending.querySelector('.sms-time');
-      if(stamp) stamp.textContent = 'sent · not confirmed';
-    }
-    if(cuData && cuData.sms){
-      cuData.sms.unshift({when: new Date().toISOString(), direction: 'Out',
-                          message, media, is_picture: !!media, from_to: cuSmsTo});
-    }
-    box.focus();
-  }catch(e){
-    if(pending) pending.remove();
-    box.value = message;
-    out.textContent = 'Failed: ' + e.message;
   }
+  if(parts.length > 1 && out.textContent.startsWith('Sending')) out.textContent = `✅ All ${parts.length} sent.`;
+  box.focus();
 }
 
 /* Puts a sent message into the thread. Greyed while it is on its way, solid
@@ -11609,6 +11671,7 @@ function cuAddBubble(message, media, pending){
 }
 
 async function cuOpen(id){
+  if(!cuData || cuData.account.id !== id) cuMedia = [];   // pictures never follow you to another customer
   document.getElementById('cu-results').classList.remove('open');
   document.getElementById('cu-empty').style.display = 'none';
   const box = document.getElementById('cu-profile');
@@ -11882,14 +11945,14 @@ function cuTab(which){
             This is an automated short code (codes and alerts). It can't be texted back.</div>` : ''}
           ${canText && !(cuSmsTo && cuSmsTo.length < 10) ? `
           <div id="sms-attached" style="display:none;padding:0 12px;"></div>
-          <div class="sx-compose">
-            <input type="file" id="sms-file" style="display:none;"
-                   accept="image/jpeg,image/png,image/gif,image/bmp,application/pdf,text/vcard"
-                   onchange="cuAttach(this.files[0])">
-            <button class="btn btn-outline" style="font-size:16px;padding:8px 12px;" title="Attach a picture"
+          <div class="sx-compose" id="sms-compose" ondragover="cuDragOver(event)" ondragleave="cuDragLeave()" ondrop="cuDrop(event)">
+            <input type="file" id="sms-file" style="display:none;" multiple
+                   accept="image/*,application/pdf,text/vcard,.vcf"
+                   onchange="cuAttach(this.files)">
+            <button class="btn btn-outline" style="font-size:16px;padding:8px 12px;" title="Attach pictures (up to 5)"
                     onclick="document.getElementById('sms-file').click()">📎</button>
             <textarea id="sms-text" class="cms-in" rows="2" style="flex:1;min-height:0;resize:none;"
-                      placeholder="Write a message to ${cuSmsTo ? fmtNum(cuSmsTo) : '…'} — or paste a picture"
+                      placeholder="Write a message to ${cuSmsTo ? fmtNum(cuSmsTo) : '…'} — paste or drop pictures here"
                       onpaste="cuPaste(event)"
                       onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();cuSendText();}"></textarea>
             <button class="btn btn-primary" style="font-size:12.5px;" onclick="cuSendText()">Send</button>
@@ -11899,6 +11962,7 @@ function cuTab(which){
       </div>`;
 
     setTimeout(()=>{ const t = document.getElementById('sms-thread'); if(t) t.scrollTop = t.scrollHeight; }, 30);
+    cuRenderAttached();     // anything already attached survives a refresh of the thread
     // opening a conversation marks that conversation read, as the old CMS does
     if(cuSmsTo && people[cuSmsTo] && people[cuSmsTo].unread){
       API.post(`/api/customers/${a.id}/texts/read`, {contact: cuSmsTo}).then(()=>{
