@@ -10060,9 +10060,22 @@ def customer_profile_route(account_id):
     """Everything held about one account."""
     import cms_db
     try:
-        return jsonify(cms_db.customer_profile(account_id))
+        out = cms_db.customer_profile(account_id)
     except Exception as e:
         return jsonify({'error': str(e)[:240]}), 400
+    # How much a customer has paid over the years is for managers and admins.
+    # Hiding the card in the page would not be enough — the figure would still
+    # travel in this reply — so it is taken out here for everyone else.
+    p = _portal_user(request.headers.get('X-Portal-Ticket', ''))
+    if p and not (p.get('m') or p.get('a')):
+        t = out.get('totals')
+        if isinstance(t, dict):
+            for k in ('collected_cents', 'refunded_cents'):
+                t.pop(k, None)
+        out['can_see_money'] = False
+    else:
+        out['can_see_money'] = True
+    return jsonify(out)
 
 
 @app.route('/api/customers/<int:account_id>/texts/latest', methods=['GET'])
