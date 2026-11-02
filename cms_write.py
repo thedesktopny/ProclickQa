@@ -2368,7 +2368,15 @@ def dnd(employee_id, turn_on, who, reason=None, kind=None):
 
 BV_BASE = 'https://portal.bulkvs.com/api/v1.0'
 SMS_TRUNK = 'SMS-ProClick'
-CAMPAIGN_LIMIT = 48           # David's rule: never more than 48 on a campaign
+# Most numbers allowed on one campaign. 49 matches the old CMS (and the
+# carriers' usual limit), so the two systems agree while both are in use —
+# with different limits they would keep taking numbers off and putting them
+# back. Set CAMPAIGN_LIMIT in the app settings to change it without new code
+# (48 keeps one place spare, once the old CMS is retired).
+try:
+    CAMPAIGN_LIMIT = max(1, min(49, int(os.getenv('CAMPAIGN_LIMIT', '49'))))
+except Exception:
+    CAMPAIGN_LIMIT = 49
                               # (BulkVS's own ceiling is 49; one kept spare for safety)
 NOT_READY_CODE = '7401'       # BulkVS: the number is not ready to send yet
 
