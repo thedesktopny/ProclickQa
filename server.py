@@ -8457,6 +8457,16 @@ def sms_number_unpool_route(number):
     return _sms_call(cms_write.remove_from_pool, number, _who(), d.get('reason'))
 
 
+@app.route('/api/sms/number/<number>/handover', methods=['POST'])
+@portal_admin_only
+def sms_number_handover_route(number):
+    """Take a working number from its customer (kept at BulkVS) — admins only."""
+    import cms_write
+    d = request.json or {}
+    return _sms_call(cms_write.hand_over_number, number, _who(), d.get('reason'),
+                     d.get('give_new', True) is not False)
+
+
 @app.route('/api/sms/order', methods=['POST'])
 @portal_manager_only
 def sms_order_route():
@@ -10161,6 +10171,20 @@ def customer_profile_route(account_id):
     else:
         out['can_see_money'] = True
     return jsonify(out)
+
+
+@app.route('/api/customers/<int:account_id>/texts/delete', methods=['POST'])
+@portal_manager_only
+def customer_texts_delete(account_id):
+    """Delete chosen messages for good — managers and admins only."""
+    import cms_write
+    d = request.json or {}
+    try:
+        return jsonify(cms_write.delete_texts(account_id, d.get('ids') or [], _who()))
+    except cms_write.WriteRefused as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)[:240]}), 400
 
 
 @app.route('/api/customers/<int:account_id>/texts/latest', methods=['GET'])

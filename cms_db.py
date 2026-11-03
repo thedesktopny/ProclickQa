@@ -3208,12 +3208,12 @@ def customer_profile(account_id, limit=120):
         return u.endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic', '.bmp'))
 
     sms = []
-    for d, io, cn, msg, media, unread in rows("""
-        SELECT TOP 300 smsDate, InOut, ContactNumber, message, MediaURL, ISNULL(smsNotRead, 0)
+    for d, io, cn, msg, media, unread, sid in rows("""
+        SELECT TOP 300 smsDate, InOut, ContactNumber, message, MediaURL, ISNULL(smsNotRead, 0), Id
         FROM SMSLog WHERE AccountId = %s ORDER BY smsDate DESC""", (aid,)):
         if _is_layout_file(media):
             continue
-        sms.append({'when': _plain(d), 'direction': io, 'from_to': cn,
+        sms.append({'id': int(sid), 'when': _plain(d), 'direction': io, 'from_to': cn,
                     'message': msg, 'media': media, 'unread': bool(unread),
                     'is_picture': _looks_like_a_picture(media)})
 
@@ -4551,7 +4551,7 @@ def account_texts(account_id):
     conn = _connect()
     try:
         cu = conn.cursor()
-        cu.execute("""SELECT TOP 300 smsDate, InOut, ContactNumber, message, MediaURL, ISNULL(smsNotRead, 0)
+        cu.execute("""SELECT TOP 300 smsDate, InOut, ContactNumber, message, MediaURL, ISNULL(smsNotRead, 0), Id
                       FROM SMSLog WHERE AccountId = %s ORDER BY smsDate DESC""", (int(account_id),))
         out = []
         while True:
@@ -4560,7 +4560,7 @@ def account_texts(account_id):
                 break
             if layout(r[4]):
                 continue
-            out.append({'when': _plain(r[0]), 'direction': r[1], 'from_to': r[2],
+            out.append({'id': int(r[6]), 'when': _plain(r[0]), 'direction': r[1], 'from_to': r[2],
                         'message': r[3], 'media': r[4], 'unread': bool(r[5]),
                         'is_picture': picture(r[4])})
         return out

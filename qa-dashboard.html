@@ -6935,6 +6935,7 @@ function nmRender(msg, ok){
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:12px;">${acts.join('')}
         ${r.in_pool && !(r.customers||[]).length ? `<button class="cn-chip" onclick="nmUnpool()">Take out of the spare pool</button>` : ''}
         ${r.at_bulkvs ? `<button class="cn-chip" onclick="nmTestText()">📱 Text a test to 347-675-2334</button>` : ''}
+        ${(r.customers||[]).length && r.at_bulkvs ? `<button class="cn-chip" style="border-color:var(--yellow);" onclick="nmHandOver()">Take from customer (keep the number)</button>` : ''}
         <button class="cn-chip" onclick="nmLookup('${r.number}')">Refresh</button></div>
       ${msg ? `<div style="margin-top:10px;color:${ok?'var(--green)':'var(--red)'};">${esc(msg)}</div>` : ''}
     </div>`;
@@ -6951,6 +6952,8 @@ function slogWhat(e){
     case 'campaign_off': return `Taken off ${c || 'its campaign'}`;
     case 'seen_on':      return `Put on <b>${c}</b> <span style="color:var(--yellow)">outside the new CMS</span>`;
     case 'seen_off':     return `Taken off ${c} <span style="color:var(--yellow)">outside the new CMS</span>`;
+    case 'handed_over':  return `<b>Taken from ${esc(d.customer||'the customer')}</b> — number kept at BulkVS`;
+    case 'list_glitch':  return `<span style="color:var(--text3)">BulkVS's list blinked — still on ${c}, nobody changed it</span>`;
     case 'registered':   return `<b style="color:var(--green)">Registered on ${c}</b> — about ${d.minutes} min after it was put on`;
     case 'freed':        return `<b style="color:var(--green)">Place on ${c} freed</b> — about ${d.minutes} min after it was taken off`;
     case 'campaign_count': return `<b>${c}</b> count: BulkVS ${d.before_bulkvs} → ${d.bulkvs_count}, set to it ${d.before_set} → ${d.set_to_it}${d.pending ? ` · <span style="color:var(--yellow)">${d.pending} still registering</span>` : ''}`;
@@ -7006,6 +7009,28 @@ async function nmHistory(num){
     const r = await API.get('/api/sms/log?limit=40&number=' + num);
     box.innerHTML = slogRows(r.events || [], false);
   }catch(e){ box.textContent = e.message; }
+}
+
+async function nmHandOver(){
+  const r = nmInfo; if(!r) return;
+  const who = (r.customers||[]).map(c=>c.customer).join(', ');
+  if(!confirm('Take ' + r.number + ' away from ' + who + '?\n\n'
+      + '• The number stays exactly as it is at BulkVS (campaign included) — it is NOT released.\n'
+      + '• ' + who + ' gets a new number from the spare pool, and a replacement spare is bought.\n'
+      + '• Anything sent to ' + r.number + ' from now on (including codes from stores where '
+      + who + ' used this number) goes to wherever you point it — no longer to this customer.\n\n'
+      + 'Last received: ' + (r.last_received ? new Date(r.last_received).toLocaleString() : 'nothing recorded'))) return;
+  const reason = prompt('Why? (kept in the log)');
+  if(reason === null) return;
+  if(reason.trim().length < 3){ nmRender('Write why — at least a few words.', false); return; }
+  nmRender('Working…', true);
+  try{
+    const res = await API.post('/api/sms/number/' + r.number + '/handover', {reason, give_new: true});
+    if(res.ok === false || res.error){ nmRender(res.error || 'Not done.', false); return; }
+    await nmLookup(r.number);
+    nmRender('✅ ' + res.meaning, true);
+    snLoadHealth();
+  }catch(e){ nmRender(e.message, false); }
 }
 
 async function nmUnpool(){
@@ -9476,8 +9501,9 @@ function cfRender(){
 
       ${(c.recording && !c.live) ? `
         <div style="margin-top:10px;" data-audio="1">
-          <div style="font-size:10.5px;color:var(--text3);margin-bottom:3px;">Call recording</div>
+          <div style="font-size:10.5px;color:var(--text3);margin-bottom:3px;">Call recording <span class="rec-len">${c.seconds ? '· ' + Math.floor(c.seconds/60) + 'm ' + String(c.seconds%60).padStart(2,'0') + 's' : ''}</span></div>
           <audio controls preload="none" style="width:100%;max-width:420px;height:34px;"
+                 onloadedmetadata="recLen(this)" onerror="recMissing(this)"
                  src="${esc(cfRecordingUrl(c.recording))}"></audio>
         </div>`
         : (c.live ? `<div style="margin-top:8px;font-size:11px;color:var(--text3);">
@@ -9510,6 +9536,22 @@ function cfRender(){
   if(!list.length && !box.children.length){
     box.innerHTML = '<div style="color:var(--text3);font-size:12.5px;">No calls in this period.</div>';
   }
+}
+
+// Recordings are not loaded until someone presses play, to keep the page
+// light — the label shows the CALL's length instead (the recording is the
+// same length). Once played, the real length replaces it; and if the file
+// is not there yet, it says so instead of sitting silent at 0:00.
+function recLen(el){
+  const d = el.duration;
+  const lab = el.parentNode && el.parentNode.querySelector('.rec-len');
+  if(lab && isFinite(d) && d > 0)
+    lab.textContent = '· ' + Math.floor(d/60) + 'm ' + String(Math.round(d%60)).padStart(2,'0') + 's';
+}
+function recMissing(el){
+  const lab = el.parentNode && el.parentNode.querySelector('.rec-len');
+  if(lab){ lab.style.color = 'var(--yellow)';
+    lab.textContent = '· not available yet — recordings usually appear a few minutes after the call ends'; }
 }
 
 function cfRecordingUrl(stored){
@@ -10501,8 +10543,10 @@ async function cuShowCall(callId){
           ${c.status ? ' · ' + esc(c.status) : ''}
           ${c.account_name ? ' · ' + esc(c.account_name) : ''}
         </div>
-        ${url ? `<audio controls preload="none" style="width:100%;max-width:460px;
-                   height:36px;margin-top:12px;" src="${esc(url)}"></audio>`
+        ${url ? `<div><span class="rec-len" style="font-size:11px;color:var(--text3);">${c.seconds ? 'Recording · ' + Math.floor(c.seconds/60) + 'm ' + String(c.seconds%60).padStart(2,'0') + 's' : ''}</span>
+                 <audio controls preload="none" style="width:100%;max-width:460px;
+                   height:36px;margin-top:12px;" onloadedmetadata="recLen(this)" onerror="recMissing(this)"
+                   src="${esc(url)}"></audio></div>`
               : '<div style="color:var(--text3);font-size:12.5px;margin-top:12px;">No recording for this call.</div>'}
         ${c.note ? `<div style="margin-top:14px;font-size:13px;line-height:1.6;">${fmtNote(c.note)}</div>` : ''}
         ${c.account_id ? `<button class="btn btn-outline" style="margin-top:16px;font-size:12px;"
@@ -11813,6 +11857,38 @@ async function cuRefreshTexts(accountId){
   }catch(e){}
 }
 
+/* Managers and admins can pick messages and delete them for good. */
+let cuSmsSel = null;            // null = not choosing; a Set of message ids while choosing
+function cuSmsToggle(id){
+  if(!cuSmsSel) return;
+  cuSmsSel.has(id) ? cuSmsSel.delete(id) : cuSmsSel.add(id);
+  const t = document.getElementById('sms-thread'), top = t ? t.scrollTop : 0;
+  cuTab('sms');
+  const t2 = document.getElementById('sms-thread'); if(t2) t2.scrollTop = top;
+}
+function cuSmsSelAll(ids){
+  if(!cuSmsSel) return;
+  const all = ids.every(i => cuSmsSel.has(i));
+  ids.forEach(i => all ? cuSmsSel.delete(i) : cuSmsSel.add(i));
+  cuTab('sms');
+}
+async function cuSmsDelete(){
+  if(!cuData || !cuSmsSel || !cuSmsSel.size) return;
+  const ids = [...cuSmsSel];
+  if(!confirm('Delete ' + ids.length + ' message' + (ids.length === 1 ? '' : 's') + ' for good?\n\n'
+      + 'They are removed from the database completely — they cannot be brought back, '
+      + 'and they disappear from the old CMS too.')) return;
+  try{
+    const r = await API.post('/api/customers/' + cuData.account.id + '/texts/delete', {ids});
+    if(r.ok === false || r.error){ showToast(r.error || 'Not deleted', true); return; }
+    const gone = new Set(r.ids || ids);
+    cuData.sms = (cuData.sms || []).filter(m => !gone.has(m.id));
+    cuSmsSel = null;
+    cuTab('sms');
+    showToast(r.meaning || 'Deleted');
+  }catch(e){ showToast(e.message, true); }
+}
+
 /* Turning texting on and off, as the old CMS's Activate / Disable SMS. */
 async function cuTextingOn(){
   if(!cuData) return;
@@ -12138,7 +12214,7 @@ function cuTab(which){
     });
     if(own.length === 10 && !people[own]) people[own] = {num: own, last: null, unread: 0, count: 0};
     if(cuSmsAccount !== a.id){
-      cuSmsAccount = a.id;
+      cuSmsAccount = a.id; cuSmsSel = null;
       const order0 = Object.values(people).sort((x, y) => (y.last ? y.last.when : '') > (x.last ? x.last.when : '') ? 1 : -1);
       cuSmsTo = (order0[0] || {}).num || own || '';
     }
@@ -12151,8 +12227,11 @@ function cuTab(which){
     const ago = d => { if(!d) return ''; const mins = (Date.now() - new Date(d).getTime()) / 60000;
       return mins < 60 ? Math.max(1, Math.round(mins)) + 'm' : mins < 1440 ? Math.round(mins/60) + 'h'
            : new Date(d).toLocaleDateString([], {month:'short', day:'numeric'}); };
+    const selOn = !!cuSmsSel;
     const bubble = m => `
-      <div class="sx-row ${m.direction==='In'?'in':'out'}"><div class="sx-bub"><span class="sx-msg">${esc((m.message||'').trim())}</span>
+      <div class="sx-row ${m.direction==='In'?'in':'out'}" ${selOn && m.id ? `onclick="cuSmsToggle(${m.id})" style="cursor:pointer;"` : ''}>
+        ${selOn && m.id ? `<input type="checkbox" ${cuSmsSel.has(m.id)?'checked':''} style="margin:0 8px;align-self:center;pointer-events:none;width:16px;height:16px;">` : ''}
+        <div class="sx-bub" ${selOn && cuSmsSel.has(m.id) ? 'style="outline:2px solid var(--red);"' : ''}><span class="sx-msg">${esc((m.message||'').trim())}</span>
         ${m.media ? (m.is_picture
           ? `<div style="margin-top:6px;"><img src="${esc(m.media)}" alt="picture message"
                onclick="window.open('${esc(m.media)}','_blank')"
@@ -12191,7 +12270,14 @@ function cuTab(which){
             <div><div style="font-size:14.5px;font-weight:650;">${cuSmsTo ? fmtNum(cuSmsTo) : 'Pick a conversation'}
                 ${cuSmsTo===own ? '<span style="font-size:11px;color:var(--text3);font-weight:500;"> · account phone</span>' : ''}</div>
               <div style="font-size:11.5px;color:var(--text3);">${canText ? 'from our number ' + esc(a.sms_number) : 'texting is off for this account'}${shown.length ? ' · ' + shown.length + ' messages' : ''}</div></div>
-            ${canText && portalIsManager ? `<button class="cn-chip" style="color:var(--red);margin-left:auto;" onclick="cuTextingOff()">Turn off texting</button>` : ''}
+            <div style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;">
+            ${portalIsManager && shown.length ? (selOn
+              ? `<button class="cn-chip" onclick="cuSmsSelAll([${shown.filter(m=>m.id).map(m=>m.id).join(',')}])">Select all ${shown.filter(m=>m.id).length}</button>
+                 <button class="cn-chip" style="color:#fff;background:var(--red);border-color:var(--red);${cuSmsSel.size ? '' : 'opacity:.5;'}" onclick="cuSmsDelete()" ${cuSmsSel.size ? '' : 'disabled'}>🗑 Delete ${cuSmsSel.size || ''}</button>
+                 <button class="cn-chip" onclick="cuSmsSel=null;cuTab('sms')">Cancel</button>`
+              : `<button class="cn-chip" onclick="cuSmsSel=new Set();cuTab('sms')">Select messages</button>`) : ''}
+            ${canText && portalIsManager && !selOn ? `<button class="cn-chip" style="color:var(--red);" onclick="cuTextingOff()">Turn off texting</button>` : ''}
+            </div>
           </div>
           <div class="sx-thread" id="sms-thread">
             ${shown.length ? [...shown].reverse().map(bubble).join('')

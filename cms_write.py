@@ -2813,7 +2813,7 @@ def sms_event(kind, number=None, campaign=None, account_id=None, ok=None, who=No
         print('[sms log] ' + str(e)[:160])
 
 
-_WATCH = {'at': 0, 'tcr': None, 'counts': None}
+_WATCH = {'at': 0, 'tcr': None, 'counts': None, 'held': {}}
 
 
 def sms_watch(force=False, every=600):
@@ -2835,35 +2835,81 @@ def sms_watch(force=False, every=600):
         print('[sms watch] ' + str(e)[:160])
         return None
     now = {_rec_tn(r): (_rec_tcr(r) or '') for r in recs if _rec_tn(r)}
+    prev, prev_counts = _WATCH['tcr'], _WATCH['counts']
+    held = _WATCH.setdefault('held', {})
+    # which changes were ours? anything logged in the last 20 minutes
+    ours = set()
+    if prev is not None:
+        try:
+            from server import get_db
+            conn = get_db(); c = conn.cursor()
+            c.execute("""SELECT number FROM sms_events WHERE kind IN ('campaign_on','campaign_off')
+                         AND at > NOW() - INTERVAL '20 minutes'""")
+            ours = {r[0] for r in c.fetchall()}
+            conn.close()
+        except Exception:
+            pass
+
+    # BulkVS's full list sometimes shows a number with NO campaign for a few
+    # minutes and then shows it back on the same one, with nobody having done
+    # anything. Logging that as "taken off / put on outside the new CMS" was
+    # wrong, and it also made a false "place freed" and skewed the timings.
+    # So a number that drops off by itself is held for one more look: back on
+    # the same campaign -> it was BulkVS's list, logged once as such; still
+    # off -> a real take-off, logged with the time it was first seen.
+    changed = 0
+    settled = set()            # held numbers dealt with this round
+    for ten, h in list(held.items()):
+        settled.add(ten)
+        cur = now.get(ten)
+        if cur == h['tcr']:
+            sms_event('list_glitch', ten, h['tcr'], ok=True, who='BulkVS',
+                      why=('BulkVS\'s number list showed it with no campaign for a few minutes, then '
+                           'back on %s. Nobody changed it — nothing to do.' % h['tcr']))
+            held.pop(ten, None)
+        elif ten not in ours:
+            sms_event('seen_on' if cur else 'seen_off', ten, cur or h['tcr'], ok=True,
+                      who='outside the new CMS', why='changed by the old CMS or at BulkVS',
+                      before=h['tcr'], after=cur or 'no campaign', first_seen=h['seen'])
+            changed += 1
+            held.pop(ten, None)
+        else:
+            held.pop(ten, None)
+    if prev is not None:
+        from datetime import datetime as _dt
+        for ten, t in now.items():
+            old = prev.get(ten)
+            if old is None or old == t or ten in ours or ten in held or ten in settled:
+                continue
+            if old and not t:
+                held[ten] = {'tcr': old, 'seen': _dt.now().strftime('%H:%M')}
+                continue
+            changed += 1
+            sms_event('seen_on' if t else 'seen_off', ten, t or old, ok=True, who='outside the new CMS',
+                      why='changed by the old CMS or at BulkVS', before=old or 'no campaign',
+                      after=t or 'no campaign')
+    # a held number still counts where it was, so the counts do not jump
     assigned = {}
-    for t in now.values():
+    for ten, t in now.items():
+        t = t or (held.get(ten) or {}).get('tcr') or ''
         if t:
             assigned[t] = assigned.get(t, 0) + 1
     counts = {c['tcr']: {'bulkvs': c['count'], 'assigned': assigned.get(c['tcr'], 0)} for c in camps}
-    prev, prev_counts = _WATCH['tcr'], _WATCH['counts']
     _WATCH['tcr'], _WATCH['counts'] = now, counts
     if prev is None:
         return {'first_look': True}
-    # which changes were ours? anything logged in the last 20 minutes
-    ours = set()
+    # tidy up a false "freed" left by such a glitch before this check existed
     try:
         from server import get_db
         conn = get_db(); c = conn.cursor()
-        c.execute("""SELECT number FROM sms_events WHERE kind IN ('campaign_on','campaign_off')
-                     AND at > NOW() - INTERVAL '20 minutes'""")
-        ours = {r[0] for r in c.fetchall()}
-        conn.close()
+        c.execute("""DELETE FROM sms_events f WHERE f.kind = 'freed'
+                     AND EXISTS (SELECT 1 FROM sms_events s WHERE s.kind = 'seen_on'
+                                 AND s.number = f.number AND s.campaign = f.campaign
+                                 AND s.at BETWEEN f.at - INTERVAL '15 minutes'
+                                              AND f.at + INTERVAL '15 minutes')""")
+        conn.commit(); conn.close()
     except Exception:
         pass
-    changed = 0
-    for ten, t in now.items():
-        old = prev.get(ten)
-        if old is None or old == t or ten in ours:
-            continue
-        changed += 1
-        sms_event('seen_on' if t else 'seen_off', ten, t or old, ok=True, who='outside the new CMS',
-                  why='changed by the old CMS or at BulkVS', before=old or 'no campaign',
-                  after=t or 'no campaign')
     for tcr, v in counts.items():
         pv = (prev_counts or {}).get(tcr)
         if pv and (pv['bulkvs'] != v['bulkvs'] or pv['assigned'] != v['assigned']):
@@ -3981,6 +4027,154 @@ def sms_log(number=None, kind=None, limit=300):
     timing = _sum(mins)
     return {'events': rows, 'registration_minutes': timing, 'freeing_minutes': _sum(fmins),
             'sends_7d': {'total': sends[0], 'failed': sends[1], 'waited': sends[2]}}
+
+
+def delete_texts(account_id, ids, who):
+    """Delete chosen text messages for good — managers and admins.
+
+    Removed from SMSLog (and from the old SMSLogCOPY table, if a copy is there
+    too), and the first words kept in our own change log for texts sent from
+    the new CMS are wiped as well, so nothing of the message is left anywhere.
+    The log keeps only who deleted how many, when, and the row numbers."""
+    account_id = int(account_id)
+    try:
+        ids = sorted({int(i) for i in (ids or [])})
+    except Exception:
+        raise WriteRefused('Those are not message numbers.')
+    if not ids:
+        raise WriteRefused('Choose at least one message.')
+    if len(ids) > 500:
+        raise WriteRefused('At most 500 messages at a time.')
+    marks = ', '.join(['%s'] * len(ids))
+    conn = cms_db._connect()
+    try:
+        cu = conn.cursor()
+        cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        cu.execute("SELECT Id, InOut, message FROM SMSLog WHERE AccountId = %%s AND Id IN (%s)" % marks,
+                   tuple([account_id] + ids))
+        found = cu.fetchall()
+        if not found:
+            raise WriteRefused('None of those messages belong to this customer.')
+        mine = [int(r[0]) for r in found]
+        sent_words = [str(r[2] or '')[:120] for r in found if str(r[1] or '').strip().lower() == 'out' and r[2]]
+        m2 = ', '.join(['%s'] * len(mine))
+        cu.execute("DELETE FROM SMSLog WHERE AccountId = %%s AND Id IN (%s)" % m2, tuple([account_id] + mine))
+        deleted = cu.rowcount if cu.rowcount is not None and cu.rowcount >= 0 else len(mine)
+        # the old copy table, only if this database has it (asking first, so a
+        # missing table cannot spoil the delete above)
+        cu.execute("SELECT CASE WHEN OBJECT_ID('SMSLogCOPY') IS NULL THEN 0 ELSE 1 END")
+        if int((cu.fetchone() or [0])[0] or 0):
+            cu.execute("DELETE FROM SMSLogCOPY WHERE AccountId = %%s AND Id IN (%s)" % m2,
+                       tuple([account_id] + mine))
+        conn.commit()
+    except WriteRefused:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    # our own log kept the first 120 characters of each text sent from here
+    if sent_words:
+        try:
+            import json as _j
+            from server import get_db
+            pg = get_db(); c = pg.cursor()
+            c.execute("""SELECT id, after_json FROM cms_audit
+                         WHERE action = 'send_text' AND table_name = 'SMSLog'""")
+            wipe = []
+            words = set(sent_words)
+            for rid, aj in c.fetchall():
+                try:
+                    v = aj if isinstance(aj, dict) else _j.loads(aj or '{}')
+                except Exception:
+                    continue
+                if (v or {}).get('message') in words:
+                    wipe.append(rid)
+            for rid in wipe:
+                c.execute("UPDATE cms_audit SET after_json = %s WHERE id = %s",
+                          (_j.dumps({'message': '(deleted)'}), rid))
+            pg.commit(); pg.close()
+        except Exception as e:
+            print('[cms_write] could not wipe sent words from the log: ' + str(e)[:140])
+
+    out = {'table': 'SMSLog', 'action': 'delete_texts', 'row_id': account_id, 'dry_run': False,
+           'ok': True, 'committed': True, 'deleted': deleted, 'ids': mine,
+           'values': {'account_id': account_id, 'count': deleted, 'ids': mine},
+           'meaning': '%d message%s deleted for good.' % (deleted, '' if deleted == 1 else 's')}
+    _log(who, out)
+    return out
+
+
+def hand_over_number(number, who, reason=None, give_new=True):
+    """Take a number away from the customer who has it, WITHOUT releasing it
+    at BulkVS — for using a proven, working number somewhere else.
+
+    "Disable texting" is NOT this: it deletes the number at BulkVS for good.
+    Here the number stays exactly as it is at BulkVS (campaign, webhook and
+    all); only the CMS stops treating it as the customer's: it is cleared from
+    the account, it stops being static, and it is not put back in the pool.
+    The customer gets a fresh number from the pool straight away, unless
+    give_new is False. To keep both CMSs from ever moving it again, change its
+    webhook at BulkVS to the one it will be used with."""
+    ten = _ten(number)
+    if len(ten) != 10:
+        raise WriteRefused('Give a ten-digit number.')
+    reason = (reason or '').strip()
+    if len(reason) < 3:
+        raise WriteRefused('Write why — it is kept in the log.')
+    conn = cms_db._connect()
+    try:
+        cu = conn.cursor()
+        cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        cu.execute("""SELECT Id, FirstName, LastName FROM Account
+                      WHERE RIGHT(ISNULL(smsNumber,''), 10) = %s""", (ten,))
+        accts = cu.fetchall()
+        if not accts:
+            raise WriteRefused('%s is not any customer\'s texting number.' % ten)
+        col = cms_db.pool_col()
+        cu.execute("DELETE FROM SMSNumberTable WHERE RIGHT([%s], 10) = %%s" % col, (ten,))
+        cu.execute("""UPDATE Account SET smsActivate = 0, smsNumber = ''
+                      WHERE RIGHT(ISNULL(smsNumber,''), 10) = %s""", (ten,))
+        cu.execute("""UPDATE AccountSMS SET StaticCompign = 0
+                      WHERE RIGHT(ISNULL(SMSNumber,''), 10) = %s""", (ten,))
+        conn.commit()
+    except WriteRefused:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    names = ', '.join((('%s %s' % (a[1] or '', a[2] or '')).strip() or '#%s' % a[0]) for a in accts)
+    out = {'table': 'Account', 'action': 'hand_over_number', 'dry_run': False, 'ok': True,
+           'committed': True, 'values': {'number': ten, 'from': names, 'reason': reason},
+           'meaning': ('%s is no longer %s\'s number. Nothing changed at BulkVS — it keeps its '
+                       'campaign. Now change its webhook at BulkVS to the one it will be used with.'
+                       % (ten, names))}
+    _log(who, out)
+    sms_event('handed_over', ten, None, ok=True, who=who, reason=reason, customer=names,
+              why='taken from %s: %s' % (names, reason))
+    _ACTIVITY['data'] = None
+    if give_new:
+        for a in accts:
+            try:
+                got = activate_texting(int(a[0]), who)
+                out['meaning'] += ' ' + (got.get('meaning') or '')
+                if got.get('refill_warning'):
+                    out['meaning'] += ' ⚠️ ' + got['refill_warning']
+            except Exception as e:
+                out['meaning'] += ' ⚠️ Could not give a new number: ' + str(e)[:140]
+    return out
 
 
 def remove_from_pool(number, who, reason=None):
