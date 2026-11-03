@@ -661,7 +661,13 @@ def send_text(account_id, message, who, media_url=None, to=None):
 
     account_id = int(account_id)
     message = (message or '').strip()
-    if not message and not media_url:
+    # one picture or several — several go out together as ONE picture message
+    if isinstance(media_url, (list, tuple)):
+        media_urls = [str(u).strip() for u in media_url if str(u or '').strip()][:MMS_MAX_PICTURES]
+    else:
+        media_urls = [str(media_url).strip()] if str(media_url or '').strip() else []
+    media_url = media_urls[0] if media_urls else None
+    if not message and not media_urls:
         raise WriteRefused('Write something first.')
     if len(message) > 1600:
         raise WriteRefused('That is longer than a text can be (%d characters, limit 1600).'
@@ -729,7 +735,7 @@ def send_text(account_id, message, who, media_url=None, to=None):
     # normal JSON encoder would escape the escapes, and the customer would
     # receive "\u002E" where a full stop should be.
     body = _old_cms_send_body(our_number, their_number,
-                              message if message else ' ', media_url)
+                              message if message else ' ', media_urls)
 
     auth = os.getenv('BULKVS_AUTH', '')
     if not auth:
@@ -766,7 +772,7 @@ def send_text(account_id, message, who, media_url=None, to=None):
             # The number has just joined a campaign and BulkVS is not ready
             # for it yet. Keep trying in the background — for up to five
             # minutes — and write it into the history only once it has gone.
-            _send_later(body, account_id, our_number, their_number, message, media_url, who)
+            _send_later(body, account_id, our_number, their_number, message, media_urls, who)
             conn.close()
             out.update({'ok': True, 'committed': False, 'queued': True,
                         'meaning': ('The number %s was just put on a campaign and BulkVS is still '
@@ -812,11 +818,7 @@ def send_text(account_id, message, who, media_url=None, to=None):
         # only now is it real, so only now is it written down
         cu2 = conn.cursor()
         cu2.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
-        cu2.execute("""INSERT INTO [SMSLog]
-                       (AccountId, AccountSMSNumber, ContactNumber, InOut,
-                        message, smsDate, smsNotRead, MediaURL)
-                       VALUES (%s, %s, %s, 'Out', %s, GETDATE(), 0, %s)""",
-                    (account_id, our_number, their_number, message, media_url))
+        _log_sent_rows(cu2, account_id, our_number, their_number, message, media_urls)
         conn.commit()
         out.update({'ok': True, 'committed': True, 'ref': ref,
                     'meaning': ('Sent to %s.' % their_number) if not timed_out else
@@ -863,11 +865,8 @@ def _send_later(body, account_id, our_number, their_number, message, media_url, 
             try:
                 k = c.cursor()
                 k.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
-                k.execute("""INSERT INTO [SMSLog]
-                             (AccountId, AccountSMSNumber, ContactNumber, InOut,
-                              message, smsDate, smsNotRead, MediaURL)
-                             VALUES (%s, %s, %s, 'Out', %s, GETDATE(), 0, %s)""",
-                          (account_id, our_number, their_number, message, media_url))
+                _log_sent_rows(k, account_id, our_number, their_number, message,
+                               media_url if isinstance(media_url, (list, tuple)) else ([media_url] if media_url else []))
                 c.commit()
             finally:
                 c.close()
@@ -3093,12 +3092,35 @@ def _old_cms_escape(message):
 
 
 def _old_cms_send_body(frm, to, message, media_url=None):
-    """The messageSend body exactly as the old CMS puts it on the wire."""
+    """The messageSend body exactly as the old CMS puts it on the wire. One
+    picture or a list of them — BulkVS takes several in one MediaURLs list and
+    the phone receives them as a single picture message."""
     body = (' {\n"From": "' + frm + '",\n"To": ["' + to + '"],\n"Message": "'
             + _old_cms_escape(message) + '"\n ')
-    if media_url:
-        body += ',"MediaURLs":[ "' + media_url.replace('\\', '\\\\').replace('"', '%22') + '"]\n'
+    urls = media_url if isinstance(media_url, (list, tuple)) else ([media_url] if media_url else [])
+    if urls:
+        body += (',"MediaURLs":[ '
+                 + ', '.join('"' + u.replace('\\', '\\\\').replace('"', '%22') + '"' for u in urls)
+                 + ']\n')
     return body + ' }'
+
+
+# Carriers take a picture message of up to about 1 MB in total (some less), so
+# several pictures together have to be small. The page shrinks them to fit;
+# this is the most that go in one message.
+MMS_MAX_PICTURES = 5
+
+
+def _log_sent_rows(cu, account_id, our_number, their_number, message, media_urls):
+    """Write a sent message to SMSLog the way the old CMS records pictures:
+    the words with the first picture, then one row per further picture."""
+    urls = list(media_urls or []) or [None]
+    for i, u in enumerate(urls):
+        cu.execute("""INSERT INTO [SMSLog]
+                       (AccountId, AccountSMSNumber, ContactNumber, InOut,
+                        message, smsDate, smsNotRead, MediaURL)
+                       VALUES (%s, %s, %s, 'Out', %s, GETDATE(), 0, %s)""",
+                   (account_id, our_number, their_number, message if i == 0 else '', u))
 
 
 def _send_via_bulkvs(body, tries=6, wait=10):
@@ -3459,7 +3481,7 @@ def sms_health():
         t = _lidb_time(_rec_lidb(r))
         if _rec_tcr(r) and _rec_tn(r) not in statics:
             rot.append({'number': _rec_tn(r), 'tcr': _rec_tcr(r),
-                        'since': t.isoformat() if t else None,
+                        'since': t.isoformat() + 'Z' if t else None,
                         'movable': t is not None,
                         'lidb': _rec_lidb(r), 'webhook': _rec_webhook(r),
                         'outside_cms': _rec_external(r),
@@ -3641,7 +3663,9 @@ def number_info(number):
            'campaign': _rec_tcr(rec) if rec else None,
            'webhook': _rec_webhook(rec) if rec else None,
            'lidb': _rec_lidb(rec) if rec else None,
-           'put_on_by_cms_at': (_lidb_time(_rec_lidb(rec)).isoformat()
+           # the stamp is written in UTC (the servers' clock), so say so —
+           # it was showing five hours late as if it were New York time
+           'put_on_by_cms_at': (_lidb_time(_rec_lidb(rec)).isoformat() + 'Z'
                                 if rec and _lidb_time(_rec_lidb(rec)) else None),
            'sms_enabled': m.get('Sms'), 'mms_enabled': m.get('Mms'),
            'static_tcr': (statics.get(ten) or {}).get('tcr'),

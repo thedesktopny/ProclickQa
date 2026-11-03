@@ -6062,21 +6062,28 @@ async function loadPackages(){
   try{
     const r = await API.get('/api/packages');
     if(r.error){ box.innerHTML = `<div style="color:var(--red)">${r.error}</div>`; return; }
-    const money = c => '$' + (Math.round(c||0)/100).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+    // each package in its own currency — £ for pounds, € for euros — grouped
+    // the way the buy window and the old CMS list them
+    const money = (c, cur) => cuCur((Math.round(c||0))/100, cur);
     document.getElementById('pk-count').textContent = `${r.packages.length} packages`;
-    const best = Math.min(...r.packages.filter(p=>p.per_minute_cents).map(p=>p.per_minute_cents));
-    box.innerHTML = `<div class="paygrid" style="grid-template-columns:repeat(auto-fill,minmax(220px,1fr));margin-top:0;">
-      ${r.packages.map(p=>`
+    const groups = (r.groups && r.groups.length) ? r.groups
+      : [{title: 'Packages', currency: '', packages: r.packages}];
+    box.innerHTML = groups.map(g => {
+      const best = Math.min(...g.packages.filter(p=>p.per_minute_cents).map(p=>p.per_minute_cents));
+      return `<h3 style="font-size:13px;color:var(--text2);margin:18px 0 10px;">${esc(g.title)}</h3>
+      <div class="paygrid" style="grid-template-columns:repeat(auto-fill,minmax(220px,1fr));margin-top:0;">
+      ${g.packages.map(p=>`
         <div class="card" style="padding:18px 20px;${p.per_minute_cents===best?'border-color:var(--accent);':''}">
           <div style="font-size:13.5px;font-weight:650;">${esc(p.name)}</div>
-          <div class="payfig paynum pos" style="font-size:28px;margin-top:10px;">${money(p.price_cents)}</div>
+          <div class="payfig paynum pos" style="font-size:28px;margin-top:10px;">${money(p.price_cents, p.currency)}</div>
           <div style="font-size:12.5px;color:var(--text2);margin-top:6px;">
             ${(p.minutes||0).toLocaleString()} minutes</div>
           <div style="font-size:11.5px;color:var(--text3);margin-top:3px;">
-            ${p.per_minute_cents ? (p.per_minute_cents/100).toFixed(3).replace(/0+$/,'') + ' a minute' : ''}
+            ${p.per_minute_cents ? cuCur(p.per_minute_cents/100, p.currency, 3) + ' a minute' : ''}
             ${p.per_minute_cents===best?' · best value':''}</div>
-          ${p.commission?`<div style="font-size:11px;color:var(--text3);margin-top:4px;">commission ${money(p.commission)}</div>`:''}
+          ${p.commission?`<div style="font-size:11px;color:var(--text3);margin-top:4px;">commission ${money(p.commission, p.currency)}</div>`:''}
         </div>`).join('')}</div>`;
+    }).join('');
   }catch(e){ box.innerHTML = `<div style="color:var(--red)">${e.message}</div>`; }
 }
 
@@ -6928,6 +6935,7 @@ function nmRender(msg, ok){
       ${row('Last sent / received', when(r.last_sent) + ' / ' + when(r.last_received))}
       ${row('Campaigns now', camps)}
       ${(r.warnings||[]).map(w=>`<div style="color:var(--yellow);margin-top:6px;">⚠️ ${esc(w)}</div>`).join('')}
+      ${r.in_pool && !(r.customers||[]).length ? `<div style="color:var(--yellow);margin-top:6px;">⚠️ This number is still a <b>spare</b>: the CMS will give it to the next customer who turns on texting in area code ${esc(r.number.slice(0,3))}. To keep it for yourself, press <b>Take out of the spare pool</b> first.</div>` : ''}
       <details style="margin-top:8px;" ontoggle="if(this.open)nmHistory('${r.number}')"><summary style="cursor:pointer;color:var(--text3);font-size:12px;">History of this number</summary>
         <div id="nm-history" style="margin-top:6px;font-size:12px;"></div></details>
       ${r.record ? `<details style="margin-top:8px;"><summary style="cursor:pointer;color:var(--text3);font-size:12px;">Everything BulkVS has on this number</summary>
@@ -11689,7 +11697,10 @@ async function cuNoteSave(){
    before it is uploaded — the person just picks a photo and it works, rather
    than being told their picture is too big and left to solve it. */
 let cuMedia = [];          // attachments ready to go: [{url, type, bytes, name}]
-const MMS_MAX_FILES = 5;  // per message batch — each goes as its own picture text
+const MMS_MAX_FILES = 5;  // most pictures in one message
+// several pictures go out as ONE picture message only while they fit in this
+// together — carriers drop picture messages much over about 600 KB–1 MB
+const MMS_TOGETHER_BYTES = 600 * 1024;
 
 const MMS_TARGET_BYTES = 480 * 1024;     // what carriers reliably deliver
 const MMS_MAX_BYTES = 900 * 1024;        // the server refuses anything bigger
@@ -11700,10 +11711,11 @@ const MMS_OK_TYPES = ['image/jpeg','image/png','image/gif','application/pdf','te
 /* Every picture leaves as a JPEG or PNG under the carriers' size: big photos
    are shrunk, and pictures in other formats (WebP, BMP, HEIC where the
    browser can open it) are converted, so the person never has to. */
-async function cuShrinkPicture(file){
+async function cuShrinkPicture(file, target, edge){
+  target = target || MMS_TARGET_BYTES; edge = edge || MMS_MAX_EDGE;
   const t = (file.type || '').toLowerCase();
   if(!t.startsWith('image/') || t === 'image/gif') return file;
-  const keep = (t === 'image/jpeg' || t === 'image/png') && file.size <= MMS_TARGET_BYTES;
+  const keep = (t === 'image/jpeg' || t === 'image/png') && file.size <= target;
   if(keep) return file;
   try{
     const img = await new Promise((ok, no)=>{
@@ -11712,7 +11724,7 @@ async function cuShrinkPicture(file){
       i.src = URL.createObjectURL(file);
     });
     let {width: w, height: h} = img;
-    const scale = Math.min(1, MMS_MAX_EDGE / Math.max(w, h));
+    const scale = Math.min(1, edge / Math.max(w, h));
     w = Math.round(w * scale); h = Math.round(h * scale);
     const canvas = document.createElement('canvas');
     canvas.width = w; canvas.height = h;
@@ -11722,7 +11734,7 @@ async function cuShrinkPicture(file){
     // step the quality down until it fits, rather than guessing once
     for(const q of [0.85, 0.75, 0.65, 0.55, 0.45, 0.35]){
       const blob = await new Promise(ok => canvas.toBlob(ok, 'image/jpeg', q));
-      if(blob && blob.size <= MMS_TARGET_BYTES){
+      if(blob && blob.size <= target){
         return new File([blob], (file.name || 'photo').replace(/\.\w+$/, '') + '.jpg', {type: 'image/jpeg'});
       }
     }
@@ -11733,6 +11745,37 @@ async function cuShrinkPicture(file){
       throw new Error('iPhone HEIC photos cannot be opened in this browser — save it as JPEG first, or take a screenshot of it and paste that');
     return file;      // let the server judge it
   }
+}
+
+async function cuUpload(file){
+  const form = new FormData();
+  form.append('file', file, file.name || 'attachment');
+  const res = await fetch('/api/media/upload', {
+    method: 'POST',
+    headers: (typeof portalTicket !== 'undefined' && portalTicket)
+      ? {'X-Portal-Ticket': portalTicket}
+      : {'Authorization': 'Bearer ' + getToken()},
+    body: form});
+  return await res.json();
+}
+
+/* Several pictures in ONE message: shrink each a little more so together they
+   stay under what carriers deliver. Returns the URLs, or null when they cannot
+   be made to fit (PDFs and moving GIFs cannot be shrunk) — then they go one
+   per text as before. */
+async function cuFitTogether(list, onStep){
+  const total = () => list.reduce((n, m) => n + (m.bytes || 0), 0);
+  if(total() <= MMS_TOGETHER_BYTES) return list.map(m => m.url);
+  const per = Math.floor(MMS_TOGETHER_BYTES / list.length);
+  for(const [i, m] of list.entries()){
+    if((m.bytes || 0) <= per || !m.file || !String(m.type).startsWith('image/') || m.type === 'image/gif') continue;
+    if(onStep) onStep(i + 1, list.length);
+    const smaller = await cuShrinkPicture(m.file, per, per < 160 * 1024 ? 1000 : 1280);
+    if(smaller.size >= (m.bytes || 0)) continue;
+    const r = await cuUpload(smaller);
+    if(r.ok){ m.url = r.url; m.bytes = r.bytes; m.type = r.type; }
+  }
+  return total() <= MMS_TOGETHER_BYTES ? list.map(m => m.url) : null;
 }
 
 /* Attach one or several files — from the 📎 button, a paste, or a drop. */
@@ -11764,17 +11807,9 @@ async function cuAttach(files){
       continue;
     }
     try{
-      const form = new FormData();
-      form.append('file', ready, ready.name || 'attachment');
-      const res = await fetch('/api/media/upload', {
-        method: 'POST',
-        headers: (typeof portalTicket !== 'undefined' && portalTicket)
-          ? {'X-Portal-Ticket': portalTicket}
-          : {'Authorization': 'Bearer ' + getToken()},
-        body: form});
-      const r = await res.json();
+      const r = await cuUpload(ready);
       if(!r.ok){ problems.push(label + ': ' + r.error); continue; }
-      cuMedia.push({url: r.url, type: r.type, bytes: r.bytes, name: label,
+      cuMedia.push({url: r.url, type: r.type, bytes: r.bytes, name: label, file,
                     shrunk: file.size > ready.size ? file.size : 0, warn: r.warn});
     }catch(e){ problems.push(label + ': ' + e.message); }
   }
@@ -11800,7 +11835,7 @@ function cuRenderAttached(){
       <button title="Remove" onclick="cuUnattach(${i})" style="position:absolute;top:4px;right:6px;background:none;border:none;
               color:var(--text3);cursor:pointer;font-size:14px;">×</button>
     </div>`).join('')}</div>
-    ${cuMedia.length > 1 ? `<div style="font-size:11px;color:var(--text3);margin-top:4px;">Each picture goes as its own text, the words with the first one.</div>` : ''}`;
+    ${cuMedia.length > 1 ? `<div style="font-size:11px;color:var(--text3);margin-top:4px;">All ${cuMedia.length} go together in one message with the words (shrunk a little more if needed to fit).</div>` : ''}`;
 }
 
 function cuUnattach(i){
@@ -11945,11 +11980,21 @@ async function cuSendText(){
   if(!message && !cuMedia.length){ return; }
   if(!cuSmsTo || cuSmsTo === 'all'){ out.textContent = 'Pick a conversation, or press + New message, first.'; return; }
 
-  // The words go with the first picture; every further picture is its own
-  // text. One text per picture is what carriers deliver reliably — several
-  // pictures in one text often arrive as none.
-  const parts = cuMedia.length ? cuMedia.map((m, i) => ({message: i === 0 ? message : '', media: m.url}))
-                               : [{message, media: null}];
+  // Several pictures go together in ONE message with the words, shrunk to
+  // fit what carriers deliver. Only if they cannot be made small enough (a
+  // PDF, a moving GIF) does each go as its own text, the words with the first.
+  let parts;
+  if(cuMedia.length > 1){
+    out.textContent = 'Fitting the pictures into one message…';
+    let urls = null;
+    try{ urls = await cuFitTogether(cuMedia, (n, all) => { out.textContent = `Shrinking picture ${n} of ${all} to fit one message…`; }); }
+    catch(e){ urls = null; }
+    parts = urls ? [{message, media: urls}]
+                 : cuMedia.map((m, i) => ({message: i === 0 ? message : '', media: m.url}));
+    out.textContent = urls ? '' : 'These are too big to go in one message, so each goes as its own text.';
+  } else {
+    parts = cuMedia.length ? [{message, media: cuMedia[0].url}] : [{message, media: null}];
+  }
   const keep = cuMedia.slice();
   box.value = '';
   cuUnattach();
@@ -11962,7 +12007,9 @@ async function cuSendText(){
     if(parts.length > 1) out.textContent = `Sending ${i + 1} of ${parts.length}…`;
     try{
       const r = await API.post(`/api/customers/${cuData.account.id}/texts`,
-                               {message: part.message, media_url: part.media, to: cuSmsTo || undefined});
+                               Array.isArray(part.media)
+                                 ? {message: part.message, media_urls: part.media, to: cuSmsTo || undefined}
+                                 : {message: part.message, media_url: part.media, to: cuSmsTo || undefined});
       if(r.error || r.ok === false){
         if(pending) pending.remove();
         // put back whatever did not go, so nothing is lost
@@ -11983,8 +12030,11 @@ async function cuSendText(){
         if(r.campaign_warning) out.textContent = '⚠️ ' + r.campaign_warning;
       }
       if(cuData && cuData.sms){
-        cuData.sms.unshift({when: new Date().toISOString(), direction: 'Out',
-                            message: part.message, media: part.media, is_picture: !!part.media, from_to: cuSmsTo});
+        // recorded as the CMS records it: the words with the first picture,
+        // then one entry per further picture
+        const pics = Array.isArray(part.media) ? part.media : [part.media];
+        pics.forEach((u, k) => cuData.sms.unshift({when: new Date().toISOString(), direction: 'Out',
+                            message: k === 0 ? part.message : '', media: u, is_picture: !!u, from_to: cuSmsTo}));
       }
     }catch(e){
       if(pending) pending.remove();
@@ -12008,9 +12058,10 @@ function cuAddBubble(message, media, pending){
   const wrap = document.createElement('div');
   wrap.className = 'sx-row out';
   if(pending) wrap.style.opacity = '.55';
+  const pics = (Array.isArray(media) ? media : [media]).filter(Boolean);
   wrap.innerHTML = `<div class="sx-bub"><span class="sx-msg">${esc(message)}</span>
-       ${media ? `<div style="margin-top:6px;"><img src="${esc(media)}"
-            style="max-width:100%;max-height:220px;border-radius:9px;display:block;"></div>` : ''}
+       ${pics.map(u => `<div style="margin-top:6px;"><img src="${esc(u)}"
+            style="max-width:100%;max-height:220px;border-radius:9px;display:block;"></div>`).join('')}
        <div class="sx-time sms-time">${pending ? 'sending…' : 'just now'}</div></div>`;
   thread.appendChild(wrap);
   thread.scrollTop = thread.scrollHeight;
@@ -12175,12 +12226,12 @@ function cuTab(which){
         <th></th></tr></thead><tbody>` +
       r.payments.map(p=>`<tr>
         <td style="white-space:nowrap;font-size:11.5px;">${cuWhen(p.when)}</td>
-        <td class="n ${p.amount_cents?'pos':'warn'}">${p.amount_cents?cuMoney(p.amount_cents):'free'}</td>
+        <td class="n ${p.amount_cents?'pos':'warn'}">${p.amount_cents?cuCur(p.amount_cents/100, p.currency||'USD'):'free'}</td>
         <td class="n">${(p.minutes||0).toLocaleString()}</td>
         <td style="font-size:11.5px;">${p.last4?'•••• '+p.last4:''}</td>
         <td style="font-size:12px;">${esc(p.agent)}</td>
         <td style="font-size:11.5px;color:var(--text3);">
-          ${p.refunded?`<span class="neg">refunded ${cuMoney(p.refund_amount_cents||p.amount_cents)}</span> ${esc(p.refund_reason)||''}`:esc(p.note)||''}</td>
+          ${p.refunded?`<span class="neg">refunded ${cuCur((p.refund_amount_cents||p.amount_cents)/100, p.currency||'USD')}</span> ${esc(p.refund_reason)||''}`:esc(p.note)||''}</td>
       <td style="text-align:right;">
           ${p.can_refund ? `<button class="cn-chip"
               onclick="cuRefundOpen(${p.id}, ${p.amount_cents}, '${esc(p.currency||'USD')}')"

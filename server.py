@@ -9979,7 +9979,7 @@ def customer_send_text(account_id):
     d = request.json or {}
     try:
         out = cms_write.send_text(account_id, d.get('message'), _who(),
-                                  media_url=d.get('media_url'), to=d.get('to'))
+                                  media_url=d.get('media_urls') or d.get('media_url'), to=d.get('to'))
     except cms_write.WriteRefused as e:
         return jsonify({'ok': False, 'error': str(e)}), 400
     except Exception as e:

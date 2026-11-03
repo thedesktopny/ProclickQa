@@ -1225,20 +1225,55 @@ def recent_calls_with_notes(hours=6, max_rows=40000):
         calls = cu.fetchall()
         cu.execute('SELECT MAX(Id) FROM AccountWork')
         wtop = int((cu.fetchone() or [0])[0] or 0)
-        cu.execute("""SELECT Id, PhoneCallId, Note, TaskDescription, EndTime FROM AccountWork
+        cu.execute("""SELECT Id, PhoneCallId, Note, TaskDescription, EndTime, EmployeeId, StartTime FROM AccountWork
                       WHERE Id > %s AND StartTime >= DATEADD(hour, -%d, GETDATE())""" % (wtop - int(max_rows), hours + 2))
         works = cu.fetchall()
+        cu.execute("""SELECT Id, LTRIM(RTRIM(Extension)) FROM Employee
+                      WHERE ISNULL(Extension, '') <> '' AND ISNULL(LeftFirm, 0) = 0""")
+        emp_by_ext = {}
+        for eid, x in cu.fetchall():
+            emp_by_ext.setdefault(str(x or '').strip(), int(eid))
     finally:
         conn.close()
-    by_id, by_call = {}, {}
+    by_id, by_call, loose = {}, {}, {}
+    tied = set()
+    for cid, ext, phone, started, ended, cnote, wid in calls:
+        if wid:
+            tied.add(int(wid))
     for w in works:
         by_id[int(w[0])] = w
         if w[1]:
             by_call.setdefault(int(w[1]), w)
+        elif int(w[0]) not in tied and w[5]:
+            # work started from the customer page without the call attached —
+            # the CMS stores those with PhoneCallId 0, so nothing points from
+            # the call to the note the agent wrote on it
+            loose.setdefault(int(w[5]), []).append(w)
+    used = set()
+
+    def untied_work(ext, started, ended):
+        # the same agent's untied work that began around this call
+        from datetime import timedelta
+        eid = emp_by_ext.get(str(ext or '').strip())
+        if not eid or not started:
+            return None
+        lo, hi = started - timedelta(minutes=5), (ended or started) + timedelta(minutes=20)
+        best, gap = None, None
+        for w in loose.get(eid, []):
+            if int(w[0]) in used or not w[6] or not (lo <= w[6] <= hi):
+                continue
+            g = abs((w[6] - started).total_seconds())
+            if gap is None or g < gap:
+                best, gap = w, g
+        if best is not None:
+            used.add(int(best[0]))
+        return best
+
     out = []
-    for cid, ext, phone, started, ended, cnote, wid in calls:
+    for cid, ext, phone, started, ended, cnote, wid in sorted(
+            calls, key=lambda r: r[3] or __import__('datetime').datetime.min):
         w = by_id.get(int(wid)) if wid else None
-        w = w or by_call.get(int(cid))
+        w = w or by_call.get(int(cid)) or untied_work(ext, started, ended)
         digits = ''.join(ch for ch in str(phone or '') if ch.isdigit())[-10:]
         out.append({'cms_call_id': int(cid), 'extension': (ext or '').strip(), 'phone10': digits,
                     'started': started, 'ended': ended,
@@ -1285,6 +1320,18 @@ def call_work_notes(cms_id=None, extension=None, phone=None, around=None):
         if w is None:
             cu.execute('SELECT TOP 1 Id, Note, TaskDescription, EndTime FROM AccountWork '
                        'WHERE PhoneCallId = %s ORDER BY Id DESC', (int(call_id),))
+            w = cu.fetchone()
+        if w is None:
+            # work started without the call attached (PhoneCallId 0): the same
+            # agent's untied work that began around this call
+            cu.execute("""SELECT TOP 1 w.Id, w.Note, w.TaskDescription, w.EndTime
+                          FROM PhoneCallsLog c
+                          JOIN Employee e ON LTRIM(RTRIM(e.Extension)) = LTRIM(RTRIM(c.PickedUpBy))
+                          JOIN AccountWork w ON w.EmployeeId = e.Id AND ISNULL(w.PhoneCallId, 0) = 0
+                           AND w.StartTime >= DATEADD(minute, -5, c.Started)
+                           AND w.StartTime <= DATEADD(minute, 20, ISNULL(c.Ended, c.Started))
+                          WHERE c.Id = %s
+                          ORDER BY ABS(DATEDIFF(second, w.StartTime, c.Started))""", (int(call_id),))
             w = cu.fetchone()
         return {'cms_call_id': int(call_id),
                 'notes': full_work_note(w[1] if w else None, w[2] if w else None, call_note),
