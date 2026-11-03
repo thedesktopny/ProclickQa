@@ -252,11 +252,11 @@
   <main>
     <div id="bay">
       <div class="bay-icon"></div>
-      <h2>Drop photos here</h2>
-      <p>Any image format your browser can open — JPG, PNG, WEBP, GIF, BMP, AVIF.<br>You can also paste with Ctrl+V.</p>
+      <h2>Drop photos or PDFs here</h2>
+      <p>Any image format your browser can open — JPG, PNG, WEBP, GIF, BMP, AVIF — and PDFs.<br>You can also paste with Ctrl+V.</p>
       <div class="bay-row">
-        <button id="pickBtn" class="btn btn-key">Choose photos</button>
-        <input id="fileInput" type="file" accept="image/*" multiple hidden>
+        <button id="pickBtn" class="btn btn-key">Choose photos or PDFs</button>
+        <input id="fileInput" type="file" accept="image/*,application/pdf,.pdf" multiple hidden>
       </div>
     </div>
 
@@ -265,7 +265,7 @@
       <label><input type="checkbox" id="autoChk"> Save automatically when done</label>
       <span class="spacer"></span>
       <span id="tally" class="mono" style="font-size:11.5px;letter-spacing:.1em;color:var(--faint)"></span>
-      <button id="addBtn" class="btn">Add photos</button>
+      <button id="addBtn" class="btn">Add photos or PDFs</button>
       <button id="copyAllBtn" class="btn" disabled>Copy all</button>
       <button id="saveAllBtn" class="btn" disabled>Save all</button>
       <button id="clearBtn" class="btn btn-ghost">Clear</button>
@@ -1002,12 +1002,16 @@ window.addEventListener("paste", e => {
   if (files.length) addFiles(files);
 });
 
+const isPdfFile = f => f.type === "application/pdf" || /\.pdf$/i.test(f.name);
 function addFiles(list){
-  const files = [...list].filter(f => f.type.startsWith("image/") || /\.(jpe?g|png|webp|gif|bmp|avif|tiff?)$/i.test(f.name));
-  const skipped = list.length - files.length;
-  if (skipped > 0) toast(skipped + (skipped === 1 ? " file isn't an image" : " files aren't images"));
-  if (!files.length) return;
+  const all = [...list];
+  const pdfs = all.filter(isPdfFile);
+  const files = all.filter(f => !isPdfFile(f) && (f.type.startsWith("image/") || /\.(jpe?g|png|webp|gif|bmp|avif|tiff?)$/i.test(f.name)));
+  const skipped = all.length - files.length - pdfs.length;
+  if (skipped > 0) toast(skipped + (skipped === 1 ? " file isn't an image or PDF" : " files aren't images or PDFs"));
+  if (!files.length && !pdfs.length) return;
   bay.classList.add("slim");
+  for (const pdf of pdfs) queue = queue.then(() => addPdf(pdf)).catch(err => toast("Couldn't open " + pdf.name + ": " + ((err && err.message) || err), 5000));
   for (const file of files){
     const item = {
       file, id:"s"+Math.random().toString(36).slice(2,9),
@@ -1018,6 +1022,63 @@ function addFiles(list){
     queue = queue.then(() => handle(item)).catch(err => markFailed(item, err));
   }
   updateTally();
+}
+
+/* ---------------- PDFs ----------------
+   Each page is turned into a picture and covered like any photo — its own
+   frame, its own Edit / Copy / Save. When every page is done the covered pages
+   are put back together as one PDF ("Save PDF" on any page saves it again
+   after edits). The covering is burned into the page, so nothing underneath
+   can be copied out of the file. The reader and writer come from our own
+   domain, like the detector. */
+let pdfjsLib = null;
+async function pdfTools(){
+  if (!pdfjsLib){
+    pdfjsLib = await import("/sbassets/pdf/pdf.min.mjs");
+    pdfjsLib.GlobalWorkerOptions.workerSrc = "/sbassets/pdf/pdf.worker.min.mjs";
+  }
+  if (!window.jspdf) await loadScript("/sbassets/pdf/jspdf.umd.min.js");
+}
+async function addPdf(file){
+  await pdfTools();
+  const doc = await pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise;
+  if (doc.numPages > 40) throw new Error("more than 40 pages — split it first");
+  const base = file.name.replace(/\.[^.]+$/, "");
+  const group = { name: base, items: [], pages: doc.numPages, saved: false };
+  for (let n = 1; n <= doc.numPages; n++){
+    const page = await doc.getPage(n);
+    const v1 = page.getViewport({ scale: 1 });
+    const sc = Math.min(3, 2000 / Math.max(v1.width, v1.height));
+    const vp = page.getViewport({ scale: sc });
+    const c = document.createElement("canvas");
+    c.width = Math.round(vp.width); c.height = Math.round(vp.height);
+    const ctx = c.getContext("2d"); ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, c.width, c.height);
+    await page.render({ canvasContext: ctx, viewport: vp }).promise;
+    const blob = await new Promise(res => c.toBlob(res, "image/png"));
+    const pageFile = new File([blob], base + " — page " + n + ".png", { type: "image/png" });
+    const item = { file: pageFile, id:"s"+Math.random().toString(36).slice(2,9),
+                   bars:[], keeps:[], done:false, no:items.length + 1,
+                   pdfGroup: group, pdfSize: [v1.width, v1.height] };
+    group.items.push(item);
+    items.push(item);
+    buildFrame(item);
+    updateTally();
+    try{ await handle(item); }catch(err){ markFailed(item, err); }
+  }
+}
+async function savePdf(group){
+  if (!group || !group.items.every(i => i.done)) { toast("Wait until every page is done"); return; }
+  await pdfTools();
+  let pdf = null;
+  for (const it of group.items){
+    const [pw, ph] = it.pdfSize;
+    const orient = pw > ph ? "l" : "p";
+    if (!pdf) pdf = new window.jspdf.jsPDF({ orientation: orient, unit: "pt", format: [pw, ph] });
+    else pdf.addPage([pw, ph], orient);
+    pdf.addImage((it.out || compose(it)).toDataURL("image/jpeg", 0.9), "JPEG", 0, 0, pw, ph);
+  }
+  triggerDownload(pdf.output("blob"), group.name + "-safe.pdf");
+  group.saved = true;
 }
 
 /* ---------------- one frame on the contact sheet ---------------- */
@@ -1042,12 +1103,14 @@ function buildFrame(item){
       <button class="btn edit-btn" disabled>Edit</button>
       <button class="btn copy-btn" disabled>Copy</button>
       <button class="btn save-btn" disabled>Save</button>
+      ${item.pdfGroup ? '<button class="btn pdf-btn" disabled title="All pages of this PDF, covered, as one PDF">Save PDF</button>' : ''}
     </div>`;
   sheet.appendChild(el);
   item.el = el;
   el.querySelector(".edit-btn").addEventListener("click", () => openEditor(item));
   el.querySelector(".save-btn").addEventListener("click", () => saveOne(item));
   el.querySelector(".copy-btn").addEventListener("click", () => copyOne(item));
+  if (item.pdfGroup) el.querySelector(".pdf-btn").addEventListener("click", () => savePdf(item.pdfGroup));
 
   // drag the finished photo straight out to a folder, chat window or email
   el.addEventListener("dragstart", e => {
@@ -1177,6 +1240,12 @@ function finish(item, secs, failed){
   else                   stamp(item, "No people found — check it", "none");
   logToServer(item, compose(item)).then(loadEarlier);
   updateTally();
+  const g = item.pdfGroup;
+  if (g && g.items.length === g.pages && g.items.every(i => i.done)){
+    g.items.forEach(i => { const b = i.el.querySelector(".pdf-btn"); if (b) b.disabled = false; });
+    // a PDF comes back as a PDF on its own — that is what the agent wants to send
+    savePdf(g);
+  }
   if (items.every(i => i.done !== false) && $("autoChk").checked) saveAll();
 }
 
@@ -1360,7 +1429,13 @@ async function saveAll(){
   const done = items.filter(i => i.done);
   if (!done.length) return;
   saveAllBtn.disabled = true; saveAllBtn.textContent = "Saving…";
-  try{ for (const item of done){ await saveOne(item); await sleep(220); } }
+  const groupsSaved = new Set();
+  try{ for (const item of done){
+    if (item.pdfGroup){
+      if (!groupsSaved.has(item.pdfGroup)){ groupsSaved.add(item.pdfGroup); await savePdf(item.pdfGroup); await sleep(220); }
+      continue;
+    }
+    await saveOne(item); await sleep(220); } }
   finally{ saveAllBtn.textContent = "Save all"; saveAllBtn.disabled = false; }
   toast(done.length === 1 ? "Photo saved" : done.length + " photos saved");
 }

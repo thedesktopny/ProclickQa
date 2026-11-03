@@ -2178,8 +2178,14 @@ def clock(employee_id, action, who, minutes=None, reason=None, logged_out_by=Non
             mins = int(minutes)
         except Exception:
             raise WriteRefused('Choose how long the break is.')
-        if mins < 1 or mins > 240:
-            raise WriteRefused('A break must be between 1 and 240 minutes.')
+        # no single break longer than this (30 by default; BREAK_MAX_MINUTES in
+        # the app settings changes it without new code)
+        try:
+            most = max(1, min(240, int(os.getenv('BREAK_MAX_MINUTES', '30'))))
+        except Exception:
+            most = 30
+        if mins < 1 or mins > most:
+            raise WriteRefused('A break can be at most %d minutes at a time.' % most)
     reason = (reason or '').strip()[:200] or None
     when = _now_local()
 

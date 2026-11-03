@@ -6107,7 +6107,7 @@ def _setting(key, default=''):
 # their existing user name and password rather than a second set of logins.
 PORTAL_PAGES = ['live', 'missed', 'customers', 'agent-calls',
                 'agent-list', 'packages', 'company-info',
-                'skin-block']   # everyone
+                'skin-block', 'my-scores']   # everyone
 PORTAL_MANAGER_PAGES = ['cms-settings', 'qa-assign', 'staffing', 'time-report', 'payroll', 'teams', 'clocker']           # managers and admins
 PORTAL_ADMIN_PAGES = ['payments', 'sms-numbers']                            # admins only — real money
 # QA reviewers additionally get the monitoring side. They are doing QA work, so
@@ -9706,6 +9706,94 @@ def _who_is_calling(phone, max_age=120):
     return who
 
 
+@app.route('/api/my-scores', methods=['GET'])
+@portal_or_manager
+def my_scores():
+    """An agent's OWN QA scores, so they can follow their own progress.
+
+    Only ever the signed-in person's calls (matched by their extension) — never
+    anyone else's — and without the recording or the full transcript: what was
+    scored, the coaching, and which rules were missed. A rule QA marked as the
+    AI's mistake is left out, so an agent is never shown a flag that was
+    overturned."""
+    p = _portal_user(request.headers.get('X-Portal-Ticket', ''))
+    if not (p and p.get('e')):
+        return jsonify({'error': 'Sign in to the CMS to see your scores.'}), 403
+    ext = _extension_for(p['e'])
+    if not ext:
+        return jsonify({'error': 'Your employee record has no extension, so your calls cannot be found.'}), 400
+    try:
+        days = max(1, min(180, int(request.args.get('days') or 30)))
+    except Exception:
+        days = 30
+    scored = "status IN ('Passed', 'Review', 'Critical') AND overall_score IS NOT NULL"
+    conn = get_db(); c = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        c.execute("""SELECT COUNT(*) AS calls, ROUND(AVG(overall_score)) AS avg_score,
+                            ROUND(AVG(notes_score)) AS avg_notes,
+                            SUM(CASE WHEN status = 'Critical' THEN 1 ELSE 0 END) AS critical,
+                            MIN(overall_score) AS worst, MAX(overall_score) AS best
+                     FROM calls WHERE agent_extension = %s AND """ + scored + """
+                       AND created_at >= NOW() - (%s || ' days')::interval""", (ext, str(days)))
+        totals = dict(c.fetchone() or {})
+        # the same figures for the period before, to show the direction
+        c.execute("""SELECT COUNT(*) AS calls, ROUND(AVG(overall_score)) AS avg_score
+                     FROM calls WHERE agent_extension = %s AND """ + scored + """
+                       AND created_at >= NOW() - (%s || ' days')::interval
+                       AND created_at < NOW() - (%s || ' days')::interval""",
+                  (ext, str(days * 2), str(days)))
+        before = dict(c.fetchone() or {})
+        c.execute("""SELECT to_char(date_trunc('week', created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York'), 'YYYY-MM-DD') AS week,
+                            COUNT(*) AS calls, ROUND(AVG(overall_score)) AS avg_score,
+                            ROUND(AVG(notes_score)) AS avg_notes
+                     FROM calls WHERE agent_extension = %s AND """ + scored + """
+                       AND created_at >= NOW() - INTERVAL '12 weeks'
+                     GROUP BY 1 ORDER BY 1""", (ext,))
+        weeks = [dict(r) for r in c.fetchall()]
+        c.execute("""SELECT call_id, created_at, account_name, duration, overall_score, status,
+                            notes_score, notes_feedback, coaching_notes, positive_highlights, summary
+                     FROM calls WHERE agent_extension = %s AND """ + scored + """
+                       AND created_at >= NOW() - (%s || ' days')::interval
+                     ORDER BY created_at DESC LIMIT 60""", (ext, str(days)))
+        rows = [dict(r) for r in c.fetchall()]
+        ids = [r['call_id'] for r in rows]
+        missed = {}
+        common = []
+        if ids:
+            c.execute("""SELECT rr.call_id, rr.rule_description, rr.severity, rr.evidence
+                         FROM rule_results rr
+                         WHERE rr.call_id = ANY(%s) AND rr.passed = FALSE
+                           AND NOT EXISTS (SELECT 1 FROM flag_reviews f
+                                           WHERE f.call_id = rr.call_id AND f.marked_ai_mistake
+                                             AND f.flag_rule = rr.rule_description)""", (ids,))
+            for r in c.fetchall():
+                missed.setdefault(r['call_id'], []).append(
+                    {'rule': r['rule_description'], 'severity': r['severity'],
+                     'evidence': (r['evidence'] or '')[:300]})
+            from collections import Counter
+            cnt = Counter(m['rule'] for lst in missed.values() for m in lst)
+            common = [{'rule': k, 'times': v} for k, v in cnt.most_common(5)]
+    finally:
+        conn.close()
+    calls_out = []
+    for r in rows:
+        calls_out.append({
+            'when': (r['created_at'].isoformat() + 'Z') if r.get('created_at') else None,
+            'customer': r.get('account_name'), 'duration': r.get('duration'),
+            'score': r.get('overall_score'), 'status': r.get('status'),
+            'notes_score': r.get('notes_score'), 'notes_feedback': r.get('notes_feedback'),
+            'coaching': r.get('coaching_notes'), 'well_done': r.get('positive_highlights'),
+            'summary': r.get('summary'), 'missed': missed.get(r['call_id'], [])})
+    num = lambda v: (int(v) if v is not None else None)
+    return jsonify({
+        'days': days, 'name': p.get('n'), 'extension': ext,
+        'totals': {k: num(v) for k, v in totals.items()},
+        'before': {k: num(v) for k, v in before.items()},
+        'weeks': [{'week': w['week'], 'calls': num(w['calls']), 'avg_score': num(w['avg_score']),
+                   'avg_notes': num(w['avg_notes'])} for w in weeks],
+        'common_misses': common, 'calls': calls_out})
+
+
 @app.route('/api/my-call', methods=['GET'])
 @portal_or_manager
 def my_current_call():
@@ -13030,6 +13118,33 @@ def sb_lib(fname):
     r.headers['Cache-Control'] = 'public, max-age=31536000'
     return r
 
+# The PDF reader and writer Skin Block uses for PDFs — mirrored like the rest,
+# so the agents' browsers still never reach an outside site. Only these three
+# files, nothing else.
+SB_PDF_FILES = {
+    'pdf.min.mjs': ['https://cdn.jsdelivr.net/npm/pdfjs-dist@4.4.168/build/pdf.min.mjs',
+                    'https://unpkg.com/pdfjs-dist@4.4.168/build/pdf.min.mjs'],
+    'pdf.worker.min.mjs': ['https://cdn.jsdelivr.net/npm/pdfjs-dist@4.4.168/build/pdf.worker.min.mjs',
+                           'https://unpkg.com/pdfjs-dist@4.4.168/build/pdf.worker.min.mjs'],
+    'jspdf.umd.min.js': ['https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js',
+                         'https://unpkg.com/jspdf@2.5.1/dist/jspdf.umd.min.js'],
+}
+
+
+@app.route('/sbassets/pdf/<fname>')
+def sb_pdf(fname):
+    if fname not in SB_PDF_FILES:
+        return jsonify({'error': 'not allowed'}), 403
+    try:
+        p = _sb_fetch('pdf_' + fname, SB_PDF_FILES[fname])
+    except Exception as e:
+        return jsonify({'error': str(e)[:200]}), 502
+    r = make_response(send_file(p, mimetype='text/javascript'))
+    r.headers['Cross-Origin-Resource-Policy'] = 'same-origin'
+    r.headers['Cache-Control'] = 'public, max-age=31536000'
+    return r
+
+
 @app.route('/sbassets/hf/<path:hfpath>')
 def sb_hf(hfpath):
     """Serves the detector model files. Locked to the two approved models only —
@@ -13113,7 +13228,7 @@ def _is_portal_host():
 # this system.
 PORTAL_ALLOWED_PREFIXES = (
     '/api/whoami', '/api/portal/', '/api/live', '/api/customers',
-    '/api/agents', '/api/agent-list', '/api/packages', '/api/company-info',
+    '/api/agents', '/api/agent-list', '/api/packages', '/api/company-info', '/api/my-scores',
     '/api/recording-link', '/api/recordings/', '/api/payments/', '/api/cms-settings',
     '/api/qa-users', '/api/qa-assignments', '/api/security-alerts', '/api/employees/', '/api/agents',
     '/api/credentials', '/api/credential-access', '/api/work',

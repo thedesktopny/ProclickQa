@@ -154,11 +154,11 @@
 
     <section class="main" id="main">
       <label class="drop" id="drop">
-        <input type="file" id="files" multiple accept="image/*">
+        <input type="file" id="files" multiple accept="image/*,application/pdf,.pdf">
         <span class="ico"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"/><path d="m6 10 6-6 6 6"/><path d="M4 20h16"/></svg></span>
-        <span class="big">Drop photos here</span>
-        <span class="small">As many as you like. Finished pictures download on their own.</span>
-        <span class="pick">Choose photos</span>
+        <span class="big">Drop photos or PDFs here</span>
+        <span class="small">As many as you like. Finished pictures and PDFs download on their own.</span>
+        <span class="pick">Choose photos or PDFs</span>
       </label>
       <div class="status" id="status">Loading the detectors…</div>
       <div class="grid" id="grid"></div>
@@ -368,9 +368,20 @@ function cover(img, w, h, mask, style){
 /* ---- one file ------------------------------------------------------------ */
 async function processFile(file){
   const url = URL.createObjectURL(file);
-  const img = await new Promise((ok, no) => { const i = new Image(); i.onload = () => ok(i); i.onerror = no; i.src = url; });
-  const scale = Math.min(1, 2000 / Math.max(img.naturalWidth, img.naturalHeight));
-  const w = Math.round(img.naturalWidth * scale), h = Math.round(img.naturalHeight * scale);
+  const pic = await new Promise((ok, no) => { const i = new Image(); i.onload = () => ok(i); i.onerror = no; i.src = url; });
+  URL.revokeObjectURL(url);
+  return processPicture(pic, pic.naturalWidth, pic.naturalHeight, file.name);
+}
+
+/* Works on anything that can be drawn — a photo, or a PDF page rendered to a
+   canvas. It is first drawn at the working size, so every step below reads
+   the same pixels at the same scale (a very large photo used to be cropped
+   from the wrong place when the skin step zoomed in on a person). */
+async function processPicture(srcPic, sw, sh, name){
+  const scale = Math.min(1, 2000 / Math.max(sw, sh));
+  const w = Math.round(sw * scale), h = Math.round(sh * scale);
+  const img = document.createElement("canvas"); img.width = w; img.height = h;
+  img.getContext("2d").drawImage(srcPic, 0, 0, w, h);
   const mode = document.querySelector('input[name="mode"]:checked').value;
   const hair = $("opt-hair").checked, grow = Number($("opt-grow").value);
   const began = performance.now();
@@ -391,33 +402,77 @@ async function processFile(file){
   mask = dilate(mask, w, h, grow);
   let covered = 0; for(let i = 0; i < mask.length; i++) covered += mask[i];
   const out = cover(img, w, h, mask, $("opt-style").value);
-  URL.revokeObjectURL(url);
   return { canvas: out, ms: Math.round(performance.now() - began), pct: Math.round(100*covered/mask.length),
-           people: people.length, whole, name: file.name };
+           people: people.length, whole, name };
+}
+
+/* ---- PDFs: every page is turned into a picture, covered, and put back
+   together as a new PDF. The covering is burned into the page, so nothing
+   underneath can be copied out of the file afterwards. -------------------- */
+let pdfjs = null, jsPDFLib = null;
+async function pdfTools(){
+  if(!pdfjs){
+    pdfjs = await import("https://cdn.jsdelivr.net/npm/pdfjs-dist@4.4.168/build/pdf.min.mjs");
+    pdfjs.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.4.168/build/pdf.worker.min.mjs";
+  }
+  if(!jsPDFLib){
+    await new Promise((ok, no) => { const t = document.createElement("script");
+      t.src = "https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"; t.crossOrigin = "anonymous";
+      t.onload = ok; t.onerror = () => no(new Error("could not load the PDF writer")); document.head.appendChild(t); });
+    jsPDFLib = window.jspdf.jsPDF;
+  }
+}
+async function processPdf(file, onPage){
+  await pdfTools();
+  const doc = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
+  if(doc.numPages > 40) throw new Error("more than 40 pages — split it first");
+  let pdf = null, first = null, people = 0, ms = 0;
+  for(let n = 1; n <= doc.numPages; n++){
+    onPage(n, doc.numPages);
+    const page = await doc.getPage(n);
+    const v1 = page.getViewport({ scale: 1 });                     // size in points
+    const sc = Math.min(3, 2000 / Math.max(v1.width, v1.height));  // sharp, not huge
+    const vp = page.getViewport({ scale: sc });
+    const c = document.createElement("canvas"); c.width = Math.round(vp.width); c.height = Math.round(vp.height);
+    const ctx = c.getContext("2d"); ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, c.width, c.height);
+    await page.render({ canvasContext: ctx, viewport: vp }).promise;
+    const r = await processPicture(c, c.width, c.height, file.name);
+    people += r.people; ms += r.ms; if(!first) first = r.canvas;
+    const orient = v1.width > v1.height ? "l" : "p";
+    if(!pdf) pdf = new jsPDFLib({ orientation: orient, unit: "pt", format: [v1.width, v1.height] });
+    else pdf.addPage([v1.width, v1.height], orient);
+    pdf.addImage(r.canvas.toDataURL("image/jpeg", 0.9), "JPEG", 0, 0, v1.width, v1.height);
+  }
+  return { canvas: first, pdfBlob: pdf.output("blob"), pages: doc.numPages, people, ms, pct: null,
+           whole: 0, name: file.name };
 }
 
 /* ---- queue -------------------------------------------------------------- */
 function addFiles(list){
   for(const f of list){
-    if(!f.type.startsWith("image/")) continue;
+    const isPdf = f.type === "application/pdf" || /\.pdf$/i.test(f.name);
+    if(!f.type.startsWith("image/") && !isPdf) continue;
     const card = document.createElement("div"); card.className = "card busy";
     card.innerHTML = '<div style="aspect-ratio:4/3;background:var(--surface2);"></div>'
       + '<div class="meta"><span>' + esc(f.name) + '</span><b>waiting</b></div>';
-    $("grid").prepend(card); queue.push({ file: f, card });
+    $("grid").prepend(card); queue.push({ file: f, card, isPdf });
   }
   pump();
 }
 async function pump(){
   if(working) return; working = true;
   while(queue.length){
-    const { file, card } = queue.shift();
+    const { file, card, isPdf } = queue.shift();
     if(!yolo || !segmenter){ card.querySelector("b").textContent = "detectors not loaded"; card.className = "card fail"; continue; }
     card.querySelector("b").textContent = "covering…";
     try{
-      const r = await processFile(file);
+      const r = isPdf
+        ? await processPdf(file, (n, all) => { card.querySelector("b").textContent = "page " + n + " of " + all + "…"; })
+        : await processFile(file);
       card.replaceChild(r.canvas, card.firstChild);
-      card.querySelector("b").textContent = r.people + (r.people === 1 ? " person" : " people")
-        + (r.whole ? " (" + r.whole + " whole)" : "") + " · " + r.pct + "% · " + r.ms + " ms";
+      card.querySelector("b").textContent = (isPdf ? "PDF · " + r.pages + (r.pages === 1 ? " page · " : " pages · ") : "")
+        + r.people + (r.people === 1 ? " person" : " people")
+        + (r.whole ? " (" + r.whole + " whole)" : "") + (r.pct != null ? " · " + r.pct + "%" : "") + " · " + r.ms + " ms";
       card.className = "card done"; results.push(r); autoDownload(r);
     }catch(e){ card.querySelector("b").textContent = "failed: " + e.message; card.className = "card fail"; }
     status(results.length + " done" + (queue.length ? ", " + queue.length + " waiting" : ""));
@@ -425,6 +480,11 @@ async function pump(){
   $("dl-all").disabled = results.length === 0; working = false;
 }
 function autoDownload(r){
+  if(r.pdfBlob){
+    const a = document.createElement("a"); a.href = URL.createObjectURL(r.pdfBlob);
+    a.download = r.name.replace(/\.[^.]+$/, "") + "-covered.pdf"; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000); return;
+  }
   r.canvas.toBlob(blob => { const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
     a.download = r.name.replace(/\.[^.]+$/, "") + "-covered.jpg"; a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 4000); }, "image/jpeg", 0.92);

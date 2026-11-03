@@ -2325,6 +2325,24 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
   </div>
 </div>
 
+<div class="page" id="page-my-scores">
+  <div class="topbar">
+    <button class="navtoggle" onclick="toggleNav()" aria-label="Menu">☰</button>
+    <div class="page-title">⭐ My Scores</div>
+    <div class="topbar-right">
+      <select class="date-filter" id="ms-days" onchange="loadMyScores()">
+        <option value="7">Last 7 days</option>
+        <option value="30" selected>Last 30 days</option>
+        <option value="90">Last 90 days</option>
+      </select>
+    </div>
+  </div>
+  <div style="padding:18px 28px 44px;">
+    <div class="payhint" style="margin-bottom:16px;">How your calls were scored by QA — only you can see your own scores here.</div>
+    <div id="ms-body"></div>
+  </div>
+</div>
+
 <div class="page" id="page-packages">
   <div class="topbar">
     <button class="navtoggle" onclick="toggleNav()" aria-label="Menu">☰</button>
@@ -6056,6 +6074,72 @@ function portalOpenAgent(id){
   if(document.getElementById('page-agent-calls')){ showPage('agent-calls'); setTimeout(()=>acOpen(id), 200); }
 }
 
+/* An agent's own QA scores: the average, which way it is going, the rules
+   missed most often, and every scored call with its coaching. */
+async function loadMyScores(){
+  const box = document.getElementById('ms-body');
+  if(!box) return;
+  const days = (document.getElementById('ms-days') || {}).value || 30;
+  box.innerHTML = '<div style="color:var(--text3);font-size:13px;">Loading…</div>';
+  let r;
+  try{ r = await API.get('/api/my-scores?days=' + days); }
+  catch(e){ box.innerHTML = `<div style="color:var(--red)">${esc(e.message)}</div>`; return; }
+  if(r.error){ box.innerHTML = `<div style="color:var(--red)">${esc(r.error)}</div>`; return; }
+  const t = r.totals || {}, b = r.before || {};
+  const col = v => v == null ? 'var(--text3)' : v >= 85 ? 'var(--green)' : v >= 70 ? 'var(--yellow)' : 'var(--red)';
+  if(!t.calls){
+    box.innerHTML = `<div class="card" style="padding:22px;color:var(--text2);font-size:13px;">
+      No scored calls in the last ${r.days} days yet. Scores appear here a few minutes after QA scores a call.</div>`;
+    return;
+  }
+  const diff = (t.avg_score != null && b.avg_score != null) ? t.avg_score - b.avg_score : null;
+  const arrow = diff == null ? '' : diff > 0 ? `<span style="color:var(--green)">▲ ${diff} from the ${r.days} days before</span>`
+              : diff < 0 ? `<span style="color:var(--red)">▼ ${-diff} from the ${r.days} days before</span>`
+              : `<span style="color:var(--text3)">same as the ${r.days} days before</span>`;
+  const tile = (big, label, colour) => `<div class="card" style="padding:16px 18px;flex:1;min-width:140px;">
+      <div style="font-size:26px;font-weight:700;color:${colour || 'var(--text)'};">${big}</div>
+      <div style="font-size:11.5px;color:var(--text3);margin-top:3px;">${label}</div></div>`;
+  // weekly trend as simple bars
+  const wk = r.weeks || [];
+  const bars = wk.length ? `<div class="card" style="padding:16px 18px;margin-top:12px;">
+      <div style="font-size:12px;color:var(--text3);margin-bottom:10px;">Average score by week</div>
+      <div style="display:flex;align-items:flex-end;gap:8px;height:120px;">
+        ${wk.map(w => `<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;min-width:22px;"
+             title="Week of ${esc(w.week)}: ${w.avg_score}% over ${w.calls} calls">
+            <div style="font-size:10.5px;color:var(--text2);">${w.avg_score}</div>
+            <div style="width:100%;max-width:34px;height:${Math.max(4, (w.avg_score||0) * 0.9)}px;background:${col(w.avg_score)};border-radius:4px 4px 0 0;"></div>
+            <div style="font-size:10px;color:var(--text3);white-space:nowrap;">${new Date(w.week + 'T12:00:00').toLocaleDateString([], {month:'short', day:'numeric'})}</div>
+          </div>`).join('')}
+      </div></div>` : '';
+  const misses = (r.common_misses || []).length ? `<div class="card" style="padding:16px 18px;margin-top:12px;">
+      <div style="font-size:12px;color:var(--text3);margin-bottom:8px;">What to work on — the rules missed most often</div>
+      ${r.common_misses.map(m => `<div style="font-size:13px;margin:5px 0;"><b style="color:var(--yellow);">${m.times}×</b> ${esc(m.rule)}</div>`).join('')}
+    </div>` : '';
+  const callCard = c => `<div class="card" style="padding:14px 18px;margin-top:10px;">
+      <div style="display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;">
+        <b style="font-size:20px;color:${col(c.score)};">${c.score}%</b>
+        <span style="font-size:12.5px;color:var(--text2);">${c.when ? new Date(c.when).toLocaleString([], {month:'short', day:'numeric', hour:'numeric', minute:'2-digit'}) : ''}
+          ${c.customer ? ' · ' + esc(c.customer) : ''}${c.duration ? ' · ' + esc(c.duration) : ''}</span>
+        ${c.notes_score != null ? `<span style="margin-left:auto;font-size:12px;color:${col(c.notes_score)};">notes ${c.notes_score}%</span>` : ''}
+      </div>
+      ${c.well_done ? `<div style="font-size:12.5px;margin-top:8px;"><span style="color:var(--green);">👍 Done well:</span> ${esc(c.well_done)}</div>` : ''}
+      ${c.coaching ? `<div style="font-size:12.5px;margin-top:6px;"><span style="color:var(--accent);">💡 Coaching:</span> ${esc(c.coaching)}</div>` : ''}
+      ${(c.missed || []).length ? `<div style="font-size:12.5px;margin-top:6px;"><span style="color:var(--yellow);">⚠️ Missed:</span>
+          ${c.missed.map(m => `<div style="margin:3px 0 0 18px;">• ${esc(m.rule)}${m.evidence ? `<div style="color:var(--text3);font-size:11.5px;">${esc(m.evidence)}</div>` : ''}</div>`).join('')}</div>` : ''}
+      ${c.notes_feedback ? `<div style="font-size:12px;margin-top:6px;color:var(--text2);"><span style="color:var(--text3);">🗒 About your notes:</span> ${esc(c.notes_feedback)}</div>` : ''}
+    </div>`;
+  box.innerHTML = `
+    <div style="display:flex;gap:10px;flex-wrap:wrap;">
+      ${tile(t.avg_score + '%', 'average score · ' + arrow, col(t.avg_score))}
+      ${tile(t.calls, 'calls scored')}
+      ${tile(t.avg_notes != null ? t.avg_notes + '%' : '—', 'average notes score', col(t.avg_notes))}
+      ${tile(t.critical || 0, 'critical calls', t.critical ? 'var(--red)' : 'var(--text)')}
+    </div>
+    ${bars}${misses}
+    <h3 style="font-size:13px;color:var(--text2);margin:20px 0 4px;">Your scored calls${r.calls.length >= 60 ? ' (latest 60)' : ''}</h3>
+    ${r.calls.map(callCard).join('')}`;
+}
+
 async function loadPackages(){
   const box = document.getElementById('pk-body');
   box.innerHTML = '<div style="color:var(--text3);font-size:13px;">Loading…</div>';
@@ -6152,6 +6236,7 @@ function portalApply(name, isManager){
     'agent-list':   ['📇', 'Agents'],
     'clocker':      ['🕘', 'Employee Clocker'],
     'packages':     ['📦', 'Packages'],
+    'my-scores':    ['⭐', 'My Scores'],
     'company-info': ['🔑', 'Info & Logins'],
     'payments':     ['💳', 'Payments'],
     'cms-settings': ['⚙️', 'CMS Tables'],
@@ -6178,7 +6263,7 @@ function portalApply(name, isManager){
     ['Work',     ['customers', ...(isManager ? [] : ['agent-list']), 'packages', 'company-info',
                   'skin-block']],
     ['Pay',      ['time-report', 'payroll', 'payments']],
-    ['Quality',  ['calls', 'human-review', 'call-notes', 'notes', 'analytics']],
+    ['Quality',  ['my-scores', 'calls', 'human-review', 'call-notes', 'notes', 'analytics']],
     ['Admin',    [...(isManager ? ['agent-list'] : []), 'clocker', 'teams', 'cms-settings', 'qa-assign', 'sms-numbers']],
   ];
   const item = (p, active) =>
@@ -6321,7 +6406,10 @@ function clockBreakAsk(){
   if(!b) return;
   clkBreakMins = null;
   b.innerHTML = `<div class="clk-ask">
-      <div class="clk-mins">${[5,10,15,20,30,45,60].map(m=>`<button onclick="clockBreakPick(this,${m})">${m}</button>`).join('')}</div>
+      <div class="clk-mins">${[5,10,15,20,30].map(m=>`<button onclick="clockBreakPick(this,${m})">${m}</button>`).join('')}
+        <button onclick="clockBreakOther(this)">Other</button></div>
+      <input id="clk-other" type="number" min="1" max="30" step="1" placeholder="Minutes (1–30)" style="display:none;"
+             oninput="clockBreakOtherSet(this)">
       <input id="clk-reason" placeholder="Reason (optional)" maxlength="200">
       <div style="display:flex;gap:6px;">
         <button class="clk-btn" id="clk-go-break" disabled onclick="clockDo('break')">Pick minutes</button>
@@ -6380,7 +6468,26 @@ async function clockDnd(on){
   clockRefresh();
 }
 
+/* "Other": any number of minutes, but never more than 30 in one break */
+const CLK_BREAK_MAX = 30;
+function clockBreakOther(btn){
+  clkBreakMins = null;
+  btn.parentElement.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === btn));
+  const f = document.getElementById('clk-other');
+  if(f){ f.style.display = ''; f.value = ''; f.focus(); }
+  const go = document.getElementById('clk-go-break');
+  if(go){ go.disabled = true; go.textContent = 'Type the minutes'; }
+}
+function clockBreakOtherSet(f){
+  const go = document.getElementById('clk-go-break');
+  let m = parseInt(f.value, 10);
+  if(m > CLK_BREAK_MAX){ m = CLK_BREAK_MAX; f.value = String(CLK_BREAK_MAX); }
+  if(!m || m < 1){ clkBreakMins = null; if(go){ go.disabled = true; go.textContent = 'Type the minutes'; } return; }
+  clkBreakMins = m;
+  if(go){ go.disabled = false; go.textContent = `Start ${m} min`; }
+}
 function clockBreakPick(btn, m){
+  const f = document.getElementById('clk-other'); if(f) f.style.display = 'none';
   clkBreakMins = m;
   btn.parentElement.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === btn));
   const go = document.getElementById('clk-go-break');
@@ -7302,12 +7409,34 @@ function qfChanged(page){
   qfReload(page);
 }
 
+const QF_RECENT_DAYS = {calls: 7};
+function qfDayStr(d){ return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0'); }
+/* Puts "the last N days" into the date boxes. Only the first time (returns
+   true then), so going back to the page keeps whatever was chosen. */
+function qfDefaultRecent(page, days){
+  const bar = document.getElementById('qf-' + page);
+  if(!bar || bar.dataset.recentSet) return false;
+  bar.dataset.recentSet = '1';
+  const to = new Date(), from = new Date();
+  from.setDate(from.getDate() - (days - 1));
+  bar.querySelector('.qf-from').value = qfDayStr(from);
+  bar.querySelector('.qf-to').value = qfDayStr(to);
+  QF[page] = Object.assign({agent:'', score:''}, QF[page] || {}, {from: qfDayStr(from), to: qfDayStr(to)});
+  return true;
+}
+
 function qfClear(page){
   const bar = document.getElementById('qf-' + page);
   ['.qf-agent', '.qf-score', '.qf-from', '.qf-to'].forEach(sel=>{
     const el = bar.querySelector(sel); if(el) el.value = '';
   });
   QF[page] = {agent:'', score:'', from:'', to:''};
+  // back to the last few days, not to everything ever scored
+  if(QF_RECENT_DAYS[page]){
+    const bar2 = document.getElementById('qf-' + page);
+    if(bar2) delete bar2.dataset.recentSet;
+    qfDefaultRecent(page, QF_RECENT_DAYS[page]);
+  }
   qfReload(page);
 }
 
@@ -7433,7 +7562,11 @@ function showPage(id){
   if(id==='alerts'){ mountAlertsDatePicker(); renderAlerts(); }
   if(id==='calls'){
     mountCallsDatePicker();
-    qfInit('calls'); qfSummary('calls');
+    // the first time the page opens, show the last 7 days rather than every
+    // call since the beginning — the dates can still be changed or cleared
+    const fresh = qfDefaultRecent('calls', 7);
+    qfInit('calls');
+    if(fresh) qfReload('calls'); else qfSummary('calls');
     // The QA dashboard loads calls as part of its own sign-in sequence, which
     // portal mode skips — so on the portal the table rendered empty and never
     // asked the server for anything. Load them the first time the page opens.
@@ -7466,6 +7599,7 @@ function showPage(id){
   if(id==='agent-list'){ loadTeamsQuietly().then(loadAgentList); }
   if(id==='clocker') ckOpen();
   if(id==='packages') loadPackages();
+  if(id==='my-scores') loadMyScores();
   if(id==='company-info') loadCompanyInfo();
   if(id!=='live') clearInterval(lvTimer);
   if(id!=='agent-calls') clearInterval(acTimer);
