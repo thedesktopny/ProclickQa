@@ -142,8 +142,12 @@
       <div class="group">
         <div class="glabel">Cover style</div>
         <select id="opt-style" aria-label="Cover style">
-          <option value="solid">Solid black</option><option value="blur">Blur</option><option value="pixel">Pixelate</option>
+          <option value="auto" selected>Auto colour — matches each picture</option>
+          <option value="solid">Solid black</option><option value="#9a9a9a">Grey</option><option value="#ffffff">White</option>
+          <option value="custom">Pick a colour…</option>
+          <option value="blur">Blur</option><option value="pixel">Pixelate</option>
         </select>
+        <input type="color" id="opt-colour" value="#7b6cf6" aria-label="Cover colour" style="display:none;width:30px;height:26px;border:0;background:none;padding:0;cursor:pointer;">
       </div>
 
       <div class="actions">
@@ -340,13 +344,39 @@ function dilate(mask, w, h, r){
   return out;
 }
 
+/* The colour around the edges of the picture — usually its background — never
+   sampling a person, nudged a little so the covered shape still reads. This is
+   the default, so a grey studio photo gets grey covers and a purple one purple. */
+function autoColour(d, w, h, mask){
+  const ring = Math.max(4, Math.round(Math.min(w, h) * 0.04));
+  const R = [], G = [], B = [];
+  for(let y = 0; y < h; y += 2) for(let x = 0; x < w; x += 2){
+    if(!(x < ring || x >= w - ring || y < ring || y >= h - ring)) continue;
+    const i = y * w + x; if(mask[i]) continue;
+    R.push(d[i*4]); G.push(d[i*4+1]); B.push(d[i*4+2]);
+  }
+  if(R.length < 20) return [154, 154, 154];
+  const med = a => { a.sort((p, q) => p - q); return a[a.length >> 1]; };
+  let c = [med(R), med(G), med(B)];
+  const lum = 0.2126*c[0] + 0.7152*c[1] + 0.0722*c[2];
+  if(lum > 200) c = c.map(v => v * 0.86);
+  else if(lum > 120) c = c.map(v => v * 0.92);
+  else if(lum < 45) c = c.map(v => v + 38);
+  else c = c.map(v => v + 16);
+  return c.map(v => Math.max(0, Math.min(255, Math.round(v))));
+}
+function hexRgb(hex){ const v = String(hex || "#000").replace("#", ""); return [0, 2, 4].map(i => parseInt(v.substr(i, 2), 16) || 0); }
+
 function cover(img, w, h, mask, style){
   const c = document.createElement("canvas"); c.width = w; c.height = h;
   const ctx = c.getContext("2d", { willReadFrequently: true });
   ctx.drawImage(img, 0, 0, w, h);
   const src = ctx.getImageData(0, 0, w, h);
-  let alt = null;
-  if(style !== "solid"){
+  let alt = null, fill = [38, 40, 52];
+  if(style === "auto") fill = autoColour(src.data, w, h, mask);
+  else if(style === "custom") fill = hexRgb($("opt-colour").value);
+  else if(String(style).startsWith("#")) fill = hexRgb(style);
+  if(style === "blur" || style === "pixel"){
     const t = document.createElement("canvas"); t.width = w; t.height = h;
     const tc = t.getContext("2d");
     if(style === "blur"){ tc.filter = "blur(" + Math.max(12, Math.round(w/40)) + "px)"; tc.drawImage(img, 0, 0, w, h); }
@@ -359,7 +389,7 @@ function cover(img, w, h, mask, style){
   for(let i = 0; i < w*h; i++){
     if(!mask[i]) continue;
     if(alt){ d[i*4] = alt[i*4]; d[i*4+1] = alt[i*4+1]; d[i*4+2] = alt[i*4+2]; }
-    else{ d[i*4] = 38; d[i*4+1] = 40; d[i*4+2] = 52; }
+    else{ d[i*4] = fill[0]; d[i*4+1] = fill[1]; d[i*4+2] = fill[2]; }
   }
   ctx.putImageData(src, 0, 0);
   return c;
@@ -492,6 +522,14 @@ function autoDownload(r){
 function esc(s){ return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 
 $("files").addEventListener("change", e => addFiles(e.target.files));
+try{ const st = localStorage.getItem("sb3_style"), cl = localStorage.getItem("sb3_colour");
+     if(st && [...$("opt-style").options].some(o => o.value === st)) $("opt-style").value = st;
+     if(cl) $("opt-colour").value = cl; }catch(e){}
+const showPick = () => { $("opt-colour").style.display = $("opt-style").value === "custom" ? "" : "none"; };
+showPick();
+$("opt-style").addEventListener("change", () => { showPick(); try{ localStorage.setItem("sb3_style", $("opt-style").value); }catch(e){}
+                                                   if($("opt-style").value === "custom") $("opt-colour").click(); });
+$("opt-colour").addEventListener("input", () => { try{ localStorage.setItem("sb3_colour", $("opt-colour").value); }catch(e){} });
 // a file dropped outside the drop area must not open in place of the page
 ["dragover", "drop"].forEach(ev => window.addEventListener(ev, e => { e.preventDefault(); }));
 window.addEventListener("drop", e => { if(!$("drop").contains(e.target) && e.dataTransfer?.files?.length) addFiles(e.dataTransfer.files); });
