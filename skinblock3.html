@@ -492,6 +492,9 @@ function autoDownload(r){
 function esc(s){ return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 
 $("files").addEventListener("change", e => addFiles(e.target.files));
+// a file dropped outside the drop area must not open in place of the page
+["dragover", "drop"].forEach(ev => window.addEventListener(ev, e => { e.preventDefault(); }));
+window.addEventListener("drop", e => { if(!$("drop").contains(e.target) && e.dataTransfer?.files?.length) addFiles(e.dataTransfer.files); });
 $("drop").addEventListener("dragover", e => { e.preventDefault(); $("drop").classList.add("over"); });
 $("drop").addEventListener("dragleave", () => $("drop").classList.remove("over"));
 $("drop").addEventListener("drop", e => { e.preventDefault(); $("drop").classList.remove("over"); addFiles(e.dataTransfer.files); });

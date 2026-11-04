@@ -1932,13 +1932,11 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
     <div class="page-title">🫥 Skin Block</div>
     <div class="topbar-right">
       <button class="btn btn-outline" onclick="sbReload()" style="font-size:12px;">Reload</button>
-      <a href="/skinblock3" target="_blank" rel="noopener" class="btn btn-outline"
+      <a href="/skinblock" target="_blank" rel="noopener" class="btn btn-outline"
          style="font-size:12px;text-decoration:none;">Open in its own tab</a>
     </div>
   </div>
-  <div class="sb-holder">
-    <iframe id="sb-frame" title="Skin Block"></iframe>
-  </div>
+  <div class="sb-holder" id="sb-holder"></div>
 </div>
 
 <div class="page" id="page-sms-numbers">
@@ -3223,7 +3221,7 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
   <div class="topbar">
     <button class="navtoggle" onclick="toggleNav()" aria-label="Menu">☰</button><div class="page-title">🖼️ Skin Block</div>
     <div class="topbar-right">
-      <a href="/skinblock3" target="_blank" class="btn btn-outline" style="text-decoration:none;">Open tool ↗</a>
+      <a href="/skinblock" target="_blank" class="btn btn-outline" style="text-decoration:none;">Open tool ↗</a>
       <button class="btn btn-outline" onclick="openSkinblockSettings()">⚙️ Settings</button>
     </div>
   </div>
@@ -6795,14 +6793,41 @@ window.addEventListener('hashchange', ()=>{
    frame rather than rebuilt here. Loaded only when the page is opened —
    the detector is around 45 MB and nobody who never covers a photo should
    pay for it. */
-function sbOpen(){
-  const frame = document.getElementById('sb-frame');
-  if(frame && !frame.src) frame.src = '/skinblock3';
+/* The agents' Skin Block (/skinblock) — the precise detector, built for
+   screenshots full of small thumbnails, with PDFs and per-picture colours.
+   The agent's extension goes with it, so nobody has to type it again. */
+let sbExt = null;
+async function sbUrl(extra){
+  if(sbExt === null){
+    sbExt = '';
+    try{ const r = await API.get('/api/portal/me'); sbExt = (r && r.extension) || ''; }catch(e){}
+  }
+  return '/skinblock?' + (sbExt ? 'ext=' + encodeURIComponent(sbExt) + '&' : '') + (extra || '');
+}
+/* The frame is made fresh each time rather than sitting in the page. A frame
+   written into the page is one the browser "restores" on every refresh — to
+   whatever it last showed, which could be a file someone dropped on it or a
+   finished download — and that came back as a Save-As box on every refresh. */
+function sbFrame(){
+  let frame = document.getElementById('sb-frame');
+  if(!frame){
+    const holder = document.getElementById('sb-holder');
+    if(!holder) return null;
+    frame = document.createElement('iframe');
+    frame.id = 'sb-frame'; frame.title = 'Skin Block';
+    frame.name = 'sb' + Date.now();          // a new name every time: nothing to "restore"
+    holder.appendChild(frame);
+  }
+  return frame;
+}
+async function sbOpen(){
+  const frame = sbFrame();
+  if(frame && !frame.getAttribute('src')) frame.src = await sbUrl();
 }
 
-function sbReload(){
-  const frame = document.getElementById('sb-frame');
-  if(frame) frame.src = '/skinblock3?t=' + Date.now();
+async function sbReload(){
+  const frame = sbFrame();
+  if(frame) frame.src = await sbUrl('t=' + Date.now());
 }
 
 
