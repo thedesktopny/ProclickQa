@@ -91,6 +91,11 @@ def _compress(resp):
             return resp
         if 'gzip' not in (request.headers.get('Accept-Encoding') or '').lower():
             return resp
+        # "?plain=1" sends the page uncompressed — to tell whether something on
+        # one person's computer or network (an antivirus web shield, a filter,
+        # a proxy) is mangling the compressed page into a "download" instead
+        if request.args.get('plain'):
+            return resp
         mt = resp.mimetype or ''
         if not (mt.startswith('text/') or mt in _GZ_TYPES):
             return resp
@@ -4573,7 +4578,17 @@ def skinblock_process():
         if not ok:
             return jsonify({'error': 'encode failed'}), 500
         data_url = 'data:image/png;base64,' + _b64.b64encode(buf.tobytes()).decode()
-        return jsonify({'image': data_url, 'info': info})
+        # exactly which pixels were covered, so the page can repaint them in the
+        # colour the agent chose (the picture's own background colour by default)
+        mask_url = None
+        try:
+            changed = (_np.abs(out.astype(_np.int16) - img.astype(_np.int16)).sum(axis=2) > 0).astype(_np.uint8) * 255
+            okm, mbuf = _cv2.imencode('.png', changed)
+            if okm:
+                mask_url = 'data:image/png;base64,' + _b64.b64encode(mbuf.tobytes()).decode()
+        except Exception:
+            pass
+        return jsonify({'image': data_url, 'mask': mask_url, 'info': info})
     except MemoryError:
         print("[skinblock] process failed: out of memory")
         return jsonify({'error': 'server ran out of memory on this image - try a smaller one'}), 500
@@ -6601,8 +6616,14 @@ def portal_me():
         pages += ['time-report']
     if p.get('a'):
         pages += PORTAL_ADMIN_PAGES
+    ext = None
+    try:
+        ext = _extension_for(p['e']) if p.get('e') else None
+    except Exception:
+        pass
     return jsonify({'signed_in': True, 'name': p.get('n'), 'is_manager': bool(p.get('m')),
-                    'is_admin': bool(p.get('a')), 'is_qa': bool(p.get('q')), 'pages': pages})
+                    'is_admin': bool(p.get('a')), 'is_qa': bool(p.get('q')), 'pages': pages,
+                    'extension': ext})
 
 
 @app.route('/api/recordings/test', methods=['GET'])
@@ -13313,7 +13334,14 @@ def _serve_page(path_, transform=None):
     else:
         resp = make_response(html)
     resp.headers['ETag'] = tag
-    resp.headers['Cache-Control'] = 'no-cache, must-revalidate'   # check, don't blindly reuse
+    # no-transform: nothing in between (a filter, a proxy) may rewrite the page;
+    # nosniff + an explicit type: it is always shown as a page, never offered as
+    # a file to save
+    resp.headers['Cache-Control'] = 'no-cache, must-revalidate, no-transform'
+    if resp.status_code == 200:
+        resp.headers['Content-Type'] = 'text/html; charset=utf-8'
+        resp.headers['X-Content-Type-Options'] = 'nosniff'
+        resp.headers['Content-Disposition'] = 'inline'
     resp.headers['X-Build'] = SERVER_BUILD
     return resp
 
