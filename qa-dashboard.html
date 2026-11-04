@@ -2308,6 +2308,10 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
           Their own manager. QA reviewers are set separately and cover other teams.
         </div></div>
 
+      <div id="ag-rate-wrap" style="margin-top:12px;"><div class="cn-lab">Rate — dollars per hour</div>
+        <input id="ag-rate" class="cms-in" inputmode="decimal" style="width:100%;" placeholder="e.g. 6.25">
+      </div>
+
       <div style="display:flex;gap:16px;margin-top:14px;flex-wrap:wrap;">
         <label class="ag-check"><input type="checkbox" id="ag-qa"> QA reviewer</label>
         <label class="ag-check"><input type="checkbox" id="ag-cam"> Has a camera</label>
@@ -5579,13 +5583,14 @@ function cmsNewAgent(){
   agTlWas = '';
   agFillLeaders(null);
   document.getElementById('ag-title').textContent = 'New agent';
-  ['ag-first','ag-last','ag-ext','ag-phone','ag-email','ag-pass'].forEach(id=>{
+  ['ag-first','ag-last','ag-ext','ag-phone','ag-email','ag-pass','ag-rate'].forEach(id=>{
     const el = document.getElementById(id); if(el) el.value = '';
   });
   document.getElementById('ag-role').value = '';
   document.getElementById('ag-qa').checked = false;
   document.getElementById('ag-cam').checked = false;
   document.getElementById('ag-login-fields').style.display = '';
+  document.getElementById('ag-rate-wrap').style.display = '';
   document.getElementById('ag-out').textContent = '';
   document.getElementById('ag-go').textContent = 'Check first';
   document.getElementById('ag-go').style.display = '';
@@ -5628,6 +5633,7 @@ function cmsEditAgent(id){
   document.getElementById('ag-cam').checked = !!a.camera;
   // an existing person's login is not changed from here
   document.getElementById('ag-login-fields').style.display = 'none';
+  document.getElementById('ag-rate-wrap').style.display = 'none';
   document.getElementById('ag-out').textContent = '';
   document.getElementById('ag-go').textContent = 'Save changes';
   document.getElementById('ag-go').style.display = '';
@@ -5651,6 +5657,7 @@ async function cmsSaveAgent(confirmed){
     body.email = document.getElementById('ag-email').value.trim();
     body.password = document.getElementById('ag-pass').value;
     body.role = document.getElementById('ag-role').value;
+    body.hourly_rate = document.getElementById('ag-rate').value.trim();
   }
   btn.disabled = true;
   out.style.color = 'var(--text3)';

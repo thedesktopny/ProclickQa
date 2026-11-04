@@ -2358,9 +2358,11 @@ def get_agents():
     conn.close()
     return jsonify(agents)
 
-@app.route('/api/agents', methods=['POST'])
 @require_admin
 def add_agent():
+    # the old dashboard's "add agent" (local agents table). It used to own
+    # POST /api/agents, which answered before the CMS route below and turned
+    # every portal "New agent" into "Unauthorized"; it is now reached from there.
     data = request.json
     if not data.get('name') or not data.get('extension'):
         return jsonify({'error': 'Name and extension required'}), 400
@@ -7550,6 +7552,8 @@ def create_agent_route():
     """
     import cms_write
     d = request.json or {}
+    if not d.get('first_name') and d.get('name'):
+        return add_agent()          # the old dashboard's form
     try:
         out = cms_write.create_agent(d, _who(), dry_run=not d.get('confirm'))
     except cms_write.WriteRefused as e:

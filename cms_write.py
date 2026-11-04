@@ -1827,8 +1827,17 @@ def create_agent(fields, who, dry_run=True):
     password = fields.get('password') or ''
     role = (fields.get('role') or '').strip()
 
-    if not first or not last:
-        raise WriteRefused('A first and last name are needed.')
+    if not first:
+        raise WriteRefused('A first name is needed.')
+    rate_txt = str(fields.get('hourly_rate') or '').replace('$', '').strip()
+    try:
+        rate = float(rate_txt) if rate_txt else 0.0
+    except ValueError:
+        raise WriteRefused('The rate should be a number, like 6.25.')
+    if rate < 0 or rate >= 100:
+        raise WriteRefused('The rate should be dollars per hour, like 6.25.')
+    # Employee.HourlyRate is a whole number held in cents (6.25 -> 625)
+    rate_cents = int(round(rate * 100))
     if not email or '@' not in email:
         raise WriteRefused('A working email address is needed — it is the user name '
                            'they sign in with, and where their sign-in code goes.')
@@ -1869,7 +1878,10 @@ def create_agent(fields, who, dry_run=True):
     user_id = str(uuid.uuid4())
     out = {'table': 'Employee', 'action': 'create_agent', 'dry_run': bool(dry_run),
            'values': {'name': '%s %s' % (first, last), 'email': email,
-                      'extension': extension, 'role': role or '(none)'}}
+                      'extension': extension, 'role': role or '(none)',
+                      'hourly_rate': rate}}
+    rate_words = (' Rate $%.2f an hour.' % rate) if rate else ' No pay rate set yet.'
+    name_words = ('%s %s' % (first, last)).strip()
     try:
         cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
         cu.execute('BEGIN TRANSACTION')
@@ -1894,7 +1906,7 @@ def create_agent(fields, who, dry_run=True):
                     1 if fields.get('is_qa') else 0,
                     1 if fields.get('with_camera') else 0,
                     (fields.get('gender') or None),
-                    int(fields.get('hourly_rate') or 0),
+                    rate_cents,
                     ((fields.get('phone_name') or '').strip()[:50] or None)))
         row = cu.fetchone()
         employee_id = int(row[0]) if row else None
@@ -1902,10 +1914,10 @@ def create_agent(fields, who, dry_run=True):
         if dry_run:
             cu.execute('ROLLBACK TRANSACTION')
             out.update({'ok': True, 'committed': False,
-                        'meaning': ('This would create %s %s on extension %s, with a '
-                                    'sign-in for %s%s. Nothing has been saved yet.'
-                                    % (first, last, extension, email,
-                                       (' as %s' % role) if role else ''))})
+                        'meaning': ('This would create %s on extension %s, with a '
+                                    'sign-in for %s%s.%s Nothing has been saved yet.'
+                                    % (name_words, extension, email,
+                                       (' as %s' % role) if role else '', rate_words))})
         else:
             cu.execute('COMMIT TRANSACTION')
             conn.commit()
@@ -1917,8 +1929,8 @@ def create_agent(fields, who, dry_run=True):
                 raise RuntimeError('the employee record is not there after saving')
             out.update({'ok': True, 'committed': True, 'employee_id': employee_id,
                         'user_id': user_id,
-                        'meaning': '%s %s created on extension %s. They sign in with %s.'
-                                   % (first, last, extension, email)})
+                        'meaning': '%s created on extension %s. They sign in with %s.%s'
+                                   % (name_words, extension, email, rate_words)})
     except WriteRefused:
         raise
     except Exception as e:
