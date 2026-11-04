@@ -575,6 +575,7 @@ td.agent{color:var(--text);font-weight:500;}
 .lvtile.brk{ border-left-color:#7B6CF6; }
 .lvtile.dnd{ border-left-color:#F2585F; background:linear-gradient(90deg, rgba(242,88,95,.10), var(--surface2) 60%); }
 .lvtile.off{ opacity:.45; }
+.lvtile.nophone{ border-left-color:#E5343D; border-color:rgba(229,52,61,.55); background:linear-gradient(90deg, rgba(229,52,61,.18), var(--surface2) 70%); }
 .lvtile.dim{ opacity:.2; }
 /* the detail on hover — status alone never says enough */
 .lvpop{
@@ -10503,6 +10504,14 @@ function lvRenderToday(){
       : '');
 }
 
+/* Clocked in but the phone is not logged in — the old CMS shows this as
+   "Unavailable" in red. It comes straight from the phone status the CMS keeps
+   (SipPhoneStatus), so it means calls cannot reach them right now. */
+const PHONE_OFF_STATES = ['UNAVAILABLE', 'INVALID', 'UNKNOWN', 'UNREACHABLE'];
+function phoneNotLoggedIn(a){
+  return !!a.clocked_in && PHONE_OFF_STATES.includes(String(a.phone||'').toUpperCase());
+}
+
 function lvRenderFloor(){
   const q = (document.getElementById('lv-search').value || '').toLowerCase().trim();
   const list = (lvData.agents || []).slice().sort((a,b)=>
@@ -10513,8 +10522,10 @@ function lvRenderFloor(){
   const onShift = list.filter(a=>a.clocked_in).length;
   const onBreak = list.filter(a=>a.clocked_in && a.on_break).length;
   const onDnd = list.filter(a=>a.clocked_in && a.dnd && (a.phone||'').toUpperCase()!=='IN_USE').length;
+  const noPhone = list.filter(a=>phoneNotLoggedIn(a) && !a.dnd && !a.on_break).length;
   document.getElementById('lv-floor-counts').textContent =
-    `${onShift} on shift · ${onCall} on a call · ${onShift-onCall-onDnd-onBreak} free`
+    `${onShift} on shift · ${onCall} on a call · ${onShift-onCall-onDnd-onBreak-noPhone} free`
+    + `${noPhone?` · ${noPhone} unavailable (phone not logged in)`:''}`
     + `${onDnd?` · ${onDnd} on do not disturb`:''}${onBreak?` · ${onBreak} on break`:''}`
     + ` · ${list.length} agents in total`;
 
@@ -10552,11 +10563,12 @@ function lvRenderFloor(){
     // on_break comes from the clocker status, so it means "on a break now"
     // rather than "took one earlier today", which break_minutes counts
     const brk = a.clocked_in && !!a.on_break && !busy && !dnd;
-    const cls = !a.clocked_in ? 'off' : busy ? 'on-call' : dnd ? 'dnd' : brk ? 'brk' : 'free';
+    const nop = !busy && !dnd && !brk && phoneNotLoggedIn(a);
+    const cls = !a.clocked_in ? 'off' : busy ? 'on-call' : dnd ? 'dnd' : brk ? 'brk' : nop ? 'nophone' : 'free';
     const state = !a.clocked_in ? 'off shift' : busy ? 'on a call'
-                : dnd ? 'do not disturb' : brk ? 'on break' : 'free';
+                : dnd ? 'do not disturb' : brk ? 'on break' : nop ? '📵 unavailable' : 'free';
     const colour = !a.clocked_in ? 'var(--text3)' : busy ? 'var(--green)'
-                 : dnd ? '#F2585F' : brk ? '#7B6CF6' : 'var(--yellow)';
+                 : dnd ? '#F2585F' : brk ? '#7B6CF6' : nop ? '#FF4D55' : 'var(--yellow)';
     const hit = !q || (a.name||'').toLowerCase().includes(q) ||
                 String(a.extension||'').includes(q) || String(a.last_call_phone||'').includes(q);
     return `<div class="lvtile ${cls} ${q && !hit ? 'dim':''}" onclick="lvOpenAgent(${a.employee_id})">
@@ -10566,6 +10578,7 @@ function lvRenderFloor(){
       <div class="lvpop">
         <b>${esc(a.name)}</b> <span class="k">ext ${a.extension||'—'}</span>
         <div><span class="k">now:</span> ${state}${busy&&a.phone_since?' for '+lvAgo(a.phone_since).replace(' ago',''):''}</div>
+        ${nop?`<div style="color:#FF4D55;">Phone is not logged in — calls cannot reach them${a.phone_since?' (since '+lvTime(a.phone_since)+')':''}</div>`:''}
         ${a.clocked_in&&a.clocker_since?`<div><span class="k">clocked in:</span> ${lvTime(a.clocker_since)} (${lvAgo(a.clocker_since).replace(' ago','')})</div>`:''}
         ${a.dnd?`<div style="color:#F2585F;"><span class="k" style="color:#F2585F;opacity:.7">do not disturb:</span>
            ${a.dnd_note?esc(a.dnd_note):'no reason given'}${a.dnd_since?' · since '+lvTime(a.dnd_since):''}</div>`:''}
@@ -12789,7 +12802,8 @@ async function acLoadLive(){
 
     const onShift = list.filter(a=>a.clocked_in);
     const onCall = list.filter(a=>(a.phone||'').toUpperCase()==='IN_USE');
-    const idle = onShift.filter(a=>(a.phone||'').toUpperCase()!=='IN_USE' && !a.dnd && !a.on_break);
+    const idle = onShift.filter(a=>(a.phone||'').toUpperCase()!=='IN_USE' && !a.dnd && !a.on_break && !phoneNotLoggedIn(a));
+    const noPhone = onShift.filter(a=>phoneNotLoggedIn(a) && !a.dnd && !a.on_break).length;
   const dndCount = onShift.filter(a=>a.dnd && (a.phone||'').toUpperCase()!=='IN_USE').length;
     const calls = list.reduce((s,a)=>s+a.calls_in+a.calls_out,0);
     const stat = (lab,val,sub,cls) => `<div class="paycard"><div class="lab">${lab}</div>
@@ -12798,6 +12812,7 @@ async function acLoadLive(){
       stat('On shift', onShift.length, `of ${list.length} agents`, 'pos') +
       stat('On a call', onCall.length, 'right now', onCall.length?'pos':'') +
       stat('Free', idle.length, 'clocked in, phone idle', idle.length?'warn':'') +
+      (noPhone ? stat('Unavailable', noPhone, 'phone not logged in', 'neg') : '') +
       (dndCount ? stat('Do not disturb', dndCount, 'not taking calls', 'neg') : '') +
       stat('Calls today', calls.toLocaleString(), 'in and out');
 
@@ -12815,11 +12830,13 @@ async function acLoadLive(){
       .map(a=>{
         const busy = (a.phone||'').toUpperCase()==='IN_USE';
         const dnd = !!a.dnd && !busy;
+        const nop = !busy && !dnd && !a.on_break && phoneNotLoggedIn(a);
         const dot = !a.clocked_in ? 'var(--text3)' : busy ? 'var(--green)'
-                  : dnd ? '#F2585F' : a.on_break ? '#7B6CF6' : 'var(--yellow)';
+                  : dnd ? '#F2585F' : a.on_break ? '#7B6CF6' : nop ? '#FF4D55' : 'var(--yellow)';
         const state = a.just_logged_out ? 'logged out just now' : !a.clocked_in ? 'off shift' : busy ? 'on a call'
                     : dnd ? 'do not disturb' + (a.dnd_note ? ' — ' + esc(a.dnd_note) : '')
-                    : a.on_break ? 'on a break' : 'free';
+                    : a.on_break ? 'on a break'
+                    : nop ? '<span style="color:#FF4D55;font-weight:600;">📵 unavailable — phone not logged in</span>' : 'free';
         return `<div class="payrow ${acSelected===a.employee_id?'sel':''}" onclick="acOpen(${a.employee_id})">
           <span style="width:9px;height:9px;border-radius:50%;background:${dot};flex:none;"></span>
           <div class="nm">${esc(a.name)} <span style="color:var(--text3);font-size:11px;">ext ${a.extension||'—'}</span>
