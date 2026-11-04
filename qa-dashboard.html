@@ -5262,6 +5262,7 @@ const IS_PORTAL = (typeof IS_PORTAL_EARLY !== 'undefined') ? IS_PORTAL_EARLY
   : (document.body.getAttribute('data-portal') === '1' || location.pathname.startsWith('/portal'));
 let portalTicket = null, portalPages = [], portalIsAdmin = false;
 let portalIsManager = false;   // managers and admins may add or edit people
+let portalIsTL = false;        // team leaders: may change a customer's minutes
 
 function portalHeaders(){
   const h = {'Content-Type':'application/json'};
@@ -5382,6 +5383,7 @@ function portalFinishLogin(r){
     clearSignedOutBar();
     portalTicket = r.ticket; portalPages = r.pages || [];
     portalIsManager = !!(r.is_manager || r.is_admin);
+    portalIsTL = !!r.is_team_leader;
     portalRemember(r);
     try{ sessionStorage.setItem('portal_ticket', r.ticket); }catch(e){}
     // a QA reviewer also gets a normal VoiceGuard session, so the review pages
@@ -6561,6 +6563,7 @@ function portalRemember(me){
     sessionStorage.setItem('portal_me', JSON.stringify({
       name: me.name, pages: me.pages || [],
       is_manager: !!me.is_manager, is_admin: !!me.is_admin, is_qa: !!me.is_qa,
+      is_team_leader: !!me.is_team_leader,
     }));
   }catch(e){}
 }
@@ -6584,6 +6587,7 @@ async function portalBoot(){
     portalPages = remembered.pages || [];
     portalIsAdmin = !!remembered.is_admin;
     portalIsManager = !!(remembered.is_manager || remembered.is_admin);
+    portalIsTL = !!remembered.is_team_leader;
     if(remembered.is_qa){
       isAdmin = !!remembered.is_admin;
       currentRole = remembered.is_admin ? 'admin' : remembered.is_manager ? 'manager' : 'reviewer';
@@ -6637,6 +6641,7 @@ async function portalBoot(){
         portalPages = me.pages || [];
         portalIsAdmin = !!me.is_admin;
         portalIsManager = !!(me.is_manager || me.is_admin);
+        portalIsTL = !!me.is_team_leader;
         if(me.is_qa){ isAdmin = !!me.is_admin;
                       currentRole = me.is_admin ? 'admin' : me.is_manager ? 'manager' : 'reviewer'; }
         document.getElementById('portal-login').style.display = 'none';
@@ -10792,6 +10797,21 @@ function cuSearch(){
 const cuMoney = c => '$' + (Math.round(c||0)/100).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
 const cuWhen = d => d ? new Date(d).toLocaleString([], {month:'short',day:'numeric',year:'numeric',hour:'2-digit',minute:'2-digit'}) : '';
 const cuDate = d => d ? new Date(d).toLocaleDateString([], {month:'short',day:'numeric',year:'numeric'}) : '';
+/* "08/06/25 07:00:27 PM - 07:02:16 PM (1 min 48 s)", as the old CMS showed a
+   piece of work: when it started, when it ended, and how long it lasted. */
+function cuWorkSpan(start, end){
+  if(!start) return '';
+  const a = new Date(start), b = end ? new Date(end) : null;
+  const day = a.toLocaleDateString('en-US', {month:'2-digit', day:'2-digit', year:'2-digit'});
+  const tm = d => d.toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+  if(!b || isNaN(b)) return day + ' ' + tm(a) + ' <span style="color:var(--yellow)">· still open</span>';
+  const secs = Math.max(0, Math.round((b - a) / 1000));
+  const len = secs >= 3600 ? Math.floor(secs/3600) + ' h ' + Math.floor(secs%3600/60) + ' min'
+            : Math.floor(secs/60) + ' min ' + (secs % 60) + ' s';
+  const sameDay = a.toDateString() === b.toDateString();
+  return day + ' ' + tm(a) + ' - ' + (sameDay ? '' : b.toLocaleDateString('en-US', {month:'2-digit', day:'2-digit', year:'2-digit'}) + ' ')
+       + tm(b) + ' <span style="color:var(--text3)">(' + len + ')</span>';
+}
 // Everything that came from the database is shown as text, never as markup —
 // including inside attributes, where a quote in a name used to break the page.
 const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
@@ -11339,7 +11359,8 @@ let buyPackages = [], buyGroups = [], buyPackageId = null, buyCardId = null;
 let buyCards = [], buyStep = 1, buyBusy = false;
 
 function cuCur(amount, currency, dp){
-  const symbol = {USD:'$', EUR:'€', GBP:'£', ILS:'₪', CAD:'CA$', MXN:'MX$'}[currency] || '';
+  const symbol = {USD:'$', EUR:'€', GBP:'£', ILS:'₪', CAD:'CA$', MXN:'MX$',
+                  '$':'$', '€':'€', '£':'£', '₪':'₪'}[String(currency || '').trim().toUpperCase()] || '';
   // a price always shows both decimals; only per-minute rates are trimmed
   if(dp === undefined) return symbol + amount.toFixed(2);
   return symbol + amount.toFixed(dp).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
@@ -12260,7 +12281,7 @@ async function cuOpen(id){
           <button class="btn btn-outline" style="font-size:12px;" onclick="cuNoteOpen()"
                   title="A note about the account itself. For what happened on a call, use the work history.">+ Account note</button>
           <button class="btn btn-primary" style="font-size:12px;" onclick="cuBuyOpen()">💳 Sell a package</button>
-          <button class="btn btn-outline" style="font-size:12px;" onclick="cuMinutesOpen()">Minutes</button>
+          ${(portalIsManager || portalIsTL || !IS_PORTAL_EARLY) ? `<button class="btn btn-outline" style="font-size:12px;" onclick="cuMinutesOpen()" title="Add or take away minutes">Minutes</button>` : ''}
           <button class="btn btn-primary" style="font-size:12px;" onclick="cuStartWork()">Start work</button>
           <button class="btn btn-outline" style="font-size:12px;" onclick="cuEditOpen()">Edit</button>
         </span>
@@ -12366,7 +12387,7 @@ function cuTab(which){
         <th class="col-phone">Phone</th><th>What was done</th>
         <th class="n col-billed">Billed</th><th class="col-rec">Recording</th></tr></thead><tbody>` +
       r.work.map(w=>`<tr>
-        <td style="white-space:nowrap;font-size:11.5px;">${cuWhen(w.start)}
+        <td style="white-space:nowrap;font-size:11.5px;">${cuWorkSpan(w.start, w.end)}
           ${w.missed?'<span style="color:var(--red);font-size:10px;display:block">missed</span>':''}</td>
         <td style="white-space:nowrap;">${esc(w.agent)||'—'}</td>
         <td style="font-size:11.5px;white-space:nowrap;">${esc(w.phone)||''}

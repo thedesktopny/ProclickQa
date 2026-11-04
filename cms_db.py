@@ -2999,6 +2999,9 @@ def company_info():
     return {'items': out}
 
 
+_SYMBOL_CODES = {'$': 'USD', '£': 'GBP', '€': 'EUR', '₪': 'ILS'}
+
+
 def packages():
     """What a customer can buy, with the price per minute worked out."""
     conn = _connect(); cu = conn.cursor()
@@ -3021,7 +3024,10 @@ def packages():
                     # kept as it is stored: a package with no currency set is
                     # not the same as one priced in dollars, and the CMS lists
                     # those separately
-                    'currency': (r[4] or '').strip().upper(),
+                    # some packages store the symbol ("$") rather than the
+                    # code — shown with the right sign all the same
+                    'currency': _SYMBOL_CODES.get((r[4] or '').strip(), (r[4] or '').strip().upper()),
+                    'currency_raw': (r[4] or '').strip(),
                     'per_minute_cents': round(cents / mins, 2) if mins else None,
                     'commission': int(r[5] or 0), 'phone_option': r[6]})
     conn.close()
@@ -3033,8 +3039,10 @@ def packages():
              'GBP': 'British Pound Sterling', 'CAD': 'Canadian Dollar',
              'MXN': 'Mexican Peso'}
     groups = {}
+    # grouped by what is STORED, so the Bobov packages (stored as "$") stay a
+    # group of their own while still showing as dollars
     for p in out:
-        code = (p.get('currency') or '').strip().upper()
+        code = (p.get('currency_raw') or '').strip().upper()
         groups.setdefault(code, []).append(p)
     ordered = []
     for code in ['USD', 'ILS', 'EUR', 'GBP', 'CAD', 'MXN']:
@@ -3042,8 +3050,10 @@ def packages():
             ordered.append({'currency': code, 'title': names[code] + ' - packages',
                             'packages': groups.pop(code)})
     for code, items in groups.items():
-        ordered.append({'currency': code,
-                        'title': (names.get(code, code) + ' - packages') if code
+        real = _SYMBOL_CODES.get(code, code)
+        ordered.append({'currency': real,
+                        'title': ((names.get(real, real) + ' (' + code + ')' if code in _SYMBOL_CODES
+                                   else names.get(code, code)) + ' - packages') if code
                                  else 'No currency set - packages',
                         'packages': items})
     return {'packages': out, 'groups': ordered}

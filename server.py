@@ -6469,6 +6469,7 @@ def _issue_portal_session(user, remember_device=False):
            'name': user['name'], 'is_manager': user['is_manager'],
            'is_admin': bool(user.get('is_admin')),
            'is_qa': bool(user.get('is_qa')), 'vg_token': vg_token,
+           'is_team_leader': _team_leader_agents(user.get('employee_id')) is not None,
            'extension': user.get('extension'), 'pages': pages}
 
     # Agents — QA and team leaders included — start their shift by signing
@@ -6623,7 +6624,7 @@ def portal_me():
         pass
     return jsonify({'signed_in': True, 'name': p.get('n'), 'is_manager': bool(p.get('m')),
                     'is_admin': bool(p.get('a')), 'is_qa': bool(p.get('q')), 'pages': pages,
-                    'extension': ext})
+                    'extension': ext, 'is_team_leader': _is_team_leader_now(p)})
 
 
 @app.route('/api/recordings/test', methods=['GET'])
@@ -8869,11 +8870,37 @@ def customer_buy_package(account_id):
     return jsonify(out), (200 if out.get('ok') else 400)
 
 
+def _is_team_leader_now(p=None):
+    p = p if p is not None else _portal_user(request.headers.get('X-Portal-Ticket', ''))
+    if not (p and p.get('e')):
+        return False
+    hit = _TL_CACHE.get(p['e'])
+    if hit and time.time() - hit[0] < 300:
+        return hit[1]
+    ok = _team_leader_agents(p['e']) is not None
+    _TL_CACHE[p['e']] = (time.time(), ok)
+    return ok
+
+
+def portal_manager_or_tl(f):
+    """Managers, admins and team leaders."""
+    from functools import wraps
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        p = _portal_user(request.headers.get('X-Portal-Ticket', ''))
+        if p and (p.get('m') or p.get('a') or _is_team_leader_now(p)):
+            return f(*args, **kwargs)
+        if p:
+            return jsonify({'error': 'Only team leaders, managers and admins can change minutes.'}), 403
+        return portal_manager_only(f)(*args, **kwargs)
+    return decorated
+
+
 @app.route('/api/customers/<int:account_id>/minutes', methods=['POST'])
-@portal_manager_only
+@portal_manager_or_tl
 def customer_adjust_minutes(account_id):
     """Change an account's minute balance, the way the CMS does — with a proper
-    entry in the balance history. Managers and admins only."""
+    entry in the balance history. Team leaders, managers and admins."""
     import cms_write
     d = request.json or {}
     confirm = bool(d.get('confirm', False))
