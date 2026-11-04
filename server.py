@@ -8958,7 +8958,8 @@ def _live_calls_reader():
                 conn = cms_db._connect(); cu = conn.cursor()
                 cu.execute("""SELECT c.Id, c.Phone, c.Started, c.PickedUpTime,
                                      c.PickedUpBy, c.Agent, c.IsOutbound,
-                                     c.DialStatus, c.CalledExtension
+                                     c.DialStatus, c.CalledExtension,
+                                     c.PreselectedAccountPhone, c.AccountToUse
                               FROM PhoneCallsLog c
                               WHERE c.Ended IS NULL
                                 AND c.Started >= DATEADD(hour, -4, GETDATE())""")
@@ -8971,7 +8972,10 @@ def _live_calls_reader():
                             'started': cms_db._plain(r[2]),
                             'picked_up': cms_db._plain(r[3]),
                             'outbound': bool(r[6]), 'status': r[7],
-                            'called': r[8], 'live': True}
+                            'called': r[8], 'live': True,
+                            # the account the caller picked on the phone menu —
+                            # how the old CMS knew the caller "verified"
+                            'preselected': ((r[9] or r[10] or '').strip() or None)}
                     for ext in {(r[4] or '').strip(), (r[5] or '').strip()}:
                         if ext:
                             # the answered call wins over one still ringing
@@ -8983,6 +8987,11 @@ def _live_calls_reader():
                 # the table, so it wins until the call ends
                 for k, v in _LIVE_CALLS['by_ext'].items():
                     if v.get('from_phone_system'):
+                        # keep the account the caller picked, which only the
+                        # table has, on the fresher phone-system copy
+                        t = by_ext.get(k)
+                        if t and t.get('preselected') and not v.get('preselected'):
+                            v['preselected'] = t['preselected']
                         by_ext[k] = v
                 _LIVE_CALLS['by_ext'] = by_ext
                 _LIVE_CALLS['at'] = datetime.now()
@@ -9862,8 +9871,41 @@ def my_current_call():
     call = _LIVE_CALLS['by_ext'].get(ext)
     if not call:
         return jsonify({'call': None, 'extension': ext})
-    return jsonify({'call': call, 'who': _who_is_calling(call.get('phone')),
-                    'extension': ext})
+    who = _who_is_calling(call.get('phone'))
+    return jsonify({'call': call, 'who': who, 'extension': ext,
+                    'verification': _call_verification(call, who)})
+
+
+def _call_verification(call, who):
+    """Did the caller verify an account — exactly the old CMS's three cases.
+
+    * They picked an account on the phone menu, and their number belongs to it
+      (its main number, one of its other numbers, or linked to it before):
+      verified — "do NOT ask for the account number again".
+    * They picked one, but this number is not on that account: "account is not
+      verified with this number — verify the name on the account".
+    * They picked nothing: "the caller did not verify an account".
+    The old CMS did this in the browser (IsAssociatedAccount); here it is one
+    lookup on the server, cached with the rest of the caller information."""
+    if call.get('outbound'):
+        return None
+    sel = ''.join(ch for ch in str(call.get('preselected') or call.get('account_to_use') or '') if ch.isdigit())[-10:]
+    if len(sel) < 7:
+        return {'state': 'not_verified', 'text': 'Caller did not verify an account'}
+    chosen = _who_is_calling(sel) or {}
+    acc = chosen.get('primary')            # the account whose main number they entered
+    if not acc:
+        return {'state': 'not_created', 'selected': sel,
+                'text': 'Caller chose account %s — there is no account with that number' % sel}
+    who = who or {}
+    mine = {a['id'] for a in ([who['primary']] if who.get('primary') else [])
+            + (who.get('others') or []) + (who.get('associated') or [])}
+    base = {'selected': sel, 'account': acc}
+    if acc['id'] in mine:
+        return dict(base, state='verified',
+                    text='Caller chose account %s and is calling from its number — do NOT ask for the account number again' % sel)
+    return dict(base, state='not_matching',
+                text='Caller chose account %s, but this number is not on that account — verify the name on the account' % sel)
 
 
 def _plain_dt(v):

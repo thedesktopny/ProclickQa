@@ -10951,6 +10951,7 @@ async function cuFormSubmit(confirm){
    number, and associated ones were linked by hand before. Flattening them
    would present a weak match as a certain one. */
 let inCallId = null, inDismissed = null, inTimer = null;
+let inVerifyKey = null;
 
 /* The browser holds a connection open and is TOLD about a call, rather than
    asking every few seconds and finding out late. If the connection drops it
@@ -10995,8 +10996,11 @@ function inShow(r){
       if(!call || !call.live) box.style.display = 'none';
       return;
     }
-    if(call.call_id === inCallId && box.style.display !== 'none') return;   // already showing
-    inCallId = call.call_id;
+    // the caller can pick an account on the phone menu a moment after the call
+    // shows, so redraw when that changes — otherwise leave it alone
+    const vkey = JSON.stringify(r.verification || null);
+    if(call.call_id === inCallId && box.style.display !== 'none' && vkey === inVerifyKey) return;   // already showing
+    inCallId = call.call_id; inVerifyKey = vkey;
 
     document.getElementById('in-phone').textContent = call.phone || 'Unknown number';
     document.getElementById('in-meta').textContent =
@@ -11016,8 +11020,20 @@ function inShow(r){
           <button class="cn-chip">Start work</button></div>`).join('')}
       </div>` : '';
 
+    // verified or not, as the old CMS showed it — the first thing the agent sees
+    const v = r.verification;
+    const vcol = v ? ({verified: 'var(--green)', not_matching: 'var(--red)', not_verified: 'var(--red)', not_created: 'var(--yellow)'}[v.state] || 'var(--text2)') : '';
+    const vicon = v ? ({verified: '✅', not_matching: '⚠️', not_verified: '⚠️', not_created: '❓'}[v.state] || '') : '';
+    const vbox = v ? `<div style="border:1px solid ${vcol};border-radius:10px;padding:8px 10px;margin-bottom:10px;font-size:12.5px;color:${vcol};font-weight:600;">
+        ${vicon} ${v.state === 'verified' ? 'Verified' : v.state === 'not_verified' ? 'Did not verify an account' : v.state === 'not_matching' ? 'Not verified with this number' : 'Account not found'}
+        <div style="font-weight:400;color:var(--text2);margin-top:3px;font-size:12px;">${esc(v.text)}</div>
+        ${v.account ? `<div class="payrow" style="cursor:pointer;margin-top:6px;" onclick="inPick(${v.account.id})">
+            <div class="nm">${esc(v.account.name)}<div class="mt" style="white-space:normal;">${esc(v.account.phone)||''} · ${v.account.minutes_left} minutes left${v.account.minutes_left <= 0 ? ' · <span style="color:var(--red)">collect payment first</span>' : ''}</div></div>
+            <button class="cn-chip">Start work</button></div>` : ''}
+      </div>` : '';
+
     const body = document.getElementById('in-body');
-    body.innerHTML =
+    body.innerHTML = vbox +
       group('This is their number', who.primary ? [who.primary] : [])
       + group('Matched on another number', who.others || [],
               'This number is a mobile or second number on these accounts.')
