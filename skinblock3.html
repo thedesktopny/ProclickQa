@@ -105,6 +105,12 @@
   .card .meta b{ color:var(--text2); font-weight:500; }
   .card.busy .meta b{ color:var(--yellow); } .card.done .meta b{ color:var(--green); } .card.fail .meta b{ color:var(--red); }
   .card.busy{ animation:pulse 1.4s ease-in-out infinite; }
+  .card.check{ border-color:var(--yellow); } .card.check .meta b{ color:var(--yellow); }
+  .card .ask{ padding:0 12px 12px; font-size:12px; color:var(--text2); line-height:1.5; }
+  .card .ask div{ display:flex; gap:8px; margin-top:8px; flex-wrap:wrap; }
+  .card .ask button{ flex:1; min-width:120px; padding:8px 10px; border-radius:9px; border:1px solid var(--border);
+                     background:var(--surface2); color:var(--text); font:inherit; cursor:pointer; }
+  .card .ask button.cov{ background:#E5343D; border-color:#E5343D; color:#fff; }
   @keyframes pulse{ 50%{ border-color:#4a4570; } }
   @media (prefers-reduced-motion:reduce){ .card.busy{ animation:none; } *{ transition:none !important; } }
 </style>
@@ -190,7 +196,10 @@
       for — and labels skin and face. Skin inside the outline is covered;
       clothes and hair stay, so the picture remains readable.
    3. If the skin model finds almost nothing for someone, that person is
-      covered whole. A safety net, not the default.
+      covered whole. A safety net, not the default. But if the outline model
+      is not very sure it is a person AND no face, hair or skin is seen (a
+      dress on a hanger, a mannequin), the agent is shown it in red and asked
+      — nothing is saved until they answer. PDF pages are covered to be safe.
 
    Earlier designs used one model for both jobs and were either ragged on
    crowds or blanketed group photos black. This split is what fixed both.
@@ -205,10 +214,37 @@ const HAIR = 1, BODY = 2, FACE = 3;
 const CONF = 0.25;          // below this the model starts seeing "people" in menu icons
 const IOU = 0.6;             // overlapping people in a crowd are two people, not one
 const FALLBACK_BELOW = 0.08; // skin found as a share of the person: under this, cover whole
+const SURE_PERSON = 0.6;     // (only without the body check) this sure -> treat as a person
+const POSE_URL = "/models/yolov8n-pose.onnx";
+const FACE_SEEN = 0.85;      // body check: a nose / eye / ear this sure means a real person
+/* ... or, with the head out of the picture, legs: knees and ankles on a body
+   with shoulders. In tests a walking man cut off at the edge scored knees 0.95
+   and ankles 0.76; clothes never above 0.38 and 0.09. */
+const KNEE_SEEN = 0.7, ANKLE_SEEN = 0.5, SHOULDER_SEEN = 0.8;
+const SMALL_SHAPE = 0.35;    // a person-shape shorter than this share of the picture is a person in a scene
+const SKIN_SOME = 0.005;     // a body with no face showing this much skin: cover that skin only
+/* Skin on a shape with NO face (clothes on a hanger, a product photo) is only
+   believed when it is real skin by every measure: the skin model is sure of
+   it, it is skin-coloured, and — unless the model is very sure — it reaches in
+   from the edge of the picture or from outside the clothes, the way a hand
+   holding a shirt does. Measured on real photos: real skin 0.81-0.89; the
+   false "skin" the model sees on clothes (collars, neck openings, black
+   sleeves and straps) 0.40-0.75, or not skin-coloured at all. */
+const LOOSE_SURE = 0.80;     // skin this sure is believed anywhere
+const LOOSE_EDGE = 0.70;     // ... this sure if it comes in from outside the clothes
+const LOOSE_COLOUR = 0.6;    // share of its pixels that must be skin-coloured
+/* Why the body check: the outline model is fooled by clothes — on product
+   photos of shirts and dresses it scored up to 0.88 "person". The body-joint
+   model finds a face on real people (0.98-1.00 in tests) and never above 0.76
+   on clothes, so a shape with no face, no hair and no skin is clothing and is
+   left alone. The agent can still cover it with one click. */
+/* A dress on a hanger or a mannequin can look like a person to the outline
+   model. When it is not very sure AND the skin model sees no face, hair or
+   skin at all, the shape is not covered by itself: the agent is asked. */
 
 const $ = id => document.getElementById(id);
 const status = t => { $("status").textContent = t; };
-let yolo = null, segmenter = null, queue = [], working = false, results = [];
+let yolo = null, segmenter = null, poseNet = null, queue = [], working = false, results = [];
 
 /* ---- load ------------------------------------------------------------- */
 async function boot(){
@@ -217,19 +253,23 @@ async function boot(){
     let backend = "webgpu";
     try{ yolo = await ort.InferenceSession.create(YOLO_URL, { executionProviders: ["webgpu"] }); }
     catch(e){ backend = "wasm"; yolo = await ort.InferenceSession.create(YOLO_URL, { executionProviders: ["wasm"] }); }
+    try{ poseNet = await ort.InferenceSession.create(POSE_URL, { executionProviders: [backend] }); }
+    catch(e){ try{ poseNet = await ort.InferenceSession.create(POSE_URL, { executionProviders: ["wasm"] }); }
+              catch(e2){ poseNet = null; console.warn("body check not loaded", e2); } }
 
     const files = await FilesetResolver.forVisionTasks(
       "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/wasm");
     let delegate = "GPU";
     try{
       segmenter = await ImageSegmenter.createFromOptions(files, {
-        baseOptions: { modelAssetPath: SKIN_URL, delegate }, runningMode: "IMAGE", outputCategoryMask: true });
+        baseOptions: { modelAssetPath: SKIN_URL, delegate }, runningMode: "IMAGE", outputCategoryMask: true, outputConfidenceMasks: true });
     }catch(e){
       delegate = "CPU";
       segmenter = await ImageSegmenter.createFromOptions(files, {
-        baseOptions: { modelAssetPath: SKIN_URL, delegate }, runningMode: "IMAGE", outputCategoryMask: true });
+        baseOptions: { modelAssetPath: SKIN_URL, delegate }, runningMode: "IMAGE", outputCategoryMask: true, outputConfidenceMasks: true });
     }
-    status("Ready — people on " + (backend === "webgpu" ? "the graphics card" : "the processor")
+    status((poseNet ? "" : "Body check not loaded — unsure shapes will be asked about. ")
+           + "Ready — people on " + (backend === "webgpu" ? "the graphics card" : "the processor")
            + ", skin on " + (delegate === "GPU" ? "the graphics card" : "the processor") + ".");
   }catch(e){ status("The detectors could not load: " + e.message); }
 }
@@ -283,33 +323,120 @@ async function findPeople(img, w, h){
   // each mask = sigmoid(coef · prototypes), inside its box, back at image size
   const people = [];
   const ps = mw / size;                 // prototype grid per letterbox pixel
+  const plane = mh * mw;
   for(const b of kept){
     const mask = new Uint8Array(w * h);
     const bx1 = Math.max(0, b.x1), by1 = Math.max(0, b.y1), bx2 = Math.min(nw, b.x2), by2 = Math.min(nh, b.y2);
     const ix1 = Math.max(0, Math.floor(bx1 / scale)), iy1 = Math.max(0, Math.floor(by1 / scale));
     const ix2 = Math.min(w, Math.ceil(bx2 / scale)), iy2 = Math.min(h, Math.ceil(by2 / scale));
+    // the mask value on the model's coarse grid first, once per grid cell ...
+    const gx1 = Math.max(0, Math.floor(ix1 * scale * ps) - 1), gx2 = Math.min(mw - 1, Math.ceil(ix2 * scale * ps) + 1);
+    const gy1 = Math.max(0, Math.floor(iy1 * scale * ps) - 1), gy2 = Math.min(mh - 1, Math.ceil(iy2 * scale * ps) + 1);
+    const gw = gx2 - gx1 + 1, logit = new Float32Array(gw * (gy2 - gy1 + 1));
+    for(let gy = gy1; gy <= gy2; gy++) for(let gx = gx1; gx <= gx2; gx++){
+      let v = 0; const o = gy * mw + gx;
+      for(let k = 0; k < 32; k++) v += b.coef[k] * pd[k * plane + o];
+      logit[(gy - gy1) * gw + (gx - gx1)] = v;
+    }
+    // ... then blended smoothly between cells, so the edge follows the shape
+    // instead of stepping in square blocks
+    const L = (gx, gy) => logit[(gy - gy1) * gw + (gx - gx1)];
     for(let y = iy1; y < iy2; y++){
-      const gy = Math.min(mh - 1, Math.floor(y * scale * ps));
+      const fy = Math.min(gy2, Math.max(gy1, (y + 0.5) * scale * ps - 0.5));
+      const y0 = Math.min(gy2 - 0, Math.floor(fy)), y1g = Math.min(gy2, y0 + 1), ty = fy - y0;
       for(let x = ix1; x < ix2; x++){
-        const gx = Math.min(mw - 1, Math.floor(x * scale * ps));
-        let v = 0;
-        for(let k = 0; k < 32; k++) v += b.coef[k] * pd[k * mh * mw + gy * mw + gx];
+        const fx = Math.min(gx2, Math.max(gx1, (x + 0.5) * scale * ps - 0.5));
+        const x0 = Math.floor(fx), x1g = Math.min(gx2, x0 + 1), tx = fx - x0;
+        const v = (L(x0, y0) * (1 - tx) + L(x1g, y0) * tx) * (1 - ty)
+                + (L(x0, y1g) * (1 - tx) + L(x1g, y1g) * tx) * ty;
         if(v > 0) mask[y * w + x] = 1;          // sigmoid(v) > 0.5  <=>  v > 0
       }
     }
-    people.push({ x1: ix1, y1: iy1, x2: ix2, y2: iy2, mask });
+    people.push({ x1: ix1, y1: iy1, x2: ix2, y2: iy2, mask, score: b.score });
   }
   return people;
 }
 
+/* ---- body check: is there a face on this shape? ------------------------- */
+/* The shape is cut out with a margin, enlarged to the body model's square,
+   and the face points (nose, eyes, ears) of the body that sits where the
+   shape is are read. Returns the surest of the five, 0..1. */
+async function faceOn(img, w, h, p){
+  const pad = 0.15, bw = p.x2 - p.x1, bh = p.y2 - p.y1;
+  const x1 = Math.max(0, p.x1 - pad*bw), y1 = Math.max(0, p.y1 - pad*bh);
+  const x2 = Math.min(w, p.x2 + pad*bw), y2 = Math.min(h, p.y2 + pad*bh);
+  const cw = x2 - x1, ch = y2 - y1; if(cw < 8 || ch < 8) return 0;
+  const S = 640, k = S / Math.max(cw, ch);
+  const c = document.createElement("canvas"); c.width = S; c.height = S;
+  const ctx = c.getContext("2d", { willReadFrequently: true });
+  ctx.fillStyle = "#727272"; ctx.fillRect(0, 0, S, S);
+  ctx.drawImage(img, x1, y1, cw, ch, 0, 0, Math.round(cw*k), Math.round(ch*k));
+  const px = ctx.getImageData(0, 0, S, S).data, n = S * S, input = new Float32Array(3 * n);
+  for(let i = 0; i < n; i++){ input[i] = px[i*4]/255; input[n+i] = px[i*4+1]/255; input[2*n+i] = px[i*4+2]/255; }
+  const out = await poseNet.run({ images: new ort.Tensor("float32", input, [1, 3, S, S]) });
+  const o = out[Object.keys(out)[0]], N = o.dims[2], d = o.data;      // [1, 56, N]
+  // where the shape sits inside the enlarged cut-out
+  const t = { x1: (p.x1 - x1)*k, y1: (p.y1 - y1)*k, x2: (p.x2 - x1)*k, y2: (p.y2 - y1)*k };
+  const ta = (t.x2 - t.x1) * (t.y2 - t.y1);
+  let best = -1, bestIou = 0.3;
+  for(let i = 0; i < N; i++){
+    if(d[4*N + i] < 0.25) continue;
+    const cx = d[i], cy = d[N+i], ww = d[2*N+i], hh = d[3*N+i];
+    const ix = Math.max(0, Math.min(t.x2, cx + ww/2) - Math.max(t.x1, cx - ww/2));
+    const iy = Math.max(0, Math.min(t.y2, cy + hh/2) - Math.max(t.y1, cy - hh/2));
+    const iou = ix * iy / (ta + ww * hh - ix * iy);
+    if(iou > bestIou){ bestIou = iou; best = i; }
+  }
+  if(best < 0) return { found: false, face: 0, legs: false, printed: false, shoulders: 0, head: null };
+  const kp = j => d[(5 + j*3 + 2) * N + best];                 // how sure of body point j
+  const ky = j => d[(5 + j*3 + 1) * N + best];                 // where it is, top to bottom
+  const kx = j => d[(5 + j*3) * N + best];
+  let face = 0, faceY = Infinity, hx = 0, hy = 0, hn = 0;
+  for(let j = 0; j < 5; j++){
+    face = Math.max(face, kp(j));
+    if(kp(j) >= 0.5){ faceY = Math.min(faceY, ky(j)); hx += kx(j); hy += ky(j); hn++; }
+  }
+  const shoulders = Math.max(kp(5), kp(6));
+  // where the head is, in the picture, so the skin model can be asked whether
+  // there is really a face or hair there (the body model will imagine a head
+  // above an empty collar)
+  const sw = kp(5) >= 0.5 && kp(6) >= 0.5 ? Math.abs(kx(5) - kx(6)) / k : 0;
+  const head = hn ? { x: x1 + hx / hn / k, y: y1 + hy / hn / k,
+                      r: Math.max(4, sw ? sw * 0.35 : 0.08 * (p.y2 - p.y1)) } : null;
+  const shoulderY = Math.min(kp(5) >= 0.5 ? ky(5) : Infinity, kp(6) >= 0.5 ? ky(6) : Infinity);
+  // A face BELOW the shoulders is a picture printed on a shirt, not a head:
+  // on a real person the face is always above the shoulder line.
+  const printed = face >= 0.5 && shoulders >= SHOULDER_SEEN && faceY > shoulderY;
+  const legs = Math.max(kp(13), kp(14)) >= KNEE_SEEN && Math.max(kp(15), kp(16)) >= ANKLE_SEEN
+            && shoulders >= SHOULDER_SEEN;
+  return { found: true, face: printed ? 0 : face, legs, printed, shoulders, head };
+}
+
+/* Is there really a face, hair or skin where the body model put the head? */
+function headSeen(g, head){
+  if(!g || !head) return false;
+  let hit = 0, all = 0;
+  const step = Math.max(1, head.r / 6);
+  for(let dy = -head.r; dy <= head.r; dy += step) for(let dx = -head.r; dx <= head.r; dx += step){
+    if(dx*dx + dy*dy > head.r*head.r) continue;
+    const xx = head.x + dx - g.x1, yy = head.y + dy - g.y1;
+    if(xx < 0 || yy < 0 || xx >= g.cw || yy >= g.ch) continue;
+    const mx = Math.min(g.mw-1, Math.floor(xx * g.s * g.mw / 512)), my = Math.min(g.mhh-1, Math.floor(yy * g.s * g.mhh / 512));
+    const k = g.cat[my * g.mw + mx]; all++;
+    if(k === FACE || k === HAIR || k === BODY) hit++;
+  }
+  return all > 0 && hit >= 0.2 * all;
+}
+
 /* ---- skin inside one person: MediaPipe ---------------------------------- */
-function skinInside(img, w, h, p, hair){
+function skinInside(img, w, h, p, hair, strictMin){
   const pad = 0.12;
   const bw = p.x2 - p.x1, bh = p.y2 - p.y1;
   const x1 = Math.max(0, Math.floor(p.x1 - pad*bw)), x2 = Math.min(w, Math.ceil(p.x2 + pad*bw));
   const y1 = Math.max(0, Math.floor(p.y1 - pad*bh)), y2 = Math.min(h, Math.ceil(p.y2 + pad*bh));
   const cw = x2 - x1, ch = y2 - y1;
   const mask = new Uint8Array(w * h);
+  mask.human = 0;
   if(cw < 8 || ch < 8) return mask;
   const s = 512 / Math.max(cw, ch);
   const c = document.createElement("canvas"); c.width = 512; c.height = 512;
@@ -318,20 +445,229 @@ function skinInside(img, w, h, p, hair){
   ctx.drawImage(img, x1, y1, cw, ch, 0, 0, Math.round(cw*s), Math.round(ch*s));
   const out = segmenter.segment(c);
   const cat = out.categoryMask.getAsUint8Array(), mw = out.categoryMask.width, mhh = out.categoryMask.height;
+  // how sure the model is of skin at each point (body skin or face skin)
+  let sure = null;
+  try{
+    const cm = out.confidenceMasks;
+    if(cm && cm[BODY] && cm[FACE]){
+      const b = cm[BODY].getAsFloat32Array(), f = cm[FACE].getAsFloat32Array();
+      sure = new Float32Array(b.length); for(let i = 0; i < b.length; i++) sure[i] = Math.max(b[i], f[i]);
+    }
+  }catch(e){ sure = null; }
   out.close();
+  // Skin anywhere in the cut-out, then kept only where it is part of skin that
+  // touches the shape. A hand on a shirt is inside the shirt's outline but the
+  // arm it belongs to hangs outside it — the arm used to be cut off at the
+  // outline. Skin that touches nothing (a stray patch in the background) is
+  // still left alone.
+  const skin = new Uint8Array(cw * ch), queue = new Int32Array(cw * ch);
+  let qn = 0;
   for(let yy = 0; yy < ch; yy++){
     const my = Math.min(mhh-1, Math.floor(yy * s * mhh / 512));
     for(let xx = 0; xx < cw; xx++){
       const mx = Math.min(mw-1, Math.floor(xx * s * mw / 512));
       const k = cat[my * mw + mx];
-      const i = (y1 + yy) * w + (x1 + xx);
-      if((k === BODY || k === FACE || (hair && k === HAIR)) && p.mask[i]) mask[i] = 1;
+      const i = (y1 + yy) * w + (x1 + xx), j = yy * cw + xx;
+      const isSkin = k === BODY || k === FACE || (hair && k === HAIR);
+      if(p.mask[i] && (k === BODY || k === FACE || k === HAIR)) mask.human++;
+      if(!isSkin) continue;
+      skin[j] = 1;
+      if(p.mask[i]){ skin[j] = 2; queue[qn++] = j; }          // inside the shape: a seed
     }
   }
+  for(let q = 0; q < qn; q++){
+    const j = queue[q], xx = j % cw, yy = (j - xx) / cw;
+    mask[(y1 + yy) * w + (x1 + xx)] = 1;
+    if(xx > 0      && skin[j-1] === 1){ skin[j-1] = 2; queue[qn++] = j-1; }
+    if(xx < cw - 1 && skin[j+1] === 1){ skin[j+1] = 2; queue[qn++] = j+1; }
+    if(yy > 0      && skin[j-cw] === 1){ skin[j-cw] = 2; queue[qn++] = j-cw; }
+    if(yy < ch - 1 && skin[j+cw] === 1){ skin[j+cw] = 2; queue[qn++] = j+cw; }
+  }
+  mask.strict = strictSkin(img, w, h, p, x1, y1, cw, ch, s, cat, sure, mw, mhh, hair, strictMin);
+  mask.grid = { cat, mw, mhh, x1, y1, cw, ch, s };
   return mask;
 }
 
-/* ---- grow, cover -------------------------------------------------------- */
+/* The skin on a shape with no face, keeping only the patches that pass every
+   test above. Patches a small gap apart (a bracelet across a wrist) count as
+   one, so a hand and its arm are judged together. */
+function strictSkin(img, w, h, p, x1, y1, cw, ch, s, cat, sure, mw, mhh, hair, strictMin){
+  const out = new Uint8Array(w * h);
+  if(!sure) return out;                       // no confidence from the model: believe none
+  const n = cw * ch, skin = new Uint8Array(n), conf = new Float32Array(n);
+  for(let yy = 0; yy < ch; yy++){
+    const my = Math.min(mhh-1, Math.floor(yy * s * mhh / 512));
+    for(let xx = 0; xx < cw; xx++){
+      const mx = Math.min(mw-1, Math.floor(xx * s * mw / 512)), k = cat[my * mw + mx];
+      if(k === BODY || k === FACE || (hair && k === HAIR)){ const j = yy*cw + xx; skin[j] = 1; conf[j] = sure[my * mw + mx]; }
+    }
+  }
+  const px = img.getContext("2d", { willReadFrequently: true }).getImageData(x1, y1, cw, ch).data;
+  const joined = dilate(skin, cw, ch, Math.max(1, Math.round(0.02 * Math.max(cw, ch))));
+  const lab = new Int32Array(n), queue = new Int32Array(n), keep = new Uint8Array(n);
+  let next = 0;
+  for(let start = 0; start < n; start++){
+    if(!joined[start] || lab[start]) continue;
+    next++; let qn = 0, a = 0, cs = 0, col = 0, outside = 0, edge = false;
+    lab[start] = next; queue[qn++] = start;
+    for(let q = 0; q < qn; q++){
+      const j = queue[q], xx = j % cw, yy = (j - xx) / cw;
+      if(skin[j]){
+        a++; cs += conf[j];
+        const r = px[j*4], g = px[j*4+1], b = px[j*4+2], Y = 0.299*r + 0.587*g + 0.114*b;
+        const cr = (r - Y) * 0.713 + 128, cb = (b - Y) * 0.564 + 128;
+        if(cr >= 136 && cr <= 180 && cb >= 77 && cb <= 135) col++;
+        const ix = x1 + xx, iy = y1 + yy;
+        if(!p.mask[iy * w + ix]) outside++;
+        if(ix <= 1 || iy <= 1 || ix >= w - 2 || iy >= h - 2) edge = true;
+      }
+      if(xx > 0      && joined[j-1]  && !lab[j-1]) { lab[j-1] = next;  queue[qn++] = j-1; }
+      if(xx < cw - 1 && joined[j+1]  && !lab[j+1]) { lab[j+1] = next;  queue[qn++] = j+1; }
+      if(yy > 0      && joined[j-cw] && !lab[j-cw]){ lab[j-cw] = next; queue[qn++] = j-cw; }
+      if(yy < ch - 1 && joined[j+cw] && !lab[j+cw]){ lab[j+cw] = next; queue[qn++] = j+cw; }
+    }
+    if(a < 0.001 * n) continue;                                   // a speck
+    const meanConf = cs / a, fromOutside = edge || outside >= 0.3 * a;
+    const believed = col >= LOOSE_COLOUR * a
+      && (strictMin ? meanConf >= strictMin
+                    : (meanConf >= LOOSE_SURE || (fromOutside && meanConf >= LOOSE_EDGE)));
+    if(!believed) continue;
+    for(let q = 0; q < qn; q++){ const j = queue[q]; if(skin[j]) keep[j] = 1; }
+  }
+  // close the small gaps inside what was kept (a bracelet across a wrist, a
+  // ring, a shadow line) without making the cover any bigger around the edge
+  const r = Math.max(1, Math.round(0.012 * Math.max(cw, ch)));
+  const grown = dilate(keep, cw, ch, r), inv = new Uint8Array(n);
+  for(let j = 0; j < n; j++) inv[j] = grown[j] ? 0 : 1;
+  const shrunk = dilate(inv, cw, ch, r);
+  for(let j = 0; j < n; j++) if((keep[j] || !shrunk[j])){ const xx = j % cw, yy = (j - xx) / cw; out[(y1+yy)*w + x1+xx] = 1; }
+  return out;
+}
+
+/* ---- edges -------------------------------------------------------------- */
+/* The skin model works on a coarse grid, so its edge wanders a few pixels off
+   the real one — a shaded side of an arm is left showing, or the cover stops
+   short of the fingertips. This walks the edge out pixel by pixel into
+   anything that has the colour of the skin right next to it, never more than
+   a short distance, so it hugs the real outline without spilling into the
+   background. */
+function refineEdges(mask, img, w, h, r, T){
+  if(r <= 0) return mask;
+  const px = img.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, w, h).data;
+  let cur = mask;
+  const steps = 3, rr = Math.max(1, Math.round(r / steps)), W = w + 1;
+  for(let step = 0; step < steps; step++){
+    // the local average colour of what is covered, from summed-area tables
+    const S = [new Float64Array(W*(h+1)), new Float64Array(W*(h+1)), new Float64Array(W*(h+1))], C = new Float64Array(W*(h+1));
+    for(let y = 0; y < h; y++){ let a = 0, b = 0, c = 0, k = 0;
+      for(let x = 0; x < w; x++){ const i = y*w + x;
+        if(cur[i]){ a += px[i*4]; b += px[i*4+1]; c += px[i*4+2]; k++; }
+        const o = (y+1)*W + x+1, u = y*W + x+1;
+        S[0][o] = S[0][u] + a; S[1][o] = S[1][u] + b; S[2][o] = S[2][u] + c; C[o] = C[u] + k; } }
+    const ring = dilate(cur, w, h, rr), next = new Uint8Array(cur);
+    const win = Math.max(3, rr * 3);
+    for(let y = 0; y < h; y++){
+      const ya = Math.max(0, y - win), yb = Math.min(h, y + win + 1);
+      for(let x = 0; x < w; x++){
+        const i = y*w + x; if(cur[i] || !ring[i]) continue;
+        const xa = Math.max(0, x - win), xb = Math.min(w, x + win + 1);
+        const box = t => t[yb*W + xb] - t[ya*W + xb] - t[yb*W + xa] + t[ya*W + xa];
+        const k = box(C); if(k < 4) continue;
+        const dr = px[i*4] - box(S[0])/k, dg = px[i*4+1] - box(S[1])/k, db = px[i*4+2] - box(S[2])/k;
+        if(dr*dr + dg*dg + db*db < T*T) next[i] = 1;
+      }
+    }
+    cur = next;
+  }
+  return cur;
+}
+
+/* The skin model often sees only part of a close-up hand — the fingers, not
+   the palm. Each patch of hand found is followed outward into touching pixels
+   of the same skin colour, so the rest of the hand and the arm are covered
+   too. A patch that would grow to more than twice its size again is not
+   following a hand any more but something skin-coloured behind it (a beige
+   shirt, a wooden table), and is left as it was. */
+function growSkin(mask, img, w, h, T, within, capTimes){
+  const px = img.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, w, h).data;
+  // how sharply the picture changes at each pixel: growth stops at an outline
+  // (the edge of an arm against a beige sofa), so it cannot leak across one
+  const lum = new Float32Array(w * h);
+  for(let i = 0; i < w*h; i++) lum[i] = 0.299*px[i*4] + 0.587*px[i*4+1] + 0.114*px[i*4+2];
+  const edge = new Uint8Array(w * h);
+  for(let y = 1; y < h - 1; y++) for(let x = 1; x < w - 1; x++){
+    const i = y*w + x;
+    const gx = lum[i-w+1] + 2*lum[i+1] + lum[i+w+1] - lum[i-w-1] - 2*lum[i-1] - lum[i+w-1];
+    const gy = lum[i+w-1] + 2*lum[i+w] + lum[i+w+1] - lum[i-w-1] - 2*lum[i-w] - lum[i-w+1];
+    if(Math.abs(gx) + Math.abs(gy) > 90) edge[i] = 1;
+  }
+  const out = new Uint8Array(mask), seen = new Uint8Array(w * h), queue = new Int32Array(w * h);
+  const skinCol = i => { const r = px[i*4], g = px[i*4+1], b = px[i*4+2], Y = 0.299*r + 0.587*g + 0.114*b;
+    const cr = (r - Y) * 0.713 + 128, cb = (b - Y) * 0.564 + 128; return cr >= 136 && cr <= 180 && cb >= 77 && cb <= 135; };
+  for(let start = 0; start < w*h; start++){
+    if(!mask[start] || seen[start]) continue;
+    // one patch of found skin, and its average colour
+    let qn = 0, sr = 0, sg = 0, sb = 0; queue[qn++] = start; seen[start] = 1;
+    for(let q = 0; q < qn; q++){
+      const i = queue[q], x = i % w; sr += px[i*4]; sg += px[i*4+1]; sb += px[i*4+2];
+      for(const j of [x > 0 ? i-1 : -1, x < w-1 ? i+1 : -1, i-w, i+w])
+        if(j >= 0 && j < w*h && mask[j] && !seen[j]){ seen[j] = 1; queue[qn++] = j; }
+    }
+    const n = qn, mr = sr/n, mg = sg/n, mb = sb/n, patch = queue.slice(0, n);
+    // follow it out into matching skin
+    const added = []; let grown = 0, cap = n * (capTimes || 2);
+    const fq = Array.from(patch);
+    for(let q = 0; q < fq.length && grown <= cap; q++){
+      const i = fq[q], x = i % w;
+      for(const j of [x > 0 ? i-1 : -1, x < w-1 ? i+1 : -1, i-w, i+w]){
+        if(j < 0 || j >= w*h || seen[j] || out[j] || edge[j] || (within && !within[j])) continue;
+        const dr = px[j*4] - mr, dg = px[j*4+1] - mg, db = px[j*4+2] - mb;
+        if(dr*dr + dg*dg + db*db < T*T && skinCol(j)){ seen[j] = 2; added.push(j); fq.push(j); grown++; }
+      }
+    }
+    if(grown <= cap) for(const j of added) out[j] = 1;
+    else for(const j of added) seen[j] = 0;            // spilled: undo, the patch stays as found
+  }
+  return out;
+}
+
+/* On a close-up the skin model's patch spills a little past the fingers onto
+   the background; keep only what is skin-coloured, or right beside it. */
+function trimToSkin(mask, img, w, h){
+  const px = img.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, w, h).data;
+  const col = new Uint8Array(w * h);
+  for(let i = 0; i < w*h; i++){
+    if(!mask[i]) continue;
+    const r = px[i*4], g = px[i*4+1], b = px[i*4+2], Y = 0.299*r + 0.587*g + 0.114*b;
+    const cr = (r - Y) * 0.713 + 128, cb = (b - Y) * 0.564 + 128;
+    if(cr >= 136 && cr <= 180 && cb >= 77 && cb <= 135) col[i] = 1;
+  }
+  const near = dilate(col, w, h, Math.max(2, Math.round(Math.min(w, h) / 200)));
+  const out = new Uint8Array(w * h);
+  for(let i = 0; i < w*h; i++) if(mask[i] && near[i]) out[i] = 1;
+  return out;
+}
+
+/* ---- smooth, grow, cover ------------------------------------------------ */
+/* Rounds off the stair-steps the models leave at their own resolution: each
+   pixel takes the majority of its small neighbourhood. */
+function smoothMask(mask, w, h, r){
+  if(r <= 0) return mask;
+  const W = w + 1, I = new Uint32Array(W * (h + 1));
+  for(let y = 0; y < h; y++){ let row = 0;
+    for(let x = 0; x < w; x++){ row += mask[y*w+x]; I[(y+1)*W + x+1] = I[y*W + x+1] + row; } }
+  const out = new Uint8Array(w * h);
+  for(let y = 0; y < h; y++){
+    const a = Math.max(0, y - r), b = Math.min(h, y + r + 1);
+    for(let x = 0; x < w; x++){
+      const l = Math.max(0, x - r), rr = Math.min(w, x + r + 1);
+      const sum = I[b*W + rr] - I[a*W + rr] - I[b*W + l] + I[a*W + l];
+      if(sum * 2 > (b - a) * (rr - l)) out[y*w+x] = 1;
+    }
+  }
+  return out;
+}
+
 function dilate(mask, w, h, r){
   if(r <= 0) return mask;
   const tmp = new Uint8Array(w*h), out = new Uint8Array(w*h);
@@ -407,7 +743,7 @@ async function processFile(file){
    canvas. It is first drawn at the working size, so every step below reads
    the same pixels at the same scale (a very large photo used to be cropped
    from the wrong place when the skin step zoomed in on a person). */
-async function processPicture(srcPic, sw, sh, name){
+async function processPicture(srcPic, sw, sh, name, askUnsure = true){
   const scale = Math.min(1, 2000 / Math.max(sw, sh));
   const w = Math.round(sw * scale), h = Math.round(sh * scale);
   const img = document.createElement("canvas"); img.width = w; img.height = h;
@@ -417,23 +753,128 @@ async function processPicture(srcPic, sw, sh, name){
   const began = performance.now();
 
   const people = await findPeople(img, w, h);
-  let mask = new Uint8Array(w * h), whole = 0;
-  for(const p of people){
-    let m = p.mask;
-    if(mode === "skin"){
-      const sk = skinInside(img, w, h, p, hair);
-      let ps = 0, ss = 0;
-      for(let i = 0; i < w*h; i++){ ps += p.mask[i]; ss += sk[i]; }
-      if(ss < FALLBACK_BELOW * ps){ whole++; }         // skin model saw nothing — keep the outline
-      else m = sk;
-    }
-    for(let i = 0; i < w*h; i++) if(m[i]) mask[i] = 1;
+  let mask = new Uint8Array(w * h), unsureMask = null, whole = 0, unsure = 0, skipped = 0, handsOnClothes = 0, handMask = null;
+  const soft = Math.max(1, Math.round(Math.min(w, h) / 400));
+  // Every shape is looked at first, and only then decided — a picture with
+  // real people in it makes its other person-shapes people too (an umpire seen
+  // from behind next to two players), while a product photo has none.
+  const ev = [];
+  if(poseNet) for(const p of people){
+    let ps = 0; for(let i = 0; i < w*h; i++) ps += p.mask[i];
+    const sk = skinInside(img, w, h, p, hair);
+    let ss = 0; for(let i = 0; i < w*h; i++) ss += sk[i];
+    const human = sk.human / Math.max(1, ps);
+    const body = await faceOn(img, w, h, p);
+    const headOK = headSeen(sk.grid, body.head);
+    // a small figure in a scene is a person: clothes for sale fill the picture
+    const small = (p.y2 - p.y1) < SMALL_SHAPE * h && (p.x2 - p.x1) * (p.y2 - p.y1) < 0.15 * w * h;
+    const faceSeen = !body.printed && body.face >= FACE_SEEN && headOK;
+    // seen from behind: an ear or the back of a head, with hair there, on shoulders
+    const backOfHead = !body.printed && body.face >= 0.5 && headOK && body.shoulders >= SHOULDER_SEEN;
+    // lots of face, hair or skin with no shoulders at all is a close-up (a hand,
+    // a face filling the picture); on a body with shoulders but no head it is
+    // more likely a print or a collar on clothes, so it does not count there
+    const closeUp = !faceSeen && human >= FALLBACK_BELOW && body.shoulders < SHOULDER_SEEN;
+    const own = !body.printed && (faceSeen || backOfHead || body.legs || small || closeUp);
+    ev.push({ ps, sk, ss, human, body, faceSeen, own, closeUp });
   }
-  mask = dilate(mask, w, h, grow);
+  const sceneHasPeople = ev.some(e => e.own);
+  for(let pi = 0; pi < people.length; pi++){
+    const p = people[pi], e = ev[pi];
+    let m = p.mask, isUnsure = false, isClothes = false;
+    let ps = 0; if(e) ps = e.ps; else for(let i = 0; i < w*h; i++) ps += p.mask[i];
+    if(e){
+      const { sk, ss, faceSeen } = e;
+      const person = e.own || (sceneHasPeople && p.score >= 0.5 && !e.body.printed);
+      const toHands = src => {            // skin of a body with no face: a hand or an arm
+        handMask = handMask || new Uint8Array(w * h);
+        let n = 0; for(let i = 0; i < w*h; i++) if(src[i]){ handMask[i] = 1; n++; }
+        return n;
+      };
+      if(!person) isClothes = true;
+      else if(mode !== "skin") { /* whole person */ }
+      // a close-up hand: the skin model calls much of a palm "clothes", so the
+      // skin it did find is followed out across the rest of the hand — inside
+      // the hand's own outline only, and only into skin colours
+      else if(e.closeUp){ toHands(trimToSkin(growSkin(sk, img, w, h, 48, p.mask, 8), img, w, h)); m = null; }
+      else if(ss >= FALLBACK_BELOW * ps){                                // plenty of skin: cover the skin
+        if(faceSeen) m = sk; else { toHands(sk); m = null; }
+      }
+      else if(!faceSeen && ss >= SKIN_SOME * ps){ toHands(sk); m = null; } // headless: just the skin that shows
+      else whole++;                                                      // a person, no skin seen: whole
+      if(isClothes && toHands(sk.strict)) handsOnClothes++;              // a real hand on clothes is covered
+    }
+    const sk = poseNet ? null : (mode === "skin" || p.score < SURE_PERSON ? skinInside(img, w, h, p, hair) : null);
+    if(isClothes){
+      skipped++;
+      unsureMask = unsureMask || new Uint8Array(w * h);
+      for(let i = 0; i < w*h; i++) if(p.mask[i]) unsureMask[i] = 1;
+      continue;
+    }
+    if(sk){
+      let ss = 0; for(let i = 0; i < w*h; i++) ss += sk[i];
+      const human = sk.human / Math.max(1, ps);
+      if(mode === "skin" && ss >= FALLBACK_BELOW * ps) m = sk;           // skin found: cover the skin
+      else if(p.score >= SURE_PERSON || human >= FALLBACK_BELOW){ if(mode === "skin") whole++; }  // a person: whole
+      else isUnsure = true;            // not sure it is a person, and no face, hair or skin seen
+    }
+    if(isUnsure){
+      unsure++;
+      if(!askUnsure){ for(let i = 0; i < w*h; i++) if(m[i]) mask[i] = 1; continue; }   // a PDF: stay safe, cover
+      unsureMask = unsureMask || new Uint8Array(w * h);
+      for(let i = 0; i < w*h; i++) if(m[i]) unsureMask[i] = 1;
+      continue;
+    }
+    if(m) for(let i = 0; i < w*h; i++) if(m[i]) mask[i] = 1;
+  }
+  // Skin with no person outline around it at all — a hand holding a product,
+  // a hand on its own, an arm reaching in. The outline model often finds no
+  // person there, so the skin model also looks at the whole picture, and only
+  // patches it is sure of (and that are skin-coloured) are believed.
+  if(mode === "skin" && poseNet){
+    const frame = { x1: 0, y1: 0, x2: w, y2: h, mask: new Uint8Array(w * h) };
+    const sk = skinInside(img, w, h, frame, hair, LOOSE_SURE);
+    let n = 0; for(let i = 0; i < w*h; i++) if(sk.strict[i] && !mask[i]){ (handMask = handMask || new Uint8Array(w * h))[i] = 1; n++; }
+    if(n > 0.0005 * w * h) handsOnClothes++;
+  }
+  // hands on clothes: the skin model is least exact there, so their edge is
+  // walked out to the real outline (faces and people keep the model's edge —
+  // walking it out would creep into blond hair, which is skin-coloured)
+  if(handMask){
+    handMask = growSkin(handMask, img, w, h, 42);
+    handMask = refineEdges(handMask, img, w, h, Math.max(2, Math.round(Math.min(w, h) / 70)), 40);
+    for(let i = 0; i < w*h; i++) if(handMask[i]) mask[i] = 1;
+  }
+  mask = dilate(smoothMask(mask, w, h, soft), w, h, grow);
+  if(unsureMask) unsureMask = dilate(smoothMask(unsureMask, w, h, soft), w, h, grow);
   let covered = 0; for(let i = 0; i < mask.length; i++) covered += mask[i];
-  const out = cover(img, w, h, mask, $("opt-style").value);
-  return { canvas: out, ms: Math.round(performance.now() - began), pct: Math.round(100*covered/mask.length),
-           people: people.length, whole, name };
+  const style = $("opt-style").value;
+  const out = cover(img, w, h, mask, style);
+  const r = { canvas: out, ms: Math.round(performance.now() - began), pct: Math.round(100*covered/mask.length),
+              people: people.length - skipped - (askUnsure ? unsure : 0), whole,
+              unsure: askUnsure ? unsure : 0, skipped, hands: handsOnClothes, name };
+  if(r.unsure || r.skipped){
+    // kept so the agent's "cover it too" can redo the picture without the models
+    r.coverAll = () => {
+      const both = new Uint8Array(w * h);
+      let n = 0; for(let i = 0; i < w*h; i++){ both[i] = mask[i] | unsureMask[i]; n += both[i]; }
+      r.pct = Math.round(100 * n / (w*h));
+      r.canvas = cover(img, w, h, both, style); r.unsure = 0; r.people += r.skipped; r.skipped = 0; return r.canvas;
+    };
+    // what the agent looks at: the covered picture with the doubtful shape tinted red
+    r.preview = () => {
+      const c = document.createElement("canvas"); c.width = w; c.height = h;
+      const ctx = c.getContext("2d"); ctx.drawImage(out, 0, 0);
+      const d = ctx.getImageData(0, 0, w, h), px = d.data;
+      for(let i = 0; i < w*h; i++) if(unsureMask[i] && !mask[i]){
+        px[i*4] = Math.round(px[i*4] * 0.45 + 229 * 0.55);
+        px[i*4+1] = Math.round(px[i*4+1] * 0.45 + 52 * 0.55);
+        px[i*4+2] = Math.round(px[i*4+2] * 0.45 + 61 * 0.55);
+      }
+      ctx.putImageData(d, 0, 0); return c;
+    };
+  }
+  return r;
 }
 
 /* ---- PDFs: every page is turned into a picture, covered, and put back
@@ -456,7 +897,7 @@ async function processPdf(file, onPage){
   await pdfTools();
   const doc = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
   if(doc.numPages > 40) throw new Error("more than 40 pages — split it first");
-  let pdf = null, first = null, people = 0, ms = 0;
+  let pdf = null, first = null, people = 0, ms = 0, skipped = 0;
   for(let n = 1; n <= doc.numPages; n++){
     onPage(n, doc.numPages);
     const page = await doc.getPage(n);
@@ -466,15 +907,15 @@ async function processPdf(file, onPage){
     const c = document.createElement("canvas"); c.width = Math.round(vp.width); c.height = Math.round(vp.height);
     const ctx = c.getContext("2d"); ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, c.width, c.height);
     await page.render({ canvasContext: ctx, viewport: vp }).promise;
-    const r = await processPicture(c, c.width, c.height, file.name);
-    people += r.people; ms += r.ms; if(!first) first = r.canvas;
+    const r = await processPicture(c, c.width, c.height, file.name, false);
+    people += r.people; ms += r.ms; skipped += r.skipped || 0; if(!first) first = r.canvas;
     const orient = v1.width > v1.height ? "l" : "p";
     if(!pdf) pdf = new jsPDFLib({ orientation: orient, unit: "pt", format: [v1.width, v1.height] });
     else pdf.addPage([v1.width, v1.height], orient);
     pdf.addImage(r.canvas.toDataURL("image/jpeg", 0.9), "JPEG", 0, 0, v1.width, v1.height);
   }
   return { canvas: first, pdfBlob: pdf.output("blob"), pages: doc.numPages, people, ms, pct: null,
-           whole: 0, name: file.name };
+           whole: 0, skipped, name: file.name };
 }
 
 /* ---- queue -------------------------------------------------------------- */
@@ -499,11 +940,43 @@ async function pump(){
       const r = isPdf
         ? await processPdf(file, (n, all) => { card.querySelector("b").textContent = "page " + n + " of " + all + "…"; })
         : await processFile(file);
-      card.replaceChild(r.canvas, card.firstChild);
-      card.querySelector("b").textContent = (isPdf ? "PDF · " + r.pages + (r.pages === 1 ? " page · " : " pages · ") : "")
+      const label = () => (isPdf ? "PDF · " + r.pages + (r.pages === 1 ? " page · " : " pages · ") : "")
         + r.people + (r.people === 1 ? " person" : " people")
-        + (r.whole ? " (" + r.whole + " whole)" : "") + (r.pct != null ? " · " + r.pct + "%" : "") + " · " + r.ms + " ms";
-      card.className = "card done"; results.push(r); autoDownload(r);
+        + (r.whole ? " (" + r.whole + " whole)" : "") + (r.pct != null ? " · " + r.pct + "%" : "")
+        + (r.skipped ? " · " + r.skipped + " clothes left" : "") + (r.hands && r.skipped ? " · hand covered" : "") + " · " + r.ms + " ms";
+      if(r.unsure){
+        // not saved yet: the agent decides about the shape in red
+        card.replaceChild(r.preview(), card.firstChild);
+        card.querySelector("b").textContent = "check this one";
+        card.className = "card check";
+        const ask = document.createElement("div"); ask.className = "ask";
+        ask.innerHTML = "The part in <b style='color:#FF6B72'>red</b> might be a person, or might be just "
+          + "clothes or an object. Is it a person?"
+          + "<div><button class='cov'>Yes — cover it</button><button class='keep'>No — leave it</button></div>";
+        card.appendChild(ask);
+        const done = () => { ask.remove(); card.replaceChild(r.canvas, card.firstChild);
+          card.querySelector("b").textContent = label(); card.className = "card done";
+          results.push(r); autoDownload(r); $("dl-all").disabled = false; };
+        ask.querySelector(".cov").onclick = () => { r.coverAll(); r.people++; done(); };
+        ask.querySelector(".keep").onclick = () => { r.unsure = 0; done(); };
+      }else if(r.skipped && !isPdf){
+        card.replaceChild(r.canvas, card.firstChild);
+        card.querySelector("b").textContent = label();
+        card.className = "card done"; results.push(r); autoDownload(r);
+        const note = document.createElement("div"); note.className = "ask";
+        note.innerHTML = "Left uncovered: " + r.skipped + (r.skipped === 1 ? " shape that looks" : " shapes that look")
+          + " like clothes, not a person" + (r.hands ? " — the hand holding it is covered." : " (no face, hair or skin).")
+          + "<div><button class='cov'>Cover it anyway</button></div>";
+        card.appendChild(note);
+        note.querySelector(".cov").onclick = () => {
+          r.coverAll(); card.replaceChild(r.canvas, card.firstChild);
+          card.querySelector("b").textContent = label(); note.remove(); autoDownload(r);
+        };
+      }else{
+        card.replaceChild(r.canvas, card.firstChild);
+        card.querySelector("b").textContent = label();
+        card.className = "card done"; results.push(r); autoDownload(r);
+      }
     }catch(e){ card.querySelector("b").textContent = "failed: " + e.message; card.className = "card fail"; }
     status(results.length + " done" + (queue.length ? ", " + queue.length + " waiting" : ""));
   }
