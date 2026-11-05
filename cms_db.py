@@ -2474,7 +2474,7 @@ def _queue_link_column(cu):
     return None
 
 
-def call_flow(minutes=180, limit=40):
+def call_flow(minutes=180, limit=40, phone=None, ext=None, kind=None, name=None):
     """Calls as they happen — who called, where it rang, who took it.
 
     The card-per-call view: a call arrives, walks the floor trying one
@@ -2483,13 +2483,41 @@ def call_flow(minutes=180, limit=40):
     show.
     """
     conn = _connect(); cu = conn.cursor()
+    # Searching, like the old CMS's filter box: one agent's calls, one phone
+    # number, answered / missed / outbound only, or a caller or agent by name.
+    # The date limit stays on every search so the database can use its index.
+    where = ['c.Started >= DATEADD(minute, -%d, GETDATE())' % int(minutes)]
+    args = []
+    digs = ''.join(ch for ch in str(phone or '') if ch.isdigit())
+    if len(digs) >= 4:
+        where.append('c.Phone LIKE %s'); args.append('%' + digs[-10:] + '%')
+    ext = ''.join(ch for ch in str(ext or '') if ch.isdigit())[:6]
+    if ext:
+        where.append('(c.PickedUpBy = %s OR c.Agent = %s OR c.SpecificExten = %s)'); args += [ext, ext, ext]
+    if kind == 'answered':
+        where.append("ISNULL(c.IsOutbound, 0) = 0 AND ISNULL(c.PickedUpBy, '') <> ''")
+    elif kind == 'missed':
+        where.append('ISNULL(c.IsMissed, 0) = 1')
+    elif kind == 'outbound':
+        where.append('ISNULL(c.IsOutbound, 0) = 1')
+    name = (name or '').strip()
+    if name:
+        names_now = _extension_names(cu)
+        low = name.lower()
+        exts = [e for e, n in names_now.items() if e and low in (n or '').lower()][:40]
+        cond = ['c.CallersName LIKE %s']; args.append('%' + name[:40] + '%')
+        if exts:
+            marks = ', '.join(['%s'] * len(exts))
+            cond.append('c.PickedUpBy IN (%s)' % marks); args += exts
+            cond.append('c.Agent IN (%s)' % marks); args += exts
+        where.append('(' + ' OR '.join(cond) + ')')
     cu.execute("""SELECT TOP %d c.Id, c.Phone, c.CallersName, c.Started, c.Ended,
                          c.PickedUpTime, c.PickedUpBy, c.Agent, c.DialStatus,
                          c.IsOutbound, c.CalledExtension, c.RecordingFileUrl,
                          ISNULL(c.IsMissed, 0), c.AstriskUniqId, c.Note
                   FROM PhoneCallsLog c
-                  WHERE c.Started >= DATEADD(minute, -%d, GETDATE())
-                  ORDER BY c.Started DESC""" % (int(limit), int(minutes)))
+                  WHERE """ % int(limit) + ' AND '.join(where) + """
+                  ORDER BY c.Started DESC""", tuple(args) if args else None)
     calls, ids = [], []
     while True:
         r = cu.fetchone()
@@ -2523,11 +2551,11 @@ def call_flow(minutes=180, limit=40):
     link = _queue_link_column(cu)
     if ids and link:
         try:
-            marks = ', '.join(['%s'] * len(ids[:40]))
+            marks = ', '.join(['%s'] * len(ids[:100]))
             cu.execute("""SELECT [%s], Info, Created
                           FROM QueueInfo
                           WHERE [%s] IN (%s)
-                          ORDER BY Id""" % (link, link, marks), tuple(ids[:40]))
+                          ORDER BY Id""" % (link, link, marks), tuple(ids[:100]))
             by_call = {}
             while True:
                 q = cu.fetchone()

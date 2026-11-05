@@ -9605,16 +9605,45 @@ def call_flow_route():
     merged in — so a call that is ringing right now shows which extensions it
     is trying before any of it reaches the database."""
     import cms_db
+    # search: q is a phone number (5+ digits), an extension (up to 4 digits)
+    # or a name; ext = one agent; kind = answered / missed / outbound; days
+    # reaches back past the live three hours
+    q = (request.args.get('q') or '').strip()[:60]
+    ext = (request.args.get('ext') or '').strip()[:6]
+    kind = (request.args.get('kind') or '').strip().lower()
+    kind = kind if kind in ('answered', 'missed', 'outbound') else None
+    qd = ''.join(ch for ch in q if ch.isdigit())
+    phone = name = None
+    if q and qd and len(qd) == len(q.replace(' ', '').replace('-', '').replace('(', '').replace(')', '').replace('+', '')):
+        if len(qd) >= 5: phone = qd
+        elif not ext: ext = qd
+    elif q:
+        name = q
     try:
-        out = cms_db.call_flow(int(request.args.get('minutes') or 180))
+        days = max(0, min(90, int(request.args.get('days') or 0)))
+    except ValueError:
+        days = 0
+    searching = bool(phone or ext or kind or name or days)
+    minutes = days * 1440 if days else int(request.args.get('minutes') or 180)
+    try:
+        out = cms_db.call_flow(minutes, limit=(100 if searching else 40),
+                               phone=phone, ext=ext, kind=kind, name=name)
     except Exception as e:
         return jsonify({'error': str(e)[:200], 'calls': []}), 400
+    out['searching'] = searching
 
     # anything the phone system reported that has not reached the table yet
     known = {str(c.get('uniq') or '') for c in out['calls']}
     live = []
     for call in _LIVE_CALLS.get('by_uniq', {}).values():
         if str(call.get('uniq') or '') in known:
+            continue
+        # a search only shows the live calls that fit it
+        if name or (kind and kind != ('outbound' if call.get('outbound') else 'answered')):
+            continue
+        if phone and phone[-10:] not in ''.join(ch for ch in str(call.get('phone') or '') if ch.isdigit()):
+            continue
+        if ext and str(call.get('answered_by') or '') != ext and ext not in [str(e) for e in (call.get('ringing_at') or [])]:
             continue
         live.append({
             'call_id': call.get('call_id'), 'uniq': call.get('uniq'),

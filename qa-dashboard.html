@@ -575,6 +575,10 @@ td.agent{color:var(--text);font-weight:500;}
 .lvtile.brk{ border-left-color:#7B6CF6; }
 .lvtile.dnd{ border-left-color:#F2585F; background:linear-gradient(90deg, rgba(242,88,95,.10), var(--surface2) 60%); }
 .lvtile.off{ opacity:.45; }
+.cf-filters{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:2px 0 8px; }
+.cf-filters .cf-kinds{ display:flex; gap:6px; flex-wrap:wrap; }
+.cf-filters .cn-chip.on{ background:var(--accent); color:#fff; border-color:var(--accent); }
+.cf-filters select{ font-size:12px; padding:6px 8px; min-width:0; flex:1 1 140px; max-width:220px; }
 .lvtile.nophone{ border-left-color:#E5343D; border-color:rgba(229,52,61,.55); background:linear-gradient(90deg, rgba(229,52,61,.18), var(--surface2) 70%); }
 .lvtile.dim{ opacity:.2; }
 /* the detail on hover — status alone never says enough */
@@ -819,7 +823,7 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
    the whole history then reads straight down. */
 #cu-profile .data-table{ table-layout:fixed; width:100%; }
 #cu-profile .data-table th, #cu-profile .data-table td{ vertical-align:top; }
-#cu-profile .data-table .col-when{ width:150px; }
+#cu-profile .data-table .col-when{ width:180px; }
 #cu-profile .data-table .col-agent{ width:130px; }
 #cu-profile .data-table .col-phone{ width:130px; }
 #cu-profile .data-table .col-billed{ width:70px; text-align:right; }
@@ -2170,9 +2174,23 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
           <h2 class="payh" style="margin:0;">Calls as they happen</h2>
           <span id="cf-live" style="font-size:11px;color:var(--text3);"></span>
         </div>
-        <div class="payhint">Where each call went and who took it.</div>
+        <div class="payhint">Where each call went and who took it. Search any phone number, agent or name — pick a longer period to look further back.</div>
+        <div class="cf-filters">
+          <div class="cf-kinds" id="cf-kinds">
+            <button class="cn-chip on" data-kind="" onclick="cfSetKind('')">All</button>
+            <button class="cn-chip" data-kind="answered" onclick="cfSetKind('answered')">Answered</button>
+            <button class="cn-chip" data-kind="missed" onclick="cfSetKind('missed')">Missed</button>
+            <button class="cn-chip" data-kind="outbound" onclick="cfSetKind('outbound')">Outbound</button>
+          </div>
+          <select id="cf-ext" class="cms-in" onchange="cfFilterChanged()" title="One agent's calls">
+            <option value="">All agents</option></select>
+          <select id="cf-days" class="cms-in" onchange="cfFilterChanged()" title="How far back">
+            <option value="0">Last 3 hours</option><option value="1">Last 24 hours</option>
+            <option value="7">Last 7 days</option><option value="30">Last 30 days</option>
+            <option value="90">Last 90 days</option></select>
+        </div>
         <input id="cf-search" class="cms-in" style="width:100%;margin-bottom:10px;font-size:12px;"
-               placeholder="number, extension or name…" oninput="cfRender()">
+               placeholder="phone number, extension or name…" oninput="cfRender(); cfFilterChanged(true)">
         <div id="cf-list" style="max-height:60vh;overflow:auto;"></div>
       </div>
     </div>
@@ -9576,21 +9594,55 @@ const lvMoney = c => '$' + (Math.round(c||0)/100).toLocaleString(undefined,{mini
    tried on the way and in what order, who picked it up, and how it ended. The
    trail across the floor is the part worth having — a caller ringing four desks
    before someone answers is invisible in a plain call list. */
-let cfData = null, cfTimer = null;
+let cfData = null, cfTimer = null, cfKind = '', cfKey = '', cfAt = 0, cfDebounce = null;
 
-async function loadCallFlow(){
+/* What the filters ask for, as the address the server reads. */
+function cfQuery(){
+  const v = id => (document.getElementById(id) || {}).value || '';
+  const p = new URLSearchParams();
+  const q = v('cf-search').trim(), ext = v('cf-ext'), days = v('cf-days');
+  if(q) p.set('q', q);
+  if(ext) p.set('ext', ext);
+  if(cfKind) p.set('kind', cfKind);
+  if(days && days !== '0') p.set('days', days);
+  return p.toString();
+}
+function cfSetKind(k){
+  cfKind = k;
+  document.querySelectorAll('#cf-kinds .cn-chip').forEach(b => b.classList.toggle('on', b.dataset.kind === k));
+  cfFilterChanged();
+}
+function cfFilterChanged(typing){
+  clearTimeout(cfDebounce);
+  cfDebounce = setTimeout(() => loadCallFlow(true), typing ? 500 : 0);
+}
+function cfFillAgents(){
+  const sel = document.getElementById('cf-ext');
+  if(!sel || sel.options.length > 1 || !lvData || !(lvData.agents || []).length) return;
+  const keep = sel.value;
+  sel.innerHTML = '<option value="">All agents</option>' + lvData.agents
+    .filter(a => a.extension).slice().sort((a, b) => (a.name || '').localeCompare(b.name || ''))
+    .map(a => `<option value="${esc(a.extension)}">${esc(a.name)} · ${esc(a.extension)}</option>`).join('');
+  sel.value = keep;
+}
+
+async function loadCallFlow(force){
   const box = document.getElementById('cf-list');
-  if(!cfData) box.innerHTML = '<div style="color:var(--text3);font-size:12.5px;">Loading…</div>';
+  cfFillAgents();
+  const query = cfQuery();
+  // a search over days of calls is heavier than the live three hours, so it is
+  // refreshed every 30 seconds rather than every few
+  if(!force && query && query === cfKey && Date.now() - cfAt < 30000) return;
+  if(!cfData || query !== cfKey) box.innerHTML = '<div style="color:var(--text3);font-size:12.5px;">' + (query ? 'Searching…' : 'Loading…') + '</div>';
   try{
-    // The window and auto-refresh controls lived on the old separate page. Now
-    // that this sits inside Live, it follows Live's own "live" switch and a
-    // fixed three-hour window — reading elements that no longer exist is what
-    // caused "Cannot read properties of null".
-    const r = await API.get('/api/call-flow?minutes=180');
+    const r = await API.get('/api/call-flow?minutes=180' + (query ? '&' + query : ''));
+    if(query !== cfQuery()) return;          // the filters changed while this was loading
     if(r.error){ box.innerHTML = `<div style="color:var(--red)">${r.error}</div>`; return; }
-    cfData = r;
-    document.getElementById('cf-live').textContent =
-      r.live_now
+    if(query !== cfKey) box.innerHTML = '';  // a different search: start the list afresh
+    cfData = r; cfKey = query; cfAt = Date.now();
+    document.getElementById('cf-live').textContent = r.searching
+      ? `${r.calls.length}${r.calls.length >= 100 ? '+' : ''} call${r.calls.length === 1 ? '' : 's'} found`
+      : r.live_now
         ? (r.ringing_now
             ? `${r.live_now} happening now · ${r.ringing_now} still ringing`
             : `${r.live_now} happening now`)
@@ -9615,13 +9667,18 @@ function cfBadge(c){
 function cfTime(d){
   if(!d) return '';
   const t = new Date(d);
-  return t.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+  const tm = t.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+  // older calls (from a search) need their day as well
+  return t.toDateString() === new Date().toDateString() ? tm
+    : t.toLocaleDateString('en-US', {month:'2-digit', day:'2-digit', year:'2-digit'}) + ' ' + tm;
 }
 
 function cfRender(){
   if(!cfData) return;
   const q = (document.getElementById('cf-search').value || '').toLowerCase().trim();
-  const list = cfData.calls.filter(c => !q
+  // a search the server has already done is not filtered again here (it
+  // matches numbers written with dashes, names of agents, older calls ...)
+  const list = cfData.calls.filter(c => !q || cfData.searching
     || String(c.phone||'').includes(q)
     || String(c.answered_by||'').includes(q)
     || (c.answered_by_name||'').toLowerCase().includes(q)
@@ -9667,7 +9724,7 @@ function cfRender(){
               style="background:${bg};color:${fg};">${esc(label)}</span>` : ''}
         <span style="font-size:12.5px;color:var(--text2);">${who}</span>
         <span style="margin-left:auto;font-size:11.5px;color:var(--text3);white-space:nowrap;">
-          ${cfTime(c.started)}${c.ended ? ' – ' + cfTime(c.ended) : ' –'}
+          ${cfTime(c.started)}${c.ended ? ' – ' + new Date(c.ended).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : ' –'}
           ${c.seconds != null ? ` · ${Math.floor(c.seconds/60)}m ${c.seconds%60}s` : ''}
         </span>
       </div>
@@ -9716,7 +9773,8 @@ function cfRender(){
   });
 
   if(!list.length && !box.children.length){
-    box.innerHTML = '<div style="color:var(--text3);font-size:12.5px;">No calls in this period.</div>';
+    box.innerHTML = '<div style="color:var(--text3);font-size:12.5px;">'
+      + (cfData.searching ? 'No calls found — try a longer period.' : 'No calls in this period.') + '</div>';
   }
 }
 
@@ -10829,8 +10887,12 @@ function cuWorkSpan(start, end){
   const len = secs >= 3600 ? Math.floor(secs/3600) + ' h ' + Math.floor(secs%3600/60) + ' min'
             : Math.floor(secs/60) + ' min ' + (secs % 60) + ' s';
   const sameDay = a.toDateString() === b.toDateString();
-  return day + ' ' + tm(a) + ' - ' + (sameDay ? '' : b.toLocaleDateString('en-US', {month:'2-digit', day:'2-digit', year:'2-digit'}) + ' ')
-       + tm(b) + ' <span style="color:var(--text3)">(' + len + ')</span>';
+  // the pieces wrap between each other, never inside one, so the column can
+  // stay narrow without the time running into the agent's name
+  const nb = t => '<span style="white-space:nowrap">' + t + '</span>';
+  return nb(day + ' ' + tm(a) + ' -') + ' '
+       + nb((sameDay ? '' : b.toLocaleDateString('en-US', {month:'2-digit', day:'2-digit', year:'2-digit'}) + ' ') + tm(b)) + ' '
+       + '<span style="color:var(--text3);white-space:nowrap">(' + len + ')</span>';
 }
 // Everything that came from the database is shown as text, never as markup —
 // including inside attributes, where a quote in a name used to break the page.
@@ -12423,9 +12485,9 @@ function cuTab(which){
         <th class="col-phone">Phone</th><th>What was done</th>
         <th class="n col-billed">Billed</th><th class="col-rec">Recording</th></tr></thead><tbody>` +
       r.work.map(w=>`<tr>
-        <td style="white-space:nowrap;font-size:11.5px;">${cuWorkSpan(w.start, w.end)}
+        <td style="white-space:normal;font-size:11.5px;line-height:1.5;">${cuWorkSpan(w.start, w.end)}
           ${w.missed?'<span style="color:var(--red);font-size:10px;display:block">missed</span>':''}</td>
-        <td style="white-space:nowrap;">${esc(w.agent)||'—'}</td>
+        <td style="white-space:normal;overflow-wrap:anywhere;">${esc(w.agent)||'—'}</td>
         <td style="font-size:11.5px;white-space:nowrap;">${esc(w.phone)||''}
           <span style="color:var(--text3);font-size:10px;display:block">${w.direction}</span></td>
         <td class="note-cell" style="font-size:12.5px;color:var(--text);user-select:text;">
