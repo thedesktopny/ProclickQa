@@ -2168,6 +2168,14 @@ def _callback_list_all(hours=48, limit=100, dedupe=True):
                     'account_id': int(r[0]),
                     'account_name': ('%s %s' % (r[1] or '', r[2] or '')).strip() or None,
                     'minutes_left': (int(r[3]) if r[3] is not None else None)}
+            missing = [t for t in tails if t not in by_tail]
+            try:
+                for t, a in _accounts_by_any_number(cu, missing).items():
+                    by_tail[t] = {'account_id': a[0],
+                                  'account_name': ('%s %s' % (a[1] or '', a[2] or '')).strip() or None,
+                                  'minutes_left': a[3]}
+            except Exception as e:
+                print('[cms] second account lookup: ' + str(e)[:120])
             for call in out['calls']:
                 found = by_tail.get(call['phone'][-10:])
                 if found:
@@ -2656,6 +2664,12 @@ def missed_calls(hours=48, include_resolved=False, limit=200):
                     row['account_id'] = int(a[0])
                     row['account'] = ('%s %s' % (a[1] or '', a[2] or '')).strip()
                     row['minutes_left'] = int(a[3] or 0)
+            missing = [k for k in keys if all(r_['account_id'] is None for r_ in last10[k])]
+            for t, a in _accounts_by_any_number(cu, missing).items():
+                for row in last10.get(t, []):
+                    row['account_id'] = a[0]
+                    row['account'] = ('%s %s' % (a[1] or '', a[2] or '')).strip()
+                    row['minutes_left'] = a[3]
         except Exception as e:
             print('[cms] missed-call account lookup: ' + str(e)[:120])
 
@@ -2805,18 +2819,21 @@ def find_account_by_phone(phone):
                      ISNULL(a.MinutesLeft,0), a.isBusiness
               FROM Account a WHERE ISNULL(a.Deleted,0) = 0 AND """
 
-    primary = rows(base + 'RIGHT(%s, 10) = %%s' % (CLEAN % 'a.Phone'), (last10,))
-    others = rows(base + '(RIGHT(%s, 10) = %%s OR RIGHT(%s, 10) = %%s OR RIGHT(%s, 10) = %%s)'
+    # each number in a field is matched on its own — a field can hold two
+    # numbers ("7188510041 | 3475781941") and the caller may be on the first
+    pat = '%' + last10 + '[^0-9]%'
+    primary = rows(base + "%s + '|' LIKE %%s" % (CLEAN % 'a.Phone'), (pat,))
+    others = rows(base + "(%s + '|' LIKE %%s OR %s + '|' LIKE %%s OR %s + '|' LIKE %%s)"
                   % (CLEAN % 'a.Mobile', CLEAN % 'a.HomePhone', CLEAN % 'a.OtherPhone'),
-                  (last10, last10, last10))
+                  (pat, pat, pat))
     associated = []
     try:
         associated = rows("""SELECT TOP 10 a.Id, a.FirstName, a.LastName, a.Phone,
                                     ISNULL(a.MinutesLeft,0), a.isBusiness
                              FROM AccountAssociatedPhoneNumber p
                              JOIN Account a ON a.Id = p.AccountId
-                             WHERE RIGHT(%s, 10) = %%s""" % (CLEAN % 'p.Phone'),
-                          (last10,))
+                             WHERE %s + '|' LIKE %%s""" % (CLEAN % 'p.Phone'),
+                          (pat,))
     except Exception:
         pass
 
@@ -2892,6 +2909,35 @@ def associate_number(account_id, phone):
         return False
 
 
+# A phone field with its usual decorations taken out, so numbers compare as digits.
+_PHONE_CLEAN = "REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(ISNULL(%s,''),'-',''),' ',''),'(',''),')',''),'.','')"
+
+
+def _accounts_by_any_number(cu, tails):
+    """{last-10-digits: (id, first, last, minutes)} for numbers that are not the
+    LAST number in an account's phone field — "7188510041 | 3475781941" holds
+    two, and the quick lookups only see the second. Used as a second pass for
+    the numbers the quick lookup did not find; at most 40 at a time."""
+    tails = [t for t in dict.fromkeys(tails) if len(t) == 10][:40]
+    if not tails:
+        return {}
+    col = _PHONE_CLEAN % 'Phone'
+    cond = ' OR '.join(["%s + '|' LIKE %%s" % col] * len(tails))
+    cu.execute("""SELECT Id, FirstName, LastName, ISNULL(MinutesLeft,0), %s
+                  FROM Account WHERE ISNULL(Deleted,0) = 0 AND (%s)""" % (col, cond),
+               tuple('%' + t + '[^0-9]%' for t in tails))
+    found = {}
+    while True:
+        r = cu.fetchone()
+        if not r:
+            break
+        digits_in = ''.join(ch if ch.isdigit() else ' ' for ch in str(r[4] or '')).split()
+        for t in tails:
+            if any(d.endswith(t) for d in digits_in):
+                found.setdefault(t, (int(r[0]), r[1], r[2], int(r[3] or 0)))
+    return found
+
+
 def customer_search(q, limit=40):
     """Find an account by name, phone or email.
 
@@ -2920,14 +2966,28 @@ def customer_search(q, limit=40):
         # slower, and less useful.
         n = min(10, len(digits))
         tail = digits[-n:]
-        cu.execute("""SELECT TOP %d a.Id, a.FirstName, a.LastName, a.Phone, a.Email,
-                             a.MinutesLeft, a.isBusiness, a.Deleted
-                      FROM Account a
-                      WHERE RIGHT(a.Phone, %d) = %%s
-                         OR RIGHT(a.HomePhone, %d) = %%s
-                         OR RIGHT(a.Mobile, %d) = %%s
-                      ORDER BY a.LastName, a.FirstName""" % (int(limit), n, n, n),
-                   (tail, tail, tail))
+        # One phone field can hold SEVERAL numbers ("7188510041 | 3475781941").
+        # Looking only at the end of the field found the last number and never
+        # the first. Each number in the field is matched on its own now: the
+        # digits must end a number — followed by a separator or the end of the
+        # field — so "5989" still means "a number ending 5989". Every phone
+        # field on the account and its extra numbers are searched.
+        pat = '%' + tail + '[^0-9]%'
+        cols = [_PHONE_CLEAN % c for c in ('a.Phone', 'a.HomePhone', 'a.Mobile', 'a.OtherPhone')]
+        where = ' OR '.join("%s + '|' LIKE %%s" % c for c in cols)
+        sql = """SELECT TOP %d a.Id, a.FirstName, a.LastName, a.Phone, a.Email,
+                        a.MinutesLeft, a.isBusiness, a.Deleted
+                 FROM Account a
+                 WHERE %s%s
+                 ORDER BY a.LastName, a.FirstName"""
+        extra = (" OR EXISTS (SELECT 1 FROM AccountAssociatedPhoneNumber p WHERE p.AccountId = a.Id"
+                 " AND %s + '|' LIKE %%s)" % (_PHONE_CLEAN % 'p.Phone'))
+        try:
+            cu.execute(sql % (int(limit), where, extra), (pat,) * (len(cols) + 1))
+        except Exception:
+            # no extra-numbers table on this database: the account's own fields
+            conn.close(); conn = _connect(); cu = conn.cursor()
+            cu.execute(sql % (int(limit), where, ''), (pat,) * len(cols))
     else:
         cu.execute("""SELECT TOP %d a.Id, a.FirstName, a.LastName, a.Phone, a.Email,
                              a.MinutesLeft, a.isBusiness, a.Deleted
