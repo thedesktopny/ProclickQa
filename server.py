@@ -1241,18 +1241,56 @@ def require_manager(f):
 
 
 def _portal_ticket(user, minutes=600):
-    import hmac, hashlib, base64, time, json as _json
-    exp = int(time.time()) + minutes * 60
+    import time
+    now = int(time.time())
     # 'i' is when this ticket was issued — without it a revocation cannot tell
-    # an old ticket from one minted a second later by a fresh sign-in
-    body = _json.dumps({'u': user.get('user_id'), 'e': user.get('employee_id'),
-                        'n': user.get('name'), 'm': bool(user.get('is_manager')),
-                        'q': bool(user.get('is_qa')),
-                        'a': bool(user.get('is_admin')),
-                        'i': int(time.time()), 'x': exp}, separators=(',', ':'))
+    # an old ticket from one minted a second later by a fresh sign-in.
+    # 's' is when the person actually signed in, kept through renewals.
+    return _sign_portal({'u': user.get('user_id'), 'e': user.get('employee_id'),
+                         'n': user.get('name'), 'm': bool(user.get('is_manager')),
+                         'q': bool(user.get('is_qa')),
+                         'a': bool(user.get('is_admin')),
+                         'i': now, 's': now, 'x': now + minutes * 60})
+
+
+def _sign_portal(data):
+    import hmac, hashlib, base64, json as _json
+    body = _json.dumps(data, separators=(',', ':'))
     secret = (os.getenv('SECRET_KEY') or app.secret_key or 'voiceguard').encode()
     sig = hmac.new(secret, body.encode(), hashlib.sha256).hexdigest()[:32]
     return base64.urlsafe_b64encode((body + '.' + sig).encode()).decode()
+
+
+# A sign-in used to end exactly ten hours after it began, active or not — so a
+# ten-hour shift with a little overtime was logged out at the end of the shift
+# (Rowena, Nov 2026, mid back-to-back calls). Now, while the CMS is open and
+# talking to the server, a ticket with under three hours left is quietly
+# renewed. It still ends for good 16 hours after the person signed in, when
+# they sign out, or when they are locked; a closed tab stops renewing at once.
+PORTAL_RENEW_LEFT = 3 * 3600
+PORTAL_MAX_SESSION = 16 * 3600
+
+
+@app.after_request
+def _portal_renew(resp):
+    try:
+        t = request.headers.get('X-Portal-Ticket')
+        if not t:
+            return resp
+        import time
+        p = _portal_user(t)               # checks signature, expiry and sign-outs
+        if not p:
+            return resp
+        now = int(time.time())
+        started = int(p.get('s') or p.get('i') or now)
+        if int(p.get('x', 0)) - now < PORTAL_RENEW_LEFT and now - started < PORTAL_MAX_SESSION:
+            fresh = dict(p)
+            fresh['x'] = min(now + 600 * 60, started + PORTAL_MAX_SESSION)
+            if fresh['x'] > int(p.get('x', 0)):
+                resp.headers['X-Portal-Ticket-Renew'] = _sign_portal(fresh)
+    except Exception as e:
+        print('[portal] renew: ' + str(e)[:120])
+    return resp
 
 
 def _portal_ticket_from_request():
@@ -1306,9 +1344,12 @@ def revoke_portal_sessions(user_id, reason=''):
         return False
 
 
-def _portal_user(ticket):
+def _portal_user(ticket, allow_pending=False):
     """Returns the signed-in person, or None. The signature is checked before
-    anything in the ticket is believed."""
+    anything in the ticket is believed. The "waiting for the emailed code"
+    ticket is signed the same way, so it is refused here unless the caller is
+    the code check itself — otherwise a password alone, without the code,
+    would have been a working sign-in."""
     import hmac, hashlib, base64, time, json as _json
     try:
         raw = base64.urlsafe_b64decode(str(ticket).encode()).decode()
@@ -1319,6 +1360,8 @@ def _portal_user(ticket):
             return None
         data = _json.loads(body)
         if int(data.get('x', 0)) < time.time():
+            return None
+        if data.get('n') == 'PENDING-CODE' and not allow_pending:
             return None
 
         # A valid signature is not enough on its own. If the person signed out,
@@ -3843,6 +3886,9 @@ def _build_shifts_from_events(events):
     Reconstruct shifts from raw clocker events for ONE employee.
     events: list of dicts with keys event_time (datetime), status, break_minutes
 
+    A repeated 'OnBreak' with no 'In' in between is the same break pressed twice
+    and is ignored the same way.
+
     Rule (confirmed with CMS side): take only the EARLIEST 'In' of a shift and ignore
     every later 'In' — regardless of how far apart they are — UNLESS an 'Out' or an
     'OnBreak' happened in between. Duplicate 'In' rows can be seconds OR hours apart,
@@ -3878,6 +3924,19 @@ def _build_shifts_from_events(events):
                 continue
 
         elif st == 'OnBreak':
+            if cur is not None and on_break and cur['breaks']:
+                # A second "break" while already on one is the same break pressed
+                # twice (seconds apart, Rowena Nov 2026). Treating it as a new
+                # break left the first one open — counted at its declared
+                # minutes on top of the real break (25 + 23 = 48m). The break
+                # keeps its first start; a changed declared length is kept.
+                b = cur['breaks'][-1]
+                dm = float(e.get('break_minutes') or 0)
+                if dm:
+                    b['declared_minutes'] = dm
+                    if not b['closed']:
+                        b['minutes'] = dm
+                continue
             if cur is None:
                 # Break with no preceding login = report window began mid-shift
                 cur = {'login': t, 'logout': None, 'breaks': [], 'partial': True}
@@ -6417,7 +6476,7 @@ def portal_login_route():
                                              'employee_id': user.get('employee_id'),
                                              'name': 'PENDING-CODE',
                                              'is_manager': False, 'is_admin': False,
-                                             'is_qa': False}),
+                                             'is_qa': False}, minutes=15),
             })
 
     return _issue_portal_session(user, remember_device=False)
@@ -6546,7 +6605,7 @@ def portal_verify_code():
     d = request.json or {}
     _t.sleep(0.3)                       # slows down anyone guessing codes
 
-    pending = _portal_user(d.get('challenge') or '')
+    pending = _portal_user(d.get('challenge') or '', allow_pending=True)
     if not pending or pending.get('n') != 'PENDING-CODE':
         # the challenge ticket did not verify — expired, wrong signature, or
         # refused by the revocation list
@@ -11431,6 +11490,88 @@ def clock_agent_out():
     except Exception:
         pass
     out['agent'] = st.get('name')
+    return jsonify(out), (200 if out.get('ok') else 400)
+
+
+@app.route('/api/live/phone-reset', methods=['POST'])
+def live_phone_reset():
+    """A team leader, manager or admin frees an extension that the phone system
+    shows as "in use" when the agent has no call — the agent then gets calls
+    and can dial out again.
+
+    It must never free someone who is really on a call, and never make a phone
+    that is not connected look available. So, before anything changes:
+      1. a call that is still open on this extension in the CMS's call log
+         (any open call from the last three hours — no real call lasts longer,
+         and a stuck status has no open call behind it) refuses the reset;
+      2. an "in use" that started only minutes ago refuses it too — a call that
+         has just been answered may not be in the log yet;
+      3. the phone system is asked whether the agent's phone app is connected
+         (registered); if it is not, nothing changes — they need to open it.
+    """
+    if not _timesheet_viewer():
+        return jsonify({'ok': False, 'error': 'Only team leaders, managers and admins can reset a phone.'}), 403
+    import cms_write, cms_db
+    d = request.json or {}
+    ext = ''.join(ch for ch in str(d.get('extension') or '') if ch.isdigit())[:6]
+    if not ext:
+        return jsonify({'ok': False, 'error': 'Which extension?'}), 400
+
+    # 1. a real call open on this extension
+    try:
+        conn = cms_db._connect(); cu = conn.cursor()
+        cu.execute("""SELECT TOP 1 c.Phone, DATEDIFF(minute, c.Started, GETDATE())
+                      FROM PhoneCallsLog c
+                      WHERE c.Ended IS NULL
+                        AND (c.PickedUpBy = %s OR c.Agent = %s)
+                        AND c.Started >= DATEADD(hour, -3, GETDATE())
+                      ORDER BY c.Started DESC""", (ext, ext))
+        open_call = cu.fetchone()
+        # 2. how long the CMS has seen this extension "in use"
+        cu.execute("""SELECT TOP 1 DATEDIFF(minute, SipPhoneTime, GETDATE())
+                      FROM Tmp_LiveEmployeesStatusFinal WHERE Extension = %s""", (ext,))
+        row = cu.fetchone()
+        conn.close()
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'Could not check the call log, so nothing was changed: ' + str(e)[:160]}), 400
+    if open_call:
+        return jsonify({'ok': False, 'open_call': True,
+                        'error': 'Extension %s has a real call open (%s, %d min). It was NOT reset. '
+                                 'If the agent is truly not on it, ask them to close and reopen their phone app.'
+                                 % (ext, open_call[0] or 'unknown number', int(open_call[1] or 0))}), 409
+    in_use_min = int(row[0]) if row and row[0] is not None else None
+    if in_use_min is not None and in_use_min < 10:
+        return jsonify({'ok': False,
+                        'error': 'Extension %s has only been "in use" for %d min — it may be a call that is just '
+                                 'starting. Wait until it has been 10 minutes with no call, then reset.' % (ext, in_use_min)}), 409
+
+    # 3. is the phone app connected?
+    try:
+        connected = cms_write.asterisk_phone_connected(ext)
+    except Exception as e:
+        connected = None
+        print('[phone-reset] could not check registration: ' + str(e)[:160])
+    if connected is False:
+        return jsonify({'ok': False, 'not_connected': True,
+                        'error': 'Extension %s\'s phone app is not connected to the phone system, so it was NOT '
+                                 'made available. Ask the agent to open their phone app (or restart it); it will '
+                                 'show available by itself once it connects.' % ext}), 409
+    if connected is None and not d.get('phone_checked'):
+        # the phone system does not say — the person resetting confirms it
+        return jsonify({'ok': False, 'need_phone_check': True,
+                        'error': 'The phone system could not tell whether the phone app is connected.'}), 409
+
+    try:
+        out = cms_write.asterisk_reset_in_use(ext, _who(), reason=d.get('reason') or '')
+    except cms_write.WriteRefused as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'Could not reach the phone system: ' + str(e)[:200]}), 400
+    out['phone_connected'] = connected
+    try:
+        _LIVE_SYNC_AT.clear(); _shared_bust()
+    except Exception:
+        pass
     return jsonify(out), (200 if out.get('ok') else 400)
 
 

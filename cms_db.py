@@ -1618,10 +1618,11 @@ def staffing_picture(weeks=4, slot_minutes=30, target_seconds=20, target_answere
             events.append((int(r[0] or 0), r[1], int(r[2]), int(r[3] or 0)))
 
         shifts, breaks = [], []
-        open_at = {}
+        open_at, last_status = {}, {}
         for emp, when, status, break_mins in events:
             if not when:
                 continue
+            was = last_status.get(emp); last_status[emp] = status
             if status == 1:
                 # already in? then this is coming back from a break or a
                 # repeated press, not a second shift
@@ -1631,7 +1632,8 @@ def staffing_picture(weeks=4, slot_minutes=30, target_seconds=20, target_answere
                 start_at = open_at.pop(emp, None)
                 if start_at and when > start_at and (when - start_at).total_seconds() <= 20 * 3600:
                     shifts.append((start_at, when))
-            elif status == 2 and break_mins > 0:
+            elif status == 2 and break_mins > 0 and was != 2:
+                # "break" pressed twice in a row is one break, not two
                 breaks.append((when, break_mins))
 
         # anyone still clocked in right now is on the floor until now
