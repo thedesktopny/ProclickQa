@@ -1271,6 +1271,40 @@ PORTAL_RENEW_LEFT = 3 * 3600
 PORTAL_MAX_SESSION = 16 * 3600
 
 
+def _portal_why(ticket):
+    """Why a CMS sign-in stopped working, in words for the person — so "your
+    sign-in has expired" says what actually happened (Rowena, Nov 2026)."""
+    import hmac, hashlib, base64, time, json as _json
+    try:
+        raw = base64.urlsafe_b64decode(str(ticket).encode()).decode()
+        body, sig = raw.rsplit('.', 1)
+        secret = (os.getenv('SECRET_KEY') or app.secret_key or 'voiceguard').encode()
+        if not hmac.compare_digest(sig, hmac.new(secret, body.encode(), hashlib.sha256).hexdigest()[:32]):
+            return 'invalid'
+        data = _json.loads(body)
+        now = time.time()
+        started = int(data.get('s') or data.get('i') or 0)
+        try:
+            conn = get_db(); c = conn.cursor()
+            c.execute('SELECT revoked_epoch, reason FROM portal_revocations WHERE user_id = %s',
+                      (str(data.get('u', '')),))
+            row = c.fetchone(); conn.close()
+        except Exception:
+            row = None
+        if row and int(data.get('i', 0) or 0) < int(row[0] or 0):
+            reason = str(row[1] or '')
+            if reason.startswith('locked'):
+                return 'locked'
+            if reason.startswith('disabled'):
+                return 'disabled'
+            return 'signed_out_elsewhere'
+        if int(data.get('x', 0)) < now:
+            return 'max_session' if started and now - started >= PORTAL_MAX_SESSION - 60 else 'expired'
+        return 'unknown'
+    except Exception:
+        return 'invalid'
+
+
 @app.after_request
 def _portal_renew(resp):
     try:
@@ -1280,6 +1314,8 @@ def _portal_renew(resp):
         import time
         p = _portal_user(t)               # checks signature, expiry and sign-outs
         if not p:
+            if resp.status_code == 401:
+                resp.headers['X-Portal-Why'] = _portal_why(t)
             return resp
         now = int(time.time())
         started = int(p.get('s') or p.get('i') or now)
@@ -13426,10 +13462,13 @@ def sb_hf(hfpath):
     return r
 
 @app.route('/skinblock3')
-def skinblock3_page():
-    """Skin Block, third design: person outlines from YOLO, skin inside them
-    from MediaPipe. The one built and tested on David's own samples."""
-    return _serve_page('skinblock3.html')
+@app.route('/skinblock2')
+def skinblock_old_addresses():
+    """Old Skin Block addresses. There is one Skin Block now (David, Nov 2026);
+    anything still pointing here — a bookmark, an open tab — goes to it."""
+    from flask import redirect
+    q = request.query_string.decode()
+    return redirect('/skinblock' + ('?' + q if q else ''), code=302)
 
 
 @app.route('/models/<path:name>')
@@ -13445,27 +13484,12 @@ def model_file(name):
     return resp
 
 
-@app.route('/skinblock2')
-def skinblock2_page():
-    """The rebuilt Skin Block — MediaPipe's multiclass model, where skin is a
-    class the model learned rather than a colour range. Served beside the old
-    page so the same photos can be put through both and compared."""
-    return _serve_page('skinblock2.html')
-
-
 @app.route('/skinblock')
 def skinblock_page():
-    """Public — no login required so any agent can use it directly.
-
-    The two Cross-Origin headers below switch the browser into 'isolated' mode,
-    which is what unlocks multi-threaded WASM — the detector then uses all of
-    the PC's cores instead of one. Everything the page loads is same-origin, so
-    nothing breaks.
-    """
-    resp = make_response(send_from_directory('.', 'skinblock.html'))
-    resp.headers['Cross-Origin-Opener-Policy'] = 'same-origin'
-    resp.headers['Cross-Origin-Embedder-Policy'] = 'require-corp'
-    return resp
+    """The one Skin Block: people outlines (YOLO), a body check, a face finder
+    and skin from MediaPipe, all in the browser. Public — no login needed.
+    (Before Nov 2026 there were three pages; the fast one won and is this.)"""
+    return _serve_page('skinblock.html')
 
 # Hostnames that serve ONLY the CMS side. Anything else on these addresses is
 # refused, so this stays a separate system from the QA dashboard even though

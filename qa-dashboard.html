@@ -1937,7 +1937,7 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
     <div class="page-title">🫥 Skin Block</div>
     <div class="topbar-right">
       <button class="btn btn-outline" onclick="sbReload()" style="font-size:12px;">Reload</button>
-      <a href="/skinblock3" target="_blank" rel="noopener" class="btn btn-outline"
+      <a href="/skinblock" target="_blank" rel="noopener" class="btn btn-outline"
          style="font-size:12px;text-decoration:none;">Open in its own tab</a>
     </div>
   </div>
@@ -3244,7 +3244,7 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
   <div class="topbar">
     <button class="navtoggle" onclick="toggleNav()" aria-label="Menu">☰</button><div class="page-title">🖼️ Skin Block</div>
     <div class="topbar-right">
-      <a href="/skinblock3" target="_blank" class="btn btn-outline" style="text-decoration:none;">Open tool ↗</a>
+      <a href="/skinblock" target="_blank" class="btn btn-outline" style="text-decoration:none;">Open tool ↗</a>
       <button class="btn btn-outline" onclick="openSkinblockSettings()">⚙️ Settings</button>
     </div>
   </div>
@@ -3956,7 +3956,16 @@ function clearSignedOutBar(){
   authFailures = 0;
 }
 
-function handleSignedOut(){
+/* What to tell the person, from the reason the server gives. */
+const SIGNED_OUT_WHY = {
+  signed_out_elsewhere: 'You were signed out because this login was signed out on another computer or phone (signing out ends it everywhere).',
+  max_session: 'Your sign-in reached its 16-hour limit.',
+  expired: 'Your sign-in expired.',
+  locked: 'This login was locked.',
+  disabled: 'This login was turned off.',
+};
+function handleSignedOut(why){
+  if(why) window.__signedOutWhy = why;
   // Not signed in yet is NOT the same as signed out. On the sign-in screen the
   // pollers are still running and every request is refused, which used to show
   // "your sign-in has expired" to somebody who had not signed in at all.
@@ -3985,7 +3994,7 @@ function handleSignedOut(){
       bar.className = 'signed-out-bar';
       bar.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:400;padding:12px 20px;'
         + 'background:var(--red);color:#fff;font-size:13px;font-weight:600;text-align:center;cursor:pointer;';
-      bar.textContent = 'Your sign-in has expired. Click here to sign in again.';
+      bar.textContent = (SIGNED_OUT_WHY[window.__signedOutWhy] || 'Your sign-in has expired.') + ' Click here to sign in again.';
       bar.onclick = () => location.reload();
       document.body.appendChild(bar);
     }else{
@@ -4064,14 +4073,27 @@ document.addEventListener('visibilitychange', ()=>{
   }
 });
 
+/* The server renews a CMS sign-in that is running low while the page is in
+   use; take the new one so a long shift is not cut off. */
+function portalTakeRenewal(r){
+  try{
+    const n = r.headers.get('X-Portal-Ticket-Renew');
+    if(n && typeof portalTicket !== 'undefined' && portalTicket){
+      portalTicket = n;
+      try{ sessionStorage.setItem('portal_ticket', n); }catch(e){}
+    }
+  }catch(e){}
+}
+
 const API={
   async get(p){
     const r=await fetch(p,{headers:authHeaders()});
+    portalTakeRenewal(r);
     if(r.status===401){
       if(p==='/api/auth-check'){
         if(!(typeof IS_PORTAL_EARLY !== 'undefined' && IS_PORTAL_EARLY)){ clearToken(); showModal('login-modal'); }
       }else{
-        handleSignedOut();
+        handleSignedOut(r.headers.get('X-Portal-Why'));
       }
       throw new Error('Unauthorized');
     }
@@ -4081,7 +4103,8 @@ const API={
   },
   async post(p,d){
     const r=await fetch(p,{method:'POST',headers:authHeaders(),body:JSON.stringify(d)});
-    if(r.status===401&&p!=='/api/login'){ handleSignedOut(); throw new Error('Unauthorized'); }
+    portalTakeRenewal(r);
+    if(r.status===401&&p!=='/api/login'){ handleSignedOut(r.headers.get('X-Portal-Why')); throw new Error('Unauthorized'); }
     if(r.status!==401) authFailures = 0;
     return r.json();
   },
@@ -6824,18 +6847,16 @@ window.addEventListener('hashchange', ()=>{
    frame rather than rebuilt here. Loaded only when the page is opened —
    the detector is around 45 MB and nobody who never covers a photo should
    pay for it. */
-/* The agents' Skin Block (/skinblock) — the precise detector, built for
-   screenshots full of small thumbnails, with PDFs and per-picture colours.
-   The agent's extension goes with it, so nobody has to type it again. */
+/* The agents' Skin Block (/skinblock) — the one Skin Block page. The agent's
+   extension goes with it, so nobody has to type it again. */
 let sbExt = null;
 async function sbUrl(extra){
   if(sbExt === null){
     sbExt = '';
     try{ const r = await API.get('/api/portal/me'); sbExt = (r && r.extension) || ''; }catch(e){}
   }
-  // back on /skinblock3 — the fast one inside the CMS (the other one ran
-  // single-threaded inside the frame and was much slower)
-  return '/skinblock3' + (extra ? '?' + extra : '');
+  // the one Skin Block (the fast design; the older pages were retired)
+  return '/skinblock' + (extra ? '?' + extra : '');
 }
 /* The frame is made fresh each time rather than sitting in the page. A frame
    written into the page is one the browser "restores" on every refresh — to
@@ -10645,6 +10666,10 @@ function lvRenderFloor(){
         <div><span class="k">calls today:</span> ${a.calls_in} in · ${a.calls_out} out</div>
         ${a.minutes_on_call?`<div><span class="k">time on calls:</span> ${a.minutes_on_call} min</div>`:''}
         ${a.last_call_at?`<div><span class="k">last call:</span> ${lvAgo(a.last_call_at)}${a.last_call_phone?' · '+a.last_call_phone:''}</div>`:'<div class="k">no calls yet today</div>'}
+        ${busy && (portalIsManager || portalIsTL || !IS_PORTAL_EARLY) ? `<div style="margin-top:6px;">
+          <button class="btn btn-outline" style="font-size:11px;padding:4px 8px;"
+                  onclick="event.stopPropagation(); lvPhoneReset('${esc(String(a.extension||''))}', '${esc(a.name||'').replace(/'/g, '')}')"
+                  title="Use when the phone shows 'in use' but the agent has no call">🔄 Stuck on "in use"? Reset phone</button></div>` : ''}
         <div style="margin-top:6px;color:var(--accent);">click for their full day →</div>
 
       </div>
@@ -10714,6 +10739,26 @@ function lvRenderInProgress(){
               title="Find whose account this is and start work">Start work</button>
       <div style="font-size:11.5px;color:var(--text3);">${lvTime(c.started)}</div>
     </div>`).join('') || '';
+}
+
+/* The phone system sometimes keeps an extension "in use" after a call ends
+   badly — the agent then gets no calls and cannot dial out. This frees it. */
+async function lvPhoneReset(ext, name){
+  if(!ext) return;
+  if(!confirm(`Reset the phone for ${name || 'ext ' + ext} (ext ${ext})?\n\nOnly do this if they are NOT on a call. `
+             + `It tells the phone system the extension is free again.`)) return;
+  try{
+    let r = await API.post('/api/live/phone-reset', { extension: ext, reason: 'shown in use with no call' });
+    if(!r.ok && r.need_phone_check){
+      // the phone system could not say whether their phone app is connected
+      if(!confirm(`The phone system could not tell whether ${name || 'ext ' + ext}'s phone app is connected.\n\n`
+                 + `Ask them: is the phone app open and showing connected/online?\n`
+                 + `Press OK only if it is.`)) return;
+      r = await API.post('/api/live/phone-reset', { extension: ext, reason: 'shown in use with no call', phone_checked: true });
+    }
+    if(r.ok){ showToast(`Ext ${ext} is free again — they can take and make calls.`); loadLive(); }
+    else showToast(r.error || 'Could not reset it.', true);
+  }catch(e){ showToast('Could not reset it: ' + e.message, true); }
 }
 
 function lvOpenAgent(id){
