@@ -898,6 +898,21 @@ def portal_login(username, password):
         conn.close()
         raise RuntimeError('That password is not right')
 
+    # Logins made by the new CMS before this fix were stored in a format the
+    # old CMS cannot read, so the person could get in here but not there. The
+    # password has just been proved, so store it again in the format both read.
+    try:
+        import base64 as _b64
+        if phash and _b64.b64decode(phash)[:1] == b'\x01':
+            new_hash = aspnet_auth.make_hash_v2(password)
+            if aspnet_auth.verify_password(password, new_hash):
+                fx = conn.cursor()
+                fx.execute('UPDATE AspNetUsers SET PasswordHash = %s WHERE Id = %s AND PasswordHash = %s',
+                           (new_hash, user_id, phash))
+                conn.commit()
+    except Exception as e:
+        print('[portal] could not convert the password for the old CMS: ' + str(e)[:120])
+
     import datetime as _dt
     if lockout_on and lockout_until and lockout_until > _dt.datetime.utcnow():
         conn.close()
@@ -4566,29 +4581,54 @@ def clocker_between(dt_from, dt_to):
 
 
 def calls_between(dt_from, dt_to):
-    """When each employee was actually on a call: {employee_id: [(start, end)]}.
+    """When each employee was actually busy with a customer: {employee_id: [(start, end)]}.
 
     Used for one rule only — overtime is paid for a stretch in which the agent
-    took a call. Missed calls do not count; an outbound call does."""
+    took a call. Missed calls do not count; an outbound call does.
+
+    A call whose end was never written (Ended empty, or no later than its
+    start) used to count only as the moment it began — so a long call that
+    started before the shift ended and ran past it looked like no call at all
+    in the overtime (Marlon, ext 325, 10/14, on a call until 8:16 PM). Such a
+    call now ends when the agent's work on it ended. The agent's own work on
+    customer accounts counts as well — that is the call's notes and orders,
+    finished after hanging up — capped at two hours per piece of work."""
     conn = _connect(); cu = conn.cursor()
     try:
-        cu.execute("""SELECT e.Id, COALESCE(c.PickedUpTime, c.Started), c.Ended
+        cu.execute("""SELECT e.Id, COALESCE(c.PickedUpTime, c.Started), c.Ended, w.EndTime
                       FROM PhoneCallsLog c
                       JOIN Employee e
                         ON CAST(e.Extension AS varchar(32)) =
                            COALESCE(NULLIF(LTRIM(RTRIM(c.PickedUpBy)), ''),
                                                   NULLIF(LTRIM(RTRIM(c.Agent)), ''))
+                      LEFT JOIN AccountWork w ON w.Id = c.AccountWorkId
                       WHERE c.Started >= %s AND c.Started < %s
                         AND (ISNULL(c.IsMissed, 0) = 0 OR ISNULL(c.IsOutbound, 0) = 1)""",
                    (dt_from, dt_to))
         rows = _all_rows(cu)
+        try:
+            cu.execute("""SELECT EmployeeId, StartTime, EndTime FROM AccountWork
+                          WHERE StartTime >= %s AND StartTime < %s""", (dt_from, dt_to))
+            work = _all_rows(cu)
+        except Exception as e:
+            print('[cms] account work for overtime: ' + str(e)[:120])
+            work = []
     finally:
         conn.close()
+    from datetime import timedelta as _td
     out = {}
-    for emp, start, end in rows:
+    for emp, start, end, work_end in rows:
         if emp is None or start is None:
             continue
-        out.setdefault(int(emp), []).append((start, end or start))
+        if not end or end <= start:
+            end = work_end if (work_end and work_end > start and work_end - start <= _td(hours=4)) else start
+        out.setdefault(int(emp), []).append((start, end))
+    for emp, start, end in work:
+        if emp is None or start is None:
+            continue
+        if not end or end <= start or end - start > _td(hours=2):
+            end = start
+        out.setdefault(int(emp), []).append((start, end))
     return out
 
 

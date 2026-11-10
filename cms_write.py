@@ -1821,7 +1821,8 @@ def create_agent(fields, who, dry_run=True):
     in ONE transaction, so a failure leaves nothing behind rather than a login
     with no employee or an employee who cannot sign in.
 
-    The password hash is made in ASP.NET Identity's own v3 format and verified
+    The password hash is made in ASP.NET Identity's v2 format (the only one the
+    old CMS can read) and verified
     with the same code the CMS login uses before anything is saved — a hash in
     the wrong shape would create somebody who simply cannot get in, and that is
     not discovered until they try.
@@ -1855,8 +1856,11 @@ def create_agent(fields, who, dry_run=True):
     if not extension:
         raise WriteRefused('An extension is needed, or calls cannot reach them.')
 
-    # prove the hash works before it is written, not after
-    password_hash = aspnet_auth.make_hash_v3(password)
+    # prove the hash works before it is written, not after.
+    # The OLD CMS runs the original ASP.NET Identity, which only reads the older
+    # (v2) password format. A v3 hash worked in the new CMS but the old one said
+    # "Invalid login attempt" — so new logins are made in v2, which both read.
+    password_hash = aspnet_auth.make_hash_v2(password)
     if not aspnet_auth.verify_password(password, password_hash):
         raise WriteRefused('The password could not be stored safely. Nothing was saved.')
 
