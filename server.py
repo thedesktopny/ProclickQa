@@ -9058,10 +9058,12 @@ def _live_calls_reader():
                 cu.execute("""SELECT c.Id, c.Phone, c.Started, c.PickedUpTime,
                                      c.PickedUpBy, c.Agent, c.IsOutbound,
                                      c.DialStatus, c.CalledExtension,
-                                     c.PreselectedAccountPhone, c.AccountToUse
+                                     c.PreselectedAccountPhone, c.AccountToUse,
+                                     c.AstriskUniqId
                               FROM PhoneCallsLog c
                               WHERE c.Ended IS NULL
-                                AND c.Started >= DATEADD(hour, -4, GETDATE())""")
+                                AND c.Started >= DATEADD(hour, -4, GETDATE())
+                              ORDER BY c.Id""")
                 by_ext = {}
                 while True:
                     r = cu.fetchone()
@@ -9074,24 +9076,40 @@ def _live_calls_reader():
                             'called': r[8], 'live': True,
                             # the account the caller picked on the phone menu —
                             # how the old CMS knew the caller "verified"
-                            'preselected': ((r[9] or r[10] or '').strip() or None)}
+                            'preselected': ((r[9] or r[10] or '').strip() or None),
+                            'uniq': (str(r[11]).strip() if r[11] else None)}
                     for ext in {(r[4] or '').strip(), (r[5] or '').strip()}:
                         if ext:
-                            # the answered call wins over one still ringing
-                            existing = by_ext.get(ext)
-                            if not existing or (call['picked_up'] and not existing.get('picked_up')):
-                                by_ext[ext] = call
+                            # rows come oldest first, so the NEWEST open call
+                            # wins. Before, the first one found won — and a call
+                            # the CMS never closed kept beating the real one,
+                            # which is how an agent saw the previous caller.
+                            by_ext[ext] = call
                 conn.close()
+                table_by_uniq = {c['uniq']: c for c in by_ext.values() if c.get('uniq')}
+                now_t = _time.time()
                 # anything the phone system reported directly is fresher than
-                # the table, so it wins until the call ends
-                for k, v in _LIVE_CALLS['by_ext'].items():
-                    if v.get('from_phone_system'):
-                        # keep the account the caller picked, which only the
-                        # table has, on the fresher phone-system copy
-                        t = by_ext.get(k)
-                        if t and t.get('preselected') and not v.get('preselected'):
+                # the table, so it wins — but only while the table agrees the
+                # call is still open, or for a few seconds while the table
+                # catches up. The app runs several workers and the "call ended"
+                # message reaches only one of them; without this the others
+                # kept showing a finished call until the next one arrived.
+                for k, v in list(_LIVE_CALLS['by_ext'].items()):
+                    if not v.get('from_phone_system'):
+                        continue
+                    t = table_by_uniq.get(str(v.get('uniq') or ''))
+                    if t:
+                        v['call_id'] = v.get('call_id') or t['call_id']
+                        if t.get('preselected') and not v.get('preselected'):
                             v['preselected'] = t['preselected']
-                        by_ext[k] = v
+                    elif now_t - (v.get('event_t') or 0) > 20:
+                        continue                  # over, or another worker heard the end
+                    by_ext[k] = v
+                # look the callers up now, while the phone rings, so the popup
+                # has the account ready instead of waiting for it
+                for c in by_ext.values():
+                    _who_prefetch(c.get('phone'))
+                    _who_prefetch(c.get('preselected'))
                 _LIVE_CALLS['by_ext'] = by_ext
                 _LIVE_CALLS['at'] = datetime.now()
                 _LIVE_CALLS['error'] = None
@@ -9099,7 +9117,7 @@ def _live_calls_reader():
                 _LIVE_CALLS['error'] = str(e)[:200]
                 _time.sleep(3)          # back off when the database is unhappy
             # every worker runs this, so keep it gentle on the CMS
-            _time.sleep(2.0)
+            _time.sleep(1.5)
 
     _t.Thread(target=run, daemon=True).start()
 
@@ -9215,6 +9233,10 @@ def phone_event():
     if agent:
         call['outbound'] = True
         call['agent'] = agent
+    import time as _tm
+    call['event_t'] = _tm.time()
+    _who_prefetch(call.get('phone'))
+    _who_prefetch(call.get('account_to_use'))
 
     if event == 'queue' and ext:
         # this extension's phone is ringing right now
@@ -9871,18 +9893,63 @@ def _extension_for(employee_id, max_age=600):
     return ext
 
 
+def _who_key(phone):
+    d = ''.join(ch for ch in str(phone or '') if ch.isdigit())
+    return d[-10:] if len(d) >= 7 else str(phone or '')
+
+
+_WHO_PENDING = set()
+
+
+def _who_prefetch(phone):
+    """Start looking a number up in the background, if it is not known yet.
+    Never waits — the popup must not sit behind a database search."""
+    import time as _t, threading as _th
+    key = _who_key(phone)
+    if len(key) < 7 or key in _WHO_PENDING:
+        return
+    hit = _WHO_CACHE.get(key)
+    if hit and (_t.time() - hit[1]) < 120:
+        return
+    _WHO_PENDING.add(key)
+
+    def run():
+        try:
+            _who_is_calling(phone)
+        finally:
+            _WHO_PENDING.discard(key)
+    _th.Thread(target=run, daemon=True).start()
+
+
+def _who_now(phone):
+    """(accounts, ready) from what is already known; starts a lookup if not."""
+    key = _who_key(phone)
+    hit = _WHO_CACHE.get(key)
+    if hit:
+        _who_prefetch(phone)            # refreshes quietly if it is old
+        return hit[0], True
+    if len(key) < 7:
+        return {'phone': phone, 'primary': None, 'others': [], 'associated': []}, True
+    _who_prefetch(phone)
+    return None, False
+
+
 def _who_is_calling(phone, max_age=120):
     """Who a number belongs to. Cached briefly, because the answer cannot
     change during one call and this is three queries each time."""
     import time as _t
     import cms_db
-    key = str(phone or '')
+    key = _who_key(phone)
     hit = _WHO_CACHE.get(key)
     if hit and (_t.time() - hit[1]) < max_age:
         return hit[0]
     try:
         who = cms_db.find_account_by_phone(phone)
     except Exception:
+        if not hit:
+            # remember the failure for a few seconds so the popup is not stuck
+            # on "looking up"; it is tried again shortly
+            _WHO_CACHE[key] = (None, _t.time() - max_age + 10)
         return hit[0] if hit else None
     _WHO_CACHE[key] = (who, _t.time())
     if len(_WHO_CACHE) > 500:
@@ -9999,9 +10066,18 @@ def my_current_call():
     call = _LIVE_CALLS['by_ext'].get(ext)
     if not call:
         return jsonify({'call': None, 'extension': ext})
-    who = _who_is_calling(call.get('phone'))
-    return jsonify({'call': call, 'who': who, 'extension': ext,
-                    'verification': _call_verification(call, who)})
+    # answer at once with whatever is known; the account search runs in the
+    # background and the next poll (a second or two later) carries it. Before,
+    # this request waited for the search, and a slow one held the popup back
+    # until the call was nearly over.
+    who, ready = _who_now(call.get('phone'))
+    ver = _call_verification(call, who) if ready else None
+    if ver is False:
+        ready, ver = False, None
+    out = dict(call)
+    out.pop('event_t', None)
+    return jsonify({'call': out, 'who': who, 'extension': ext,
+                    'looking_up': not ready, 'verification': ver})
 
 
 def _call_verification(call, who):
@@ -10020,7 +10096,10 @@ def _call_verification(call, who):
     sel = ''.join(ch for ch in str(call.get('preselected') or call.get('account_to_use') or '') if ch.isdigit())[-10:]
     if len(sel) < 7:
         return {'state': 'not_verified', 'text': 'Caller did not verify an account'}
-    chosen = _who_is_calling(sel) or {}
+    chosen, ready = _who_now(sel)
+    if not ready:
+        return False                    # still looking; the next poll has it
+    chosen = chosen or {}
     acc = chosen.get('primary')            # the account whose main number they entered
     if not acc:
         return {'state': 'not_created', 'selected': sel,
@@ -10499,7 +10578,13 @@ def customer_texts_latest(account_id):
     """Just the texts, for the Texts tab's check for new messages."""
     import cms_db
     try:
-        return jsonify({'sms': cms_db.account_texts(account_id)})
+        contact = request.args.get('contact')
+        if contact:
+            # one whole conversation — for people whose messages are older than
+            # the newest 300 the tab loads
+            return jsonify({'sms': cms_db.contact_texts(account_id, contact), 'contact': contact})
+        sms, contacts = cms_db.account_texts(account_id, with_contacts=True)
+        return jsonify({'sms': sms, 'sms_contacts': contacts if len(sms) >= 250 else None})
     except Exception as e:
         return jsonify({'error': str(e)[:240]}), 400
 
