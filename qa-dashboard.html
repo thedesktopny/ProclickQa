@@ -10193,10 +10193,10 @@ async function loadMissedCount(){
    both look identical from a desk. */
 function resetPopup(){
   inDismissed = null;
-  inCallId = null; inVerifyKey = null; inBusy = false; inSkip = 0; inFails = 0;
+  inCallId = null;
   const box = document.getElementById('incoming');
   if(box) box.style.display = 'none';
-  inConnect(); inPoll();
+  pollStart('my-call', inPoll, 2000);
   showToast('Popup reset — it should appear on the next call');
 }
 
@@ -10248,9 +10248,8 @@ async function whyNoPopup(){
         lines.push('   marked live: ' + call.live + (call.live ? '' : '   <- the popup only shows live calls'));
         lines.push('   answered: ' + (call.picked_up ? 'yes' : 'still ringing'));
         lines.push('   call id: ' + call.call_id
-                   + (inDismissed && (inDismissed.ids.includes(call.call_id) || inDismissed.uniqs.includes(call.uniq))
+                   + (String(call.call_id) === String(inDismissed)
                       ? '   <- THIS WAS DISMISSED, so it stays hidden' : ''));
-        if(mine.looking_up) lines.push('   still looking up whose number it is');
       }
       if(mine.extension !== undefined)
         lines.push('extension the live check used: ' + (mine.extension || '(none)'));
@@ -10262,9 +10261,9 @@ async function whyNoPopup(){
     if(box){
       lines.push('   its display is: ' + (box.style.display || '(default)'));
       lines.push('   currently showing call: ' + (inCallId || 'none'));
-      lines.push('   dismissed calls: ' + (inDismissed ? inDismissed.ids.concat(inDismissed.uniqs).join(', ') || 'none' : 'none'));
+      lines.push('   dismissed call id: ' + (inDismissed || 'none'));
     }
-    lines.push('popup clock is running: ' + (!!inClock) + (inFails ? '  (' + inFails + ' failed asks in a row)' : ''));
+    lines.push('polling is running: ' + (!!inTimer));
 
     out.textContent = lines.join('\n');
   }catch(e){ out.textContent = 'Failed: ' + e.message; }
@@ -11094,88 +11093,41 @@ let inVerifyKey = null;
    phone system posts events straight in, the agent's extension is looked up
    once and kept, and the caller lookup is cached for the duration of a call.
    A poll with no call in progress touches no database at all. */
-/* The caller popup has its own clock, apart from the other refreshes.
-   It used to share them, and they slow to once a MINUTE when the tab is in
-   the background — agents keep the CMS behind the phone or another tab, so
-   the caller showed up at the end of the call or with the next one. Chrome
-   also slows ordinary timers in background tabs to once a minute, so the
-   tick comes from a tiny background worker, which Chrome does not slow.
-   Each ask is a memory lookup on the server, so every 1.5s is cheap. */
-let inClock = null, inBusy = false, inFails = 0, inSkip = 0;
 function inConnect(){
   if(!IS_PORTAL && !portalTicket) return;
-  pollStop('my-call');
-  if(inClock) return;
-  const tick = () => {
-    if(inSkip > 0){ inSkip--; return; }     // backing off after errors only
-    inPoll();
-  };
-  try{
-    const src = 'setInterval(()=>postMessage(1),1500);';
-    inClock = new Worker(URL.createObjectURL(new Blob([src], {type:'text/javascript'})));
-    inClock.onmessage = tick;
-  }catch(e){
-    inClock = setInterval(tick, 1500);
-  }
   inPoll();
-  document.addEventListener('visibilitychange', ()=>{ if(!document.hidden){ inSkip = 0; inPoll(); } });
+  // was every second; now it waits for the previous answer and backs off
+  pollStart('my-call', inPoll, 2000);
+  // stop asking when the tab is in the background — nobody is looking, and
+  // thirty idle tabs asking every second is thirty requests a second for nothing
+
 }
 
 async function inPoll(){
   // In portal mode this used to poll whether or not anybody was signed in, so
   // the sign-in screen produced a 401 every second — which is what raised the
   // "your sign-in has expired" bar to somebody who had not signed in.
-  if(!portalSignedIn() || inBusy) return;
-  inBusy = true;
+  if(!portalSignedIn()) return;
   try{
     const r = await API.get('/api/my-call');
-    inFails = 0;
     inShow(r);
-  }catch(e){
-    inFails++;
-    inSkip = Math.min(10, inFails);        // wait a little longer after each failure
-  }finally{
-    inBusy = false;
-  }
+  }catch(e){}
 }
-
-/* when a caller pops up while the CMS is in the background, say so in the tab */
-let inTitleTimer = null, inTitleWas = null;
-function inTabAlert(text){
-  if(!document.hidden || inTitleTimer) return;
-  inTitleWas = document.title;
-  let on = false;
-  inTitleTimer = setInterval(()=>{
-    on = !on; document.title = on ? '📞 ' + text : inTitleWas;
-    if(!document.hidden || document.getElementById('incoming').style.display === 'none') inTabAlertStop();
-  }, 1000);
-}
-function inTabAlertStop(){
-  if(inTitleTimer){ clearInterval(inTitleTimer); inTitleTimer = null; }
-  if(inTitleWas !== null){ document.title = inTitleWas; inTitleWas = null; }
-}
-const inKeyOf = c => String(c.call_id || c.uniq || c.phone || '');
 
 function inShow(r){
   try{
     const call = r.call;
     const box = document.getElementById('incoming');
     if(!box) return;
-    if(!call || !call.live){ box.style.display = 'none'; return; }
-    // a call is known by its CMS number, or — when the phone system told us
-    // first — by the phone system's own id; dismissing hides it under both.
-    // (Before, a call with no CMS number yet matched "nothing dismissed" and
-    // was never shown at all.)
-    if(inDismissed && ((call.call_id && inDismissed.ids.includes(call.call_id))
-                       || (call.uniq && inDismissed.uniqs.includes(call.uniq)))){
-      box.style.display = 'none'; return;
+    if(!call || !call.live || call.call_id === inDismissed){
+      if(!call || !call.live) box.style.display = 'none';
+      return;
     }
-    // redraw when the call changes, when the account search finishes, when the
-    // caller picks an account on the menu, or when it is answered
-    const vkey = JSON.stringify([inKeyOf(call), !!r.looking_up, r.verification || null,
-                                 !!call.picked_up, (r.who || {}).any || false]);
-    if(box.style.display !== 'none' && vkey === inVerifyKey) return;   // already showing
-    inCallId = call.call_id; inVerifyKey = vkey; inShowing = call;
+    // the caller can pick an account on the phone menu a moment after the call
+    // shows, so redraw when that changes — otherwise leave it alone
+    const vkey = JSON.stringify(r.verification || null);
+    if(call.call_id === inCallId && box.style.display !== 'none' && vkey === inVerifyKey) return;   // already showing
+    inCallId = call.call_id; inVerifyKey = vkey;
 
     document.getElementById('in-phone').textContent = call.phone || 'Unknown number';
     document.getElementById('in-meta').textContent =
@@ -11208,12 +11160,6 @@ function inShow(r){
       </div>` : '';
 
     const body = document.getElementById('in-body');
-    if(r.looking_up){
-      body.innerHTML = '<div style="font-size:12.5px;color:var(--text3);margin-bottom:10px;">Looking up whose number this is…</div>';
-      box.style.display = '';
-      inTabAlert(call.phone || 'Call');
-      return;
-    }
     body.innerHTML = vbox +
       group('This is their number', who.primary ? [who.primary] : [])
       + group('Matched on another number', who.others || [],
@@ -11233,7 +11179,6 @@ function inShow(r){
         <button class="btn btn-outline" style="width:100%;margin-top:8px;font-size:12px;"
                 onclick="inNewCustomer()">Create a new customer</button>` : '');
     box.style.display = '';
-    inTabAlert(call.phone || 'Call');
   }catch(e){}
 }
 
@@ -11279,14 +11224,8 @@ function inNewCustomer(){
   setTimeout(()=>{ cuNewOpen(); const f = document.getElementById('cf-phone'); if(f) f.value = phone; cuFormHint(); }, 200);
 }
 
-let inShowing = null;
 function inDismiss(){
-  const c = inShowing || {};
-  if(!inDismissed) inDismissed = {ids: [], uniqs: []};
-  if(c.call_id) inDismissed.ids.push(c.call_id);
-  if(c.uniq) inDismissed.uniqs.push(c.uniq);
-  inDismissed.ids = inDismissed.ids.slice(-20); inDismissed.uniqs = inDismissed.uniqs.slice(-20);
-  inVerifyKey = null;
+  inDismissed = inCallId;
   document.getElementById('incoming').style.display = 'none';
 }
 
@@ -12267,15 +12206,11 @@ async function cuRefreshTexts(accountId){
     const key = m => m.when + '|' + (m.message || '') + '|' + (m.from_to || '');
     const seen = new Set((cuData.sms || []).map(key));
     const fresh = r.sms.filter(m => !seen.has(key(m)));
-    if(r.sms_contacts) cuData.sms_contacts = r.sms_contacts;
     if(!fresh.length) return;
     // keep anything half-typed in the box
     const box = document.getElementById('sms-text');
     const typed = box ? box.value : '';
-    // keep older messages fetched for a conversation; only add the new ones
-    const newIds = new Set(r.sms.map(m => m.id));
-    cuData.sms = r.sms.concat((cuData.sms || []).filter(m => !newIds.has(m.id) && !(m.id == null)))
-                      .sort((p, q) => String(q.when) > String(p.when) ? 1 : -1);
+    cuData.sms = r.sms;
     cuTab('sms');
     const box2 = document.getElementById('sms-text');
     if(box2 && typed){ box2.value = typed; box2.focus(); }
@@ -12348,7 +12283,6 @@ async function cuTextingOff(){
 }
 
 let cuSmsTo = '', cuSmsAccount = null, cuSmsFind = '';
-const cuSmsLoaded = {};          // conversations already fetched in full
 function cuSmsPick(t){ cuSmsTo = t; cuTab('sms'); setTimeout(()=>document.getElementById('sms-text')?.focus(), 50); }
 function cuSmsNewAsk(){
   const box = document.getElementById('sx-new');
@@ -12654,21 +12588,6 @@ function cuTab(which){
       if(!p.last) p.last = m;                       // messages arrive newest first
       if(m.direction === 'In' && m.unread) p.unread++;
     });
-    // The list above only covers the newest 300 messages. A busy shared account
-    // (ProClick SMS) passes 300 in a day, so people who texted were missing.
-    // The server also sends everyone the account has texted with; add them.
-    (r.sms_contacts || []).forEach(c => {
-      const t = ten(c.contact); if(!t || t.length < 3) return;
-      const p = people[t];
-      if(!p){
-        people[t] = {num: t, last: {when: c.last, message: '', media: '', direction: ''},
-                     unread: c.unread || 0, count: c.count || 0, older: true};
-      }else{
-        p.unread = Math.max(p.unread, c.unread || 0);
-        p.count = Math.max(p.count, c.count || 0);
-        if(c.last && p.last && c.last > p.last.when) p.older = true;
-      }
-    });
     if(own.length === 10 && !people[own]) people[own] = {num: own, last: null, unread: 0, count: 0};
     if(cuSmsAccount !== a.id){
       cuSmsAccount = a.id; cuSmsSel = null;
@@ -12681,20 +12600,6 @@ function cuTab(which){
       .filter(p => !q || p.num.includes(q))
       .sort((x, y) => (y.fresh?1:0) - (x.fresh?1:0) || ((y.last ? y.last.when : '') > (x.last ? x.last.when : '') ? 1 : -1));
     const shown = (r.sms || []).filter(m => ten(m.from_to) === cuSmsTo);
-    // part of this conversation is older than what was loaded — fetch all of it
-    const sel = people[cuSmsTo];
-    const loadKey = a.id + '|' + cuSmsTo;
-    if(sel && sel.count > shown.length && !cuSmsLoaded[loadKey]){
-      cuSmsLoaded[loadKey] = true;
-      API.get(`/api/customers/${a.id}/texts/latest?contact=${encodeURIComponent(cuSmsTo)}`).then(x => {
-        if(!x || !x.sms || !cuData || cuData.account.id !== a.id) return;
-        const have = new Set((cuData.sms || []).map(m => m.id));
-        const add = x.sms.filter(m => !have.has(m.id));
-        if(!add.length) return;
-        cuData.sms = (cuData.sms || []).concat(add).sort((p, q) => String(q.when) > String(p.when) ? 1 : -1);
-        cuTab('sms');
-      }).catch(()=>{ cuSmsLoaded[loadKey] = false; });
-    }
     const ago = d => { if(!d) return ''; const mins = (Date.now() - new Date(d).getTime()) / 60000;
       return mins < 60 ? Math.max(1, Math.round(mins)) + 'm' : mins < 1440 ? Math.round(mins/60) + 'h'
            : new Date(d).toLocaleDateString([], {month:'short', day:'numeric'}); };
@@ -12731,7 +12636,7 @@ function cuTab(which){
                   <span class="sx-num">${fmtNum(p.num)}</span>
                   <span class="sx-when">${p.last ? ago(p.last.when) : ''}</span></div>
                 <div style="display:flex;align-items:center;gap:6px;">
-                  <span class="sx-prev">${p.last ? (p.last.direction==='Out'?'You: ':'') + esc((p.last.message||'').slice(0,60) || (p.last.media?'📷 picture':'') || (p.older?'open to load messages':'')) : (p.num===own ? 'account phone · no messages yet' : 'new conversation')}</span>
+                  <span class="sx-prev">${p.last ? (p.last.direction==='Out'?'You: ':'') + esc((p.last.message||'').slice(0,60) || (p.last.media?'📷 picture':'')) : (p.num===own ? 'account phone · no messages yet' : 'new conversation')}</span>
                   ${p.unread ? `<span class="sx-badge">${p.unread}</span>` : ''}</div>
               </div>`).join('') || '<div class="payhint" style="padding:12px;">No numbers match.</div>'}
           </div>

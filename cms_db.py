@@ -3378,17 +3378,6 @@ def customer_profile(account_id, limit=120):
         sms.append({'id': int(sid), 'when': _plain(d), 'direction': io, 'from_to': cn,
                     'message': msg, 'media': media, 'unread': bool(unread),
                     'is_picture': _looks_like_a_picture(media)})
-    sms_contacts = None
-    if len(sms) >= 250:                 # only a busy account can be missing people
-        try:
-            sms_contacts = [{'contact': c, 'last': _plain(l), 'count': int(k or 0), 'unread': int(u or 0)}
-                            for c, l, k, u in rows("""
-                SELECT TOP 500 ContactNumber, MAX(smsDate), COUNT(*),
-                       SUM(CASE WHEN ISNULL(smsNotRead,0)=1 AND InOut='In' THEN 1 ELSE 0 END)
-                FROM SMSLog WHERE AccountId = %s AND ISNULL(ContactNumber,'') <> ''
-                GROUP BY ContactNumber ORDER BY MAX(smsDate) DESC""", (aid,))]
-        except Exception:
-            sms_contacts = None
 
     tickets = [{'created': _plain(cr), 'status': st, 'priority': pr,
                 'subject': subj, 'description': desc, 'closed': _plain(cl)}
@@ -3425,7 +3414,7 @@ def customer_profile(account_id, limit=120):
 
     conn.close()
     return {'account': account, 'totals': totals, 'work': work, 'payments': payments_list,
-            'notes': notes, 'balance': balance, 'sms': sms, 'sms_contacts': sms_contacts, 'tickets': tickets,
+            'notes': notes, 'balance': balance, 'sms': sms, 'tickets': tickets,
             'cards': cards, 'credentials': credentials, 'profiles': profiles}
 
 
@@ -4733,47 +4722,7 @@ def clocked_on_now(hours=20):
     return out
 
 
-def _sms_contacts(cu, account_id):
-    """Everyone this account has ever texted with, newest first — over ALL its
-    messages, like the old CMS's contact list. The message list itself is
-    capped at the newest 300, and a busy shared account (ProClick SMS) goes
-    past 300 quickly, so a person who texted today could be missing from the
-    list entirely."""
-    cu.execute("""SELECT TOP 500 ContactNumber, MAX(smsDate), COUNT(*),
-                         SUM(CASE WHEN ISNULL(smsNotRead,0)=1 AND InOut='In' THEN 1 ELSE 0 END)
-                  FROM SMSLog WHERE AccountId = %s AND ISNULL(ContactNumber,'') <> ''
-                  GROUP BY ContactNumber ORDER BY MAX(smsDate) DESC""", (int(account_id),))
-    return [{'contact': r[0], 'last': _plain(r[1]), 'count': int(r[2] or 0),
-             'unread': int(r[3] or 0)} for r in cu.fetchall()]
-
-
-def contact_texts(account_id, contact):
-    """All messages between this account and one number (newest 500)."""
-    d = ''.join(ch for ch in str(contact or '') if ch.isdigit())
-    if not d:
-        return []
-    tail = d[-10:] if len(d) >= 10 else d
-    conn = _connect()
-    try:
-        cu = conn.cursor()
-        cu.execute("""SELECT TOP 500 smsDate, InOut, ContactNumber, message, MediaURL, ISNULL(smsNotRead, 0), Id
-                      FROM SMSLog WHERE AccountId = %s
-                        AND (ContactNumber = %s OR ContactNumber LIKE %s)
-                      ORDER BY smsDate DESC""", (int(account_id), tail, '%' + tail))
-        out = []
-        for r in cu.fetchall():
-            u = str(r[4] or '').lower().split('?')[0]
-            if u.endswith('.smil') or u.endswith('.xml') or 'smil' in u.rsplit('/', 1)[-1]:
-                continue
-            out.append({'id': int(r[6]), 'when': _plain(r[0]), 'direction': r[1], 'from_to': r[2],
-                        'message': r[3], 'media': r[4], 'unread': bool(r[5]),
-                        'is_picture': u.endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic', '.bmp'))})
-        return out
-    finally:
-        conn.close()
-
-
-def account_texts(account_id, with_contacts=False):
+def account_texts(account_id):
     """Only the texts for one account — what the Texts tab checks every few
     seconds for new messages. The full customer read pulls calls, payments,
     notes and more; doing all of that every ten seconds just to spot a new text
@@ -4801,11 +4750,6 @@ def account_texts(account_id, with_contacts=False):
             out.append({'id': int(r[6]), 'when': _plain(r[0]), 'direction': r[1], 'from_to': r[2],
                         'message': r[3], 'media': r[4], 'unread': bool(r[5]),
                         'is_picture': picture(r[4])})
-        if with_contacts:
-            try:
-                return out, _sms_contacts(cu, account_id)
-            except Exception:
-                return out, None
         return out
     finally:
         conn.close()
