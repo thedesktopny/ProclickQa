@@ -99,6 +99,15 @@ REQUIRED_ANY = {
 }
 
 
+
+def _with_new_id(sql):
+    """Some CMS tables have triggers (Employee does), and SQL Server refuses a plain
+    OUTPUT INSERTED.Id on those. Catch the new id in a table variable instead —
+    works the same with or without triggers."""
+    sql = sql.replace('OUTPUT INSERTED.Id', 'OUTPUT INSERTED.Id INTO @new_id')
+    return ('SET NOCOUNT ON; DECLARE @new_id TABLE (Id BIGINT); ' + sql.strip().rstrip(';')
+            + '; SELECT Id FROM @new_id; SET NOCOUNT OFF;')
+
 def _explain(e):
     """Turns a database complaint into something a person can act on."""
     m = str(e)
@@ -170,7 +179,7 @@ def create(table, values, who, dry_run=True):
     for col, expr in server.items():
         cols.append(col); placeholders.append(expr)
 
-    sql = ('INSERT INTO [%s] (%s) OUTPUT INSERTED.Id VALUES (%s)'
+    sql = _with_new_id('INSERT INTO [%s] (%s) OUTPUT INSERTED.Id VALUES (%s)'
            % (cms_db._safe(table),
               ', '.join('[%s]' % cms_db._safe(c) for c in cols),
               ', '.join(placeholders)))
@@ -426,10 +435,10 @@ def start_work(account_id, employee_id, call_id=None, dry_run=False):
             return out
 
         # PhoneCallId is required by the table, so an untied piece of work uses 0
-        cu.execute("""INSERT INTO [AccountWork]
+        cu.execute(_with_new_id("""INSERT INTO [AccountWork]
                       (AccountId, EmployeeId, PhoneCallId, StartTime, Modified)
                       OUTPUT INSERTED.Id
-                      VALUES (%s, %s, %s, GETDATE(), GETDATE())""",
+                      VALUES (%s, %s, %s, GETDATE(), GETDATE())"""),
                    (account_id, employee_id, int(call_id) if call_id else 0))
         r = cu.fetchone()
         out['work_id'] = int(r[0]) if r else None
@@ -1086,10 +1095,10 @@ def save_card(account_id, card_token, exp_month, exp_year, who,
         brand = (answer.get('xCardType') or answer.get('xCardBrand') or 'Card').strip()
 
         cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
-        cu.execute("""INSERT INTO [StripeCustomers]
+        cu.execute(_with_new_id("""INSERT INTO [StripeCustomers]
                       (AccountId, Created, CreatedBy, StripeCustomer, Brand, Last4, LastUsed)
                       OUTPUT INSERTED.Id
-                      VALUES (%s, GETDATE(), %s, %s, %s, %s, NULL)""",
+                      VALUES (%s, GETDATE(), %s, %s, %s, %s, NULL)"""),
                    (account_id, (who or {}).get('employee_id') or 0,
                     token, brand[:50], last4[:4]))
         row = cu.fetchone()
@@ -1240,11 +1249,11 @@ def buy_package(account_id, package_id, card_id, who, note=None):
         if pct > 0:
             sale_note += ' Discount applied: %%%d' % pct
 
-        cu.execute("""INSERT INTO [PackageSold]
+        cu.execute(_with_new_id("""INSERT INTO [PackageSold]
                       (AccountId, Created, Note, PackageId, StripeChargeId,
                        AmountPaid, AccountWorkId, EmployeId, Last4, PackageMinutes)
                       OUTPUT INSERTED.Id
-                      VALUES (%s, GETDATE(), %s, %s, %s, %s, %s, %s, %s, %s)""",
+                      VALUES (%s, GETDATE(), %s, %s, %s, %s, %s, %s, %s, %s)"""),
                    (account_id, sale_note[:200], package_id, charge_ref, price,
                     (int(open_work[0]) if open_work else None),
                     (who or {}).get('employee_id'),
@@ -1331,11 +1340,11 @@ def give_free_minutes(account_id, minutes, reason, who):
                       ORDER BY StartTime DESC""", (account_id,))
         open_work = cu.fetchone()
 
-        cu.execute("""INSERT INTO [PackageSold]
+        cu.execute(_with_new_id("""INSERT INTO [PackageSold]
                       (AccountId, Created, Note, PackageId, AmountPaid,
                        AccountWorkId, EmployeId, PackageMinutes)
                       OUTPUT INSERTED.Id
-                      VALUES (%s, GETDATE(), %s, 0, 0, %s, %s, %s)""",
+                      VALUES (%s, GETDATE(), %s, 0, 0, %s, %s, %s)"""),
                    (account_id, ('Free Minutes - ' + reason)[:200],
                     (int(open_work[0]) if open_work else None),
                     (who or {}).get('employee_id'), minutes))
@@ -1897,11 +1906,11 @@ def create_agent(fields, who, dry_run=True):
             cu.execute('INSERT INTO [AspNetUserRoles] (UserId, RoleId) VALUES (%s, %s)',
                        (user_id, role_id))
 
-        cu.execute("""INSERT INTO [Employee]
+        cu.execute(_with_new_id("""INSERT INTO [Employee]
                       (FirstName, LastName, Extension, AspNetUserId, LeftFirm,
                        Created, QA, WithCamera, Gender, HourlyRate, PhoneName)
                       OUTPUT INSERTED.Id
-                      VALUES (%s, %s, %s, %s, 0, GETDATE(), %s, %s, %s, %s, %s)""",
+                      VALUES (%s, %s, %s, %s, 0, GETDATE(), %s, %s, %s, %s, %s)"""),
                    (first, last, extension, user_id,
                     1 if fields.get('is_qa') else 0,
                     1 if fields.get('with_camera') else 0,
@@ -2073,6 +2082,93 @@ def asterisk_set_status(extension, cms_status):
         conn.close()
 
 
+# what ast_status holds when an extension is in use, and when it is free
+_AST_BUSY = {'IN_USE', 'INUSE', 'BUSY', 'RINGINUSE', 'ONHOLD', 'IN USE'}
+_AST_FREE = ('NOT_INUSE', 'NOTINUSE', 'NOT INUSE', 'IDLE', 'NOT_IN_USE')
+
+
+def asterisk_reset_in_use(extension, who, reason=''):
+    """Put an extension the phone system wrongly shows as "in use" back to free.
+
+    ast_status in ps_auths is the phone system's own record of whether the
+    extension is on a call. When a call ends badly (a dropped line, a softphone
+    that crashed) the "call is over" message can be lost, and the extension
+    stays "in use" with nothing on it — the routing then skips the agent for
+    incoming calls and their outgoing calls are refused. This writes back the
+    free value the phone system itself uses on the other extensions; the next
+    real call overwrites it as usual. Only an extension that shows "in use"
+    is touched, and the change is logged."""
+    ext = ''.join(ch for ch in str(extension or '') if ch.isdigit())[:6]
+    if not ext:
+        raise WriteRefused('Which extension?')
+    if not asterisk_configured():
+        raise WriteRefused('The phone system connection is not set up on the server.')
+    conn = _asterisk_connect()
+    try:
+        cu = conn.cursor()
+        cu.execute('SELECT ast_status FROM ps_auths WHERE id = %s', (ext,))
+        row = cu.fetchone()
+        if not row:
+            raise WriteRefused('The phone system has no extension %s.' % ext)
+        now = row[0]
+        if str(now or '').strip().upper() not in _AST_BUSY:
+            raise WriteRefused('The phone system shows extension %s as "%s", not in use — '
+                               'nothing to reset.' % (ext, now))
+        # the free value exactly as the phone system writes it elsewhere
+        cu.execute('SELECT DISTINCT ast_status FROM ps_auths')
+        values = [r[0] for r in cu.fetchall() if r and r[0] is not None]
+        free = next((v for v in values if str(v).strip().upper() in _AST_FREE), None)
+        if free is None:
+            raise WriteRefused('Could not tell what "free" looks like in the phone system '
+                               '(values seen: %s), so nothing was changed.' % ', '.join(map(str, values[:8])))
+        cu.execute('UPDATE ps_auths SET ast_status = %s WHERE id = %s AND ast_status = %s',
+                   (free, ext, now))
+        changed = cu.rowcount
+    finally:
+        conn.close()
+    result = {'ok': bool(changed), 'committed': bool(changed), 'action': 'phone_status_reset',
+              'table': 'ps_auths', 'row_id': ext,
+              'values': {'extension': ext, 'from': now, 'to': free, 'reason': (reason or '')[:300]}}
+    _log(who, result, before={'ast_status': now})
+    if not changed:
+        result['error'] = 'The status changed while this was happening — look again.'
+    return result
+
+
+def asterisk_phone_connected(extension):
+    """Is the agent's phone app connected (registered) to the phone system?
+
+    True / False when the phone system keeps its connections in its database
+    (the ps_contacts table, with an expiry time), None when it cannot be told
+    from here — then the person resetting is asked to confirm it themselves."""
+    ext = ''.join(ch for ch in str(extension or '') if ch.isdigit())[:6]
+    conn = _asterisk_connect()
+    try:
+        cu = conn.cursor()
+        try:
+            cu.execute("SHOW TABLES LIKE 'ps_contacts'")
+            if not cu.fetchone():
+                return None
+            # a contact's id is "<extension>;@<something>"; expiration_time is
+            # when the registration runs out, in seconds since 1970
+            cu.execute("""SELECT COUNT(*) FROM ps_contacts
+                          WHERE id LIKE %s
+                            AND (expiration_time IS NULL OR expiration_time = ''
+                                 OR CAST(expiration_time AS UNSIGNED) > UNIX_TIMESTAMP())""",
+                       (ext + ';@%',))
+            n = int((cu.fetchone() or [0])[0] or 0)
+            if n:
+                return True
+            # nothing for this extension: only trust "not connected" if the
+            # table is really in use (other phones are registered in it)
+            cu.execute("SELECT COUNT(*) FROM ps_contacts")
+            return False if int((cu.fetchone() or [0])[0] or 0) > 0 else None
+        except Exception:
+            return None
+    finally:
+        conn.close()
+
+
 def asterisk_check(extension=None):
     """Can we reach the phone system's table at all? Read-only."""
     conn = _asterisk_connect()
@@ -2215,8 +2311,8 @@ def clock(employee_id, action, who, minutes=None, reason=None, logged_out_by=Non
     try:
         cu = conn.cursor()
         cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
-        cu.execute("""INSERT INTO EmployeeClocker (EmployeeId, Created, Status, BreakMinutes, BreakReason)
-                      OUTPUT INSERTED.Id VALUES (%s, %s, %s, %s, %s)""",
+        cu.execute(_with_new_id("""INSERT INTO EmployeeClocker (EmployeeId, Created, Status, BreakMinutes, BreakReason)
+                      OUTPUT INSERTED.Id VALUES (%s, %s, %s, %s, %s)"""),
                    (int(employee_id), when, status, mins, reason if action == 'break' else None))
         r = cu.fetchone()
         conn.commit()
@@ -2330,8 +2426,8 @@ def _dnd_insert(conn, employee_id, status, when, note, kind):
         raise WriteRefused('The CMS needs more for Do Not Disturb than this page knows how to fill ('
                            + ', '.join(sorted(missing)) + '). Use the old CMS for DND for now.')
     cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
-    cu.execute("""INSERT INTO NotDistrubStatus (EmployeeID, Status, Created, Note, TypeDND)
-                  OUTPUT INSERTED.Id VALUES (%s, %s, %s, %s, %s)""",
+    cu.execute(_with_new_id("""INSERT INTO NotDistrubStatus (EmployeeID, Status, Created, Note, TypeDND)
+                  OUTPUT INSERTED.Id VALUES (%s, %s, %s, %s, %s)"""),
                (int(employee_id), status, when, note, kind))
     r = cu.fetchone()
     conn.commit()
@@ -3919,8 +4015,8 @@ def add_personal_info(account_id, title, value, who):
     try:
         cu = conn.cursor()
         cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
-        cu.execute("""INSERT INTO AccountPersonalInfo (AccountId, CreatedBy, Title, Description, Created)
-                      OUTPUT INSERTED.Id VALUES (%s, %s, %s, %s, GETDATE())""",
+        cu.execute(_with_new_id("""INSERT INTO AccountPersonalInfo (AccountId, CreatedBy, Title, Description, Created)
+                      OUTPUT INSERTED.Id VALUES (%s, %s, %s, %s, GETDATE())"""),
                    (int(account_id), int((who or {}).get('employee_id') or 0) or None, title, value))
         new_id = int(cu.fetchone()[0])
         _touch_account(cu, account_id)
