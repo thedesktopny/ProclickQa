@@ -14400,7 +14400,9 @@ def _warm_skinblock_assets():
     threading.Thread(target=run, daemon=True).start()
 
 
-_warm_skinblock_assets()
+# The old Skin Block page downloaded these at every start (a large model, in
+# every worker). The current page uses its own small models from /models, so
+# the warm-up no longer runs — it only slowed down every restart.
 
 try:
     _notes_refresher()
