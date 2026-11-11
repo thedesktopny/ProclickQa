@@ -429,6 +429,24 @@ td.agent{color:var(--text);font-weight:500;}
 .payhead{
   display:grid; grid-template-columns:1.25fr 1fr 1fr 1fr; gap:14px; padding:22px 0 4px;
 }
+/* A customer's name, minutes and tabs stay on screen while scrolling through
+   their history; once scrolled, the block shrinks to a slim bar. */
+.cu-head{ position:sticky; top:var(--cu-top,73px); z-index:30; background:var(--bg);
+          padding-top:6px; transition:box-shadow .15s; }
+.cu-head.stuck{ box-shadow:0 10px 14px -12px rgba(0,0,0,.7); }
+.cu-head.stuck .cu-contact{ display:none; }
+.cu-head.stuck .cu-name{ font-size:17px !important; }
+.cu-head.stuck .cu-titlerow{ margin-bottom:0 !important; }
+.cu-head.stuck .payhead{ padding:8px 0 0; gap:8px; }
+.cu-head.stuck .paycard{ padding:7px 12px; border-radius:10px; display:flex; align-items:baseline; gap:10px; }
+.cu-head.stuck .paycard .sub{ display:none; }
+.cu-head.stuck .payfig{ font-size:19px; margin-top:0; }
+.cu-head.stuck .runtabs{ margin-top:8px !important; }
+.cu-head.stuck .cu-actions .btn{ padding:5px 10px; font-size:11.5px !important; }
+@media (max-width:820px){
+  .cu-head.stuck .payhead{ grid-template-columns:1fr 1fr; }
+  .cu-head.stuck .paycard:not(.cu-min):not(.cu-calls){ display:none; }
+}
 .paycard{ background:var(--surface); border:1px solid var(--border); border-radius:16px; padding:18px 20px; }
 .paycard .lab{ font-size:10.5px; letter-spacing:.13em; text-transform:uppercase; color:var(--text3); font-weight:600; }
 .payfig{ font-size:38px; line-height:1; letter-spacing:-.035em; font-weight:640; margin-top:12px; }
@@ -12463,6 +12481,35 @@ function cuAddBubble(message, media, pending){
   return wrap;
 }
 
+/* keeps the customer header just under the top bar, and slims it once the
+   page has scrolled past its full size */
+let cuStickyWired = false;
+function cuStickyHead(){
+  const place = () => {
+    const bar = Array.from(document.querySelectorAll('.topbar')).find(e => e.offsetHeight > 0);
+    const pos = bar ? getComputedStyle(bar).position : '';
+    const h = bar && (pos === 'sticky' || pos === 'fixed') ? bar.getBoundingClientRect().bottom : 0;
+    document.documentElement.style.setProperty('--cu-top', h + 'px');
+    const head = document.getElementById('cu-head');
+    const box = document.getElementById('cu-profile');
+    if(!head || !box || box.style.display === 'none') return;
+    // how far the profile has scrolled up under the top bar; two different
+    // points to slim and to grow back, so it does not flicker in between
+    const scrolled = h - box.getBoundingClientRect().top;
+    const stuck = head.classList.contains('stuck');
+    if(!stuck && scrolled > 140) head.classList.add('stuck');
+    else if(stuck && scrolled < 40) head.classList.remove('stuck');
+  };
+  place();
+  if(cuStickyWired) return;
+  cuStickyWired = true;
+  let queued = false;
+  const onScroll = () => { if(queued) return; queued = true; requestAnimationFrame(()=>{ queued = false; place(); }); };
+  window.addEventListener('scroll', onScroll, {passive:true});
+  document.addEventListener('scroll', onScroll, {passive:true, capture:true});
+  window.addEventListener('resize', onScroll);
+}
+
 async function cuOpen(id){
   if(!cuData || cuData.account.id !== id) cuMedia = [];   // pictures never follow you to another customer
   document.getElementById('cu-results').classList.remove('open');
@@ -12477,7 +12524,7 @@ async function cuOpen(id){
     document.getElementById('cu-search').value = a.name;
     document.getElementById('cu-scope').textContent = 'account #' + a.id;
 
-    const stat = (lab,val,sub,cls) => `<div class="paycard">
+    const stat = (lab,val,sub,cls,card) => `<div class="paycard ${card||''}">
       <div class="lab">${lab}</div><div class="payfig paynum ${cls||''}">${val}</div>
       <div class="sub">${sub||'&nbsp;'}</div></div>`;
 
@@ -12485,12 +12532,13 @@ async function cuOpen(id){
       `<button class="runtab ${id_==='work'?'on':''}" data-cutab="${id_}" onclick="cuTab('${id_}')">${label}${count?` <span style="opacity:.5">${count}</span>`:''}</button>`;
 
     box.innerHTML = `
-      <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:6px;">
-        <div style="font-size:22px;font-weight:660;letter-spacing:-.02em;">${esc(a.name)}</div>
+      <div class="cu-head" id="cu-head">
+      <div class="cu-titlerow" style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:6px;">
+        <div class="cu-name" style="font-size:22px;font-weight:660;letter-spacing:-.02em;">${esc(a.name)}</div>
         ${a.business?'<span class="pill">business</span>':''}
         ${a.deleted?'<span class="pill" style="color:var(--red)">deleted</span>':''}
         ${a.is_free?'<span class="pill" style="color:var(--yellow)">free account</span>':''}
-        <span style="margin-left:auto;display:flex;gap:8px;">
+        <span class="cu-actions" style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;">
           <button class="btn btn-outline" style="font-size:12px;" onclick="cuNoteOpen()"
                   title="A note about the account itself. For what happened on a call, use the work history.">+ Account note</button>
           <button class="btn btn-primary" style="font-size:12px;" onclick="cuBuyOpen()">💳 Sell a package</button>
@@ -12499,7 +12547,7 @@ async function cuOpen(id){
           <button class="btn btn-outline" style="font-size:12px;" onclick="cuEditOpen()">Edit</button>
         </span>
       </div>
-      <div style="font-size:12.5px;color:var(--text3);margin-bottom:18px;">
+      <div class="cu-contact" style="font-size:12.5px;color:var(--text3);margin-bottom:18px;">
         ${[a.phone,a.mobile,a.home_phone,a.other_phone].filter(Boolean).join(' · ')}
         ${a.email?' · '+esc(a.email):''}
         ${a.sms_number?' · texts from '+a.sms_number:''}
@@ -12509,11 +12557,11 @@ async function cuOpen(id){
 
       <div class="payhead" style="padding-top:0;">
         ${stat('Minutes left', (a.minutes_left||0).toLocaleString(),
-               t.free_minutes?`${t.free_minutes.toLocaleString()} given free over time`:'', a.minutes_left>0?'pos':'neg')}
+               t.free_minutes?`${t.free_minutes.toLocaleString()} given free over time`:'', a.minutes_left>0?'pos':'neg', 'cu-min')}
         ${r.can_see_money === false ? '' : stat('Paid in total', cuMoney(t.collected_cents),
                `${t.payments} payments${t.refunded_cents?` · ${cuMoney(t.refunded_cents)} refunded`:''}`, 'pos')}
         ${stat('Calls worked', (t.work_sessions||0).toLocaleString(),
-               `${(t.minutes_billed||0).toLocaleString()} minutes billed`)}
+               `${(t.minutes_billed||0).toLocaleString()} minutes billed`, '', 'cu-calls')}
         ${stat('Last worked', t.last_worked?cuDate(t.last_worked):'never',
                t.first_worked?'first on '+cuDate(t.first_worked):'')}
       </div>
@@ -12527,7 +12575,9 @@ async function cuOpen(id){
         ${tab('tickets','Tickets', r.tickets.length)}
         ${tab('other','Logins & cards', (r.profiles||[]).length + r.cards.length + r.credentials.length)}
       </div>
+      </div>
       <div id="cu-tab-body" style="margin-top:14px;"></div>`;
+    cuStickyHead();
     cuTab('work');
   }catch(e){ box.innerHTML = `<div style="color:var(--red)">${e.message}</div>`; }
 }
