@@ -13918,7 +13918,7 @@ def _notes_pass(refresh_days=None):
         cms_calls = cms_db.recent_calls_with_notes(hours=hours,
                                                    max_rows=40000 if hours <= 12 else 120000)
         by_id = {x['cms_call_id']: x for x in cms_calls}
-        paused = is_processing_paused()
+        paused = is_processing_paused() or time.time() < _AI_NO_CREDIT['until']
         to_score = []
         for r in waiting:
             result['waiting'] += 1
@@ -14015,6 +14015,49 @@ def refresh_notes_now():
 
 
 
+_AI_NO_CREDIT = {'until': 0, 'said': 0}
+
+
+def _safe_err(e):
+    """An error message fit for the log: Google puts the API key in the
+    address, and the address ends up in the error text."""
+    import re as _re
+    return _re.sub(r'key=[^&\s]+', 'key=***', str(e))
+
+
+def _is_out_of_credit(msg):
+    m = msg.lower()
+    return ('prepayment' in m or 'credits are depleted' in m or 'payment required' in m
+            or m.startswith('402') or ' 402 ' in m)
+
+
+def _requeue_credit_failures():
+    """Scoring works again. Calls from the last day that were marked Failed
+    while the AI account had no credit go back in the queue — once a day, so a
+    recording that is genuinely broken is not retried over and over."""
+    import datetime as _dt
+    if _AI_NO_CREDIT.get('checked'):
+        return
+    _AI_NO_CREDIT['checked'] = True
+    today = _dt.date.today().isoformat()
+    try:
+        if _setting('requeued_failed_on') == today:
+            return
+        conn = get_db(); c = conn.cursor()
+        c.execute("""INSERT INTO app_settings (key, value, updated_at)
+                     VALUES ('requeued_failed_on', %s, CURRENT_TIMESTAMP)
+                     ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=CURRENT_TIMESTAMP""",
+                  (today,))
+        c.execute("""UPDATE calls SET status='Waiting for notes', processing_started_at=NULL
+                     WHERE status='Failed' AND created_at >= NOW() - INTERVAL '24 hours'""")
+        n = c.rowcount
+        conn.commit(); conn.close()
+        if n:
+            print('[Pull] scoring works again — %d calls that failed in the last day are queued again' % n)
+    except Exception as e:
+        print('[Pull] could not re-queue failed calls: ' + str(e)[:120])
+
+
 def _score_in_background(call):
     """Downloads the recording and scores it, then writes the result.
 
@@ -14077,8 +14120,27 @@ def _score_in_background(call):
                            rr.get('confidence', 100), rr.get('evidence', '')))
             conn.commit(); conn.close()
             print('[Pull] scored %s: %s%%' % (call_id, result['overall_score']))
+            _requeue_credit_failures()
         except Exception as e:
-            print('[Pull] %s failed: %s' % (call_id, str(e)[:160]))
+            msg = _safe_err(e)
+            if _is_out_of_credit(msg):
+                # The AI account has run out of credit. Marking every call
+                # "Failed" lost them for good; instead put the call back in the
+                # queue and stop trying for 15 minutes — once credit is added
+                # the waiting calls are scored on their own.
+                _AI_NO_CREDIT['until'] = time.time() + 900
+                if time.time() - _AI_NO_CREDIT['said'] > 900:
+                    _AI_NO_CREDIT['said'] = time.time()
+                    print('[Pull] AI ACCOUNT OUT OF CREDIT — scoring paused 15 min, calls kept waiting: ' + msg[:160])
+                try:
+                    conn = get_db(); c = conn.cursor()
+                    c.execute("""UPDATE calls SET status='Waiting for notes', processing_started_at=NULL
+                                 WHERE call_id=%s""", (call_id,))
+                    conn.commit(); conn.close()
+                except Exception:
+                    pass
+                return
+            print('[Pull] %s failed: %s' % (call_id, msg[:160]))
             try:
                 conn = get_db(); c = conn.cursor()
                 c.execute("UPDATE calls SET status='Failed' WHERE call_id=%s", (call_id,))
