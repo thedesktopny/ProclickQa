@@ -13897,6 +13897,12 @@ def _notes_pass(refresh_days=None):
                      FROM calls WHERE status = 'Waiting for notes'
                      ORDER BY created_at LIMIT 300""")
         waiting = [dict(r) for r in c.fetchall()]
+        if time.time() < _AI_NO_CREDIT['until'] or is_processing_paused():
+            # nothing can be scored right now, so don't fetch the CMS calls
+            # for the waiting pile — while the AI account was out of credit
+            # that pile grew all afternoon and this read grew with it,
+            # every 90 seconds, slowing everything down
+            waiting = []
         _NOTES_PASS['n'] += 1
         do_refresh = refresh_days is not None or _NOTES_PASS['n'] % 7 == 1
         recent = []
@@ -13915,6 +13921,10 @@ def _notes_pass(refresh_days=None):
             return result
         oldest_s = max([float(r.get('age_s') or 0) for r in waiting + recent] or [0])
         hours = int(oldest_s // 3600) + 2
+        if not recent:
+            # calls waiting longer than this are scored without fresh notes
+            # anyway; never read more than half a day of calls for them
+            hours = min(hours, 12)
         cms_calls = cms_db.recent_calls_with_notes(hours=hours,
                                                    max_rows=40000 if hours <= 12 else 120000)
         by_id = {x['cms_call_id']: x for x in cms_calls}

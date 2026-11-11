@@ -11106,20 +11106,20 @@ function inConnect(){
   if(!IS_PORTAL && !portalTicket) return;
   pollStop('my-call');
   if(inClock) return;
-  let odd = false;
+  let n = 0;
   const tick = () => {
     if(inSkip > 0){ inSkip--; return; }     // backing off after errors only
-    odd = !odd;
-    if(document.hidden && odd) return;
+    n++;
+    if(document.hidden && n % 3) return;
     inPoll();
   };
   try{
-    // every 2s while the CMS is on screen, every 4s while it is behind other tabs
-    const src = 'setInterval(()=>postMessage(1),2000);';
+    // every 3s while the CMS is on screen, every 9s while it is behind other tabs
+    const src = 'setInterval(()=>postMessage(1),3000);';
     inClock = new Worker(URL.createObjectURL(new Blob([src], {type:'text/javascript'})));
     inClock.onmessage = tick;
   }catch(e){
-    inClock = setInterval(tick, 2000);
+    inClock = setInterval(tick, 3000);
   }
   inPoll();
   document.addEventListener('visibilitychange', ()=>{ if(!document.hidden){ inSkip = 0; inPoll(); } });
