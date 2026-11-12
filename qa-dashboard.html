@@ -7513,7 +7513,7 @@ function snRender(){
     const clash = n.where.startsWith('BOTH');
     const st = stState(n);
     return `<div class="card" id="sn-${key}" style="padding:14px 18px;margin-bottom:10px;
-              ${clash || st === 'failed' || st === 'refused' ? 'border-color:var(--red);' : st === 'works' ? 'border-color:rgba(34,197,94,.55);' : ''}">
+              ${clash || st === 'failed' || st === 'refused' ? 'border-color:var(--red);' : st === 'works' ? 'border-color:rgba(34,197,94,.55);' : st === 'nocampaign' ? 'border-color:rgba(245,166,35,.5);' : ''}">
       <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;">
         <span style="font-size:16px;font-variant-numeric:tabular-nums;">${esc(n.number)}</span>
         <span style="font-size:11.5px;color:${clash ? 'var(--red)' : 'var(--text3)'};">
@@ -7610,12 +7610,12 @@ async function loadSmsNumbers2(){}
    from any computer and still see which ones were done. */
 let stTests = {}, stFilter = 'all', stBusy = false;
 const ST_NAMES = {all:'All', untested:'Not tested', waiting:'Waiting for you', works:'Arrived ✓',
-                  failed:"Didn't arrive ✗", refused:'Refused by BulkVS'};
+                  failed:"Didn't arrive ✗", nocampaign:'Not on a campaign', refused:'Refused (other)'};
 function stKey(n){ return String(n.number || n).replace(/\D/g, '').slice(-10); }
 function stState(n){
   const t = stTests[stKey(n)];
   if(!t) return 'untested';
-  if(t.accepted === false) return 'refused';
+  if(t.accepted === false) return /not on a campaign|not associated to a messaging campaign/i.test(t.campaign || '') ? 'nocampaign' : 'refused';
   if(t.received === true) return 'works';
   if(t.received === false) return 'failed';
   return 'waiting';
@@ -7637,6 +7637,10 @@ function stLine(key){
   const btns = `<button class="cn-chip" onclick="stMark('${key}', true)">✓ Got it</button>
                 <button class="cn-chip" onclick="stMark('${key}', false)">✗ Didn't come</button>`;
   let txt, col;
+  if(t.accepted === false && /not on a campaign|not associated to a messaging campaign/i.test(t.campaign || '')){
+    txt = '⛔ Not on a campaign — BulkVS will not send from it until it is put on one (' + when + ')'; col = 'var(--yellow)';
+    return `<div style="margin-top:8px;font-size:12.5px;color:${col};">${txt}</div>`;
+  }
   if(t.accepted === false){ txt = '❌ BulkVS refused to send it (' + when + ')'; col = 'var(--red)'; }
   else if(t.received === true){ txt = '✅ Arrived — tested ' + when + (t.how ? ' · ' + esc(t.how) : ''); col = 'var(--green)'; }
   else if(t.received === false){ txt = "✗ Didn't arrive — tested " + when; col = 'var(--red)'; }
@@ -7678,6 +7682,7 @@ async function stNextTen(){
     try{
       const r = await API.post('/api/sms-numbers/' + key + '/test', {to, leave_campaign: true});
       if(r.ok) sent++;
+      if(r.ok === false && !r.campaign && r.error) r.campaign = r.error;
       stTests[key] = {number: key, to_number: to.slice(-10), sent_at: new Date().toISOString(),
                       accepted: !!r.ok, received: r.ok ? null : false, campaign: r.campaign || ''};
     }catch(e){

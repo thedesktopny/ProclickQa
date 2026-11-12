@@ -8661,11 +8661,18 @@ def sms_number_test(number):
         except Exception as e:
             campaign = 'Campaign step failed: ' + str(e)[:160]
     try:
-        answer = cms_write._send_via_bulkvs({'From': frm, 'To': [to[-10:]], 'Message': text})
+        # a test is ONE try — a real send waits up to a minute for a number
+        # that is still being registered, which made each test take minutes
+        answer = cms_write._send_via_bulkvs({'From': frm, 'To': [to[-10:]], 'Message': text},
+                                            tries=1)
     except Exception as e:
+        err = str(e)[:240]
+        if 'not associated to a messaging campaign' in err.lower():
+            campaign = 'NOT on a campaign — BulkVS will not send from it until it is put on one'
         cms_write.sms_event('test_send', frm, None, None, False, _who(), to=to[-10:],
-                            campaign_now=campaign, error=str(e)[:240])
-        return jsonify({'ok': False, 'error': str(e)[:240], 'campaign': campaign}), 400
+                            campaign_now=campaign, error=err)
+        _sms_test_record(frm, to[-10:], False, campaign or err)
+        return jsonify({'ok': False, 'error': err, 'campaign': campaign or err}), 200
     if not isinstance(answer, dict):
         answer = {}
     results = answer.get('Results') or []
