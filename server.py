@@ -13913,7 +13913,8 @@ def _notes_pass(refresh_days=None):
                      FROM calls WHERE status = 'Waiting for notes'
                      ORDER BY created_at LIMIT 300""")
         waiting = [dict(r) for r in c.fetchall()]
-        if time.time() < _AI_NO_CREDIT['until'] or is_processing_paused():
+        cs = _credit_state()
+        if time.time() < cs['until'] or is_processing_paused():
             # nothing can be scored right now, so don't fetch the CMS calls
             # for the waiting pile — while the AI account was out of credit
             # that pile grew all afternoon and this read grew with it,
@@ -13944,7 +13945,11 @@ def _notes_pass(refresh_days=None):
         cms_calls = cms_db.recent_calls_with_notes(hours=hours,
                                                    max_rows=40000 if hours <= 12 else 120000)
         by_id = {x['cms_call_id']: x for x in cms_calls}
-        paused = is_processing_paused() or time.time() < _AI_NO_CREDIT['until']
+        paused = is_processing_paused() or time.time() < cs['until']
+        # after an out-of-credit spell, try ONE call first; the rest follow
+        # only once it has worked. Before, all 25 recordings were downloaded
+        # at once just to be refused, and memory climbed until the app froze.
+        batch_max = 1 if cs.get('probing') else 15
         to_score = []
         for r in waiting:
             result['waiting'] += 1
@@ -13956,7 +13961,7 @@ def _notes_pass(refresh_days=None):
             ready = (age > 1800 or
                      (info is not None and (info['work_ended'] or (not info['has_work'] and age > 300))) or
                      (info is None and age > 600))
-            if not ready or paused or len(to_score) >= 15:
+            if not ready or paused or len(to_score) >= batch_max:
                 if info and notes != (r.get('call_notes') or '').strip():
                     c.execute('UPDATE calls SET call_notes = %s WHERE call_id = %s', (notes, r['call_id']))
                 continue
@@ -14041,7 +14046,59 @@ def refresh_notes_now():
 
 
 
-_AI_NO_CREDIT = {'until': 0, 'said': 0}
+_AI_NO_CREDIT = {'until': 0, 'said': 0, 'read_at': 0, 'probing': False}
+_SCORE_SLOTS = None
+
+
+def _put_setting(key, value):
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute("""INSERT INTO app_settings (key, value, updated_at)
+                     VALUES (%s, %s, CURRENT_TIMESTAMP)
+                     ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=CURRENT_TIMESTAMP""",
+                  (key, str(value)))
+        conn.commit(); conn.close()
+    except Exception as e:
+        print('[Pull] could not save %s: %s' % (key, str(e)[:100]))
+
+
+def _credit_state():
+    """Whether the AI account is known to be out of credit — shared through
+    the database so every process (and a restart) knows, not just the one
+    that saw the error. Read at most every 30 seconds."""
+    if time.time() - _AI_NO_CREDIT['read_at'] > 30:
+        _AI_NO_CREDIT['read_at'] = time.time()
+        raw = _setting('ai_no_credit_until', '0')
+        try:
+            until = float(raw or 0)
+        except ValueError:
+            until = 0
+        _AI_NO_CREDIT['until'] = until
+        _AI_NO_CREDIT['probing'] = until > 0      # had a problem, not yet proved fixed
+    return _AI_NO_CREDIT
+
+
+def _credit_failed():
+    """Out of credit again: wait longer each time — 15, 30, then 60 minutes."""
+    if time.time() < _AI_NO_CREDIT.get('until', 0):
+        return int(_AI_NO_CREDIT['until'] - time.time())   # already waiting; several calls failed together
+    try:
+        step = min(3600, max(900, int(float(_setting('ai_no_credit_wait', '0') or 0)) * 2))
+    except ValueError:
+        step = 900
+    until = time.time() + step
+    _put_setting('ai_no_credit_wait', step)
+    _put_setting('ai_no_credit_until', until)
+    _AI_NO_CREDIT.update(until=until, probing=True, read_at=time.time())
+    return step
+
+
+def _credit_ok():
+    if _AI_NO_CREDIT.get('probing') or _AI_NO_CREDIT.get('until'):
+        _put_setting('ai_no_credit_until', 0)
+        _put_setting('ai_no_credit_wait', 0)
+        _AI_NO_CREDIT.update(until=0, probing=False, read_at=time.time())
+        print('[Pull] AI account has credit again — scoring resumed')
 
 
 def _safe_err(e):
@@ -14093,10 +14150,29 @@ def _score_in_background(call):
     a pushed one would be a nasty thing to discover later.
     """
     import threading
+    global _SCORE_SLOTS
+    if _SCORE_SLOTS is None:
+        _SCORE_SLOTS = threading.BoundedSemaphore(3)
 
     def run():
+        # at most three recordings downloaded and scored at once
+        with _SCORE_SLOTS:
+            _run()
+
+    def _run():
         from ai_engine import analyze_call as run_analysis
         call_id = call['call_id']
+        if time.time() < _AI_NO_CREDIT.get('until', 0):
+            # out of credit was found while this one waited its turn —
+            # don't download it, just put it back in the queue
+            try:
+                conn = get_db(); c = conn.cursor()
+                c.execute("""UPDATE calls SET status='Waiting for notes', processing_started_at=NULL
+                             WHERE call_id=%s""", (call_id,))
+                conn.commit(); conn.close()
+            except Exception:
+                pass
+            return
         url = call['recording_url']
         path_only = url.split('?')[0]
         ext = os.path.splitext(path_only)[1].lower()
@@ -14146,6 +14222,7 @@ def _score_in_background(call):
                            rr.get('confidence', 100), rr.get('evidence', '')))
             conn.commit(); conn.close()
             print('[Pull] scored %s: %s%%' % (call_id, result['overall_score']))
+            _credit_ok()
             _requeue_credit_failures()
         except Exception as e:
             msg = _safe_err(e)
@@ -14154,10 +14231,11 @@ def _score_in_background(call):
                 # "Failed" lost them for good; instead put the call back in the
                 # queue and stop trying for 15 minutes — once credit is added
                 # the waiting calls are scored on their own.
-                _AI_NO_CREDIT['until'] = time.time() + 900
+                wait = _credit_failed()
                 if time.time() - _AI_NO_CREDIT['said'] > 900:
                     _AI_NO_CREDIT['said'] = time.time()
-                    print('[Pull] AI ACCOUNT OUT OF CREDIT — scoring paused 15 min, calls kept waiting: ' + msg[:160])
+                    print('[Pull] AI ACCOUNT OUT OF CREDIT — scoring paused %d min, calls kept waiting: %s'
+                          % (wait // 60, msg[:160]))
                 try:
                     conn = get_db(); c = conn.cursor()
                     c.execute("""UPDATE calls SET status='Waiting for notes', processing_started_at=NULL
