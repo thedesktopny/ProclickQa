@@ -7606,6 +7606,243 @@ def _who():
             'employee_id': None}
 
 
+# ===================== birthdays, start dates, best of the month =====================
+# None of this exists in the CMS, so it lives in our own database, tied to the
+# CMS by the agent's Employee.Id or the customer's Account.Id — nothing in the
+# CMS changes. Managers and admins enter it; everyone sees the celebrations.
+def _celeb_tables(c):
+    c.execute("""CREATE TABLE IF NOT EXISTS people_dates (
+                   kind TEXT NOT NULL, ref_id INTEGER NOT NULL,
+                   birth_month INTEGER, birth_day INTEGER, birth_year INTEGER,
+                   start_date DATE, updated_by TEXT, updated_at TIMESTAMPTZ DEFAULT NOW(),
+                   PRIMARY KEY (kind, ref_id))""")
+    c.execute("""CREATE TABLE IF NOT EXISTS best_of_month (
+                   month TEXT PRIMARY KEY, employee_id INTEGER NOT NULL, name TEXT,
+                   note TEXT, chosen_by TEXT, chosen_at TIMESTAMPTZ DEFAULT NOW())""")
+
+
+_CELEB_CACHE = {'at': 0, 'dates': None}
+
+
+def _people_dates(force=False):
+    """{('employee'|'account', id): row} — read at most once a minute."""
+    import time as _t
+    if not force and _CELEB_CACHE['dates'] is not None and _t.time() - _CELEB_CACHE['at'] < 60:
+        return _CELEB_CACHE['dates']
+    try:
+        conn = get_db(); c = conn.cursor(cursor_factory=RealDictCursor)
+        _celeb_tables(c); conn.commit()
+        c.execute('SELECT * FROM people_dates')
+        _CELEB_CACHE['dates'] = {(r['kind'], r['ref_id']): dict(r) for r in c.fetchall()}
+        conn.close()
+        _CELEB_CACHE['at'] = _t.time()
+    except Exception as e:
+        print('[celebrations] ' + str(e)[:120])
+        if _CELEB_CACHE['dates'] is None:
+            _CELEB_CACHE['dates'] = {}
+    return _CELEB_CACHE['dates']
+
+
+def _today_ny():
+    from datetime import datetime as _dt
+    return _dt.now(_ny_zone()).date()
+
+
+def _is_birthday(row, today=None):
+    today = today or _today_ny()
+    if not row or not row.get('birth_month') or not row.get('birth_day'):
+        return False
+    m, d = int(row['birth_month']), int(row['birth_day'])
+    if (m, d) == (today.month, today.day):
+        return True
+    # 29 February birthdays are celebrated on the 28th in other years
+    import calendar
+    return (m, d) == (2, 29) and not calendar.isleap(today.year) and (today.month, today.day) == (2, 28)
+
+
+def _parse_birthday(text):
+    """'03-14', '3/14', '1990-03-14' or '03/14/1990' -> (month, day, year or None)."""
+    import re as _re
+    t = str(text or '').strip()
+    if not t:
+        return None
+    m = _re.match(r'^(\d{4})-(\d{1,2})-(\d{1,2})$', t)
+    if m:
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    else:
+        m = _re.match(r'^(\d{1,2})[/\-.](\d{1,2})(?:[/\-.](\d{2,4}))?$', t)
+        if not m:
+            raise ValueError('Write the birthday like 03/14 or 03/14/1990')
+        mo, d = int(m.group(1)), int(m.group(2))
+        y = int(m.group(3)) if m.group(3) else None
+        if y is not None and y < 100:
+            y += 1900 if y > 30 else 2000
+    import datetime as _d
+    try:
+        _d.date(y or 2000, mo, d)        # refuses 02/31 and the like
+    except ValueError:
+        raise ValueError('That date does not exist — write it like 03/14 or 03/14/1990')
+    if y and not (1900 <= y <= _today_ny().year):
+        raise ValueError('That year does not look right')
+    return mo, d, y
+
+
+def _save_dates(kind, ref_id, d):
+    sets, vals = [], []
+    if 'birthday' in d:
+        b = _parse_birthday(d.get('birthday'))
+        sets += ['birth_month', 'birth_day', 'birth_year']
+        vals += list(b) if b else [None, None, None]
+    if 'start_date' in d and kind == 'employee':
+        sd = (d.get('start_date') or '').strip() or None
+        if sd:
+            import datetime as _d
+            _d.date.fromisoformat(sd)
+        sets.append('start_date'); vals.append(sd)
+    if not sets:
+        return
+    conn = get_db(); c = conn.cursor()
+    _celeb_tables(c)
+    cols = ', '.join(['kind', 'ref_id'] + sets + ['updated_by', 'updated_at'])
+    ph = ', '.join(['%s'] * (len(sets) + 3)) + ', NOW()'
+    upd = ', '.join('%s = EXCLUDED.%s' % (k, k) for k in sets + ['updated_by']) + ', updated_at = NOW()'
+    c.execute('INSERT INTO people_dates (%s) VALUES (%s) ON CONFLICT (kind, ref_id) DO UPDATE SET %s'
+              % (cols, ph, upd), [kind, int(ref_id)] + vals + [(_who() or {}).get('name')])
+    conn.commit(); conn.close()
+    _CELEB_CACHE['at'] = 0
+
+
+def _fmt_birthday(row):
+    if not row or not row.get('birth_month'):
+        return None
+    import calendar
+    s = '%s %d' % (calendar.month_abbr[int(row['birth_month'])], int(row['birth_day']))
+    return s + (', %d' % row['birth_year'] if row.get('birth_year') else '')
+
+
+@app.route('/api/agents-celebrations', methods=['GET'])
+@portal_or_manager
+def agents_celebrations():
+    """Everybody: today's agent birthdays, work anniversaries, and the best of
+    the month."""
+    import cms_db
+    today = _today_ny()
+    dates = _people_dates()
+    try:
+        people = {a['id']: a for a in cms_db.agent_list(False)['agents'] if not a.get('left_firm')}
+    except Exception:
+        people = {}
+    birthdays, anniversaries = [], []
+    for (kind, rid), row in dates.items():
+        if kind != 'employee' or rid not in people:
+            continue
+        a = people[rid]
+        nice = a.get('phone_name') or a.get('first') or a['name']
+        if _is_birthday(row, today):
+            birthdays.append({'employee_id': rid, 'name': a['name'], 'call_name': nice})
+        sd = row.get('start_date')
+        if sd and (sd.month, sd.day) == (today.month, today.day) and today.year > sd.year:
+            anniversaries.append({'employee_id': rid, 'name': a['name'], 'call_name': nice,
+                                  'years': today.year - sd.year})
+    best = None
+    try:
+        conn = get_db(); c = conn.cursor(cursor_factory=RealDictCursor)
+        _celeb_tables(c); conn.commit()
+        c.execute('SELECT * FROM best_of_month WHERE month = %s', (today.strftime('%Y-%m'),))
+        r = c.fetchone()
+        if not r:   # early in a month, last month's winner stays up until a new one is picked
+            prev = (today.replace(day=1) - __import__('datetime').timedelta(days=1)).strftime('%Y-%m')
+            c.execute('SELECT * FROM best_of_month WHERE month = %s', (prev,))
+            r = c.fetchone()
+        conn.close()
+        if r:
+            a = people.get(r['employee_id']) or {}
+            best = {'month': r['month'], 'employee_id': r['employee_id'],
+                    'name': a.get('name') or r['name'],
+                    'call_name': a.get('phone_name') or a.get('first') or r['name'],
+                    'note': r['note'] or ''}
+    except Exception as e:
+        print('[celebrations] best: ' + str(e)[:120])
+    return jsonify({'today': today.isoformat(), 'birthdays': birthdays,
+                    'anniversaries': anniversaries, 'best': best})
+
+
+@app.route('/api/agents-dates', methods=['GET'])
+@portal_manager_only
+def agents_dates():
+    """Managers: every agent's birthday and start date (start date suggested
+    from when their CMS account was made, until somebody sets the real one)."""
+    import cms_db
+    dates = _people_dates(force=True)
+    out = {}
+    try:
+        for a in cms_db.agent_list(False)['agents']:
+            row = dates.get(('employee', a['id'])) or {}
+            b = None
+            if row.get('birth_month'):
+                b = ('%04d-%02d-%02d' % (row['birth_year'], row['birth_month'], row['birth_day'])
+                     if row.get('birth_year') else '%02d/%02d' % (row['birth_month'], row['birth_day']))
+            out[a['id']] = {'birthday': b, 'birthday_text': _fmt_birthday(row),
+                            'start_date': row['start_date'].isoformat() if row.get('start_date') else None,
+                            'start_suggested': (a.get('since') or '')[:10] or None}
+    except Exception as e:
+        return jsonify({'error': str(e)[:200]}), 400
+    return jsonify({'dates': out})
+
+
+@app.route('/api/agents-dates/<int:employee_id>', methods=['POST'])
+@portal_manager_only
+def agents_dates_save(employee_id):
+    try:
+        _save_dates('employee', employee_id, request.json or {})
+    except ValueError as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    return jsonify({'ok': True})
+
+
+@app.route('/api/agents-best-of-month', methods=['POST'])
+@portal_manager_only
+def agents_best_of_month():
+    """Pick (or clear, with no employee_id) this month's best agent."""
+    d = request.json or {}
+    month = (d.get('month') or _today_ny().strftime('%Y-%m'))[:7]
+    conn = get_db(); c = conn.cursor()
+    _celeb_tables(c)
+    if not d.get('employee_id'):
+        c.execute('DELETE FROM best_of_month WHERE month = %s', (month,))
+    else:
+        c.execute("""INSERT INTO best_of_month (month, employee_id, name, note, chosen_by)
+                     VALUES (%s, %s, %s, %s, %s)
+                     ON CONFLICT (month) DO UPDATE SET employee_id = EXCLUDED.employee_id,
+                       name = EXCLUDED.name, note = EXCLUDED.note,
+                       chosen_by = EXCLUDED.chosen_by, chosen_at = NOW()""",
+                  (month, int(d['employee_id']), (d.get('name') or '')[:100],
+                   (d.get('note') or '')[:200], (_who() or {}).get('name')))
+    conn.commit(); conn.close()
+    return jsonify({'ok': True})
+
+
+@app.route('/api/customers/<int:account_id>/dates', methods=['GET'])
+@portal_or_manager
+def customer_dates(account_id):
+    row = _people_dates().get(('account', account_id)) or {}
+    return jsonify({'birthday_text': _fmt_birthday(row),
+                    'birthday': ('%02d/%02d' % (row['birth_month'], row['birth_day'])
+                                 + ('/%d' % row['birth_year'] if row.get('birth_year') else ''))
+                                if row.get('birth_month') else None,
+                    'birthday_today': _is_birthday(row)})
+
+
+@app.route('/api/customers/<int:account_id>/dates', methods=['POST'])
+@portal_manager_only
+def customer_dates_save(account_id):
+    try:
+        _save_dates('account', account_id, request.json or {})
+    except ValueError as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    return customer_dates(account_id)
+
+
 @app.route('/api/customers', methods=['POST'])
 @portal_or_manager
 def customer_create():
@@ -10191,6 +10428,12 @@ def my_current_call():
         ready, ver = False, None
     out = dict(call)
     out.pop('event_t', None)
+    try:
+        prim = (who or {}).get('primary') or {}
+        if prim.get('id') and _is_birthday(_people_dates().get(('account', int(prim['id'])))):
+            who = dict(who); who['primary'] = dict(prim, birthday_today=True)
+    except Exception:
+        pass
     return jsonify({'call': out, 'who': who, 'extension': ext,
                     'looking_up': not ready, 'verification': ver})
 

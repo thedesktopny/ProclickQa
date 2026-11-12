@@ -429,6 +429,18 @@ td.agent{color:var(--text);font-weight:500;}
 .payhead{
   display:grid; grid-template-columns:1.25fr 1fr 1fr 1fr; gap:14px; padding:22px 0 4px;
 }
+/* celebrations */
+.celeb-bar{ display:flex; flex-wrap:wrap; gap:8px 18px; align-items:center; margin-bottom:12px;
+  padding:10px 16px; border-radius:12px; font-size:13.5px; color:var(--text);
+  background:linear-gradient(90deg, rgba(244,114,182,.16), rgba(124,108,255,.16), rgba(250,204,21,.14));
+  border:1px solid rgba(244,114,182,.35); }
+.celeb-layer{ position:fixed; inset:0; pointer-events:none; z-index:9999; overflow:hidden; }
+.celeb-layer span{ position:absolute; bottom:-60px; animation:celebUp linear forwards; }
+@keyframes celebUp{ 0%{ transform:translateY(0) rotate(-6deg); opacity:1; }
+  50%{ transform:translateY(-55vh) rotate(6deg); }
+  100%{ transform:translateY(-115vh) rotate(-4deg); opacity:.9; } }
+@media (prefers-reduced-motion: reduce){ .celeb-layer{ display:none; } }
+
 /* A customer's name, minutes and tabs stay on screen while scrolling through
    their history; once scrolled, the block shrinks to a slim bar. */
 .cu-head{ position:sticky; top:var(--cu-top,73px); z-index:30; background:var(--bg);
@@ -2143,6 +2155,7 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
   </div>
 
   <div style="padding:18px 28px 44px;">
+    <div id="celeb-banner"></div>
     <div style="display:flex;justify-content:flex-end;margin-bottom:8px;">
       <button class="cn-chip" onclick="whyNoPopup()">Why don't I see callers?</button>
       <button class="cn-chip" onclick="resetPopup()" style="margin-left:6px;">Reset the popup</button>
@@ -2292,6 +2305,8 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
         <input type="checkbox" id="al-former" onchange="loadAgentList()"> include former staff
       </label>
       <span id="al-count" style="font-size:11.5px;color:var(--text3);"></span>
+      <button class="btn btn-outline" id="al-best" style="display:none;"
+              onclick="celebBestOpen()">⭐ Best of the month</button>
       <button class="btn btn-primary" id="al-add" style="display:none;"
               onclick="cmsNewAgent()">+ Add agent</button>
     </div>
@@ -2369,6 +2384,14 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
       <div id="ag-rate-wrap" style="margin-top:12px;"><div class="cn-lab">Rate — dollars per hour</div>
         <input id="ag-rate" class="cms-in" inputmode="decimal" style="width:100%;" placeholder="e.g. 6.25">
       </div>
+
+      <div class="ag-grid" style="margin-top:12px;">
+        <div><div class="cn-lab">Birthday 🎈</div>
+          <input id="ag-bday" class="cms-in" style="width:100%;" placeholder="03/14 or 03/14/1990"></div>
+        <div><div class="cn-lab">Started at ProClick 🎉</div>
+          <input id="ag-start" class="cms-in" type="date" style="width:100%;"></div>
+      </div>
+      <div id="ag-start-hint" style="font-size:11px;color:var(--text3);margin-top:4px;line-height:1.5;"></div>
 
       <div style="display:flex;gap:16px;margin-top:14px;flex-wrap:wrap;">
         <label class="ag-check"><input type="checkbox" id="ag-qa"> QA reviewer</label>
@@ -5670,6 +5693,7 @@ function cmsNewAgent(){
   document.getElementById('ag-role').value = '';
   document.getElementById('ag-qa').checked = false;
   document.getElementById('ag-cam').checked = false;
+  agDatesFill(null);
   document.getElementById('ag-login-fields').style.display = '';
   document.getElementById('ag-rate-wrap').style.display = '';
   document.getElementById('ag-out').textContent = '';
@@ -5712,6 +5736,7 @@ function cmsEditAgent(id){
   document.getElementById('ag-phone').value = a.phone_name || '';
   document.getElementById('ag-qa').checked = !!a.qa;
   document.getElementById('ag-cam').checked = !!a.camera;
+  agDatesFill(id);
   // an existing person's login is not changed from here
   document.getElementById('ag-login-fields').style.display = 'none';
   document.getElementById('ag-rate-wrap').style.display = 'none';
@@ -5725,6 +5750,12 @@ function cmsEditAgent(id){
 async function cmsSaveAgent(confirmed){
   const out = document.getElementById('ag-out');
   const btn = document.getElementById('ag-go');
+  const bdIn = document.getElementById('ag-bday').value.trim();
+  if(bdIn && !/^\d{1,2}[\/\-.]\d{1,2}([\/\-.]\d{2,4})?$|^\d{4}-\d{1,2}-\d{1,2}$/.test(bdIn)){
+    out.style.color = 'var(--red)';
+    out.textContent = '❌ Write the birthday like 03/14 or 03/14/1990';
+    return;
+  }
   const body = {
     first_name: document.getElementById('ag-first').value.trim(),
     last_name: document.getElementById('ag-last').value.trim(),
@@ -5761,6 +5792,18 @@ async function cmsSaveAgent(confirmed){
       if(forId && wanted !== String(agTlWas || '')){
         try{ await API.post('/api/teams/' + forId, {leader_id: wanted || null}); }
         catch(e){ showToast('Saved, but the team could not be set: ' + e.message, true); }
+      }
+      // birthday and start date are ours too — saved only when changed
+      if(forId){
+        const bd = document.getElementById('ag-bday').value.trim();
+        const sd = document.getElementById('ag-start').value || '';
+        if(bd !== agDatesWas.birthday || sd !== agDatesWas.start){
+          try{
+            const x = await API.post('/api/agents-dates/' + forId, {birthday: bd, start_date: sd});
+            if(x.ok === false) throw new Error(x.error);
+            agDates = null; celebLoad();
+          }catch(e){ showToast('Saved, but the birthday / start date was not: ' + e.message, true); }
+        }
       }
       out.style.color = 'var(--green)';
       out.textContent = '✅ ' + r.meaning;
@@ -6429,6 +6472,9 @@ function portalApply(name, isManager){
   // on the first page (Live) instead of where you were.
   addressLocked = true;
   try{ showPage(portalPages[0] || 'live'); } finally { addressLocked = false; }
+  celebLoad();
+  const best = document.getElementById('al-best');
+  if(best) best.style.display = (portalIsManager || portalIsAdmin) ? '' : 'none';
 }
 
 /* ── Start shift / break / end shift ─────────────────────────────────────
@@ -10822,7 +10868,7 @@ function lvRenderFloor(){
         const line = !a.break_planned ? `on break · ${Math.round(-left/60)} min so far`
                    : over ? `${m} min over` : `${m} min left`;
         return `<div class="lvtile brk" onclick="lvOpenAgent(${a.employee_id})" title="${esc((a.break_reason||'') + (a.break_planned ? ' · ' + a.break_planned + ' min break' : ''))}">
-          <div class="nm">${esc(a.name)||'—'}</div>
+          <div class="nm">${esc(a.name)||'—'}${celebMark(a.employee_id)}</div>
           <div class="ex">ext ${a.extension||'—'}${a.break_planned ? ' · ' + a.break_planned + ' min break' : ''}</div>
           <div class="st" style="color:${over ? '#F2585F' : '#9C90FF'}">${line}</div></div>`;
       }).join('')}</div>
@@ -10845,7 +10891,7 @@ function lvRenderFloor(){
     const hit = !q || (a.name||'').toLowerCase().includes(q) ||
                 String(a.extension||'').includes(q) || String(a.last_call_phone||'').includes(q);
     return `<div class="lvtile ${cls} ${q && !hit ? 'dim':''}" onclick="lvOpenAgent(${a.employee_id})">
-      <div class="nm">${esc(a.name)||'—'}</div>
+      <div class="nm">${esc(a.name)||'—'}${celebMark(a.employee_id)}</div>
       <div class="ex">ext ${a.extension||'—'}</div>
       <div class="st" style="color:${colour}">${state}${busy && a.phone_since ? ' · ' + lvAgo(a.phone_since).replace(' ago','') : ''}</div>
       <div class="lvpop">
@@ -11430,7 +11476,10 @@ function inShow(r){
       inTabAlert(call.phone || 'Call');
       return;
     }
-    body.innerHTML = vbox +
+    const bday = who.primary && who.primary.birthday_today
+      ? `<div style="font-size:13px;margin-bottom:10px;padding:8px 10px;border-radius:9px;
+           background:rgba(244,114,182,.12);border:1px solid rgba(244,114,182,.35);">🎂 It's ${esc(who.primary.name || 'their')}'s birthday today — wish them a happy birthday!</div>` : '';
+    body.innerHTML = vbox + bday +
       group('This is their number', who.primary ? [who.primary] : [])
       + group('Matched on another number', who.others || [],
               'This number is a mobile or second number on these accounts.')
@@ -12565,6 +12614,154 @@ async function cuTextingOff(){
 }
 
 let cuSmsTo = '', cuSmsAccount = null, cuSmsFind = '';
+/* ================= celebrations =================
+   Birthdays and start dates live in our own database (the CMS has no place for
+   them). Managers and admins enter them; everyone sees the balloons. */
+let celebData = null, celebTimer = null;
+async function celebLoad(){
+  try{
+    celebData = await API.get('/api/agents-celebrations');
+  }catch(e){ return; }
+  celebBanner();
+  if(typeof lvData !== 'undefined' && lvData && typeof lvRenderFloor === 'function'){ try{ lvRenderFloor(); }catch(e){} }
+  celebBalloonsOnce();
+  if(!celebTimer) celebTimer = setInterval(celebLoad, 30 * 60000);
+}
+function celebMark(id){
+  if(!celebData || !id) return '';
+  let m = '';
+  if((celebData.birthdays || []).some(x => x.employee_id === id)) m += ' 🎈';
+  if((celebData.anniversaries || []).some(x => x.employee_id === id)) m += ' 🎉';
+  if(celebData.best && celebData.best.employee_id === id) m += ' ⭐';
+  return m ? `<span title="celebrating today">${m}</span>` : '';
+}
+function celebBanner(){
+  const box = document.getElementById('celeb-banner');
+  if(!box || !celebData) return;
+  const items = [];
+  (celebData.birthdays || []).forEach(b => items.push(`🎈 Happy birthday <b>${esc(b.call_name)}</b>!`));
+  (celebData.anniversaries || []).forEach(a => items.push(
+    `🎉 <b>${esc(a.call_name)}</b> — ${a.years} year${a.years === 1 ? '' : 's'} at ProClick today!`));
+  if(celebData.best){
+    const mon = new Date(celebData.best.month + '-15').toLocaleString([], {month:'long'});
+    items.push(`⭐ Best of ${mon}: <b>${esc(celebData.best.call_name)}</b>${celebData.best.note ? ' — ' + esc(celebData.best.note) : ''}`);
+  }
+  box.innerHTML = !items.length ? '' : `<div class="celeb-bar">${items.map(t => `<span>${t}</span>`).join('')}</div>`;
+}
+/* balloons float up once a day per computer, only when there is something to celebrate */
+function celebBalloonsOnce(){
+  if(!celebData || !((celebData.birthdays || []).length || (celebData.anniversaries || []).length)) return;
+  const key = 'celeb-shown-' + celebData.today;
+  try{ if(localStorage.getItem(key)) return; localStorage.setItem(key, '1'); }catch(e){}
+  celebBalloons();
+}
+function celebBalloons(){
+  const layer = document.createElement('div');
+  layer.className = 'celeb-layer';
+  const pics = ['🎈','🎈','🎈','🎉','🎊','🎈'];
+  for(let i = 0; i < 26; i++){
+    const b = document.createElement('span');
+    b.textContent = pics[i % pics.length];
+    b.style.left = (Math.random() * 96) + 'vw';
+    b.style.fontSize = (26 + Math.random() * 26) + 'px';
+    b.style.animationDelay = (Math.random() * 2.2) + 's';
+    b.style.animationDuration = (4.5 + Math.random() * 2.5) + 's';
+    layer.appendChild(b);
+  }
+  document.body.appendChild(layer);
+  setTimeout(() => layer.remove(), 10000);
+}
+
+/* agent dialog: birthday + start date */
+let agDates = null, agDatesWas = {birthday:'', start:''};
+async function agDatesFill(id){
+  const bd = document.getElementById('ag-bday'), sd = document.getElementById('ag-start');
+  const hint = document.getElementById('ag-start-hint');
+  bd.value = ''; sd.value = ''; hint.textContent = '';
+  agDatesWas = {birthday:'', start:''};
+  if(!id) return;
+  try{
+    if(!agDates) agDates = (await API.get('/api/agents-dates')).dates || {};
+    const d = agDates[id] || {};
+    let b = d.birthday || '';
+    if(/^\d{4}-\d\d-\d\d$/.test(b)){ const p = b.split('-'); b = p[1] + '/' + p[2] + '/' + p[0]; }
+    bd.value = b; sd.value = d.start_date || '';
+    agDatesWas = {birthday: bd.value, start: sd.value};
+    if(!d.start_date && d.start_suggested){
+      hint.innerHTML = `Their CMS account was made on ${esc(d.start_suggested)} — <a href="#" onclick="document.getElementById('ag-start').value='${d.start_suggested}';return false;">use that</a>, or type the real start date.`;
+    }
+  }catch(e){}
+}
+
+/* best of the month — managers pick */
+function celebBestOpen(){
+  const list = ((alData && alData.agents) || []).filter(a => !a.left_firm)
+    .slice().sort((x, y) => x.name.localeCompare(y.name));
+  const cur = celebData && celebData.best;
+  const thisMonth = (celebData && celebData.today ? celebData.today : new Date().toISOString()).slice(0, 7);
+  const wrap = document.createElement('div');
+  wrap.className = 'modal'; wrap.style.display = 'flex'; wrap.style.zIndex = String(++_modalZ); wrap.id = 'best-modal';
+  wrap.innerHTML = `<div class="modal-box" style="max-width:420px;padding:22px;">
+    <div style="font-size:16px;font-weight:650;margin-bottom:12px;">⭐ Best of the month</div>
+    <div class="cn-lab">Month</div>
+    <input id="best-month" class="cms-in" type="month" style="width:100%;" value="${thisMonth}">
+    <div class="cn-lab" style="margin-top:12px;">Who</div>
+    <select id="best-who" class="cms-in" style="width:100%;">
+      <option value="">— nobody (clear) —</option>
+      ${list.map(a => `<option value="${a.id}" ${cur && cur.month === thisMonth && cur.employee_id === a.id ? 'selected' : ''}>${esc(a.name)}${a.extension ? ' · ' + esc(a.extension) : ''}</option>`).join('')}
+    </select>
+    <div class="cn-lab" style="margin-top:12px;">Why (optional, shown to everyone)</div>
+    <input id="best-note" class="cms-in" style="width:100%;" maxlength="200" placeholder="e.g. great reviews from customers"
+           value="${cur && cur.month === thisMonth ? esc(cur.note || '') : ''}">
+    <div style="display:flex;gap:8px;margin-top:16px;">
+      <button class="btn btn-outline" style="flex:1;" onclick="document.getElementById('best-modal').remove()">Cancel</button>
+      <button class="btn btn-primary" style="flex:1;" onclick="celebBestSave()">Save</button>
+    </div></div>`;
+  document.body.appendChild(wrap);
+}
+async function celebBestSave(){
+  const sel = document.getElementById('best-who');
+  const id = sel.value;
+  try{
+    const r = await API.post('/api/agents-best-of-month', {
+      month: document.getElementById('best-month').value,
+      employee_id: id ? parseInt(id, 10) : null,
+      name: id ? sel.options[sel.selectedIndex].text.split(' · ')[0] : '',
+      note: document.getElementById('best-note').value.trim()});
+    if(r.ok === false) throw new Error(r.error || 'failed');
+    document.getElementById('best-modal').remove();
+    showToast(id ? 'Best of the month saved ⭐' : 'Cleared');
+    celebLoad();
+  }catch(e){ alert('Could not save: ' + e.message); }
+}
+
+/* customer birthday */
+async function cuBirthdayLoad(id){
+  try{
+    const r = await API.get('/api/customers/' + id + '/dates');
+    if(!cuData || cuData.account.id !== id) return;
+    cuData.dates = r;
+    const el = document.getElementById('cu-bday');
+    if(el) el.innerHTML = r.birthday_text ? `🎂 ${esc(r.birthday_text)} · ` : '';
+    const t = document.getElementById('cu-bday-today');
+    if(t) t.innerHTML = r.birthday_today
+      ? `<span style="font-size:12.5px;padding:3px 10px;border-radius:999px;background:rgba(244,114,182,.15);
+           border:1px solid rgba(244,114,182,.4);">🎂 Birthday today!</span>` : '';
+  }catch(e){}
+}
+async function cuBirthdayEdit(){
+  if(!cuData) return;
+  const cur = (cuData.dates && cuData.dates.birthday) || '';
+  const v = prompt("Customer's birthday — like 03/14 or 03/14/1990.\nLeave empty to remove it.", cur);
+  if(v === null) return;
+  try{
+    const r = await API.post('/api/customers/' + cuData.account.id + '/dates', {birthday: v.trim()});
+    if(r.ok === false) throw new Error(r.error);
+    cuBirthdayLoad(cuData.account.id);
+    showToast(v.trim() ? 'Birthday saved 🎂' : 'Birthday removed');
+  }catch(e){ alert('Could not save: ' + e.message); }
+}
+
 /* managers and admins can remove an account note; the text is kept in the change log */
 async function cuNoteDelete(id){
   if(!cuData) return;
@@ -12764,7 +12961,9 @@ async function cuOpen(id){
         ${a.business?'<span class="pill">business</span>':''}
         ${a.deleted?'<span class="pill" style="color:var(--red)">deleted</span>':''}
         ${a.is_free?'<span class="pill" style="color:var(--yellow)">free account</span>':''}
+        <span id="cu-bday-today"></span>
         <span class="cu-actions" style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;">
+          ${(portalIsManager || portalIsAdmin) ? `<button class="btn btn-outline" style="font-size:12px;" onclick="cuBirthdayEdit()" title="Customer's birthday">🎂</button>` : ''}
           <button class="btn btn-outline" style="font-size:12px;" onclick="cuNoteOpen()"
                   title="A note about the account itself. For what happened on a call, use the work history.">+ Account note</button>
           <button class="btn btn-primary" style="font-size:12px;" onclick="cuBuyOpen()">💳 Sell a package</button>
@@ -12774,7 +12973,7 @@ async function cuOpen(id){
         </span>
       </div>
       <div class="cu-contact" style="font-size:12.5px;color:var(--text3);margin-bottom:18px;">
-        ${[a.phone,a.mobile,a.home_phone,a.other_phone].filter(Boolean).join(' · ')}
+        <span id="cu-bday"></span>${[a.phone,a.mobile,a.home_phone,a.other_phone].filter(Boolean).join(' · ')}
         ${a.email?' · '+esc(a.email):''}
         ${a.sms_number?' · texts from '+a.sms_number:''}
         · customer since ${cuDate(a.created)}
@@ -12804,6 +13003,7 @@ async function cuOpen(id){
       </div>
       <div id="cu-tab-body" style="margin-top:14px;"></div>`;
     cuStickyHead();
+    cuBirthdayLoad(a.id);
     cuTab('work');
   }catch(e){ box.innerHTML = `<div style="color:var(--red)">${e.message}</div>`; }
 }
