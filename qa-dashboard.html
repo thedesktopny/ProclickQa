@@ -432,7 +432,7 @@ td.agent{color:var(--text);font-weight:500;}
 /* A customer's name, minutes and tabs stay on screen while scrolling through
    their history; once scrolled, the block shrinks to a slim bar. */
 .cu-head{ position:sticky; top:var(--cu-top,73px); z-index:30; background:var(--bg);
-          padding-top:6px; transition:box-shadow .15s; }
+          padding-top:6px; transition:box-shadow .15s; overflow-anchor:none; }
 .cu-head.stuck{ box-shadow:0 10px 14px -12px rgba(0,0,0,.7); }
 .cu-head.stuck .cu-contact{ display:none; }
 .cu-head.stuck .cu-name{ font-size:17px !important; }
@@ -12711,8 +12711,18 @@ function cuStickyHead(){
     // points to slim and to grow back, so it does not flicker in between
     const scrolled = h - box.getBoundingClientRect().top;
     const stuck = head.classList.contains('stuck');
-    if(!stuck && scrolled > 140) head.classList.add('stuck');
-    else if(stuck && scrolled < 40) head.classList.remove('stuck');
+    // Slimming the header made the page shorter, the browser moved the
+    // scroll to make up for it, and that crossed the line back the other way —
+    // so it flickered between big and slim. Now the space it gives up is kept
+    // as an invisible gap below it, so the page never changes length.
+    if(!stuck && scrolled > 140){
+      const full = head.offsetHeight;
+      head.classList.add('stuck');
+      head.style.marginBottom = Math.max(0, full - head.offsetHeight) + 'px';
+    }else if(stuck && scrolled < 40){
+      head.classList.remove('stuck');
+      head.style.marginBottom = '0px';
+    }
   };
   place();
   if(cuStickyWired) return;
