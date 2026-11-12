@@ -12440,6 +12440,25 @@ async function cuTextingOff(){
 }
 
 let cuSmsTo = '', cuSmsAccount = null, cuSmsFind = '';
+/* managers and admins can remove an account note; the text is kept in the change log */
+async function cuNoteDelete(id){
+  if(!cuData) return;
+  const n = (cuData.notes || []).find(x => x.id === id);
+  const preview = n ? String(n.note || '').replace(/<[^>]+>/g,' ').trim().slice(0, 120) : '';
+  if(!confirm('Delete this note?\n\n"' + preview + (preview.length >= 120 ? '…' : '') + '"\n\nIt is removed from the account (and the old CMS). A copy is kept in the change log.')) return;
+  try{
+    const r = await API.del(`/api/customers/${cuData.account.id}/notes/${id}`);
+    if(r && r.ok === false) throw new Error(r.error || 'Could not delete');
+    cuData.notes = (cuData.notes || []).filter(x => x.id !== id);
+    if(typeof showToast === 'function') showToast('Note deleted');
+    cuTab('notes');
+    const t = document.querySelector('[data-cutab="notes"] span');
+    if(t) t.textContent = cuData.notes.length;
+  }catch(e){
+    alert('Could not delete the note: ' + (e.message || e));
+  }
+}
+
 const cuSmsLoaded = {};          // conversations already fetched in full
 function cuSmsPick(t){ cuSmsTo = t; cuTab('sms'); setTimeout(()=>document.getElementById('sms-text')?.focus(), 50); }
 function cuSmsNewAsk(){
@@ -12757,7 +12776,10 @@ function cuTab(which){
   else if(which === 'notes'){
     body.innerHTML = !r.notes.length ? '<div class="payhint">No account notes.</div>' :
       r.notes.map(n=>`<div class="card" style="padding:12px 16px;margin-bottom:8px;">
-        <div style="font-size:11.5px;color:var(--text3);">${cuWhen(n.when)} · ${esc(n.by)}</div>
+        <div style="font-size:11.5px;color:var(--text3);display:flex;align-items:center;gap:8px;">
+          <span>${cuWhen(n.when)} · ${esc(n.by)}</span>
+          ${(portalIsManager || portalIsAdmin) && n.id ? `<button class="btn btn-outline" style="margin-left:auto;font-size:11px;padding:3px 9px;color:var(--red,#f87171);"
+              onclick="cuNoteDelete(${n.id})">Delete</button>` : ''}</div>
         <div style="font-size:13px;margin-top:4px;line-height:1.65;">${fmtNote(n.note)}</div></div>`).join('');
   }
   else if(which === 'sms'){

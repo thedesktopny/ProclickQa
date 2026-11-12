@@ -229,6 +229,48 @@ def create(table, values, who, dry_run=True):
     return out
 
 
+def delete_account_note(account_id, note_id, who):
+    """Removes one account note (managers and admins). The full note is kept in
+    our own audit log first, so a deletion can always be looked up and the
+    text put back if it was a mistake."""
+    conn = cms_db._connect()
+    out = {'table': 'AccountNotes', 'action': 'delete', 'row_id': int(note_id),
+           'dry_run': False}
+    before = None
+    try:
+        cu = conn.cursor()
+        cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        cu.execute("""SELECT Id, AccountId, Note, CreatedBy, Created FROM AccountNotes
+                      WHERE Id = %s AND AccountId = %s""", (int(note_id), int(account_id)))
+        r = cu.fetchone()
+        if not r:
+            out.update(ok=False, committed=False,
+                       error='That note was not found on this account (it may already be deleted).')
+            return out
+        before = {'Id': int(r[0]), 'AccountId': int(r[1]), 'Note': r[2],
+                  'CreatedBy': r[3], 'Created': str(r[4])}
+        out['values'] = {'deleted_note': before}
+        cu.execute('DELETE FROM AccountNotes WHERE Id = %s AND AccountId = %s',
+                   (int(note_id), int(account_id)))
+        gone = cu.rowcount
+        conn.commit()
+        if gone != 1 or _row_now(conn, 'AccountNotes', int(note_id)) is not None:
+            out.update(ok=False, committed=False,
+                       error='The note could not be deleted — the login may not have permission.')
+        else:
+            out.update(ok=True, committed=True, meaning='Note deleted.')
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        out.update(ok=False, committed=False, error=_explain(e), raw_error=str(e)[:300])
+    finally:
+        conn.close()
+    _log(who, out, before=before)
+    return out
+
+
 def update(table, row_id, values, who, dry_run=True):
     """Change a row. The previous values are recorded before anything moves."""
     clean = _check(table, values, creating=False)

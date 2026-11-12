@@ -10525,6 +10525,20 @@ def customer_add_note(account_id):
     return jsonify(out), (200 if out.get('ok') else 400)
 
 
+@app.route('/api/customers/<int:account_id>/notes/<int:note_id>', methods=['DELETE'])
+@portal_manager_only
+def customer_delete_note(account_id, note_id):
+    """Managers and admins only — enforced here, not just by hiding the button.
+    The note's text is kept in the change log (CMS Tables / audit)."""
+    import cms_write
+    try:
+        out = cms_write.delete_account_note(account_id, note_id, _who())
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'The note could not be deleted.',
+                        'raw_error': str(e)[:300]}), 400
+    return jsonify(out), (200 if out.get('ok') else 400)
+
+
 @app.route('/api/cms-audit', methods=['GET'])
 @portal_manager_only
 def cms_audit_list():

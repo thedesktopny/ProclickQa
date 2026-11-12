@@ -3344,10 +3344,10 @@ def customer_profile(account_id, limit=120):
         LEFT JOIN Packages p ON p.Id = ps.PackageId
         WHERE ps.AccountId = %s ORDER BY ps.Created DESC""", (aid,))]
 
-    notes = [{'when': _plain(cr), 'note': note,
+    notes = [{'id': int(nid), 'when': _plain(cr), 'note': note,
               'by': ('%s %s' % (fn or '', ln or '')).strip()}
-             for cr, note, fn, ln in rows("""
-        SELECT TOP 100 n.Created, n.Note, e.FirstName, e.LastName
+             for nid, cr, note, fn, ln in rows("""
+        SELECT TOP 100 n.Id, n.Created, n.Note, e.FirstName, e.LastName
         FROM AccountNotes n LEFT JOIN Employee e ON e.Id = n.CreatedBy
         WHERE n.AccountId = %s ORDER BY n.Created DESC""", (aid,))]
 
