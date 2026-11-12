@@ -2029,13 +2029,13 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
         <div style="font-size:14px;font-weight:650;margin-right:6px;">Test which numbers can text</div>
         <span style="font-size:12px;color:var(--text3);">send to</span>
         <input id="st-to" class="cms-in" style="width:140px;" value="3476752334">
-        <button class="btn btn-primary" style="font-size:12px;" id="st-go" onclick="stNextTen()">Send to the next 10 untested</button>
+        <button class="btn btn-primary" style="font-size:12px;" id="st-go" onclick="stNextTen()">Send to the next 10 untested on a campaign</button>
         <button class="btn btn-outline" style="font-size:12px;" onclick="stLoad()">Refresh results</button>
         <button class="btn btn-outline" style="font-size:12px;" onclick="stDownload()">Download results</button>
         <span id="st-say" style="font-size:12px;color:var(--text2);"></span>
       </div>
       <div style="font-size:11.5px;color:var(--text3);margin-top:8px;line-height:1.6;">
-        Each test goes from that number to your phone and changes nothing about the number.
+        Only numbers that are on a campaign are tested (static and rotating). Each test goes from that number to your phone and changes nothing about the number.
         When one arrives, press <b>✓ Got it</b> on that number — or just <b>reply "ok"</b> to the text and it is
         marked by itself (that also proves texts coming IN work). Press <b>✗ Didn't come</b> for ones that never arrive; they turn red.
       </div>
@@ -7107,6 +7107,7 @@ async function snLoadHealth(){
         ${c.free!=null ? ' · '+(c.free>0? c.free+' free' : c.free===0 ? '<b style="color:var(--yellow)">full</b>' : (c.count <= (h.carrier_max||49) ? '<b style="color:var(--yellow)">full</b> · '+(-c.free)+' above '+lim+', comes down as numbers rotate' : '<b style="color:var(--red)">'+(c.count-(h.carrier_max||49))+' over the carriers\' limit</b>')) : ''}</div></div>`;
   }).join('');
   snHealth = h;
+  if(typeof snData !== 'undefined' && snData) snRender();     // campaign test counts need this
   const probs = (h.problems||[]);
   const rot = h.rotating || [];
   const next = rot.find(x=>x.movable);
@@ -7504,7 +7505,10 @@ function snRender(){
   const list = snData.numbers.filter(n => (!q
     || String(n.number).includes(q)
     || (n.customer || '').toLowerCase().includes(q))
-    && (stFilter === 'all' || stState(n) === stFilter));
+    && (stFilter === 'all'
+        || (stFilter === 'oncampaign' ? !!(stCampaignSet() || new Map()).get(stKey(n))
+           : stFilter === 'untested' ? (stState(n) === 'untested' && !!(stCampaignSet() || new Map()).get(stKey(n)))
+           : stState(n) === stFilter)));
   document.getElementById('sn-count').textContent =
     `${snData.count} numbers · ${snData.spare} spare`;
 
@@ -7609,7 +7613,16 @@ async function loadSmsNumbers2(){}
    Results are kept on the server, so you can test 10 today and 10 tomorrow
    from any computer and still see which ones were done. */
 let stTests = {}, stFilter = 'all', stBusy = false;
-const ST_NAMES = {all:'All', untested:'Not tested', waiting:'Waiting for you', works:'Arrived ✓',
+/* numbers on a campaign, from the campaign check at the top of the page */
+function stCampaignSet(){
+  const set = new Map();
+  const h = (typeof snHealth !== 'undefined') ? snHealth : null;
+  if(!h) return null;
+  (h.static || []).forEach(x => { if(x.bulkvs_tcr) set.set(stKey(x.number), {number: x.number, tcr: x.bulkvs_tcr, kind: 'static', customer: x.customer}); });
+  (h.rotating || []).forEach(x => { if(x.tcr) set.set(stKey(x.number), {number: x.number, tcr: x.tcr, kind: 'rotating', customer: x.customer}); });
+  return set;
+}
+const ST_NAMES = {all:'All', oncampaign:'On a campaign', untested:'Not tested', waiting:'Waiting for you', works:'Arrived ✓',
                   failed:"Didn't arrive ✗", nocampaign:'Not on a campaign', refused:'Refused (other)'};
 function stKey(n){ return String(n.number || n).replace(/\D/g, '').slice(-10); }
 function stState(n){
@@ -7624,7 +7637,11 @@ function stFilters(){
   const box = document.getElementById('st-filters');
   if(!box || !snData) return;
   const count = {all: snData.numbers.length};
+  const camp = stCampaignSet();
   snData.numbers.forEach(n => { const s = stState(n); count[s] = (count[s] || 0) + 1; });
+  count.oncampaign = camp ? camp.size : 0;
+  // "not tested" counts only campaign numbers — those are the ones being tested
+  if(camp) count.untested = [...camp.keys()].filter(k => !stTests[k]).length;
   box.innerHTML = Object.keys(ST_NAMES).map(k =>
     `<button class="cn-chip" style="${stFilter===k ? 'background:var(--accent);color:#fff;border-color:var(--accent);' : ''}"
        onclick="stFilter='${k}';snRender()">${ST_NAMES[k]} · ${count[k] || 0}</button>`).join('');
@@ -7668,11 +7685,13 @@ async function stNextTen(){
   if(stBusy || !snData) return;
   const to = (document.getElementById('st-to').value || '').replace(/\D/g, '');
   if(to.length < 10){ alert('Type the 10-digit number the tests should go to.'); return; }
-  const next = snData.numbers.filter(n => stState(n) === 'untested').slice(0, 10);
   const say = document.getElementById('st-say');
-  if(!next.length){ say.textContent = 'Every number has been tested.'; return; }
-  if(!confirm('Send a test text from these ' + next.length + ' numbers to ' + to + '?\n\n'
-              + next.map(n => n.number).join('\n'))) return;
+  const camp = stCampaignSet();
+  if(!camp){ say.textContent = 'Still checking which numbers are on a campaign — try again in a few seconds.'; return; }
+  const next = [...camp.values()].filter(c => !stTests[stKey(c.number)]).slice(0, 10);
+  if(!next.length){ say.textContent = 'Every number on a campaign has been tested.'; return; }
+  if(!confirm('Send a test text from these ' + next.length + ' campaign numbers to ' + to + '?\n\n'
+              + next.map(n => n.number + '  (' + n.tcr + ', ' + n.kind + ')').join('\n'))) return;
   stBusy = true; document.getElementById('st-go').disabled = true;
   let i = 0, sent = 0;
   for(const n of next){
