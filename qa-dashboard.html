@@ -1036,8 +1036,27 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
 .st-fix .tag.move{ background:rgba(245,166,35,.16); color:var(--yellow); }
 .st-fix .tag.hire{ background:rgba(242,78,78,.16); color:var(--red); }
 
+/* the top strip of the Live page */
+.lv-strip{ display:flex; flex-wrap:wrap; gap:8px; align-items:stretch; margin-bottom:12px; }
+.lv-strip > div:empty{ display:none; }
+.lv-today{ display:flex; flex-wrap:wrap; gap:8px; }
+.lv-celeb{ flex:1 1 300px; min-width:0; display:flex; }
+.lv-celeb .celeb-bar{ flex:1; margin:0; padding:8px 14px; font-size:13px; }
+.lv-pill{ display:flex; align-items:center; gap:8px; padding:8px 14px; border-radius:12px;
+  background:var(--surface); border:1px solid var(--border); font-size:12.5px; color:var(--text2);
+  white-space:nowrap; }
+.lv-pill b{ font-size:18px; color:var(--text); font-variant-numeric:tabular-nums; font-weight:680; }
+.lv-pill.busy{ background:rgba(245,166,35,.10); border-color:rgba(245,166,35,.4); }
+.lv-pill.busy b{ color:var(--yellow); }
+.lv-pill.bad{ background:rgba(242,78,78,.10); border-color:rgba(242,78,78,.45); }
+.lv-pill.bad b{ color:var(--red); }
+.lv-pill .sep{ width:1px; align-self:stretch; background:var(--border); margin:0 4px; }
+.lv-link{ background:none; border:0; color:var(--text3); font:inherit; font-size:11.5px;
+  text-decoration:underline; cursor:pointer; padding:2px 4px; }
+.lv-link:hover{ color:var(--text2); }
+
 /* callers holding — the number that matters most on a busy floor */
-.lv-waiting{ margin-bottom:14px; }
+.lv-waiting{ display:flex; }
 .lv-hold{
   display:flex; align-items:center; gap:16px; padding:14px 18px; border-radius:12px;
   border:1px solid var(--border); background:var(--surface);
@@ -2155,14 +2174,19 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
   </div>
 
   <div style="padding:18px 28px 44px;">
-    <div id="celeb-banner"></div>
-    <div style="display:flex;justify-content:flex-end;margin-bottom:8px;">
-      <button class="cn-chip" onclick="whyNoPopup()">Why don't I see callers?</button>
-      <button class="cn-chip" onclick="resetPopup()" style="margin-left:6px;">Reset the popup</button>
+    <!-- one slim strip: callers waiting, the day's figures (team leaders,
+         managers and admins only) and the celebrations, all on one line -->
+    <div class="lv-strip">
+      <div id="lv-waiting" class="lv-waiting"></div>
+      <div id="lv-today" class="lv-today"></div>
+      <div id="celeb-banner" class="lv-celeb"></div>
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:6px;margin:-4px 0 10px;">
+      <button class="lv-link" onclick="whyNoPopup()">Why don't I see callers?</button>
+      <button class="lv-link" onclick="resetPopup()">Reset the popup</button>
     </div>
     <pre id="why-popup" style="white-space:pre-wrap;font-size:11.5px;color:var(--text2);
          margin:0 0 12px;line-height:1.8;"></pre>
-    <div id="lv-waiting" class="lv-waiting"></div>
     <div id="lv-why" class="card" style="display:none;padding:14px 18px;margin:-6px 0 14px;"></div>
     <div class="card" id="lv-callbacks-card" style="padding:16px 20px;margin-bottom:14px;display:none;">
       <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;">
@@ -2180,7 +2204,6 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
         ring back and reach somebody, or when you mark it done.</div>
       <div id="lv-callbacks" style="max-height:40vh;overflow:auto;margin-top:8px;"></div>
     </div>
-    <div id="lv-today" class="payhead" style="padding-top:0;"></div>
 
     <div class="card" style="padding:16px 20px;margin-top:14px;">
       <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:12px;">
@@ -10753,34 +10776,28 @@ async function loadWaiting(){
       .map(([num, count]) => `<span class="lv-qchip">${esc(num)}: <b>${count}</b></span>`)
       .join('');
 
-    box.innerHTML = `<div class="lv-hold ${cls}" ${n ? `onclick="wtWhyToggle()" style="cursor:pointer;" title="Click to see why they are waiting"` : ''}>
-      <div>
-        <div class="big" style="color:${n ? (cls==='bad'?'var(--red)':'var(--yellow)') : 'var(--text)'}">${n}</div>
-        <div class="lab">${n === 1 ? 'caller waiting' : 'callers waiting'}</div>
-        ${n ? `<div class="lab" style="color:var(--accent);text-decoration:underline;">${WT_OPEN ? 'hide why ▴' : 'why? ▾'}</div>` : ''}
-      </div>
-      ${longest ? `<div>
-        <div class="big" style="font-size:22px;color:${longest>=120?'var(--red)':'var(--text2)'};">
-          ${Math.floor(longest/60)}:${String(longest%60).padStart(2,'0')}</div>
-        <div class="lab">longest wait</div></div>` : ''}
-      ${chips ? `<div class="lv-queue">${chips}</div>` : ''}
-      <div id="lv-missed-strip" style="margin-left:${chips ? '10px' : 'auto'};
-           text-align:right;"></div>
+    // one slim pill — agents only need to know whether callers are waiting
+    const staff = lvIsStaff();
+    box.innerHTML = `<div class="lv-pill ${cls}" ${n ? `onclick="wtWhyToggle()" style="cursor:pointer;" title="Click to see why they are waiting"` : ''}>
+      <b>${n}</b> ${n === 1 ? 'caller waiting' : 'callers waiting'}
+      ${longest ? `<span class="sep"></span><b style="font-size:15px;">${Math.floor(longest/60)}:${String(longest%60).padStart(2,'0')}</b> longest` : ''}
+      ${n ? `<span style="color:var(--accent);text-decoration:underline;font-size:11.5px;">${WT_OPEN ? 'hide' : 'why?'}</span>` : ''}
+      ${staff && chips ? `<span class="sep"></span>${chips}` : ''}
+      ${staff ? `<span id="lv-missed-strip" style="display:contents;"></span>` : ''}
     </div>`;
 
     if(WT_OPEN){ if(n) wtWhyLoad(); else wtWhyClose(); }
 
     // how many people are still owed a call back, alongside the live figures
-    try{
+    if(staff) try{
       const m = await API.get('/api/callbacks?hours=48');
       const strip = document.getElementById('lv-missed-strip');
       if(strip && !m.error){
         const mc = m.manager_count || 0;
-        strip.innerHTML = (m.count
-          ? `<div class="big" style="font-size:22px;color:var(--red);">${m.count}</div>
-             <div class="lab">to call back</div>`
-          : `<div class="lab" style="color:var(--green);">nobody waiting for a call back</div>`)
-          + (mc ? `<div class="lab" style="margin-top:2px;">+${mc} on the Manager line</div>` : '');
+        strip.innerHTML = '<span class="sep"></span>' + (m.count
+          ? `<b style="font-size:15px;color:var(--red);">${m.count}</b> to call back`
+          : `<span style="color:var(--green);">nobody to call back</span>`)
+          + (mc ? ` <span style="color:var(--text3);">(+${mc} Manager line)</span>` : '');
       }
     }catch(e){}
   }catch(e){ /* the floor board matters more than this strip */ }
@@ -10802,25 +10819,30 @@ async function loadLive(){
   }
 }
 
+/* team leaders, managers and admins (and the QA dashboard's own logins) */
+function lvIsStaff(){
+  if(typeof IS_PORTAL !== 'undefined' && !IS_PORTAL) return true;
+  return !!(portalIsManager || portalIsAdmin || portalIsTL);
+}
+
 function lvRenderToday(){
   const t = lvData.today, a = lvData.agents || [];
   const onCall = a.filter(x=>(x.phone||'').toUpperCase()==='IN_USE').length;
   const onShift = a.filter(x=>x.clocked_in).length;
   const onDnd = a.filter(x=>x.clocked_in && x.dnd && (x.phone||'').toUpperCase()!=='IN_USE').length;
-  const stat = (lab,val,sub,cls) => `<div class="paycard"><div class="lab">${lab}</div>
-    <div class="payfig paynum ${cls||''}">${val}</div><div class="sub">${sub||'&nbsp;'}</div></div>`;
-  document.getElementById('lv-today').innerHTML =
-    stat('On a call now', onCall,
-         `${onShift} on shift${onDnd?` · ${onDnd} on do not disturb`:''}`, onCall?'pos':'') +
-    stat('Calls today', (t.calls||0).toLocaleString(),
-         t.missed ? `${t.missed} missed` : 'none missed', t.missed?'warn':'') +
-    stat('Work today', (t.work_sessions||0).toLocaleString(),
-         `${(t.minutes_billed||0).toLocaleString()} minutes on ${t.accounts_touched} accounts`) +
-    // The money card is admins only, and the server does not send the figures
+  // Agents don't need the day's figures — only team leaders, managers and
+  // admins see them, as slim pills on the same line as callers waiting.
+  const box = document.getElementById('lv-today');
+  if(!lvIsStaff()){ box.innerHTML = ''; return; }
+  const pill = (val, txt, title) => `<div class="lv-pill" title="${title||''}"><b>${val}</b> ${txt}</div>`;
+  box.innerHTML =
+    pill(`${onCall}<span style="font-size:13px;color:var(--text3);font-weight:500;">/${onShift}</span>`, 'on a call',
+         `${onCall} on a call of ${onShift} on shift${onDnd ? ` · ${onDnd} on do not disturb` : ''}`) +
+    pill((t.calls||0).toLocaleString(), `calls${t.missed ? ` · <span style="color:var(--yellow)">${t.missed} missed</span>` : ''}`, 'calls today') +
+    pill((t.work_sessions||0).toLocaleString(), 'work', `work today · ${(t.minutes_billed||0).toLocaleString()} minutes on ${t.accounts_touched} accounts`) +
+    // The money is admins only, and the server does not send the figures
     // to anybody else — so this is not the security, just the tidiness.
-    (lvData.can_see_money
-      ? stat('Taken today', lvMoney(t.collected_cents), `${t.payments} payments`, 'pos')
-      : '');
+    (lvData.can_see_money ? pill(lvMoney(t.collected_cents), `taken · ${t.payments} payments`) : '');
 }
 
 /* Clocked in but the phone is not logged in — the old CMS shows this as
