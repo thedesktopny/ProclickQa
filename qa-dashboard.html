@@ -1993,6 +1993,23 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
       </div>
       <div id="nm-body" style="margin-top:4px;"></div>
     </div>
+    <div class="card" style="padding:16px 18px;margin-bottom:14px;">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <div style="font-size:14px;font-weight:650;margin-right:6px;">Test which numbers can text</div>
+        <span style="font-size:12px;color:var(--text3);">send to</span>
+        <input id="st-to" class="cms-in" style="width:140px;" value="3476752334">
+        <button class="btn btn-primary" style="font-size:12px;" id="st-go" onclick="stNextTen()">Send to the next 10 untested</button>
+        <button class="btn btn-outline" style="font-size:12px;" onclick="stLoad()">Refresh results</button>
+        <button class="btn btn-outline" style="font-size:12px;" onclick="stDownload()">Download results</button>
+        <span id="st-say" style="font-size:12px;color:var(--text2);"></span>
+      </div>
+      <div style="font-size:11.5px;color:var(--text3);margin-top:8px;line-height:1.6;">
+        Each test goes from that number to your phone and changes nothing about the number.
+        When one arrives, press <b>✓ Got it</b> on that number — or just <b>reply "ok"</b> to the text and it is
+        marked by itself (that also proves texts coming IN work). Press <b>✗ Didn't come</b> for ones that never arrive; they turn red.
+      </div>
+      <div id="st-filters" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px;"></div>
+    </div>
     <div id="sn-health"></div>
     <div class="card" style="padding:16px 18px;margin-top:14px;">
       <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;">
@@ -7400,6 +7417,7 @@ async function loadSmsNumbers(){
     const r = await API.get('/api/sms-numbers');
     if(r.error){ box.innerHTML = `<div style="color:var(--red)">${esc(r.error)}</div>`; return; }
     snData = r;
+    stLoad();
     if(!r.bulkvs_configured){
       box.innerHTML = `<div class="alert-bar" style="background:rgba(245,166,35,.1);
         border-color:rgba(245,166,35,.35);margin-bottom:14px;">
@@ -7413,17 +7431,20 @@ async function loadSmsNumbers(){
 function snRender(){
   if(!snData) return;
   const q = (document.getElementById('sn-search').value || '').toLowerCase().trim();
-  const list = snData.numbers.filter(n => !q
+  stFilters();
+  const list = snData.numbers.filter(n => (!q
     || String(n.number).includes(q)
-    || (n.customer || '').toLowerCase().includes(q));
+    || (n.customer || '').toLowerCase().includes(q))
+    && (stFilter === 'all' || stState(n) === stFilter));
   document.getElementById('sn-count').textContent =
     `${snData.count} numbers · ${snData.spare} spare`;
 
   document.getElementById('sn-body').innerHTML = list.map(n=>{
     const key = String(n.number).replace(/\D/g, '').slice(-10);
     const clash = n.where.startsWith('BOTH');
+    const st = stState(n);
     return `<div class="card" id="sn-${key}" style="padding:14px 18px;margin-bottom:10px;
-              ${clash ? 'border-color:var(--red);' : ''}">
+              ${clash || st === 'failed' || st === 'refused' ? 'border-color:var(--red);' : st === 'works' ? 'border-color:rgba(34,197,94,.55);' : ''}">
       <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;">
         <span style="font-size:16px;font-variant-numeric:tabular-nums;">${esc(n.number)}</span>
         <span style="font-size:11.5px;color:${clash ? 'var(--red)' : 'var(--text3)'};">
@@ -7433,6 +7454,7 @@ function snRender(){
         <span style="margin-left:auto;font-size:11.5px;color:var(--text3);">
           ${n.messages_30d} messages in 30 days</span>
       </div>
+      ${stLine(key)}
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px;">
         <button class="cn-chip" onclick="snCheck('${key}')">Check at BulkVS</button>
         <button class="cn-chip" onclick="snWebhook('${key}','WebHook1')">Set WebHook1</button>
@@ -7503,6 +7525,9 @@ async function snTest(key){
   try{
     // a test changes nothing about the number's campaign
     const r = await API.post('/api/sms-numbers/' + key + '/test', {to, leave_campaign: true});
+    stTests[key] = {number: key, to_number: String(to).replace(/\D/g,'').slice(-10), sent_at: new Date().toISOString(),
+                    accepted: !!r.ok, received: r.ok ? null : false, campaign: r.campaign || ''};
+    snRender();
     snSay(key, (r.ok ? '✅ ' : '❌ ') + (r.meaning || '')
           + (r.answer ? '\n' + JSON.stringify(r.answer) : ''),
           r.ok ? 'var(--green)' : 'var(--red)');
@@ -7510,6 +7535,106 @@ async function snTest(key){
 }
 
 async function loadSmsNumbers2(){}
+
+/* ---- testing which numbers can text ----
+   Results are kept on the server, so you can test 10 today and 10 tomorrow
+   from any computer and still see which ones were done. */
+let stTests = {}, stFilter = 'all', stBusy = false;
+const ST_NAMES = {all:'All', untested:'Not tested', waiting:'Waiting for you', works:'Arrived ✓',
+                  failed:"Didn't arrive ✗", refused:'Refused by BulkVS'};
+function stKey(n){ return String(n.number || n).replace(/\D/g, '').slice(-10); }
+function stState(n){
+  const t = stTests[stKey(n)];
+  if(!t) return 'untested';
+  if(t.accepted === false) return 'refused';
+  if(t.received === true) return 'works';
+  if(t.received === false) return 'failed';
+  return 'waiting';
+}
+function stFilters(){
+  const box = document.getElementById('st-filters');
+  if(!box || !snData) return;
+  const count = {all: snData.numbers.length};
+  snData.numbers.forEach(n => { const s = stState(n); count[s] = (count[s] || 0) + 1; });
+  box.innerHTML = Object.keys(ST_NAMES).map(k =>
+    `<button class="cn-chip" style="${stFilter===k ? 'background:var(--accent);color:#fff;border-color:var(--accent);' : ''}"
+       onclick="stFilter='${k}';snRender()">${ST_NAMES[k]} · ${count[k] || 0}</button>`).join('');
+}
+function stLine(key){
+  const t = stTests[key];
+  if(!t) return '<div style="font-size:12px;color:var(--text3);margin-top:6px;">Not tested yet.</div>';
+  const when = t.sent_at ? new Date(t.sent_at).toLocaleString([], {month:'short', day:'numeric', hour:'numeric', minute:'2-digit'}) : '';
+  const camp = t.campaign ? ` · <span style="color:var(--text3)">${esc(t.campaign)}</span>` : '';
+  const btns = `<button class="cn-chip" onclick="stMark('${key}', true)">✓ Got it</button>
+                <button class="cn-chip" onclick="stMark('${key}', false)">✗ Didn't come</button>`;
+  let txt, col;
+  if(t.accepted === false){ txt = '❌ BulkVS refused to send it (' + when + ')'; col = 'var(--red)'; }
+  else if(t.received === true){ txt = '✅ Arrived — tested ' + when + (t.how ? ' · ' + esc(t.how) : ''); col = 'var(--green)'; }
+  else if(t.received === false){ txt = "✗ Didn't arrive — tested " + when; col = 'var(--red)'; }
+  else { txt = '⏳ Test sent ' + when + ' to ' + esc(t.to_number || '') + ' — did it arrive?'; col = 'var(--yellow)'; }
+  return `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;font-size:12.5px;">
+    <span style="color:${col};">${txt}</span>${camp}
+    <span style="margin-left:auto;display:flex;gap:6px;">${btns}</span></div>`;
+}
+async function stLoad(){
+  try{
+    const r = await API.get('/api/sms-numbers/tests');
+    stTests = r.tests || {};
+    snRender();
+  }catch(e){ const s = document.getElementById('st-say'); if(s) s.textContent = 'Could not read results: ' + e.message; }
+}
+async function stMark(key, received){
+  try{
+    const r = await API.post('/api/sms-numbers/' + key + '/test-result', {received});
+    if(r.ok === false) throw new Error(r.error || 'failed');
+    if(stTests[key]){ stTests[key].received = received; stTests[key].how = 'marked by hand'; }
+    snRender();
+  }catch(e){ alert('Could not save: ' + e.message); }
+}
+async function stNextTen(){
+  if(stBusy || !snData) return;
+  const to = (document.getElementById('st-to').value || '').replace(/\D/g, '');
+  if(to.length < 10){ alert('Type the 10-digit number the tests should go to.'); return; }
+  const next = snData.numbers.filter(n => stState(n) === 'untested').slice(0, 10);
+  const say = document.getElementById('st-say');
+  if(!next.length){ say.textContent = 'Every number has been tested.'; return; }
+  if(!confirm('Send a test text from these ' + next.length + ' numbers to ' + to + '?\n\n'
+              + next.map(n => n.number).join('\n'))) return;
+  stBusy = true; document.getElementById('st-go').disabled = true;
+  let i = 0, sent = 0;
+  for(const n of next){
+    i++;
+    const key = stKey(n);
+    say.textContent = `Sending ${i} of ${next.length} — from ${n.number}…`;
+    try{
+      const r = await API.post('/api/sms-numbers/' + key + '/test', {to, leave_campaign: true});
+      if(r.ok) sent++;
+      stTests[key] = {number: key, to_number: to.slice(-10), sent_at: new Date().toISOString(),
+                      accepted: !!r.ok, received: r.ok ? null : false, campaign: r.campaign || ''};
+    }catch(e){
+      stTests[key] = {number: key, to_number: to.slice(-10), sent_at: new Date().toISOString(),
+                      accepted: false, received: false, campaign: 'error: ' + e.message};
+    }
+    snRender();
+    await new Promise(res => setTimeout(res, 2000));     // a short gap between texts
+  }
+  stBusy = false; document.getElementById('st-go').disabled = false;
+  say.textContent = `Done — ${sent} of ${next.length} accepted by BulkVS. Now check your phone and mark each one (or reply "ok" to each text).`;
+  stFilter = 'waiting'; snRender();
+}
+function stDownload(){
+  if(!snData) return;
+  const rows = [['Number', 'Where', 'Customer', 'Result', 'Tested', 'Sent to', 'Campaign', 'How marked']];
+  snData.numbers.forEach(n => {
+    const t = stTests[stKey(n)] || {};
+    rows.push([n.number, n.where, n.customer || '', ST_NAMES[stState(n)],
+               t.sent_at || '', t.to_number || '', t.campaign || '', t.how || '']);
+  });
+  const csv = rows.map(r => r.map(v => '"' + String(v).replace(/"/g, '""') + '"').join(',')).join('\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], {type: 'text/csv'}));
+  a.download = 'sms-number-tests.csv'; a.click();
+}
 
 
 /* ================= filters on the review pages =================

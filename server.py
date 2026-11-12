@@ -8436,6 +8436,7 @@ def sms_number_test(number):
              for x in results if isinstance(x, dict)) or bool(
                  (answer or {}).get('RefId') or (answer or {}).get('RefID'))
     _log_admin_action('sms_test', {'from': frm, 'to': to[-10:], 'accepted': ok})
+    _sms_test_record(frm, to[-10:], bool(ok), campaign)
     cms_write.sms_event('test_send', frm, None, None, bool(ok), _who(), to=to[-10:],
                         ref=(answer or {}).get('RefId') or (answer or {}).get('RefID'),
                         campaign_now=campaign, answer=str(answer)[:300])
@@ -8443,6 +8444,92 @@ def sms_number_test(number):
                     'meaning': (('Sent from %s to %s.' % (frm, to[-10:])) if ok
                                 else 'The texting service did not accept it.')
                                + ('\n   campaign: ' + campaign if campaign else '')})
+
+
+# ---- testing which numbers can text ----------------------------------------
+# One row per test message. Whether it ARRIVED can only be known from the phone
+# it was sent to: either the person marks it, or they reply to the text and the
+# reply coming in marks it automatically.
+def _sms_tests_table(c):
+    c.execute("""CREATE TABLE IF NOT EXISTS sms_number_tests (
+                     id SERIAL PRIMARY KEY, number TEXT NOT NULL, to_number TEXT,
+                     sent_at TIMESTAMPTZ DEFAULT NOW(), accepted BOOLEAN, campaign TEXT,
+                     received BOOLEAN, marked_at TIMESTAMPTZ, marked_by TEXT, how TEXT)""")
+    c.execute('CREATE INDEX IF NOT EXISTS sms_number_tests_num ON sms_number_tests(number, sent_at DESC)')
+
+
+def _sms_test_record(number, to, accepted, campaign):
+    try:
+        conn = get_db(); c = conn.cursor()
+        _sms_tests_table(c)
+        c.execute("""INSERT INTO sms_number_tests (number, to_number, accepted, campaign, received, how)
+                     VALUES (%s, %s, %s, %s, %s, %s)""",
+                  (number, to, accepted, (campaign or '')[:300],
+                   None if accepted else False, None if accepted else 'refused by BulkVS'))
+        conn.commit(); conn.close()
+    except Exception as e:
+        print('[sms test] could not record: ' + str(e)[:120])
+
+
+@app.route('/api/sms-numbers/tests', methods=['GET'])
+@portal_admin_only
+def sms_number_tests():
+    """The latest test of every number, and whether it arrived. A test still
+    waiting is marked as arrived automatically when a reply from the phone it
+    went to comes in on that number."""
+    conn = get_db(); c = conn.cursor(cursor_factory=RealDictCursor)
+    _sms_tests_table(c)
+    conn.commit()
+    c.execute("""SELECT DISTINCT ON (number) id, number, to_number, sent_at, accepted, campaign,
+                        received, marked_at, marked_by, how
+                 FROM sms_number_tests ORDER BY number, sent_at DESC""")
+    rows = [dict(r) for r in c.fetchall()]
+    waiting = [r for r in rows if r['accepted'] and r['received'] is None]
+    if waiting:
+        try:
+            import cms_db
+            tos = sorted({r['to_number'] for r in waiting if r['to_number']})
+            ms = cms_db._connect(); cu = ms.cursor()
+            got = set()
+            for t in tos:
+                cu.execute("""SELECT DISTINCT RIGHT(AccountSMSNumber, 10) FROM SMSLog
+                              WHERE InOut = 'In' AND ContactNumber LIKE %s
+                                AND smsDate >= DATEADD(day, -3, GETDATE())""", ('%' + t,))
+                got |= {(t, str(x[0])) for x in cu.fetchall() if x[0]}
+            ms.close()
+            for r in waiting:
+                if (r['to_number'], r['number']) in got:
+                    c.execute("""UPDATE sms_number_tests SET received = TRUE, marked_at = NOW(),
+                                     how = 'reply came in' WHERE id = %s""", (r['id'],))
+                    r['received'] = True; r['how'] = 'reply came in'
+            conn.commit()
+        except Exception as e:
+            print('[sms test] reply check failed: ' + str(e)[:120])
+    conn.close()
+    for r in rows:
+        for k in ('sent_at', 'marked_at'):
+            if r.get(k):
+                r[k] = r[k].isoformat()
+    return jsonify({'tests': {r['number']: r for r in rows}})
+
+
+@app.route('/api/sms-numbers/<number>/test-result', methods=['POST'])
+@portal_admin_only
+def sms_number_test_result(number):
+    """'I got it' / 'It didn't come' for the latest test of a number."""
+    d = request.json or {}
+    frm = ''.join(ch for ch in number if ch.isdigit())[-10:]
+    received = d.get('received')
+    conn = get_db(); c = conn.cursor()
+    _sms_tests_table(c)
+    c.execute("""UPDATE sms_number_tests SET received = %s, marked_at = NOW(), marked_by = %s,
+                        how = 'marked by hand'
+                 WHERE id = (SELECT id FROM sms_number_tests WHERE number = %s
+                             ORDER BY sent_at DESC LIMIT 1)""",
+              (None if received is None else bool(received), (_who() or {}).get('name'), frm))
+    n = c.rowcount
+    conn.commit(); conn.close()
+    return jsonify({'ok': bool(n), 'error': None if n else 'No test found for that number yet.'})
 
 
 def _log_admin_action(what, detail):
