@@ -9066,16 +9066,24 @@ def _live_calls_reader():
                                      c.PickedUpBy, c.Agent, c.IsOutbound,
                                      c.DialStatus, c.CalledExtension,
                                      c.PreselectedAccountPhone, c.AccountToUse,
-                                     c.AstriskUniqId
+                                     c.AstriskUniqId,
+                                     CASE WHEN c.Ended IS NULL THEN 0 ELSE 1 END
                               FROM PhoneCallsLog c
-                              WHERE c.Ended IS NULL
-                                AND c.Started >= DATEADD(hour, -4, GETDATE())
+                              WHERE c.Started >= DATEADD(hour, -4, GETDATE())
+                                AND (c.Ended IS NULL OR c.Ended >= DATEADD(minute, -15, GETDATE()))
                               ORDER BY c.Id""")
                 by_ext = {}
+                ended_uniqs = set()
                 while True:
                     r = cu.fetchone()
                     if not r:
                         break
+                    if r[12]:
+                        # finished in the last 15 minutes — remembered so a
+                        # worker that never heard "call ended" drops it now
+                        if r[11]:
+                            ended_uniqs.add(str(r[11]).strip())
+                        continue
                     call = {'call_id': int(r[0]), 'phone': r[1],
                             'started': cms_db._plain(r[2]),
                             'picked_up': cms_db._plain(r[3]),
@@ -9104,7 +9112,15 @@ def _live_calls_reader():
                 for k, v in list(_LIVE_CALLS['by_ext'].items()):
                     if not v.get('from_phone_system'):
                         continue
+                    if str(v.get('uniq') or '') in ended_uniqs:
+                        continue                  # the CMS says this call is over
                     t = table_by_uniq.get(str(v.get('uniq') or ''))
+                    if t and v.get('ringing') and by_ext.get(k) is not t:
+                        # it rang here, but the CMS shows somebody else took
+                        # it — stop showing it on this phone. Only the worker
+                        # that heard the pickup used to clear this, so the
+                        # others kept popping it up for the whole call.
+                        continue
                     if t:
                         v['call_id'] = v.get('call_id') or t['call_id']
                         if t.get('preselected') and not v.get('preselected'):

@@ -5877,12 +5877,41 @@ function alLeaderName(agentId){
   return boss ? boss.name : null;
 }
 
+/* Sorted by extension unless somebody clicks another heading — the list is
+   mostly opened to find a free extension for a new person. Click the same
+   heading again to reverse it. Remembered on this computer. */
+let alSort = (() => { try{ return JSON.parse(localStorage.getItem('al-sort')) || {k:'ext', d:1}; }catch(e){ return {k:'ext', d:1}; } })();
+function alSortBy(k){
+  alSort = alSort.k === k ? {k, d: -alSort.d} : {k, d: 1};
+  try{ localStorage.setItem('al-sort', JSON.stringify(alSort)); }catch(e){}
+  alRender();
+}
+function alSorted(list){
+  const extNum = a => { const n = parseInt(String(a.extension||'').replace(/\D/g,''), 10); return isNaN(n) ? null : n; };
+  const val = a => alSort.k === 'ext' ? extNum(a)
+                 : alSort.k === 'phone' ? (a.phone_name||'').toLowerCase() || null
+                 : alSort.k === 'role' ? ((a.roles||[]).join(', ') || (a.qa?'QA':'agent')).toLowerCase()
+                 : (a.name||'').toLowerCase();
+  return list.slice().sort((x, y) => {
+    const a = val(x), b = val(y);
+    if(a === null && b === null) return 0;
+    if(a === null) return 1;               // no extension / no phone name always last
+    if(b === null) return -1;
+    return (a < b ? -1 : a > b ? 1 : 0) * alSort.d;
+  });
+}
+function alTh(k, label, cls){
+  const on = alSort.k === k;
+  return `<th class="${cls||''}" style="cursor:pointer;user-select:none;white-space:nowrap;${on?'color:var(--text);':''}"
+             onclick="alSortBy('${k}')" title="Sort by ${label.toLowerCase()}">${label}${on ? (alSort.d > 0 ? ' ▲' : ' ▼') : ''}</th>`;
+}
+
 function alRender(){
   if(!alData) return;
   const q = (document.getElementById('al-search').value||'').toLowerCase().trim();
-  const list = alData.agents.filter(a => !q ||
+  const list = alSorted(alData.agents.filter(a => !q ||
     a.name.toLowerCase().includes(q) || (a.phone_name||'').toLowerCase().includes(q)
-    || String(a.extension||'').includes(q));
+    || String(a.extension||'').includes(q)));
   document.getElementById('al-count').textContent =
     `${list.length} of ${alData.agents.length}`;
   const add = document.getElementById('al-add');
@@ -5903,7 +5932,7 @@ function alRender(){
     document.getElementById('al-count').textContent = `${mine.length} people`;
     document.getElementById('al-body').innerHTML = mine.length ? `
       <div class="card" style="padding:0;max-width:640px;"><div class="table-wrap"><table class="data-table">
-        <thead><tr><th>Name</th><th>Phone name</th><th class="n">Extension</th></tr></thead>
+        <thead><tr>${alTh('name','Name')}${alTh('phone','Phone name')}${alTh('ext','Extension','n')}</tr></thead>
         <tbody>${mine.map(a=>`<tr><td>${esc(a.name)}</td>
           <td style="${differs(a)?'color:var(--accent);font-weight:600;':''}">${esc(a.phone_name)}</td>
           <td class="n" style="font-variant-numeric:tabular-nums;">${esc(a.extension)||'—'}</td></tr>`).join('')}</tbody>
@@ -5912,7 +5941,7 @@ function alRender(){
   }
   document.getElementById('al-body').innerHTML = list.length ? `
     <div class="card" style="padding:0;"><div class="table-wrap"><table class="data-table al-table">
-      <thead><tr><th>Agent</th><th>Phone name</th><th class="n">Ext</th><th>Role</th><th>Team leader</th><th>Status</th>${portalIsManager?'<th></th>':''}</tr></thead>
+      <thead><tr>${alTh('name','Agent')}${alTh('phone','Phone name')}${alTh('ext','Ext','n')}${alTh('role','Role')}<th>Team leader</th><th>Status</th>${portalIsManager?'<th></th>':''}</tr></thead>
       <tbody>${list.map(a=>`<tr style="cursor:pointer;${a.left_firm?'opacity:.55;':''}" onclick="portalOpenAgent(${a.id})">
         <td><b>${esc(a.name)}</b></td>
         <td>${a.phone_name ? `<span style="${differs(a)?'color:var(--accent);font-weight:600;':''}">${esc(a.phone_name)}</span>`
@@ -6374,7 +6403,11 @@ function portalApply(name, isManager){
   const mark = document.querySelector('.logo-mark');
   if(mark) mark.innerHTML = '<div class="logo-icon">🎧</div>ProClick';
   clockMount();
-  showPage(portalPages[0] || 'live');
+  // Draw the first page WITHOUT writing its address. It used to overwrite the
+  // address before the page in it could be restored, so every refresh landed
+  // on the first page (Live) instead of where you were.
+  addressLocked = true;
+  try{ showPage(portalPages[0] || 'live'); } finally { addressLocked = false; }
 }
 
 /* ── Start shift / break / end shift ─────────────────────────────────────
@@ -6816,7 +6849,11 @@ let addressLocked = false;
 function pageToAddress(id){
   if(addressLocked) return;                     // we are restoring, not navigating
   try{
-    const want = '#' + id;
+    let want = '#' + id;
+    // coming back to Customers with an account still open keeps that account
+    const prof = document.getElementById('cu-profile');
+    if(id === 'customers' && typeof cuData !== 'undefined' && cuData && cuData.account
+       && prof && prof.style.display !== 'none') want = '#customers/' + cuData.account.id;
     if(location.hash !== want) history.replaceState(null, '', want);
   }catch(e){}
 }
@@ -6827,6 +6864,15 @@ function openFromAddress(){
   const call = hash.match(/^call\/(.+)$/);
   if(call){
     setTimeout(()=>openCallDetail(decodeURIComponent(call[1]), true), 150);
+    return true;
+  }
+  // an open customer account — a refresh shows it again with fresh notes
+  const cust = hash.match(/^customers\/(\d+)$/);
+  if(cust){
+    if(typeof portalPages !== 'undefined' && portalPages.length && !portalPages.includes('customers')) return false;
+    addressLocked = true;
+    try{ showPage('customers'); } finally { addressLocked = false; }
+    setTimeout(()=>cuOpen(parseInt(cust[1], 10)), 50);
     return true;
   }
   const run = hash.match(/^payroll\/(\d{4}-\d\d-\d\d)_(\d{4}-\d\d-\d\d)$/);
@@ -11183,7 +11229,26 @@ function inShow(r){
     const call = r.call;
     const box = document.getElementById('incoming');
     if(!box) return;
-    if(!call || !call.live){ box.style.display = 'none'; return; }
+    const shown = box.style.display !== 'none';
+    const goneKey = c => (c.call_id && inGone['c' + c.call_id]) || (c.uniq && inGone['u' + c.uniq]);
+    // The server runs several copies, and for a moment after a call starts or
+    // ends they can disagree — one answer says "call", the next "no call".
+    // Following every answer made the popup flash away and come back. Now it
+    // only closes after no copy has reported the call for 7 seconds, and a
+    // call that closed that way never comes back.
+    if(!call || !call.live || goneKey(call)){
+      inMiss++;
+      if(shown && (inMiss < 2 || Date.now() - inLastSeen < 7000)) return;
+      if(shown && inShowing){
+        if(inShowing.call_id) inGone['c' + inShowing.call_id] = Date.now();
+        if(inShowing.uniq) inGone['u' + inShowing.uniq] = Date.now();
+        const old = Date.now() - 30 * 60000;
+        Object.keys(inGone).forEach(k => { if(inGone[k] < old) delete inGone[k]; });
+      }
+      box.style.display = 'none'; inVerifyKey = null; inShowing = null;
+      return;
+    }
+    inMiss = 0; inLastSeen = Date.now();
     // a call is known by its CMS number, or — when the phone system told us
     // first — by the phone system's own id; dismissing hides it under both.
     // (Before, a call with no CMS number yet matched "nothing dismissed" and
@@ -11301,7 +11366,8 @@ function inNewCustomer(){
   setTimeout(()=>{ cuNewOpen(); const f = document.getElementById('cf-phone'); if(f) f.value = phone; cuFormHint(); }, 200);
 }
 
-let inShowing = null;
+let inShowing = null, inMiss = 0, inLastSeen = 0;
+const inGone = {};          // calls whose popup already closed by itself
 function inDismiss(){
   const c = inShowing || {};
   if(!inDismissed) inDismissed = {ids: [], uniqs: []};
@@ -12521,6 +12587,8 @@ async function cuOpen(id){
     if(r.error){ box.innerHTML = `<div style="color:var(--red)">${r.error}</div>`; return; }
     cuData = r;
     const a = r.account, t = r.totals;
+    // the open account goes in the address, so a refresh comes back to it
+    try{ if(location.hash !== '#customers/' + a.id) history.replaceState(null, '', '#customers/' + a.id); }catch(e){}
     document.getElementById('cu-search').value = a.name;
     document.getElementById('cu-scope').textContent = 'account #' + a.id;
 
