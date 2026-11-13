@@ -1150,9 +1150,11 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
    space" only works if something above it has a fixed height — nothing did,
    so the frame collapsed to a 150px strip. It now takes the window's height
    minus the page header, which is a real number. */
-#page-skin-block.active{ display:block; padding:0; }
-#page-skin-block .sb-holder{ height:calc(100vh - 74px); min-height:560px; }
-#page-skin-block #sb-frame{ width:100%; height:100%; border:0; display:block; background:var(--bg); }
+#page-skin-block.active{ display:block; }
+.sb-launch{ display:flex; justify-content:center; padding:48px 16px; }
+.sb-launch-box{ max-width:460px; width:100%; text-align:center; background:var(--surface);
+  border:1px solid var(--border); border-radius:16px; padding:32px 26px; }
+.sb-launch-btn{ display:inline-block; margin-top:20px; font-size:15px; padding:12px 26px; text-decoration:none; }
 .ac-out{flex:none;margin-right:10px;font-size:11.5px;font-weight:600;padding:5px 10px;border-radius:7px;
   border:1px solid rgba(242,88,95,.45);background:rgba(242,88,95,.10);color:#F2585F;cursor:pointer;}
 .ac-out:hover{background:rgba(242,88,95,.22);}
@@ -1988,13 +1990,20 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
   <div class="topbar">
     <button class="navtoggle" onclick="toggleNav()" aria-label="Menu">☰</button>
     <div class="page-title">🫥 Skin Block</div>
-    <div class="topbar-right">
-      <button class="btn btn-outline" onclick="sbReload()" style="font-size:12px;">Reload</button>
-      <a href="/skinblock" target="_blank" rel="noopener" class="btn btn-outline"
-         style="font-size:12px;text-decoration:none;">Open in its own tab</a>
+  </div>
+  <div class="sb-launch">
+    <div class="sb-launch-box">
+      <div style="font-size:42px;line-height:1;">🫥</div>
+      <div style="font-size:18px;font-weight:700;margin-top:10px;">Skin Block opens in its own tab</div>
+      <div style="font-size:13px;color:var(--text2);margin-top:8px;line-height:1.6;">
+        Covering photos takes a lot of computer power. In its own tab it can work
+        without freezing this page — calls, popups and notes keep working while it runs.
+      </div>
+      <a href="/skinblock" target="_blank" rel="noopener" class="btn btn-primary sb-launch-btn"
+         onclick="sbOpened()">Open Skin Block ↗</a>
+      <div id="sb-launch-note" style="font-size:12px;color:var(--text2);margin-top:10px;min-height:16px;"></div>
     </div>
   </div>
-  <div class="sb-holder" id="sb-holder"></div>
 </div>
 
 <div class="page" id="page-sms-numbers">
@@ -2030,6 +2039,7 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
         <span style="font-size:12px;color:var(--text3);">send to</span>
         <input id="st-to" class="cms-in" style="width:140px;" value="3476752334">
         <button class="btn btn-primary" style="font-size:12px;" id="st-go" onclick="stNextTen()">Send to the next 10 untested on a campaign</button>
+        <button class="btn btn-outline" style="font-size:12px;" onclick="stAllArrived()">✓ All waiting arrived</button>
         <button class="btn btn-outline" style="font-size:12px;" onclick="stLoad()">Refresh results</button>
         <button class="btn btn-outline" style="font-size:12px;" onclick="stDownload()">Download results</button>
         <span id="st-say" style="font-size:12px;color:var(--text2);"></span>
@@ -3329,7 +3339,7 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
   <div class="topbar">
     <button class="navtoggle" onclick="toggleNav()" aria-label="Menu">☰</button><div class="page-title">🖼️ Skin Block</div>
     <div class="topbar-right">
-      <a href="/skinblock" target="_blank" class="btn btn-outline" style="text-decoration:none;">Open tool ↗</a>
+      <a href="/skinblock" target="_blank" rel="noopener" class="btn btn-outline" style="text-decoration:none;">Open tool ↗</a>
       <button class="btn btn-outline" onclick="openSkinblockSettings()">⚙️ Settings</button>
     </div>
   </div>
@@ -6997,47 +7007,26 @@ window.addEventListener('hashchange', ()=>{
 });
 
 
-/* Skin Block runs its own page with its own detector, so it is shown in a
-   frame rather than rebuilt here. Loaded only when the page is opened —
-   the detector is around 45 MB and nobody who never covers a photo should
-   pay for it. */
-/* The agents' Skin Block (/skinblock) — the one Skin Block page. The agent's
-   extension goes with it, so nobody has to type it again. */
-let sbExt = null;
-async function sbUrl(extra){
-  if(sbExt === null){
-    sbExt = '';
-    try{ const r = await API.get('/api/portal/me'); sbExt = (r && r.extension) || ''; }catch(e){}
-  }
-  // the one Skin Block (the fast design; the older pages were retired)
-  return '/skinblock' + (extra ? '?' + extra : '');
+/* Skin Block runs in its own browser tab, never inside this page. Inside a
+   frame it shared this page's thread, so while it covered a photo the whole
+   CMS froze — calls, the caller popup, typing. A tab opened with "noopener"
+   gets its own process, so it can work as hard as it likes. */
+function sbTab(){
+  try{ window.open('/skinblock', '_blank', 'noopener'); }catch(e){}
+  sbOpened();
 }
-/* The frame is made fresh each time rather than sitting in the page. A frame
-   written into the page is one the browser "restores" on every refresh — to
-   whatever it last showed, which could be a file someone dropped on it or a
-   finished download — and that came back as a Save-As box on every refresh. */
-function sbFrame(){
-  let frame = document.getElementById('sb-frame');
-  if(!frame){
-    const holder = document.getElementById('sb-holder');
-    if(!holder) return null;
-    frame = document.createElement('iframe');
-    frame.id = 'sb-frame'; frame.title = 'Skin Block';
-    frame.name = 'sb' + Date.now();          // a new name every time: nothing to "restore"
-    holder.appendChild(frame);
-  }
-  return frame;
+function sbOpened(){
+  const n = document.getElementById('sb-launch-note');
+  if(n) n.textContent = 'Opened in a new tab. Keep this tab for calls and notes.';
 }
-async function sbOpen(){
-  const frame = sbFrame();
-  if(frame && !frame.getAttribute('src')) frame.src = await sbUrl();
+/* Opening the page from the menu opens the tool straight away. On a refresh
+   (no click) the browser would block a new tab, so the button is shown instead. */
+let sbAutoOpened = false;      // only once: going back to this page later shows the button instead of piling up tabs
+function sbOpen(){
+  const ua = navigator.userActivation;
+  if(!sbAutoOpened && ua && ua.isActive){ sbAutoOpened = true; sbTab(); }
 }
-
-async function sbReload(){
-  const frame = sbFrame();
-  if(frame) frame.src = await sbUrl('t=' + Date.now());
-}
-
+function sbReload(){ sbTab(); }
 
 /* Every SMS number in one place, with what BulkVS says about each. The two
    systems can disagree — the CMS can believe it owns a number BulkVS never
@@ -7681,6 +7670,23 @@ async function stMark(key, received){
     snRender();
   }catch(e){ alert('Could not save: ' + e.message); }
 }
+/* the whole batch came through — mark every test still waiting as arrived */
+async function stAllArrived(){
+  const keys = Object.keys(stTests).filter(k => stTests[k].accepted && stTests[k].received == null);
+  const say = document.getElementById('st-say');
+  if(!keys.length){ say.textContent = 'Nothing is waiting to be marked.'; return; }
+  if(!confirm('Mark these ' + keys.length + ' as arrived?\n\n' + keys.join('\n'))) return;
+  let done = 0;
+  for(const k of keys){
+    try{
+      const r = await API.post('/api/sms-numbers/' + k + '/test-result', {received: true});
+      if(r.ok !== false){ stTests[k].received = true; stTests[k].how = 'marked by hand'; done++; }
+    }catch(e){}
+  }
+  say.textContent = `${done} marked as arrived.`;
+  snRender();
+}
+
 async function stNextTen(){
   if(stBusy || !snData) return;
   const to = (document.getElementById('st-to').value || '').replace(/\D/g, '');

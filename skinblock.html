@@ -1,1555 +1,1190 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Skin Block</title>
-<!-- No web fonts on purpose: the page runs cross-origin-isolated so the detector
-     can use every CPU core, and an outside font would be blocked. Personality
-     comes from scale, tracking and the sans/mono pairing instead. -->
 <style>
-  :root{
-    /* darkroom safelight — the room this work actually happens in */
-    --ink:#13151B;  --panel:#1A1D25;  --raise:#212530;  --line:#2C313D;
-    --paper:#F1EFE9; --amber:#E8A33D; --amber-dim:#8A6224;
-    --ok:#6FBF8B;   --warn:#E0A05A;   --bad:#E06A5A;
-    --text:#D9DDE5; --dim:#868EA0;    --faint:#5A6070;
-    --sans: ui-sans-serif, system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    --mono: ui-monospace, "Cascadia Mono", "SF Mono", Consolas, "Liberation Mono", monospace;
-    --r:10px;
-  }
+  :root{ --bg:#0B0D14; --surface:#131623; --surface2:#1B1F2E; --border:#262B3D;
+         --text:#F2F4FF; --text2:#AEB6E4; --text3:#7A84B8; --accent:#7B6CF6;
+         --green:#10D48E; --red:#F24E4E; --yellow:#F5A623; }
   *{ box-sizing:border-box; }
   html,body{ height:100%; }
-  body{
-    margin:0; background:var(--ink); color:var(--text);
-    font-family:var(--sans); font-size:14px; line-height:1.5;
-    -webkit-font-smoothing:antialiased;
-  }
-  button{ font:inherit; color:inherit; cursor:pointer; }
-  .mono{ font-family:var(--mono); }
+  body{ margin:0; background:var(--bg); color:var(--text);
+        font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
 
-  /* ---------- shared controls ---------- */
-  .btn{
-    background:var(--raise); border:1px solid var(--line); color:var(--text);
-    border-radius:8px; padding:8px 14px; font-size:13px; font-weight:500;
-    transition:background .15s, border-color .15s, transform .05s;
-  }
-  .btn:hover{ background:#272C38; border-color:#39404F; }
-  .btn:active{ transform:translateY(1px); }
-  .btn:disabled{ opacity:.4; cursor:not-allowed; }
-  .btn-key{
-    background:var(--amber); border-color:var(--amber); color:#1A1206; font-weight:650;
-  }
-  .btn-key:hover{ background:#F0B255; border-color:#F0B255; }
-  .btn-ghost{ background:transparent; }
-  :focus-visible{ outline:2px solid var(--amber); outline-offset:2px; }
+  .wrap{ max-width:1280px; margin:0 auto; padding:26px 28px 60px; }
+  .head{ margin-bottom:20px; }
+  h1{ font-size:22px; margin:0 0 4px; letter-spacing:-.2px; }
+  .sub{ color:var(--text3); font-size:13px; max-width:640px; }
+  /* Inside the portal the page already has its own title bar. */
+  .framed .head{ display:none; }
+  .framed .wrap{ padding-top:20px; }
 
-  .eyebrow{
-    font-family:var(--mono); font-size:10.5px; letter-spacing:.18em;
-    text-transform:uppercase; color:var(--faint);
-  }
+  .layout{ display:grid; grid-template-columns:290px minmax(0,1fr); gap:20px; align-items:start; }
+  @media (max-width:860px){ .layout{ grid-template-columns:1fr; } .wrap{ padding:16px 16px 40px; } }
 
-  /* ---------- gate ---------- */
-  #gate{
-    min-height:100dvh; display:grid; place-items:center; padding:24px;
-  }
-  .gate-card{
-    width:min(400px,100%); background:var(--panel); border:1px solid var(--line);
-    border-radius:14px; padding:30px 28px;
-  }
-  .gate-card h1{ font-size:22px; margin:14px 0 6px; letter-spacing:-.01em; }
-  .gate-card p{ color:var(--dim); margin:0 0 22px; font-size:13.5px; }
-  .field{ display:flex; gap:10px; }
-  #extInput{
-    flex:1; background:var(--ink); border:1px solid var(--line); color:var(--text);
-    border-radius:8px; padding:11px 14px; font-family:var(--mono); font-size:17px;
-    letter-spacing:.25em; text-align:center;
-  }
-  #extInput::placeholder{ letter-spacing:.2em; color:var(--faint); }
-  #extErr{ color:var(--bad); font-size:12.5px; min-height:18px; margin-top:10px; }
+  /* ── settings panel ── */
+  .panel{ background:var(--surface); border:1px solid var(--border); border-radius:16px;
+          padding:18px; position:sticky; top:20px; }
+  @media (max-width:860px){ .panel{ position:static; } .main{ order:-1; } }
+  .group{ padding-bottom:16px; margin-bottom:16px; border-bottom:1px solid var(--border); }
+  .group:last-of-type{ border-bottom:0; margin-bottom:0; padding-bottom:4px; }
+  .glabel{ font-size:11px; font-weight:600; letter-spacing:.7px; text-transform:uppercase;
+           color:var(--text3); margin-bottom:10px; display:flex; justify-content:space-between; }
+  .glabel span{ color:var(--text2); text-transform:none; letter-spacing:0; font-weight:500; }
 
-  /* ---------- top bar ---------- */
-  header{
-    position:sticky; top:0; z-index:20; background:rgba(19,21,27,.92);
-    backdrop-filter:blur(8px); border-bottom:1px solid var(--line);
-  }
-  .bar{
-    max-width:1400px; margin:0 auto; padding:12px 22px;
-    display:flex; align-items:center; gap:16px; flex-wrap:wrap;
-  }
-  .wordmark{ display:flex; align-items:center; gap:10px; font-weight:650; letter-spacing:-.01em; font-size:15px; }
-  .lamp{
-    width:9px; height:9px; border-radius:50%; background:var(--faint);
-    box-shadow:0 0 0 0 rgba(232,163,61,0);
-  }
-  .lamp.on{ background:var(--amber); box-shadow:0 0 14px 2px rgba(232,163,61,.45); }
-  .ver{ color:var(--faint); font-size:10.5px; }
-  .bar-right{ margin-left:auto; display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
-  #statusText{ color:var(--dim); font-size:12.5px; }
-  .chip{
-    font-family:var(--mono); font-size:11px; letter-spacing:.08em;
-    border:1px solid var(--line); border-radius:999px; padding:4px 10px; color:var(--dim);
-  }
+  .choice{ display:block; cursor:pointer; margin-bottom:8px; }
+  .choice:last-child{ margin-bottom:0; }
+  .choice input{ position:absolute; opacity:0; pointer-events:none; }
+  .choice .box{ display:block; border:1px solid var(--border); background:var(--surface2);
+                border-radius:11px; padding:10px 12px; transition:border-color .15s, background .15s; }
+  .choice .box b{ display:block; font-size:13.5px; font-weight:600; color:var(--text); }
+  .choice .box i{ display:block; font-style:normal; font-size:12px; color:var(--text3); margin-top:1px; }
+  .choice:hover .box{ border-color:#3a4160; }
+  .choice input:checked + .box{ border-color:var(--accent); background:rgba(123,108,246,.14); }
+  .choice input:focus-visible + .box{ outline:2px solid var(--accent); outline-offset:2px; }
 
-  /* ---------- layout ---------- */
-  main{ max-width:1400px; margin:0 auto; padding:22px; }
+  .toggle{ display:flex; align-items:center; justify-content:space-between; gap:10px; cursor:pointer;
+           font-size:13.5px; color:var(--text); }
+  .toggle small{ display:block; color:var(--text3); font-size:12px; }
+  .toggle input{ position:absolute; opacity:0; pointer-events:none; }
+  .toggle .sw{ flex:none; width:38px; height:22px; border-radius:22px; background:var(--surface2);
+               border:1px solid var(--border); position:relative; transition:background .15s, border-color .15s; }
+  .toggle .sw::after{ content:""; position:absolute; top:2px; left:2px; width:16px; height:16px;
+               border-radius:50%; background:var(--text3); transition:transform .15s, background .15s; }
+  .toggle input:checked + .sw{ background:var(--accent); border-color:var(--accent); }
+  .toggle input:checked + .sw::after{ transform:translateX(16px); background:#fff; }
+  .toggle input:focus-visible + .sw{ outline:2px solid var(--accent); outline-offset:2px; }
 
-  /* loading bay: big when empty, a slim rail once work is underway */
-  #bay{
-    border:1px dashed #333A48; border-radius:14px; background:var(--panel);
-    display:grid; place-items:center; text-align:center;
-    padding:64px 24px; transition:border-color .15s, background .15s;
-  }
-  #bay.slim{ padding:18px 24px; }
-  #bay.hot{ border-color:var(--amber); background:#20222B; }
-  #bay h2{ margin:14px 0 6px; font-size:19px; font-weight:600; letter-spacing:-.01em; }
-  #bay p{ margin:0 0 18px; color:var(--dim); font-size:13.5px; }
-  #bay.slim h2, #bay.slim .bay-icon, #bay.slim p{ display:none; }
-  .bay-icon{
-    width:44px; height:32px; border:2px solid var(--faint); border-radius:5px; position:relative;
-  }
-  .bay-icon::before{
-    content:""; position:absolute; inset:auto 5px 5px 5px; height:11px;
-    border-radius:3px; background:var(--faint);
-  }
-  .bay-row{ display:flex; gap:10px; align-items:center; justify-content:center; flex-wrap:wrap; }
+  input[type=range]{ width:100%; accent-color:var(--accent); margin:0; display:block; }
+  .hint{ font-size:12px; color:var(--text3); margin-top:6px; }
+  select{ width:100%; background:var(--surface2); color:var(--text); border:1px solid var(--border);
+          border-radius:10px; padding:9px 10px; font:inherit; font-size:13.5px; }
+  select:focus{ outline:none; border-color:var(--accent); }
 
-  .toolrow{
-    display:flex; gap:18px; align-items:center; flex-wrap:wrap;
-    margin:20px 2px 6px; color:var(--dim); font-size:12.5px;
-  }
-  .toolrow label{ display:flex; align-items:center; gap:7px; cursor:pointer; }
-  input[type=checkbox]{ accent-color:var(--amber); width:15px; height:15px; }
-  .spacer{ flex:1; }
+  .btn{ background:var(--accent); color:#fff; border:0; border-radius:10px; padding:10px 16px;
+        font-size:13.5px; font-weight:600; cursor:pointer; font-family:inherit; transition:filter .15s, opacity .15s; }
+  .btn:hover:not(:disabled){ filter:brightness(1.1); }
+  .btn.outline{ background:transparent; border:1px solid var(--border); color:var(--text2); font-weight:500; }
+  .btn.outline:hover:not(:disabled){ border-color:#3a4160; color:var(--text); filter:none; }
+  .btn:disabled{ opacity:.4; cursor:default; }
+  .actions{ display:grid; grid-template-columns:1fr auto; gap:8px; margin-top:16px; }
 
-  /* ---------- contact sheet ---------- */
-  #sheet{
-    display:grid; gap:16px; margin-top:16px;
-    grid-template-columns:repeat(auto-fill, minmax(268px, 1fr));
-  }
-  .frame{
-    background:var(--panel); border:1px solid var(--line); border-radius:var(--r);
-    overflow:hidden; display:flex; flex-direction:column;
-  }
-  /* signature: the film rebate — frame number and status live in the margin,
-     exactly where they sit on a real strip of film */
-  .rebate{
-    display:flex; align-items:center; gap:10px; padding:7px 10px;
-    background:#171A21; border-bottom:1px solid var(--line);
-  }
-  .sprockets{ display:flex; gap:3px; }
-  .sprockets i{ width:6px; height:8px; border-radius:1.5px; background:#2E3441; display:block; }
-  .fno{ font-family:var(--mono); font-size:10.5px; letter-spacing:.14em; color:var(--faint); }
-  .fname{
-    font-size:11.5px; color:var(--dim); margin-left:auto; max-width:52%;
-    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; direction:rtl;
-  }
-  .plate{
-    position:relative; background:#0E1015; aspect-ratio:4/3;
-    display:grid; place-items:center; overflow:hidden;
-  }
-  .plate canvas, .plate img{ max-width:100%; max-height:100%; display:block; }
-  .frame[draggable=true] .plate{ cursor:grab; }
-  .frame.dragging{ opacity:.55; }
-  .working{
-    position:absolute; inset:0; display:grid; place-items:center; gap:10px;
-    background:rgba(14,16,21,.72); font-size:12.5px; color:var(--text);
-  }
-  .bar-track{ width:64%; height:3px; border-radius:2px; background:#252A35; overflow:hidden; }
-  .bar-fill{ height:100%; width:30%; background:var(--amber); transition:width .2s; }
-  .foot{ display:flex; align-items:center; gap:8px; padding:9px 10px; flex-wrap:wrap; }
-  .status{
-    font-size:12px; display:flex; align-items:center; gap:6px; min-width:0;
-  }
-  .status b{ width:7px; height:7px; border-radius:50%; background:var(--ok); flex:none; }
-  .status.warn b{ background:var(--warn); } .status.none b{ background:var(--faint); }
-  .status.bad b{ background:var(--bad); }
-  .status span{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .foot .btn{ padding:5px 10px; font-size:12px; }
-  .foot .spacer{ flex:1; }
+  /* ── drop zone ── */
+  .drop{ display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px;
+         min-height:250px; border:2px dashed #343a55; border-radius:18px; padding:30px 20px;
+         text-align:center; cursor:pointer; background:var(--surface);
+         transition:border-color .15s, background .15s, min-height .2s; }
+  .drop:hover{ border-color:var(--accent); }
+  .drop.over{ border-color:var(--accent); background:rgba(123,108,246,.12); }
+  .drop input{ display:none; }
+  .drop .ico{ width:54px; height:54px; border-radius:50%; background:rgba(123,108,246,.16);
+              color:var(--accent); display:flex; align-items:center; justify-content:center; margin-bottom:6px; }
+  .drop .big{ font-size:17px; font-weight:600; color:var(--text); }
+  .drop .small{ font-size:13px; color:var(--text3); }
+  .drop .pick{ margin-top:10px; background:var(--accent); color:#fff; border-radius:10px;
+               padding:9px 18px; font-size:13.5px; font-weight:600; }
+  /* Once there are photos, the drop zone shrinks out of the way. */
+  .main.has .drop{ min-height:0; flex-direction:row; padding:14px 18px; gap:12px; justify-content:flex-start; text-align:left; }
+  .main.has .drop .ico{ width:36px; height:36px; margin:0; }
+  .main.has .drop .ico svg{ width:18px; height:18px; }
+  .main.has .drop .big{ font-size:14px; }
+  .main.has .drop .small{ display:none; }
+  .main.has .drop .pick{ margin:0 0 0 auto; padding:7px 14px; font-size:13px; }
 
-  /* ---------- editor ---------- */
-  #editor{
-    position:fixed; inset:0; z-index:60; background:rgba(11,12,16,.94);
-    display:none; flex-direction:column;
-  }
-  #editor.open{ display:flex; }
-  .ed-bar{
-    display:flex; align-items:center; gap:10px; padding:12px 18px;
-    border-bottom:1px solid var(--line); flex-wrap:wrap;
-  }
-  .tools{ display:flex; gap:6px; background:var(--panel); border:1px solid var(--line); border-radius:9px; padding:4px; }
-  .tool{
-    background:transparent; border:0; border-radius:6px; padding:7px 13px; font-size:13px; color:var(--dim);
-  }
-  .tool.on{ background:var(--amber); color:#1A1206; font-weight:600; }
-  .ed-hint{ color:var(--dim); font-size:12.5px; }
-  .ed-stage{ flex:1; display:grid; place-items:center; padding:18px; overflow:auto; }
-  #edCanvas{ max-width:100%; max-height:100%; cursor:crosshair; border-radius:6px; }
+  .status{ display:flex; align-items:center; gap:8px; font-size:12.5px; color:var(--text2);
+           margin:14px 2px; min-height:18px; }
+  .status::before{ content:""; width:7px; height:7px; border-radius:50%; background:var(--accent); flex:none; }
+  .status:empty{ display:none; }
 
-  #earlierRow{
-    display:grid; gap:12px; grid-template-columns:repeat(auto-fill, minmax(150px,1fr));
-  }
-  .past{
-    background:var(--panel); border:1px solid var(--line); border-radius:8px; overflow:hidden;
-  }
-  .past .thumb{ background:#0E1015; aspect-ratio:4/3; display:grid; place-items:center; }
-  .past img{ max-width:100%; max-height:100%; display:block; cursor:grab; }
-  .past .meta{
-    padding:6px 8px; font-size:11px; color:var(--dim);
-    display:flex; align-items:center; gap:6px;
-  }
-  .past .meta span{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .past .meta button{
-    margin-left:auto; background:transparent; border:0; color:var(--amber);
-    font-size:11.5px; padding:2px 4px;
-  }
-  .toast{
-    position:fixed; left:50%; bottom:24px; transform:translateX(-50%);
-    background:var(--raise); border:1px solid var(--line); border-radius:10px;
-    padding:10px 16px; font-size:13px; z-index:80; opacity:0; pointer-events:none;
-    transition:opacity .2s, transform .2s;
-  }
-  .toast.show{ opacity:1; transform:translateX(-50%) translateY(-4px); }
-
-  @media (prefers-reduced-motion: reduce){ *{ transition:none !important; } }
-  @media (max-width:560px){
-    .bar{ padding:10px 14px; } main{ padding:14px; }
-    #sheet{ grid-template-columns:repeat(auto-fill, minmax(200px,1fr)); }
-  }
+  .grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); gap:14px; }
+  .card{ background:var(--surface); border:1px solid var(--border); border-radius:14px; overflow:hidden; }
+  .card canvas, .card img{ width:100%; display:block; background:#000; }
+  .card .meta{ padding:9px 12px; font-size:12px; color:var(--text3); display:flex; justify-content:space-between; gap:8px; }
+  .card .meta b{ color:var(--text2); font-weight:500; }
+  .card.busy .meta b{ color:var(--yellow); } .card.done .meta b{ color:var(--green); } .card.fail .meta b{ color:var(--red); }
+  .card.busy{ animation:pulse 1.4s ease-in-out infinite; }
+  .card.check{ border-color:var(--yellow); } .card.check .meta b{ color:var(--yellow); }
+  .card .ask{ padding:0 12px 12px; font-size:12px; color:var(--text2); line-height:1.5; }
+  .card .ask div{ display:flex; gap:8px; margin-top:8px; flex-wrap:wrap; }
+  .card .ask button{ flex:1; min-width:120px; padding:8px 10px; border-radius:9px; border:1px solid var(--border);
+                     background:var(--surface2); color:var(--text); font:inherit; cursor:pointer; }
+  .card .ask button.cov{ background:#E5343D; border-color:#E5343D; color:#fff; }
+  @keyframes pulse{ 50%{ border-color:#4a4570; } }
+  @media (prefers-reduced-motion:reduce){ .card.busy{ animation:none; } *{ transition:none !important; } }
 </style>
+<script>if (window.top !== window.self) document.documentElement.classList.add('framed');</script>
 </head>
 <body>
-
-<!-- ============================ gate ============================ -->
-<div id="gate">
-  <div class="gate-card">
-    <div class="eyebrow">ProClick · photo prep</div>
+<div class="wrap">
+  <div class="head">
     <h1>Skin Block</h1>
-    <p>Covers skin in photos before they go to a customer. Enter your extension to start.</p>
-    <div class="field">
-      <input id="extInput" maxlength="3" inputmode="numeric" placeholder="000" autocomplete="off">
-      <button id="extGo" class="btn btn-key">Start</button>
-    </div>
-    <div id="extErr"></div>
+    <div class="sub">Drop photos in. People are found, their skin is covered, and the pictures download
+      themselves. Nothing leaves this computer.</div>
   </div>
-</div>
 
-<!-- ============================ app ============================ -->
-<div id="app" style="display:none">
-  <header>
-    <div class="bar">
-      <div class="wordmark"><span id="dot" class="lamp"></span> Skin Block <span class="ver mono">v15</span></div>
-      <div class="bar-right">
-        <span id="statusText">Starting…</span>
-        <span id="extBadge" class="chip" style="display:none"></span>
-        <button id="diagBtn" class="btn btn-ghost" style="padding:5px 10px;font-size:11.5px;display:none"
-                onclick="runDiagnostic()">Why is it slow?</button>
+  <div class="layout">
+    <aside class="panel">
+      <div class="group">
+        <div class="glabel">What to cover</div>
+        <label class="choice"><input type="radio" name="mode" value="skin" checked>
+          <span class="box"><b>Skin only</b><i>Clothes stay visible</i></span></label>
+        <label class="choice"><input type="radio" name="mode" value="person">
+          <span class="box"><b>Whole person</b><i>Covers the full outline</i></span></label>
       </div>
-    </div>
-  </header>
 
-  <main>
-    <div id="bay">
-      <div class="bay-icon"></div>
-      <h2>Drop photos or PDFs here</h2>
-      <p>Any image format your browser can open — JPG, PNG, WEBP, GIF, BMP, AVIF — and PDFs.<br>You can also paste with Ctrl+V.</p>
-      <div class="bay-row">
-        <button id="pickBtn" class="btn btn-key">Choose photos or PDFs</button>
-        <input id="fileInput" type="file" accept="image/*,application/pdf,.pdf" multiple hidden>
+      <div class="group">
+        <label class="toggle"><span>Cover hair too<small>Off leaves hair as it is</small></span>
+          <input type="checkbox" id="opt-hair"><span class="sw"></span></label>
       </div>
-    </div>
 
-    <div class="toolrow">
-      <label><input type="checkbox" id="shrinkChk" checked> Shrink very large photos</label>
-      <label><input type="checkbox" id="autoChk"> Save automatically when done</label>
-      <span class="spacer"></span>
-      <span id="tally" class="mono" style="font-size:11.5px;letter-spacing:.1em;color:var(--faint)"></span>
-      <button id="addBtn" class="btn">Add photos or PDFs</button>
-      <button id="copyAllBtn" class="btn" disabled>Copy all</button>
-      <button id="saveAllBtn" class="btn" disabled>Save all</button>
-      <button id="clearBtn" class="btn btn-ghost">Clear</button>
-    </div>
-
-    <div id="sheet"></div>
-
-    <section id="earlier" style="display:none;margin-top:34px">
-      <div style="display:flex;align-items:baseline;gap:12px;margin-bottom:12px">
-        <span class="eyebrow">Earlier today</span>
-        <span id="earlierNote" style="color:var(--faint);font-size:12px"></span>
-        <span class="spacer" style="flex:1"></span>
-        <button id="earlierRefresh" class="btn btn-ghost" style="padding:4px 10px;font-size:12px">Refresh</button>
+      <div class="group">
+        <div class="glabel">Extra margin <span><span id="grow-v">6</span> px</span></div>
+        <input type="range" id="opt-grow" min="0" max="24" value="6" aria-label="Extra margin around covered areas">
+        <div class="hint">Higher covers a little past the edge of the skin.</div>
       </div>
-      <div id="earlierRow"></div>
+
+      <div class="group">
+        <div class="glabel">Cover style</div>
+        <select id="opt-style" aria-label="Cover style">
+          <option value="auto" selected>Auto colour — matches each picture</option>
+          <option value="solid">Solid black</option><option value="#9a9a9a">Grey</option><option value="#ffffff">White</option>
+          <option value="custom">Pick a colour…</option>
+          <option value="blur">Blur</option><option value="pixel">Pixelate</option>
+        </select>
+        <input type="color" id="opt-colour" value="#7b6cf6" aria-label="Cover colour" style="display:none;width:30px;height:26px;border:0;background:none;padding:0;cursor:pointer;">
+      </div>
+
+      <div class="actions">
+        <button class="btn" id="dl-all" disabled>Download all</button>
+        <button class="btn outline" id="clear">Clear</button>
+      </div>
+    </aside>
+
+    <section class="main" id="main">
+      <label class="drop" id="drop">
+        <input type="file" id="files" multiple accept="image/*,application/pdf,.pdf">
+        <span class="ico"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"/><path d="m6 10 6-6 6 6"/><path d="M4 20h16"/></svg></span>
+        <span class="big">Drop photos or PDFs here</span>
+        <span class="small">As many as you like. Finished pictures and PDFs download on their own.</span>
+        <span class="pick">Choose photos or PDFs</span>
+      </label>
+      <div class="status" id="status">Loading the detectors…</div>
+      <div class="grid" id="grid"></div>
     </section>
-  </main>
+  </div>
 </div>
 
-<!-- ============================ editor ============================ -->
-<div id="editor">
-  <div class="ed-bar">
-    <div class="tools">
-      <button class="tool on" id="toolCover">Cover more</button>
-      <button class="tool" id="toolKeep">Show again</button>
-    </div>
-    <span class="ed-hint" id="edHint">Drag over anything that still needs covering.</span>
-    <span class="spacer" style="flex:1"></span>
-    <button id="edUndo" class="btn">Undo</button>
-    <button id="edReset" class="btn">Start over</button>
-    <button id="edCopy" class="btn">Copy</button>
-    <button id="edDone" class="btn btn-key">Done</button>
-  </div>
-  <div class="ed-stage"><canvas id="edCanvas"></canvas></div>
-</div>
-
-<div id="diag" style="display:none;position:fixed;inset:auto 16px 16px 16px;max-width:760px;margin:0 auto;
-     background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;z-index:70;
-     font-size:12.5px;max-height:60vh;overflow:auto;">
-  <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
-    <strong>Detector check</strong>
-    <button class="btn btn-ghost" style="margin-left:auto;padding:3px 9px;font-size:11px;"
-            onclick="document.getElementById('diag').style.display='none'">Close</button>
-  </div>
-  <pre id="diag-out" style="white-space:pre-wrap;margin:0;font-family:var(--mono);font-size:11.5px;line-height:1.55;"></pre>
-</div>
-<div id="toast" class="toast"></div>
+<script>
+  // Shrink the drop zone once there are photos, grow it back when cleared.
+  new MutationObserver(function(){
+    document.getElementById('main').classList.toggle('has', document.getElementById('grid').children.length > 0);
+  }).observe(document.getElementById('grid'), { childList:true });
+</script>
 
 <script type="module">
-/* ================= real-time detector (runs on THIS PC, not the server) =======
-   The agent's machine has a GPU; the shared Azure CPU does not. Running the
-   parser here is what makes it instant instead of a 40-second round trip.
+/* ===========================================================================
+   SKIN BLOCK, third design. Two models, each doing what it is good at.
 
-   Everything loads from our own domain (/sbassets/...), which the server
-   mirrors, so the content filter never sees an outside AI site.
+   1. A person-segmentation model (YOLOv8n-seg, trained on real scenes at every
+      scale) finds each person's OUTLINE. Reliable for a crowd of thumbnails
+      and for one person filling the frame; no face needed; text, objects and
+      backgrounds are never mistaken for people.
+   2. MediaPipe's multiclass selfie model then looks at EACH PERSON up close —
+      their crop enlarged to fill its frame, which is the scale it was built
+      for — and labels skin and face. Skin inside the outline is covered;
+      clothes and hair stay, so the picture remains readable.
+   3. If the skin model finds almost nothing for someone, that person is
+      covered whole. A safety net, not the default. But if the outline model
+      is not very sure it is a person AND no face, hair or skin is seen (a
+      dress on a hanger, a mannequin), the agent is shown it in red and asked
+      — nothing is saved until they answer. PDF pages are covered to be safe.
 
-   The model labels every pixel: Face, Left-arm, Right-arm, Left-leg, Right-leg,
-   Hair, Upper-clothes, Pants, Dress, Skirt, Shoes, Bag, Hat, Scarf, Sunglasses,
-   Belt, Background. Only the skin classes are painted.
-============================================================================= */
+   Earlier designs used one model for both jobs and were either ragged on
+   crowds or blanketed group photos black. This split is what fixed both.
+   =========================================================================== */
+import * as ort from "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.webgpu.mjs";
+import { FilesetResolver, ImageSegmenter }
+  from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21";
 
-const ORT_URL   = "/sbassets/lib/ort.min.js";
-const ORT_WASM  = "/sbassets/lib/";
-const MODEL_URL = "/sbassets/hf/Xenova/segformer_b2_clothes/resolve/main/onnx/model_quantized.onnx";
-
-const CLS = { HAT:1, HAIR:2, SUNGLASSES:3, UPPER:4, SKIRT:5, PANTS:6, DRESS:7,
-              BELT:8, LSHOE:9, RSHOE:10, FACE:11, LLEG:12, RLEG:13,
-              LARM:14, RARM:15, BAG:16, SCARF:17 };
-const SKIN_IDS = [CLS.FACE, CLS.LLEG, CLS.RLEG, CLS.LARM, CLS.RARM];
-// Anything worn. The rounding step may never cover these — that is what
-// painted over the bikini.
-const CLOTH_IDS = [CLS.UPPER, CLS.SKIRT, CLS.PANTS, CLS.DRESS, CLS.BELT,
-                   CLS.LSHOE, CLS.RSHOE, CLS.BAG, CLS.SUNGLASSES];
-
-const NET_SIZE = 512;      // detail windows: small thumbnails genuinely need this
-const COARSE_SIZE = 384;   // the first look — and the whole answer when one big
-                           // subject fills the frame, where 512 buys nothing visible
-const MEAN = [0.485, 0.456, 0.406];
-const STD  = [0.229, 0.224, 0.225];
-
-let ortSession = null;
-let ortBackend = "";
-
-async function loadScript(src){
-  return new Promise((res, rej) => {
-    const s = document.createElement("script");
-    s.src = src; s.onload = res; s.onerror = () => rej(new Error("script " + src));
-    document.head.appendChild(s);
-  });
-}
-
-/* Loads the runtime and model. WebGPU when the machine has it (fastest),
-   otherwise multi-threaded WASM on the CPU — still far quicker than the
-   shared server. Returns the backend name, or "" if it couldn't load. */
-async function initBrowserModel(onProgress){
-  if (ortSession) return ortBackend;
-  if (!window.ort) await loadScript(ORT_URL);
-  const ort = window.ort;
-  ort.env.wasm.wasmPaths = ORT_WASM;
-  // Threads only work when the browser has granted cross-origin isolation.
-  // Asking for them without it makes the runtime fail to load ENTIRELY, which
-  // silently forces every photo onto the slow server path. This check must stay.
-  try {
-    ort.env.wasm.numThreads = self.crossOriginIsolated
-      ? Math.min(4, navigator.hardwareConcurrency || 2) : 1;
-  } catch(e){ ort.env.wasm.numThreads = 1; }
-  ort.env.wasm.simd = true;
-  ort.env.logLevel = "error";
-
-  // fetch with progress so the one-time download doesn't look like a hang
-  const resp = await fetch(MODEL_URL);
-  if (!resp.ok) throw new Error("model " + resp.status);
-  const total = +(resp.headers.get("content-length") || 0);
-  const reader = resp.body.getReader();
-  const parts = [];
-  let got = 0;
-  for(;;){
-    const { done, value } = await reader.read();
-    if (done) break;
-    parts.push(value); got += value.length;
-    if (onProgress && total) onProgress(got / total);
-  }
-  const buf = new Uint8Array(got);
-  let off = 0;
-  for (const p of parts){ buf.set(p, off); off += p.length; }
-
-  const backendErrors = [];
-  for (const ep of ["webgpu", "wasm"]){
-    try {
-      ortSession = await ort.InferenceSession.create(buf, { executionProviders: [ep] });
-      ortBackend = ep;
-      break;
-    } catch(e){
-      // Keep the reason. Throwing it away is why "no backend" told nobody anything.
-      backendErrors.push(ep + ": " + ((e && e.message) || e));
-    }
-  }
-  if (!ortSession) throw new Error(backendErrors.join(" | ") || "no backend");
-  return ortBackend;
-}
-
-/* One model pass over a canvas region -> Float32Array skin score at the
-   model's own grid resolution. Positive = skin.
-   We reduce the 18 class scores to ONE number per cell (best skin class minus
-   best non-skin class) before upscaling. That keeps the smooth-boundary
-   benefit of interpolating scores while being cheap enough for real time. */
-async function scoreRegion(srcCanvas, sx, sy, sw, sh, size){
-  const NET = size || NET_SIZE;
-  const c = document.createElement("canvas");
-  c.width = NET; c.height = NET;
-  const cx = c.getContext("2d", { willReadFrequently:true });
-  cx.drawImage(srcCanvas, sx, sy, sw, sh, 0, 0, NET, NET);
-  const px = cx.getImageData(0, 0, NET, NET).data;
-
-  // Auto-levels: dark thumbnails (the black panel) look like background to the
-  // model. Brightening the window before it goes in recovers those people.
-  // Purely an input adjustment — the picture the agent gets is untouched.
-  let lumaSum = 0;
-  for (let p = 0; p < px.length; p += 16){        // sample every 4th pixel
-    lumaSum += 0.299*px[p] + 0.587*px[p+1] + 0.114*px[p+2];
-  }
-  const meanLuma = lumaSum / (px.length / 16);
-  let gamma = 1;
-  if (meanLuma > 4 && meanLuma < 105) gamma = Math.log(0.42) / Math.log(meanLuma / 255);
-  gamma = Math.max(0.35, Math.min(1, gamma));
-  if (gamma < 0.99){
-    const lut = new Uint8Array(256);
-    for (let i = 0; i < 256; i++) lut[i] = Math.round(255 * Math.pow(i/255, gamma));
-    for (let p = 0; p < px.length; p += 4){ px[p]=lut[px[p]]; px[p+1]=lut[px[p+1]]; px[p+2]=lut[px[p+2]]; }
-  }
-
-  const n = NET * NET;
-  const data = new Float32Array(3 * n);
-  for (let i = 0, p = 0; i < n; i++, p += 4){
-    data[i]        = (px[p]   / 255 - MEAN[0]) / STD[0];
-    data[n + i]    = (px[p+1] / 255 - MEAN[1]) / STD[1];
-    data[2*n + i]  = (px[p+2] / 255 - MEAN[2]) / STD[2];
-  }
-  const ort = window.ort;
-  const feeds = {};
-  feeds[ortSession.inputNames[0]] = new ort.Tensor("float32", data, [1, 3, NET, NET]);
-  const out = await ortSession.run(feeds);
-  const t = out[ortSession.outputNames[0]];
-  const [, C, gh, gw] = t.dims;
-  const d = t.data;
-  const cells = gh * gw;
-  const score = new Float32Array(cells);
-  const cloth = new Float32Array(cells);
-  const isSkin = new Uint8Array(C), isCloth = new Uint8Array(C);
-  for (const id of SKIN_IDS)  if (id < C) isSkin[id] = 1;
-  for (const id of CLOTH_IDS) if (id < C) isCloth[id] = 1;
-  for (let i = 0; i < cells; i++){
-    let best = -1e9, bestOther = -1e9, bestCloth = -1e9;
-    for (let k = 0; k < C; k++){
-      const v = d[k*cells + i];
-      if (isSkin[k]){ if (v > best) best = v; }
-      else {
-        if (v > bestOther) bestOther = v;
-        if (isCloth[k] && v > bestCloth) bestCloth = v;
-      }
-    }
-    score[i] = best - bestOther + SKIN_BIAS;   // >0 means skin
-    // Clothing as a CONTINUOUS score, not a yes/no block. Comparing the two
-    // smoothly is what gives a clean line along a bikini strap instead of the
-    // stair-stepped edge a hard block mask produced.
-    cloth[i] = bestCloth - best;               // >0 means clothing beats skin
-  }
-  return { score, cloth, gw, gh };
-}
-
-/* Bilinear upsample of the score grid into a full-size mask. Interpolating the
-   score and then thresholding is what gives curved edges instead of blocks. */
-// how eagerly to call something skin. 0 = exactly what the model says.
-// Raised slightly by default because missing skin is worse than covering a
-// little extra, and the clothing guard below stops it reaching clothes.
-let SKIN_BIAS = 0.35;
-
-/* Bilinear upsample of a score grid into a full-size float map, keeping the
-   highest value where windows overlap. Interpolating the SCORE and deciding
-   afterwards is what produces curved edges instead of blocks. */
-function blendScore(grid, gw, gh, w, h, out, ox, oy, outW){
-  for (let y = 0; y < h; y++){
-    const fy = (y + 0.5) * gh / h - 0.5;
-    const y0 = Math.max(0, Math.min(gh - 1, Math.floor(fy)));
-    const y1 = Math.min(gh - 1, y0 + 1);
-    const wy = Math.max(0, Math.min(1, fy - y0));
-    for (let x = 0; x < w; x++){
-      const fx = (x + 0.5) * gw / w - 0.5;
-      const x0 = Math.max(0, Math.min(gw - 1, Math.floor(fx)));
-      const x1 = Math.min(gw - 1, x0 + 1);
-      const wx = Math.max(0, Math.min(1, fx - x0));
-      const v =
-        grid[y0*gw + x0] * (1-wx) * (1-wy) +
-        grid[y0*gw + x1] * wx     * (1-wy) +
-        grid[y1*gw + x0] * (1-wx) * wy     +
-        grid[y1*gw + x1] * wx     * wy;
-      const i = (oy + y)*outW + ox + x;
-      if (v > out[i]) out[i] = v;
-    }
-  }
-}
-
-/* Rounds the outline into a simple blob, the way the reference covering looks.
-   Box-blur the mask and re-threshold below the midpoint so the edge rounds
-   outward and never pulls back inside real skin. */
-function smoothMask(mask, w, h, strength){
-  if (strength <= 0) return mask;
-  // Absolute, small. Previously this scaled with the whole image, so a big
-  // screenshot got a huge blur that chewed the detail out of every thumbnail.
-  const r = Math.max(1, Math.round(2 * strength));
-  const tmp = new Float32Array(w*h), acc = new Float32Array(w*h);
-  for (let y = 0; y < h; y++){
-    let sum = 0;
-    for (let x = -r; x <= r; x++) sum += mask[y*w + Math.max(0, Math.min(w-1, x))];
-    for (let x = 0; x < w; x++){
-      tmp[y*w + x] = sum / (2*r + 1);
-      sum -= mask[y*w + Math.max(0, x - r)];
-      sum += mask[y*w + Math.min(w-1, x + r + 1)];
-    }
-  }
-  for (let x = 0; x < w; x++){
-    let sum = 0;
-    for (let y = -r; y <= r; y++) sum += tmp[Math.max(0, Math.min(h-1, y))*w + x];
-    for (let y = 0; y < h; y++){
-      acc[y*w + x] = sum / (2*r + 1);
-      sum -= tmp[Math.max(0, y - r)*w + x];
-      sum += tmp[Math.min(h-1, y + r + 1)*w + x];
-    }
-  }
-  const out = new Uint8Array(w*h);
-  for (let i = 0; i < out.length; i++) out[i] = acc[i] > 0.45 ? 1 : 0;
-  return out;
-}
-
-/* Fills each separate covered area with its own averaged tone, so the patch
-   sits in the picture instead of being a black hole. */
-function paintBlend(ctx, imgData, mask, w, h, mode, hex){
-  const d = imgData.data;
-  const solid = (mode === "solid");
-  let cr = 0, cg = 0, cb = 0;
-  if (solid){
-    const s = (hex || "#000000").replace("#","");
-    cr = parseInt(s.substr(0,2),16); cg = parseInt(s.substr(2,2),16); cb = parseInt(s.substr(4,2),16);
-  }
-  if (solid){
-    for (let i = 0, p = 0; i < mask.length; i++, p += 4){
-      if (mask[i]){ d[p]=cr; d[p+1]=cg; d[p+2]=cb; }
-    }
-    ctx.putImageData(imgData, 0, 0);
-    return;
-  }
-  // connected components, then fill each with its own mean colour
-  const label = new Int32Array(w*h);
-  const stack = new Int32Array(w*h);
-  let next = 0;
-  for (let s = 0; s < mask.length; s++){
-    if (!mask[s] || label[s]) continue;
-    next++;
-    let top = 0, size = 0, sr = 0, sg = 0, sb = 0;
-    stack[top++] = s; label[s] = next;
-    const members = [];
-    while (top > 0){
-      const i = stack[--top];
-      members.push(i); size++;
-      const p = i*4;
-      sr += d[p]; sg += d[p+1]; sb += d[p+2];
-      const x = i % w, y = (i / w) | 0;
-      if (x > 0   && mask[i-1] && !label[i-1]){ label[i-1]=next; stack[top++]=i-1; }
-      if (x < w-1 && mask[i+1] && !label[i+1]){ label[i+1]=next; stack[top++]=i+1; }
-      if (y > 0   && mask[i-w] && !label[i-w]){ label[i-w]=next; stack[top++]=i-w; }
-      if (y < h-1 && mask[i+w] && !label[i+w]){ label[i+w]=next; stack[top++]=i+w; }
-    }
-    const tr = Math.min(255, Math.round(sr/size * 0.92 + 14));
-    const tg = Math.min(255, Math.round(sg/size * 0.92 + 14));
-    const tb = Math.min(255, Math.round(sb/size * 0.92 + 14));
-    for (const i of members){ const p = i*4; d[p]=tr; d[p+1]=tg; d[p+2]=tb; }
-  }
-  ctx.putImageData(imgData, 0, 0);
-}
-
-/* Full pass over one photo, in the browser. Returns a painted canvas. */
-/* The model has 18 classes and NONE of them is "torso" — a bare midriff comes
-   back labelled "Upper-clothes", which is why a stomach could sit uncovered
-   while the face and arms were painted. So: take the skin the model DID find,
-   learn that person's own colour, and grow into matching neighbours.
-
-   Crucially this runs PER PERSON, not per window. Sampling colour across a
-   whole window mixed several thumbnails into one average that matched almost
-   anything. Each patch of confirmed skin now learns its own colour, growth is
-   confined to that patch's neighbourhood and capped in distance, and it is
-   discarded entirely if it balloons — which is what stops a bikini or a top
-   from being swallowed. */
-const MAX_GROW_PX = 90;
-const MAX_GROW_RATIO = 2.4;
-
-function labelComponents(mask, w, h){
-  const label = new Int32Array(w*h);
-  const stack = new Int32Array(w*h);
-  const comps = [];
-  let next = 0;
-  for (let s = 0; s < mask.length; s++){
-    if (!mask[s] || label[s]) continue;
-    next++;
-    let top = 0, size = 0;
-    let minx = w, maxx = 0, miny = h, maxy = 0;
-    stack[top++] = s; label[s] = next;
-    while (top > 0){
-      const i = stack[--top];
-      const x = i % w, y = (i / w) | 0;
-      size++;
-      if (x < minx) minx = x; if (x > maxx) maxx = x;
-      if (y < miny) miny = y; if (y > maxy) maxy = y;
-      if (x > 0   && mask[i-1] && !label[i-1]){ label[i-1] = next; stack[top++] = i-1; }
-      if (x < w-1 && mask[i+1] && !label[i+1]){ label[i+1] = next; stack[top++] = i+1; }
-      if (y > 0   && mask[i-w] && !label[i-w]){ label[i-w] = next; stack[top++] = i-w; }
-      if (y < h-1 && mask[i+w] && !label[i+w]){ label[i+w] = next; stack[top++] = i+w; }
-    }
-    comps.push({ id: next, size, minx, maxx, miny, maxy });
-  }
-  return { label, comps };
-}
-
-function extendByColour(px, mask, w, h){
-  const { label, comps } = labelComponents(mask, w, h);
-  const out = Uint8Array.from(mask);
-  const TOL = Number(SETTINGS.skin_colour_tolerance ?? 12);
-
-  for (const c of comps){
-    if (c.size < 150) continue;                       // too small to trust
-    const bw = c.maxx - c.minx + 1, bh = c.maxy - c.miny + 1;
-    const reach = Math.min(MAX_GROW_PX, Math.max(12, Math.round(0.9 * Math.max(bw, bh))));
-    const x0 = Math.max(0, c.minx - reach), y0 = Math.max(0, c.miny - reach);
-    const x1 = Math.min(w, c.maxx + 1 + reach), y1 = Math.min(h, c.maxy + 1 + reach);
-    const rw = x1 - x0, rh = y1 - y0;
-
-    // this patch's own colour
-    let n = 0, sr = 0, sg = 0, sb = 0;
-    for (let y = y0; y < y1; y++){
-      for (let x = x0; x < x1; x++){
-        const i = y*w + x;
-        if (label[i] !== c.id) continue;
-        const p = i*4; sr += px[p]; sg += px[p+1]; sb += px[p+2]; n++;
-      }
-    }
-    if (!n) continue;
-    const mr = sr/n, mg = sg/n, mb = sb/n;
-    const mcr = 128 + 0.5*mr - 0.418688*mg - 0.081312*mb;
-    const mcb = 128 - 0.168736*mr - 0.331264*mg + 0.5*mb;
-    const mlum = 0.299*mr + 0.587*mg + 0.114*mb;
-
-    const allowed = new Uint8Array(rw*rh);
-    const seed = new Uint8Array(rw*rh);
-    for (let y = 0; y < rh; y++){
-      for (let x = 0; x < rw; x++){
-        const gi = (y0 + y)*w + (x0 + x), li = y*rw + x, p = gi*4;
-        if (label[gi] === c.id){ seed[li] = 1; allowed[li] = 1; continue; }
-        const r = px[p], g = px[p+1], bl = px[p+2];
-        const cr = 128 + 0.5*r - 0.418688*g - 0.081312*bl;
-        const cb = 128 - 0.168736*r - 0.331264*g + 0.5*bl;
-        const lum = 0.299*r + 0.587*g + 0.114*bl;
-        if (Math.hypot(cr - mcr, cb - mcb) < TOL && Math.abs(lum - mlum) < 62) allowed[li] = 1;
-      }
-    }
-    // growth may not cross a strong brightness change (a strap, a hem)
-    for (let y = 1; y < rh-1; y++){
-      for (let x = 1; x < rw-1; x++){
-        const gi = (y0 + y)*w + (x0 + x), li = y*rw + x;
-        if (seed[li]) continue;
-        const L = i2 => 0.299*px[i2*4] + 0.587*px[i2*4+1] + 0.114*px[i2*4+2];
-        if (Math.abs(L(gi+1) - L(gi-1)) + Math.abs(L(gi+w) - L(gi-w)) > 46) allowed[li] = 0;
-      }
-    }
-
-    // bounded flood
-    const grown = Uint8Array.from(seed);
-    const stack = new Int32Array(rw*rh);
-    let top = 0, grownCount = 0;
-    const dist = new Int16Array(rw*rh).fill(-1);
-    for (let i = 0; i < grown.length; i++) if (grown[i]){ stack[top++] = i; dist[i] = 0; grownCount++; }
-    while (top > 0){
-      const i = stack[--top];
-      const d = dist[i];
-      if (d >= reach) continue;
-      const x = i % rw, y = (i / rw) | 0;
-      const push = j => { if (allowed[j] && !grown[j]){ grown[j] = 1; dist[j] = d+1; stack[top++] = j; grownCount++; } };
-      if (x > 0)    push(i-1);
-      if (x < rw-1) push(i+1);
-      if (y > 0)    push(i-rw);
-      if (y < rh-1) push(i+rw);
-    }
-    if (grownCount > c.size * MAX_GROW_RATIO) continue;   // runaway: discard
-    for (let y = 0; y < rh; y++)
-      for (let x = 0; x < rw; x++)
-        if (grown[y*rw + x]) out[(y0 + y)*w + (x0 + x)] = 1;
-  }
-  return out;
-}
-
-let RUN_COUNT = 0, SINGLE_PASS_USED = false;
-
-async function processInBrowser(base, onStep){
-  RUN_COUNT = 0; SINGLE_PASS_USED = false;
-  const w = base.width, h = base.height;
-  const WINDOW = 260;                       // finer than before: more detail per thumbnail
-  let cols = Math.max(1, Math.round(w / WINDOW));
-  let rows = Math.max(1, Math.round(h / WINDOW));
-  // Window size follows the CONTENT, never the machine's speed. Letting a time
-  // budget shrink the grid meant a slower PC produced worse covering — windows
-  // spanning several thumbnails can't resolve a bikini strap.
-  const cap = Number(SETTINGS.max_windows ?? 60);
-  while (cols * rows > cap){ if (cols >= rows && cols > 1) cols--; else if (rows > 1) rows--; else break; }
-
-  const S = new Float32Array(w*h).fill(-9);   // skin score
-  const C = new Float32Array(w*h).fill(-9);   // clothing score
-  SKIN_BIAS = Number(SETTINGS.skin_bias ?? 0.35);
-
-  // ---- one coarse look first -------------------------------------------
-  // Windows exist so small thumbnails in a screenshot get enough resolution.
-  // When one big person fills the frame, the whole photo at model size is
-  // already plenty of detail — so look once and stop. That's 1 run instead of
-  // 25 on an ordinary product photo.
-  {
-    const c = await scoreRegion(base, 0, 0, w, h, COARSE_SIZE);
-    RUN_COUNT++;
-    blendScore(c.score, c.gw, c.gh, w, h, S, 0, 0, w);
-    blendScore(c.cloth, c.gw, c.gh, w, h, C, 0, 0, w);
-    if (onStep) onStep(1, 1);
-  }
-  const coarse = new Uint8Array(w*h);
-  // A deliberately generous map for deciding which windows to skip: the first
-  // look runs small and can't resolve tiny thumbnails, so anything even faintly
-  // person-like keeps its window. Skipping is only for clearly empty areas.
-  const gate = new Uint8Array(w*h);
-  for (let i = 0; i < coarse.length; i++){
-    coarse[i] = (S[i] > 0 && C[i] <= 0) ? 1 : 0;
-    gate[i] = S[i] > -2.0 ? 1 : 0;
-  }
-
-  // subject height separates the cases far better than area: a portrait's
-  // largest skin patch runs ~40% of frame height, the biggest face in a grid ~14%
-  let tallest = 0;
-  {
-    const { comps } = labelComponents(coarse, w, h);
-    for (const c of comps){ const ch2 = c.maxy - c.miny + 1; if (ch2 > tallest) tallest = ch2; }
-  }
-  // One big subject means a portrait — but a wide screenshot can hold one large
-  // person AND a dozen small ones. Counting the separate people is what tells
-  // them apart: a portrait has one or two, a grid has many. Getting this wrong
-  // means the whole screenshot gets a single low-resolution pass and almost
-  // nothing is covered.
-  let bigParts = 0;
-  {
-    const { comps } = labelComponents(coarse, w, h);
-    for (const c of comps) if (c.size > (w*h) * 0.0008) bigParts++;
-  }
-  SINGLE_PASS_USED = tallest > h * Number(SETTINGS.coarse_enough ?? 0.28)
-                     && bigParts <= Number(SETTINGS.coarse_max_parts ?? 2);
-  const oneIsEnough = tallest > h * Number(SETTINGS.coarse_enough ?? 0.28)
-                      && bigParts <= Number(SETTINGS.coarse_max_parts ?? 2);
-  if (!oneIsEnough){
-  const cw = w / cols, ch = h / rows;
-  const OV = 0.12;
-
-  const passes = (SETTINGS.second_pass === false) ? [[0,0]] : [[0,0],[0.5,0.5]];
-  const total = passes.length * cols * rows;
-  const boxes = [];
-  let done = 0;
-  for (const [ox, oy] of passes){
-    for (let ry = (oy ? -1 : 0); ry < rows; ry++){
-      for (let rx = (ox ? -1 : 0); rx < cols; rx++){
-        const x0 = Math.max(0, Math.floor((rx+ox)*cw - cw*OV));
-        const y0 = Math.max(0, Math.floor((ry+oy)*ch - ch*OV));
-        const x1 = Math.min(w, Math.ceil((rx+1+ox)*cw + cw*OV));
-        const y1 = Math.min(h, Math.ceil((ry+1+oy)*ch + ch*OV));
-        const sw = x1-x0, sh = y1-y0;
-        if (sw < 16 || sh < 16) continue;
-        // nothing human here — don't spend a run on it
-        let anyHere = false;
-        const M = 24;   // margin, since the coarse look is approximate
-        const gy0 = Math.max(0, y0-M), gy1 = Math.min(h, y1+M);
-        const gx0 = Math.max(0, x0-M), gx1 = Math.min(w, x1+M);
-        for (let y = gy0; y < gy1 && !anyHere; y += 2)
-          for (let x = gx0; x < gx1; x += 2) if (gate[y*w + x]){ anyHere = true; break; }
-        if (!anyHere){ done++; if (onStep) onStep(Math.min(done,total), total); continue; }
-        const { score, cloth, gw, gh } = await scoreRegion(base, x0, y0, sw, sh);
-        RUN_COUNT++;
-        blendScore(score, gw, gh, sw, sh, S, x0, y0, w);
-        blendScore(cloth, gw, gh, sw, sh, C, x0, y0, w);
-        boxes.push([x0, y0, sw, sh]);
-        done++;
-        if (onStep) onStep(Math.min(done, total), total);
-      }
-    }
-  }
-  }  // end: detail windows, only needed when the people are small
-
-  // skin wins only where it also beats clothing
-  const mask = new Uint8Array(w*h);
-  for (let i = 0; i < mask.length; i++) mask[i] = (S[i] > 0 && C[i] <= 0) ? 1 : 0;
-
-  // reclaim bare torso the model labelled as clothing — per person, bounded
-  if (SETTINGS.extend_by_colour !== false){
-    try{
-      const px = base.getContext("2d", { willReadFrequently:true }).getImageData(0,0,w,h).data;
-      const grown = extendByColour(px, mask, w, h);
-      for (let i = 0; i < mask.length; i++) mask[i] = grown[i];
-    }catch(e){ /* can't read pixels: keep the model's own mask */ }
-  }
-
-  const smoothed = smoothMask(mask, w, h, Number(SETTINGS.smooth_shapes ?? 0.6));
-  // Clothing still wins after rounding — except where the colour pass already
-  // established the pixel is bare skin (that is exactly the mislabelled torso).
-  for (let i = 0; i < smoothed.length; i++) if (C[i] > 0 && !mask[i]) smoothed[i] = 0;
-
-  const out = document.createElement("canvas");
-  out.width = w; out.height = h;
-  const octx = out.getContext("2d", { willReadFrequently:true });
-  octx.drawImage(base, 0, 0);
-  const imgData = octx.getImageData(0, 0, w, h);
-  paintBlend(octx, imgData, smoothed, w, h,
-             (SETTINGS.cover_mode || "blend"), SETTINGS.cover_color);
-  let any = false;
-  for (let i = 0; i < smoothed.length; i++) if (smoothed[i]){ any = true; break; }
-  return { canvas: out, found: any, runs: RUN_COUNT, oneIsEnough: SINGLE_PASS_USED };
-}
-
-
-/* ===================== Skin Block app =====================
-   The detector itself lives above this block. Everything here is the page:
-   taking photos in, showing the batch, hand-editing, getting photos out.
-========================================================== */
+const YOLO_URL = "/models/yolov8n-seg.onnx";
+const SKIN_URL = "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite";
+const HAIR = 1, BODY = 2, FACE = 3;
+const CONF = 0.25;          // below this the model starts seeing "people" in menu icons
+const IOU = 0.6;             // overlapping people in a crowd are two people, not one
+const FALLBACK_BELOW = 0.08; // skin found as a share of the person: under this, cover whole
+const SURE_PERSON = 0.6;     // (only without the body check) this sure -> treat as a person
+const POSE_URL = "/models/yolov8n-pose.onnx";
+/* A small dedicated face finder (UltraFace, 1.6 MB). Every face it is sure of
+   that the rest has not already covered gets covered — faces too small for the
+   people models (a crowd, someone far away), and any face the skin model
+   missed. Big pictures are also looked at in four overlapping parts so small
+   faces are not lost when the picture is shrunk. */
+const FACE_URL = "/models/ultraface-640.onnx";
+const FACE_SURE = 0.8;
+const FACE_SEEN = 0.85;      // body check: a nose / eye / ear this sure means a real person
+/* ... or, with the head out of the picture, legs: knees and ankles on a body
+   with shoulders. In tests a walking man cut off at the edge scored knees 0.95
+   and ankles 0.76; clothes never above 0.38 and 0.09. */
+const KNEE_SEEN = 0.7, ANKLE_SEEN = 0.5, SHOULDER_SEEN = 0.8;
+const SMALL_SHAPE = 0.35;    // a person-shape shorter than this share of the picture is a person in a scene
+const SKIN_SOME = 0.005;     // a body with no face showing this much skin: cover that skin only
+/* Skin on a shape with NO face (clothes on a hanger, a product photo) is only
+   believed when it is real skin by every measure: the skin model is sure of
+   it, it is skin-coloured, and — unless the model is very sure — it reaches in
+   from the edge of the picture or from outside the clothes, the way a hand
+   holding a shirt does. Measured on real photos: real skin 0.81-0.89; the
+   false "skin" the model sees on clothes (collars, neck openings, black
+   sleeves and straps) 0.40-0.75, or not skin-coloured at all. */
+const LOOSE_SURE = 0.80;     // skin this sure is believed anywhere
+const LOOSE_EDGE = 0.70;     // ... this sure if it comes in from outside the clothes
+const LOOSE_COLOUR = 0.6;    // share of its pixels that must be skin-coloured
+/* Why the body check: the outline model is fooled by clothes — on product
+   photos of shirts and dresses it scored up to 0.88 "person". The body-joint
+   model finds a face on real people (0.98-1.00 in tests) and never above 0.76
+   on clothes, so a shape with no face, no hair and no skin is clothing and is
+   left alone. The agent can still cover it with one click. */
+/* A dress on a hanger or a mannequin can look like a person to the outline
+   model. When it is not very sure AND the skin model sees no face, hair or
+   skin at all, the shape is not covered by itself: the agent is asked. */
 
 const $ = id => document.getElementById(id);
-console.log("[SkinBlock] v15 — isolation guard restored");
+const status = t => { $("status").textContent = t; };
+let yolo = null, segmenter = null, poseNet = null, faceNet = null, queue = [], working = false, results = [];
 
-const dot = $("dot"), statusText = $("statusText"), sheet = $("sheet"), bay = $("bay");
-const fileInput = $("fileInput"), saveAllBtn = $("saveAllBtn"), tally = $("tally");
-
-let ready = false;
-let LOCAL_MODEL = false;
-let AGENT_EXT = "";
-let SETTINGS = {
-  cover_mode:'blend', cover_color:'#000000', max_dimension:2000,
-  require_extension:true, smooth_shapes:0.6, skin_bias:0.35,
-  extend_by_colour:true, skin_colour_tolerance:14, second_pass:true, max_windows:60
-};
-const MAXDIM = 2000;
-const items = [];
-let queue = Promise.resolve();
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-
-function toast(msg, ms=2600){
-  const t = $("toast");
-  t.textContent = msg; t.classList.add("show");
-  clearTimeout(toast._t); toast._t = setTimeout(()=> t.classList.remove("show"), ms);
-}
-
-/* ---------------- gate ---------------- */
-function openApp(ext){
-  AGENT_EXT = ext;
-  $("gate").style.display = "none";
-  $("app").style.display = "";
-  const b = $("extBadge");
-  b.textContent = "EXT " + ext; b.style.display = "";
-  try{ sessionStorage.setItem('sb_ext', ext); }catch(e){}
-  boot().catch(() => { statusText.textContent = "Detector didn't start — check the connection"; });
-  loadEarlier();
-}
-function initGate(){
-  let saved = null;
-  try{ saved = sessionStorage.getItem('sb_ext'); }catch(e){}
-  if (SETTINGS.require_extension === false){ openApp(saved || "000"); return; }
-  if (saved && /^\d{3}$/.test(saved)){ openApp(saved); return; }
-  const go = () => {
-    const v = $("extInput").value.trim();
-    if (!/^\d{3}$/.test(v)){ $("extErr").textContent = "Enter your 3-digit extension."; return; }
-    $("extErr").textContent = ""; openApp(v);
-  };
-  $("extGo").addEventListener("click", go);
-  $("extInput").addEventListener("keydown", e => { if (e.key === "Enter") go(); });
-  $("extInput").focus();
-}
-
-async function loadSettings(){
-  try{
-    const r = await fetch('/api/skinblock/settings');
-    if (r.ok) SETTINGS = Object.assign(SETTINGS, await r.json());
-  }catch(e){ /* offline: defaults are fine */ }
-  const sc = $("shrinkChk"); if (sc) sc.checked = SETTINGS.shrink_large !== false;
-}
-
-/* ---------------- boot ---------------- */
+/* ---- load ------------------------------------------------------------- */
 async function boot(){
-  ready = true;
-  dot.classList.add("on");
-  statusText.textContent = "Loading detector…";
   try{
-    const backend = await initBrowserModel(p => {
-      statusText.textContent = "Getting the detector — one time only (" + Math.round(p*100) + "%)";
-    });
-    LOCAL_MODEL = true;
-    const threads = (window.ort && window.ort.env.wasm.numThreads) || 1;
-    reportDetector('local', '', backend, threads);
-    statusText.textContent = backend === "webgpu"
-      ? "Instant mode — using this PC's graphics"
-      : ("Fast mode — this PC, " + threads + (threads > 1 ? " cores" : " core"));
-    console.log("[SkinBlock] backend:", backend, "threads:", threads, "isolated:", self.crossOriginIsolated);
-  }catch(e){
-    LOCAL_MODEL = false;
-    const why = (e && e.message) ? String(e.message).slice(0,90) : "unknown";
-    console.warn("[SkinBlock] local model unavailable:", e);
-    statusText.textContent = "Server mode — " + why;
-    statusText.title = "Send this to David: " + why;
-    reportDetector('server', why, '', 0);
-    const db = document.getElementById("diagBtn"); if (db) db.style.display = "";
-  }
-}
+    ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/";
+    let backend = "webgpu";
+    try{ yolo = await ort.InferenceSession.create(YOLO_URL, { executionProviders: ["webgpu"] }); }
+    catch(e){ backend = "wasm"; yolo = await ort.InferenceSession.create(YOLO_URL, { executionProviders: ["wasm"] }); }
+    try{ faceNet = await ort.InferenceSession.create(FACE_URL, { executionProviders: [backend] }); }
+    catch(e){ try{ faceNet = await ort.InferenceSession.create(FACE_URL, { executionProviders: ["wasm"] }); }
+              catch(e2){ faceNet = null; console.warn("face finder not loaded", e2); } }
+    try{ poseNet = await ort.InferenceSession.create(POSE_URL, { executionProviders: [backend] }); }
+    catch(e){ try{ poseNet = await ort.InferenceSession.create(POSE_URL, { executionProviders: ["wasm"] }); }
+              catch(e2){ poseNet = null; console.warn("body check not loaded", e2); } }
 
-/* Tells the server which detector we ended up on. If it's the slow server
-   path, the reason goes with it, so nobody has to read it off the screen. */
-function reportDetector(mode, reason, backend, threads){
-  try{
-    fetch('/api/skinblock/report-detector', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ agent_ext: AGENT_EXT, mode, reason, backend,
-                             threads, isolated: !!self.crossOriginIsolated })
-    });
-  }catch(e){}
-}
-
-
-/* Checks each thing the fast detector needs, in order, and says which one
-   failed — so a slow machine can be diagnosed without opening a console. */
-async function runDiagnostic(){
-  const panel = document.getElementById("diag"), out = document.getElementById("diag-out");
-  panel.style.display = "block";
-  const lines = [];
-  const say = s => { lines.push(s); out.textContent = lines.join("\n"); };
-
-  say("Checking this PC…\n");
-  say((self.crossOriginIsolated ? "OK  " : "NO  ") + "cross-origin isolation" +
-      (self.crossOriginIsolated ? " — multiple cores usable" : " — falls back to one core (still fine)"));
-  say(((navigator.gpu ? "OK  " : "NO  ")) + "WebGPU" + (navigator.gpu ? " — graphics acceleration available" : " — this PC has no usable GPU for it; CPU will be used"));
-  say("--  " + (navigator.hardwareConcurrency || "?") + " CPU cores reported");
-
-  for (const [label, url] of [["detector library", ORT_URL], ["detector model", MODEL_URL]]){
+    const files = await FilesetResolver.forVisionTasks(
+      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/wasm");
+    let delegate = "GPU";
     try{
-      const t0 = performance.now();
-      const r = await fetch(url);
-      const buf = await r.arrayBuffer();
-      const ms = Math.round(performance.now() - t0);
-      const head = new Uint8Array(buf.slice(0, 4));
-      const looksText = head[0] === 0x7b || head[0] === 0x3c;   // { or <
-      say((r.ok && !looksText ? "OK  " : "NO  ") + label + ": HTTP " + r.status +
-          ", " + Math.round(buf.byteLength/1024) + " KB in " + ms + "ms" +
-          (looksText ? "  <-- this is text, not a file. The server sent an error page." : ""));
-      if (!r.ok || looksText){
-        try{ say("     server said: " + new TextDecoder().decode(buf.slice(0, 200))); }catch(e){}
-      }
+      segmenter = await ImageSegmenter.createFromOptions(files, {
+        baseOptions: { modelAssetPath: SKIN_URL, delegate }, runningMode: "IMAGE", outputCategoryMask: true, outputConfidenceMasks: true });
     }catch(e){
-      say("NO  " + label + " could not be fetched: " + ((e && e.message) || e));
+      delegate = "CPU";
+      segmenter = await ImageSegmenter.createFromOptions(files, {
+        baseOptions: { modelAssetPath: SKIN_URL, delegate }, runningMode: "IMAGE", outputCategoryMask: true, outputConfidenceMasks: true });
+    }
+    status((poseNet ? "" : "Body check not loaded — unsure shapes will be asked about. ")
+           + "Ready — people on " + (backend === "webgpu" ? "the graphics card" : "the processor")
+           + ", skin on " + (delegate === "GPU" ? "the graphics card" : "the processor") + ".");
+  }catch(e){ status("The detectors could not load: " + e.message); }
+}
+
+/* ---- people: YOLO ------------------------------------------------------ */
+/* Returns [{x1,y1,x2,y2, mask:Uint8Array(w*h)}] at image size. The model
+   sees a letterboxed square; 640 for ordinary photos, 1280 when the image is
+   large and may hold small figures — it is 4x the work, so only when needed. */
+async function findPeople(img, w, h){
+  const size = Math.max(w, h) > 1400 ? 1280 : 640;
+  const scale = size / Math.max(w, h);
+  const nw = Math.round(w * scale), nh = Math.round(h * scale);
+  const c = document.createElement("canvas"); c.width = size; c.height = size;
+  const ctx = c.getContext("2d", { willReadFrequently: true });
+  ctx.fillStyle = "#727272"; ctx.fillRect(0, 0, size, size);       // YOLO's letterbox grey
+  ctx.drawImage(img, 0, 0, nw, nh);
+  const px = ctx.getImageData(0, 0, size, size).data;
+  const input = new Float32Array(3 * size * size);
+  for(let i = 0, n = size * size; i < n; i++){
+    input[i] = px[i*4] / 255; input[n + i] = px[i*4+1] / 255; input[2*n + i] = px[i*4+2] / 255;
+  }
+  const out = await yolo.run({ images: new ort.Tensor("float32", input, [1, 3, size, size]) });
+  const det = out.output0;               // [1, 116, N]  4 box + 80 classes + 32 mask coeffs
+  const proto = out.output1;             // [1, 32, mh, mw]
+  const N = det.dims[2], d = det.data;
+  const mh = proto.dims[2], mw = proto.dims[3], pd = proto.data;
+
+  // person is class 0 -> row 4
+  const cands = [];
+  for(let i = 0; i < N; i++){
+    const score = d[4 * N + i];
+    if(score < CONF) continue;
+    const cx = d[i], cy = d[N + i], bw = d[2*N + i], bh = d[3*N + i];
+    const coef = new Float32Array(32);
+    for(let k = 0; k < 32; k++) coef[k] = d[(84 + k) * N + i];
+    cands.push({ score, x1: cx - bw/2, y1: cy - bh/2, x2: cx + bw/2, y2: cy + bh/2, coef });
+  }
+  cands.sort((a, b) => b.score - a.score);
+  const kept = [];
+  for(const a of cands){
+    let dup = false;
+    for(const b of kept){
+      const ix = Math.max(0, Math.min(a.x2, b.x2) - Math.max(a.x1, b.x1));
+      const iy = Math.max(0, Math.min(a.y2, b.y2) - Math.max(a.y1, b.y1));
+      const inter = ix * iy, ua = (a.x2-a.x1)*(a.y2-a.y1) + (b.x2-b.x1)*(b.y2-b.y1) - inter;
+      if(inter / ua > IOU){ dup = true; break; }
+    }
+    if(!dup) kept.push(a);
+  }
+
+  // each mask = sigmoid(coef · prototypes), inside its box, back at image size
+  const people = [];
+  const ps = mw / size;                 // prototype grid per letterbox pixel
+  const plane = mh * mw;
+  for(const b of kept){
+    const mask = new Uint8Array(w * h);
+    const bx1 = Math.max(0, b.x1), by1 = Math.max(0, b.y1), bx2 = Math.min(nw, b.x2), by2 = Math.min(nh, b.y2);
+    const ix1 = Math.max(0, Math.floor(bx1 / scale)), iy1 = Math.max(0, Math.floor(by1 / scale));
+    const ix2 = Math.min(w, Math.ceil(bx2 / scale)), iy2 = Math.min(h, Math.ceil(by2 / scale));
+    // the mask value on the model's coarse grid first, once per grid cell ...
+    const gx1 = Math.max(0, Math.floor(ix1 * scale * ps) - 1), gx2 = Math.min(mw - 1, Math.ceil(ix2 * scale * ps) + 1);
+    const gy1 = Math.max(0, Math.floor(iy1 * scale * ps) - 1), gy2 = Math.min(mh - 1, Math.ceil(iy2 * scale * ps) + 1);
+    const gw = gx2 - gx1 + 1, logit = new Float32Array(gw * (gy2 - gy1 + 1));
+    for(let gy = gy1; gy <= gy2; gy++) for(let gx = gx1; gx <= gx2; gx++){
+      let v = 0; const o = gy * mw + gx;
+      for(let k = 0; k < 32; k++) v += b.coef[k] * pd[k * plane + o];
+      logit[(gy - gy1) * gw + (gx - gx1)] = v;
+    }
+    // ... then blended smoothly between cells, so the edge follows the shape
+    // instead of stepping in square blocks
+    const L = (gx, gy) => logit[(gy - gy1) * gw + (gx - gx1)];
+    for(let y = iy1; y < iy2; y++){
+      const fy = Math.min(gy2, Math.max(gy1, (y + 0.5) * scale * ps - 0.5));
+      const y0 = Math.min(gy2 - 0, Math.floor(fy)), y1g = Math.min(gy2, y0 + 1), ty = fy - y0;
+      for(let x = ix1; x < ix2; x++){
+        const fx = Math.min(gx2, Math.max(gx1, (x + 0.5) * scale * ps - 0.5));
+        const x0 = Math.floor(fx), x1g = Math.min(gx2, x0 + 1), tx = fx - x0;
+        const v = (L(x0, y0) * (1 - tx) + L(x1g, y0) * tx) * (1 - ty)
+                + (L(x0, y1g) * (1 - tx) + L(x1g, y1g) * tx) * ty;
+        if(v > 0) mask[y * w + x] = 1;          // sigmoid(v) > 0.5  <=>  v > 0
+      }
+    }
+    people.push({ x1: ix1, y1: iy1, x2: ix2, y2: iy2, mask, score: b.score });
+  }
+  return people;
+}
+
+/* ---- body check: is there a face on this shape? ------------------------- */
+/* The shape is cut out with a margin, enlarged to the body model's square,
+   and the face points (nose, eyes, ears) of the body that sits where the
+   shape is are read. Returns the surest of the five, 0..1. */
+async function faceOn(img, w, h, p){
+  const pad = 0.15, bw = p.x2 - p.x1, bh = p.y2 - p.y1;
+  const x1 = Math.max(0, p.x1 - pad*bw), y1 = Math.max(0, p.y1 - pad*bh);
+  const x2 = Math.min(w, p.x2 + pad*bw), y2 = Math.min(h, p.y2 + pad*bh);
+  const cw = x2 - x1, ch = y2 - y1; if(cw < 8 || ch < 8) return 0;
+  const S = 640, k = S / Math.max(cw, ch);
+  const c = document.createElement("canvas"); c.width = S; c.height = S;
+  const ctx = c.getContext("2d", { willReadFrequently: true });
+  ctx.fillStyle = "#727272"; ctx.fillRect(0, 0, S, S);
+  ctx.drawImage(img, x1, y1, cw, ch, 0, 0, Math.round(cw*k), Math.round(ch*k));
+  const px = ctx.getImageData(0, 0, S, S).data, n = S * S, input = new Float32Array(3 * n);
+  for(let i = 0; i < n; i++){ input[i] = px[i*4]/255; input[n+i] = px[i*4+1]/255; input[2*n+i] = px[i*4+2]/255; }
+  const out = await poseNet.run({ images: new ort.Tensor("float32", input, [1, 3, S, S]) });
+  const o = out[Object.keys(out)[0]], N = o.dims[2], d = o.data;      // [1, 56, N]
+  // where the shape sits inside the enlarged cut-out
+  const t = { x1: (p.x1 - x1)*k, y1: (p.y1 - y1)*k, x2: (p.x2 - x1)*k, y2: (p.y2 - y1)*k };
+  const ta = (t.x2 - t.x1) * (t.y2 - t.y1);
+  let best = -1, bestIou = 0.3;
+  for(let i = 0; i < N; i++){
+    if(d[4*N + i] < 0.25) continue;
+    const cx = d[i], cy = d[N+i], ww = d[2*N+i], hh = d[3*N+i];
+    const ix = Math.max(0, Math.min(t.x2, cx + ww/2) - Math.max(t.x1, cx - ww/2));
+    const iy = Math.max(0, Math.min(t.y2, cy + hh/2) - Math.max(t.y1, cy - hh/2));
+    const iou = ix * iy / (ta + ww * hh - ix * iy);
+    if(iou > bestIou){ bestIou = iou; best = i; }
+  }
+  if(best < 0) return { found: false, face: 0, legs: false, printed: false, shoulders: 0, head: null };
+  const kp = j => d[(5 + j*3 + 2) * N + best];                 // how sure of body point j
+  const ky = j => d[(5 + j*3 + 1) * N + best];                 // where it is, top to bottom
+  const kx = j => d[(5 + j*3) * N + best];
+  let face = 0, faceY = Infinity, hx = 0, hy = 0, hn = 0;
+  for(let j = 0; j < 5; j++){
+    face = Math.max(face, kp(j));
+    if(kp(j) >= 0.5){ faceY = Math.min(faceY, ky(j)); hx += kx(j); hy += ky(j); hn++; }
+  }
+  const shoulders = Math.max(kp(5), kp(6));
+  // where the head is, in the picture, so the skin model can be asked whether
+  // there is really a face or hair there (the body model will imagine a head
+  // above an empty collar)
+  const sw = kp(5) >= 0.5 && kp(6) >= 0.5 ? Math.abs(kx(5) - kx(6)) / k : 0;
+  const head = hn ? { x: x1 + hx / hn / k, y: y1 + hy / hn / k,
+                      r: Math.max(4, sw ? sw * 0.35 : 0.08 * (p.y2 - p.y1)) } : null;
+  const shoulderY = Math.min(kp(5) >= 0.5 ? ky(5) : Infinity, kp(6) >= 0.5 ? ky(6) : Infinity);
+  // A face BELOW the shoulders is a picture printed on a shirt, not a head:
+  // on a real person the face is always above the shoulder line.
+  const printed = face >= 0.5 && shoulders >= SHOULDER_SEEN && faceY > shoulderY;
+  const legs = Math.max(kp(13), kp(14)) >= KNEE_SEEN && Math.max(kp(15), kp(16)) >= ANKLE_SEEN
+            && shoulders >= SHOULDER_SEEN;
+  return { found: true, face: printed ? 0 : face, legs, printed, shoulders, head };
+}
+
+/* Is there really a face, hair or skin where the body model put the head? */
+function headSeen(g, head){
+  if(!g || !head) return false;
+  let hit = 0, all = 0;
+  const step = Math.max(1, head.r / 6);
+  for(let dy = -head.r; dy <= head.r; dy += step) for(let dx = -head.r; dx <= head.r; dx += step){
+    if(dx*dx + dy*dy > head.r*head.r) continue;
+    const xx = head.x + dx - g.x1, yy = head.y + dy - g.y1;
+    if(xx < 0 || yy < 0 || xx >= g.cw || yy >= g.ch) continue;
+    const mx = Math.min(g.mw-1, Math.floor(xx * g.s * g.mw / 512)), my = Math.min(g.mhh-1, Math.floor(yy * g.s * g.mhh / 512));
+    const k = g.cat[my * g.mw + mx]; all++;
+    if(k === FACE || k === HAIR || k === BODY) hit++;
+  }
+  return all > 0 && hit >= 0.2 * all;
+}
+
+/* ---- faces ------------------------------------------------------------- */
+async function facesIn(img, x0, y0, cw, ch){
+  const W = 640, H = 480, k = Math.min(W / cw, H / ch);
+  const c = document.createElement("canvas"); c.width = W; c.height = H;
+  const ctx = c.getContext("2d", { willReadFrequently: true });
+  ctx.fillStyle = "#000"; ctx.fillRect(0, 0, W, H);
+  ctx.drawImage(img, x0, y0, cw, ch, 0, 0, Math.round(cw * k), Math.round(ch * k));
+  const px = ctx.getImageData(0, 0, W, H).data, n = W * H, input = new Float32Array(3 * n);
+  for(let i = 0; i < n; i++){
+    input[i] = (px[i*4] - 127) / 128; input[n + i] = (px[i*4+1] - 127) / 128; input[2*n + i] = (px[i*4+2] - 127) / 128;
+  }
+  const out = await faceNet.run({ input: new ort.Tensor("float32", input, [1, 3, H, W]) });
+  const sc = out.scores.data, bx = out.boxes.data, N = out.scores.dims[1], found = [];
+  for(let i = 0; i < N; i++){
+    const conf = sc[i*2 + 1]; if(conf < FACE_SURE) continue;
+    const fx1 = bx[i*4] * W / k, fy1 = bx[i*4+1] * H / k, fx2 = bx[i*4+2] * W / k, fy2 = bx[i*4+3] * H / k;
+    if(fx2 - fx1 < 6 || fy2 - fy1 < 6) continue;
+    found.push({ x1: x0 + fx1, y1: y0 + fy1, x2: x0 + fx2, y2: y0 + fy2, conf });
+  }
+  return found;
+}
+/* The face finder sometimes "sees" a face in an insect or a row of buttons.
+   A face it reports is believed only if much of it is skin-coloured — or, in a
+   black-and-white photo where colour says nothing, if it is very sure. */
+function faceLooksReal(img, w, h, f, grey, people){
+  if(grey){
+    // colour says nothing here: only a very sure face on a person the people
+    // model found counts (a grey insect fooled it otherwise)
+    const cx = (f.x1 + f.x2) / 2, cy = (f.y1 + f.y2) / 2;
+    return f.conf >= 0.95 && (people || []).some(p => cx >= p.x1 && cx <= p.x2 && cy >= p.y1 && cy <= p.y2);
+  }
+  const x1 = Math.max(0, Math.floor(f.x1)), y1 = Math.max(0, Math.floor(f.y1));
+  const fw = Math.min(w, Math.ceil(f.x2)) - x1, fh = Math.min(h, Math.ceil(f.y2)) - y1;
+  if(fw < 2 || fh < 2) return false;
+  const px = img.getContext("2d", { willReadFrequently: true }).getImageData(x1, y1, fw, fh).data;
+  let skin = 0;
+  for(let i = 0; i < fw * fh; i++){
+    const r = px[i*4], g = px[i*4+1], b = px[i*4+2], Y = 0.299*r + 0.587*g + 0.114*b;
+    const cr = (r - Y) * 0.713 + 128, cb = (b - Y) * 0.564 + 128;
+    if(cr >= 133 && cr <= 180 && cb >= 77 && cb <= 135 && Y > 25) skin++;
+  }
+  return skin >= 0.3 * fw * fh;
+}
+function isGreyPicture(img, w, h){
+  const k = Math.min(1, 200 / Math.max(w, h)), c = document.createElement("canvas");
+  c.width = Math.max(1, Math.round(w * k)); c.height = Math.max(1, Math.round(h * k));
+  const ctx = c.getContext("2d", { willReadFrequently: true }); ctx.drawImage(img, 0, 0, c.width, c.height);
+  const px = ctx.getImageData(0, 0, c.width, c.height).data; let sat = 0;
+  for(let i = 0; i < px.length; i += 4) sat += Math.max(px[i], px[i+1], px[i+2]) - Math.min(px[i], px[i+1], px[i+2]);
+  return sat / (px.length / 4) < 8;
+}
+async function findFaces(img, w, h, people){
+  if(!faceNet) return [];
+  let all = await facesIn(img, 0, 0, w, h);
+  // the picture again in overlapping parts, each enlarged to the finder's full
+  // size — small faces (a crowd, people far away) only show up that way
+  const grids = Math.max(w, h) > 1600 ? [2, 3] : [2];
+  for(const g of grids){
+    const tw = Math.round(w / g * 1.25), th = Math.round(h / g * 1.25);
+    for(let gy = 0; gy < g; gy++) for(let gx = 0; gx < g; gx++){
+      const ax = Math.round(gx * (w - tw) / Math.max(1, g - 1)), ay = Math.round(gy * (h - th) / Math.max(1, g - 1));
+      all = all.concat(await facesIn(img, ax, ay, Math.min(tw, w - ax), Math.min(th, h - ay)));
     }
   }
+  const grey = isGreyPicture(img, w, h);
+  all = all.filter(f => faceLooksReal(img, w, h, f, grey, people));
+  all.sort((a, b) => b.conf - a.conf);
+  const keep = [];
+  for(const f of all){
+    const area = (f.x2 - f.x1) * (f.y2 - f.y1);
+    if(keep.every(g => Math.max(0, Math.min(f.x2, g.x2) - Math.max(f.x1, g.x1)) *
+                       Math.max(0, Math.min(f.y2, g.y2) - Math.max(f.y1, g.y1)) < 0.3 * area)) keep.push(f);
+  }
+  return keep;
+}
+function coverFace(mask, w, h, f){
+  // an oval a little larger than the face box, so chin, ears and forehead go too
+  const cx = (f.x1 + f.x2) / 2, cy = (f.y1 + f.y2) / 2 - 0.05 * (f.y2 - f.y1);
+  const rx = 0.62 * (f.x2 - f.x1), ry = 0.68 * (f.y2 - f.y1);
+  for(let y = Math.max(0, Math.floor(cy - ry)); y < Math.min(h, Math.ceil(cy + ry)); y++)
+    for(let x = Math.max(0, Math.floor(cx - rx)); x < Math.min(w, Math.ceil(cx + rx)); x++){
+      const dx = (x - cx) / rx, dy = (y - cy) / ry;
+      if(dx*dx + dy*dy <= 1) mask[y*w + x] = 1;
+    }
+}
 
+/* ---- skin inside one person: MediaPipe ---------------------------------- */
+function skinInside(img, w, h, p, hair, strictMin){
+  const pad = 0.12;
+  const bw = p.x2 - p.x1, bh = p.y2 - p.y1;
+  const x1 = Math.max(0, Math.floor(p.x1 - pad*bw)), x2 = Math.min(w, Math.ceil(p.x2 + pad*bw));
+  const y1 = Math.max(0, Math.floor(p.y1 - pad*bh)), y2 = Math.min(h, Math.ceil(p.y2 + pad*bh));
+  const cw = x2 - x1, ch = y2 - y1;
+  const mask = new Uint8Array(w * h);
+  mask.human = 0; mask.hair = 0;
+  if(cw < 8 || ch < 8) return mask;
+  const s = 512 / Math.max(cw, ch);
+  const c = document.createElement("canvas"); c.width = 512; c.height = 512;
+  const ctx = c.getContext("2d", { willReadFrequently: true });
+  ctx.fillStyle = "#000"; ctx.fillRect(0, 0, 512, 512);
+  ctx.drawImage(img, x1, y1, cw, ch, 0, 0, Math.round(cw*s), Math.round(ch*s));
+  const out = segmenter.segment(c);
+  const cat = out.categoryMask.getAsUint8Array(), mw = out.categoryMask.width, mhh = out.categoryMask.height;
+  // how sure the model is of skin at each point (body skin or face skin)
+  let sure = null, prob = null;
   try{
-    say("\nStarting the detector…");
-    const backend = await initBrowserModel(p => say("     downloading " + Math.round(p*100) + "%"));
-    LOCAL_MODEL = true;
-    say("OK  running on this PC (" + backend + ") — reload and photos will be fast.");
-  }catch(e){
-    say("NO  detector would not start:");
-    say("     " + ((e && e.message) || e));
-    say("\nSend this text to David.");
-  }
-}
-
-/* ---------------- intake: click, drag in, paste ---------------- */
-$("pickBtn").addEventListener("click", () => fileInput.click());
-$("addBtn").addEventListener("click", () => fileInput.click());
-fileInput.addEventListener("change", e => { addFiles(e.target.files); fileInput.value = ""; });
-
-["dragenter","dragover"].forEach(ev => window.addEventListener(ev, e => {
-  if (!e.dataTransfer || ![...e.dataTransfer.types].includes("Files")) return;
-  e.preventDefault(); bay.classList.add("hot");
-}));
-["dragleave","drop"].forEach(ev => window.addEventListener(ev, e => {
-  e.preventDefault(); if (ev === "drop" || e.target === document.documentElement) bay.classList.remove("hot");
-}));
-window.addEventListener("drop", e => {
-  if (e.dataTransfer && e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
-});
-window.addEventListener("paste", e => {
-  const files = [...(e.clipboardData?.files || [])];
-  if (files.length) addFiles(files);
-});
-
-const isPdfFile = f => f.type === "application/pdf" || /\.pdf$/i.test(f.name);
-function addFiles(list){
-  const all = [...list];
-  const pdfs = all.filter(isPdfFile);
-  const files = all.filter(f => !isPdfFile(f) && (f.type.startsWith("image/") || /\.(jpe?g|png|webp|gif|bmp|avif|tiff?)$/i.test(f.name)));
-  const skipped = all.length - files.length - pdfs.length;
-  if (skipped > 0) toast(skipped + (skipped === 1 ? " file isn't an image or PDF" : " files aren't images or PDFs"));
-  if (!files.length && !pdfs.length) return;
-  bay.classList.add("slim");
-  for (const pdf of pdfs) queue = queue.then(() => addPdf(pdf)).catch(err => toast("Couldn't open " + pdf.name + ": " + ((err && err.message) || err), 5000));
-  for (const file of files){
-    const item = {
-      file, id:"s"+Math.random().toString(36).slice(2,9),
-      bars:[], keeps:[], done:false, no:items.length + 1
-    };
-    items.push(item);
-    buildFrame(item);
-    queue = queue.then(() => handle(item)).catch(err => markFailed(item, err));
-  }
-  updateTally();
-}
-
-/* ---------------- PDFs ----------------
-   Each page is turned into a picture and covered like any photo — its own
-   frame, its own Edit / Copy / Save. When every page is done the covered pages
-   are put back together as one PDF ("Save PDF" on any page saves it again
-   after edits). The covering is burned into the page, so nothing underneath
-   can be copied out of the file. The reader and writer come from our own
-   domain, like the detector. */
-let pdfjsLib = null;
-async function pdfTools(){
-  if (!pdfjsLib){
-    pdfjsLib = await import("/sbassets/pdf/pdf.min.mjs");
-    pdfjsLib.GlobalWorkerOptions.workerSrc = "/sbassets/pdf/pdf.worker.min.mjs";
-  }
-  if (!window.jspdf) await loadScript("/sbassets/pdf/jspdf.umd.min.js");
-}
-async function addPdf(file){
-  await pdfTools();
-  const doc = await pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise;
-  if (doc.numPages > 40) throw new Error("more than 40 pages — split it first");
-  const base = file.name.replace(/\.[^.]+$/, "");
-  const group = { name: base, items: [], pages: doc.numPages, saved: false };
-  for (let n = 1; n <= doc.numPages; n++){
-    const page = await doc.getPage(n);
-    const v1 = page.getViewport({ scale: 1 });
-    const sc = Math.min(3, 2000 / Math.max(v1.width, v1.height));
-    const vp = page.getViewport({ scale: sc });
-    const c = document.createElement("canvas");
-    c.width = Math.round(vp.width); c.height = Math.round(vp.height);
-    const ctx = c.getContext("2d"); ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, c.width, c.height);
-    await page.render({ canvasContext: ctx, viewport: vp }).promise;
-    const blob = await new Promise(res => c.toBlob(res, "image/png"));
-    const pageFile = new File([blob], base + " — page " + n + ".png", { type: "image/png" });
-    const item = { file: pageFile, id:"s"+Math.random().toString(36).slice(2,9),
-                   bars:[], keeps:[], done:false, no:items.length + 1,
-                   pdfGroup: group, pdfSize: [v1.width, v1.height] };
-    group.items.push(item);
-    items.push(item);
-    buildFrame(item);
-    updateTally();
-    try{ await handle(item); }catch(err){ markFailed(item, err); }
-  }
-}
-async function savePdf(group){
-  if (!group || !group.items.every(i => i.done)) { toast("Wait until every page is done"); return; }
-  await pdfTools();
-  let pdf = null;
-  for (const it of group.items){
-    const [pw, ph] = it.pdfSize;
-    const orient = pw > ph ? "l" : "p";
-    if (!pdf) pdf = new window.jspdf.jsPDF({ orientation: orient, unit: "pt", format: [pw, ph] });
-    else pdf.addPage([pw, ph], orient);
-    pdf.addImage((it.out || compose(it)).toDataURL("image/jpeg", 0.9), "JPEG", 0, 0, pw, ph);
-  }
-  triggerDownload(pdf.output("blob"), group.name + "-safe.pdf");
-  group.saved = true;
-}
-
-/* ---------------- one frame on the contact sheet ---------------- */
-function buildFrame(item){
-  const el = document.createElement("div");
-  el.className = "frame";
-  el.innerHTML = `
-    <div class="rebate">
-      <span class="sprockets"><i></i><i></i><i></i></span>
-      <span class="fno">FRAME ${String(item.no).padStart(2,"0")}</span>
-      <span class="fname" title="${item.file.name}">${item.file.name}</span>
-    </div>
-    <div class="plate">
-      <div class="working">
-        <span class="txt">Reading photo…</span>
-        <span class="bar-track"><span class="bar-fill"></span></span>
-      </div>
-    </div>
-    <div class="foot">
-      <span class="status"><b></b><span>Working…</span></span>
-      <span class="spacer"></span>
-      <button class="btn edit-btn" disabled>Edit</button>
-      <button class="btn copy-btn" disabled>Copy</button>
-      <button class="btn save-btn" disabled>Save</button>
-      ${item.pdfGroup ? '<button class="btn pdf-btn" disabled title="All pages of this PDF, covered, as one PDF">Save PDF</button>' : ''}
-    </div>`;
-  sheet.appendChild(el);
-  item.el = el;
-  el.querySelector(".edit-btn").addEventListener("click", () => openEditor(item));
-  el.querySelector(".save-btn").addEventListener("click", () => saveOne(item));
-  el.querySelector(".copy-btn").addEventListener("click", () => copyOne(item));
-  if (item.pdfGroup) el.querySelector(".pdf-btn").addEventListener("click", () => savePdf(item.pdfGroup));
-
-  // drag the finished photo straight out to a folder, chat window or email
-  el.addEventListener("dragstart", e => {
-    if (!item.done || !item.url) { e.preventDefault(); return; }
-    el.classList.add("dragging");
-    e.dataTransfer.effectAllowed = "copy";
-    e.dataTransfer.setData("DownloadURL", `image/jpeg:${safeName(item.file.name)}:${item.url}`);
-    e.dataTransfer.setData("text/uri-list", item.url);
-  });
-  el.addEventListener("dragend", () => el.classList.remove("dragging"));
-}
-
-function setWork(item, text, pct){
-  const w = item.el.querySelector(".working");
-  if (!w) return;
-  const t = w.querySelector(".txt"); if (t) t.textContent = text;
-  const f = w.querySelector(".bar-fill");
-  if (f && pct != null) f.style.width = Math.max(4, Math.min(100, pct)) + "%";
-}
-function stamp(item, text, kind){
-  const s = item.el.querySelector(".status");
-  s.className = "status" + (kind ? " " + kind : "");
-  s.querySelector("span").textContent = text;
-}
-function markFailed(item, err){
-  item.done = false;
-  item.el.querySelector(".working")?.remove();
-  stamp(item, "Couldn't open this photo — try saving it as JPG or PNG", "bad");
-  console.warn("[SkinBlock]", item.file.name, err);
-}
-
-/* ---------------- process one photo ---------------- */
-async function handle(item){
-  while (!ready) await sleep(180);
-
-  let bmp;
-  try{
-    bmp = await createImageBitmap(item.file, { imageOrientation:"from-image" });
-  }catch(e){
-    // HEIC and a few exotic formats can't be opened by the browser
-    throw new Error("format not supported by this browser");
-  }
-  let w = bmp.width, h = bmp.height;
-  const maxDim = SETTINGS.max_dimension || MAXDIM;
-  if ($("shrinkChk").checked && Math.max(w,h) > maxDim){
-    const s = maxDim / Math.max(w,h);
-    w = Math.round(w*s); h = Math.round(h*s);
-  }
-  const base = document.createElement("canvas");
-  base.width = w; base.height = h;
-  base.getContext("2d").drawImage(bmp, 0, 0, w, h);
-  if (bmp.close) bmp.close();
-  item.base = base;
-
-  if (LOCAL_MODEL){
-    try{
-      setWork(item, "Covering…", 5);
-      const t0 = performance.now();
-      const r = await processInBrowser(base, (d,n) => setWork(item, `Covering… ${d}/${n}`, d/n*100));
-      item.painted = r.canvas;
-      item.found = r.found;
-      const secs = (performance.now()-t0)/1000;
-      // Say WHY it took as long as it did: where it ran, how many passes the
-      // picture needed, and how big it was. A slow result is then explainable
-      // rather than mysterious.
-      item.why = `${ortBackend === "webgpu" ? "this PC's graphics" : "this PC's processor"}`
-        + ` · ${r.runs} pass${r.runs === 1 ? "" : "es"}`
-        + (r.oneIsEnough ? " (one big subject)" : (r.runs > 6 ? " (many small people)" : ""))
-        + ` · ${base.width}×${base.height}`
-        + ` · ${(secs / Math.max(1, r.runs)).toFixed(2)}s per pass`;
-      finish(item, secs.toFixed(1) + "s");
-      return;
-    }catch(e){ console.warn("[SkinBlock] local pass failed, using server:", e && e.message); }
-  }
-
-  setWork(item, "Covering on the server…", 40);
-  let resp = null;
-  try{
-    const r = await fetch("/api/skinblock/process", {
-      method:"POST", headers:{ "Content-Type":"application/json" },
-      body: JSON.stringify({ agent_ext: AGENT_EXT, image: base.toDataURL("image/jpeg", 0.92) })
-    });
-    if (r.ok) resp = await r.json();
-  }catch(e){}
-
-  if (resp && resp.image){
-    const img = new Image();
-    await new Promise(res => { img.onload = res; img.onerror = res; img.src = resp.image; });
-    const painted = document.createElement("canvas");
-    painted.width = w; painted.height = h;
-    painted.getContext("2d").drawImage(img, 0, 0, w, h);
-    item.painted = painted;
-    item.found = !!(resp.info && resp.info.painted);
-    item.partial = !!(resp.info && resp.info.partial);
-    const inf = resp.info || {};
-    item.why = `the server (slow path) · ${inf.windows || "?"} pass${inf.windows === 1 ? "" : "es"}`
-      + ` · ${w}×${h}` + (inf.partial ? " · hit the time limit" : "");
-    finish(item, inf.seconds ? inf.seconds + "s" : "");
-  } else {
-    item.painted = null;
-    item.found = false;
-    finish(item, "", true);
-  }
-}
-
-function finish(item, secs, failed){
-  item.done = true;
-  item.el.querySelector(".working")?.remove();
-  render(item);
-  item.el.setAttribute("draggable", "true");
-  item.el.querySelector(".edit-btn").disabled = false;
-  item.el.querySelector(".save-btn").disabled = false;
-  item.el.querySelector(".copy-btn").disabled = false;
-  if (failed)            stamp(item, "Couldn't cover this one — check it by hand", "bad");
-  else if (item.partial) stamp(item, "Part of this photo wasn't checked — look it over", "warn");
-  else if (item.found)   stamp(item, "Skin covered" + (secs ? " · " + secs : ""), "");
-  if (item.why){
-    const foot = item.el.querySelector(".foot");
-    if (foot && !foot.querySelector(".why")){
-      const d = document.createElement("div");
-      d.className = "why";
-      d.style.cssText = "flex-basis:100%;font-size:10px;color:var(--faint);margin-top:2px;";
-      d.textContent = item.why;
-      foot.appendChild(d);
+    const cm = out.confidenceMasks;
+    if(cm && cm[BODY] && cm[FACE]){
+      const b = cm[BODY].getAsFloat32Array(), f = cm[FACE].getAsFloat32Array();
+      const hr = hair && cm[HAIR] ? cm[HAIR].getAsFloat32Array() : null;
+      sure = new Float32Array(b.length); prob = new Float32Array(b.length);
+      for(let i = 0; i < b.length; i++){
+        sure[i] = Math.max(b[i], f[i]);
+        // what the model DECIDED is skin (its top answer), as 1 or 0 — only the
+        // edge of that is re-drawn, so nothing it did not call skin can become
+        // skin (its raw likelihood is middling on a brown horse, for one)
+        const k = cat[i];
+        prob[i] = (k === BODY || k === FACE || (hair && k === HAIR)) ? 1 : 0;
+      }
+    }
+  }catch(e){ sure = null; prob = null; }
+  out.close();
+  // the skin model's answer is a coarse 256 x 256 grid; drawn straight onto a
+  // big photo its edge is a staircase that leaves slivers of skin and spills
+  // onto clothes. This follows the photo's own colour edges instead.
+  const fine = prob ? edgeAwareSkin(img, x1, y1, cw, ch, s, prob, mw, mhh) : null;
+  // Skin anywhere in the cut-out, then kept only where it is part of skin that
+  // touches the shape. A hand on a shirt is inside the shirt's outline but the
+  // arm it belongs to hangs outside it — the arm used to be cut off at the
+  // outline. Skin that touches nothing (a stray patch in the background) is
+  // still left alone.
+  const skin = new Uint8Array(cw * ch), queue = new Int32Array(cw * ch);
+  let qn = 0;
+  for(let yy = 0; yy < ch; yy++){
+    const my = Math.min(mhh-1, Math.floor(yy * s * mhh / 512));
+    for(let xx = 0; xx < cw; xx++){
+      const mx = Math.min(mw-1, Math.floor(xx * s * mw / 512));
+      const k = cat[my * mw + mx];
+      const i = (y1 + yy) * w + (x1 + xx), j = yy * cw + xx;
+      const isSkin = fine ? fine[j] === 1 : (k === BODY || k === FACE || (hair && k === HAIR));
+      if(p.mask[i] && (k === BODY || k === FACE || k === HAIR)) mask.human++;
+      if(p.mask[i] && k === HAIR) mask.hair++;
+      if(!isSkin) continue;
+      skin[j] = 1;
+      if(p.mask[i]){ skin[j] = 2; queue[qn++] = j; }          // inside the shape: a seed
     }
   }
-  else                   stamp(item, "No people found — check it", "none");
-  logToServer(item, compose(item)).then(loadEarlier);
-  updateTally();
-  const g = item.pdfGroup;
-  if (g && g.items.length === g.pages && g.items.every(i => i.done)){
-    g.items.forEach(i => { const b = i.el.querySelector(".pdf-btn"); if (b) b.disabled = false; });
-    // a PDF comes back as a PDF on its own — that is what the agent wants to send
-    savePdf(g);
+  for(let q = 0; q < qn; q++){
+    const j = queue[q], xx = j % cw, yy = (j - xx) / cw;
+    mask[(y1 + yy) * w + (x1 + xx)] = 1;
+    if(xx > 0      && skin[j-1] === 1){ skin[j-1] = 2; queue[qn++] = j-1; }
+    if(xx < cw - 1 && skin[j+1] === 1){ skin[j+1] = 2; queue[qn++] = j+1; }
+    if(yy > 0      && skin[j-cw] === 1){ skin[j-cw] = 2; queue[qn++] = j-cw; }
+    if(yy < ch - 1 && skin[j+cw] === 1){ skin[j+cw] = 2; queue[qn++] = j+cw; }
   }
-  if (items.every(i => i.done !== false) && $("autoChk").checked) saveAll();
+  mask.strict = strictSkin(img, w, h, p, x1, y1, cw, ch, s, cat, sure, mw, mhh, hair, strictMin, fine);
+  mask.grid = { cat, mw, mhh, x1, y1, cw, ch, s };
+  return mask;
 }
 
-/* ---------------- compose: painted + manual edits ---------------- */
-function compose(item){
-  const w = item.base.width, h = item.base.height;
-  const out = document.createElement("canvas");
-  out.width = w; out.height = h;
-  const ctx = out.getContext("2d");
-  ctx.drawImage(item.painted || item.base, 0, 0, w, h);
-
-  // "Show again" — put the untouched photo back, for a necklace or bracelet
-  // sitting on skin that the agent needs the customer to see
-  for (const r of item.keeps){
-    const x = r.x*w, y = r.y*h, rw = r.w*w, rh = r.h*h;
-    ctx.drawImage(item.base, x, y, rw, rh, x, y, rw, rh);
+/* Edge-aware skin. The model's skin decision is spread smoothly onto the
+   photo's pixels and then pulled onto the photo's own edges with a guided
+   filter (each small window fits the likelihood as a straight function of the
+   brightness there, so it changes where the photo changes and stays flat where
+   the photo is flat). A pixel is skin where the result is over one half. */
+function edgeAwareSkin(img, x1, y1, cw, ch, s, prob, mw, mhh){
+  const n = cw * ch;
+  const px = img.getContext("2d", { willReadFrequently: true }).getImageData(x1, y1, cw, ch).data;
+  const I = new Float32Array(n), P = new Float32Array(n);
+  const gx = mw / 512 * s, gy = mhh / 512 * s;
+  for(let yy = 0; yy < ch; yy++){
+    const fy = Math.min(mhh - 1, Math.max(0, (yy + 0.5) * gy - 0.5)), y0 = Math.floor(fy), y1g = Math.min(mhh - 1, y0 + 1), ty = fy - y0;
+    for(let xx = 0; xx < cw; xx++){
+      const fx = Math.min(mw - 1, Math.max(0, (xx + 0.5) * gx - 0.5)), x0 = Math.floor(fx), x1g = Math.min(mw - 1, x0 + 1), tx = fx - x0;
+      const j = yy * cw + xx;
+      P[j] = (prob[y0*mw + x0] * (1 - tx) + prob[y0*mw + x1g] * tx) * (1 - ty)
+           + (prob[y1g*mw + x0] * (1 - tx) + prob[y1g*mw + x1g] * tx) * ty;
+      I[j] = (0.299 * px[j*4] + 0.587 * px[j*4+1] + 0.114 * px[j*4+2]) / 255;
+    }
   }
-  // "Cover more" — anything the detector missed
-  ctx.fillStyle = SETTINGS.cover_color || "#000000";
-  for (const r of item.bars) ctx.fillRect(r.x*w, r.y*h, r.w*w, r.h*h);
+  const r = Math.max(2, Math.round(0.008 * Math.max(cw, ch))), eps = 0.004;
+  const box = (src) => {                         // mean over a (2r+1) square, from a summed-area table
+    const W = cw + 1, S = new Float64Array(W * (ch + 1)), out = new Float32Array(n);
+    for(let yy = 0; yy < ch; yy++){ let row = 0;
+      for(let xx = 0; xx < cw; xx++){ row += src[yy*cw + xx]; S[(yy+1)*W + xx+1] = S[yy*W + xx+1] + row; } }
+    for(let yy = 0; yy < ch; yy++){
+      const a = Math.max(0, yy - r), b = Math.min(ch, yy + r + 1);
+      for(let xx = 0; xx < cw; xx++){
+        const l = Math.max(0, xx - r), rr = Math.min(cw, xx + r + 1);
+        out[yy*cw + xx] = (S[b*W + rr] - S[a*W + rr] - S[b*W + l] + S[a*W + l]) / ((b - a) * (rr - l));
+      }
+    }
+    return out;
+  };
+  const IP = new Float32Array(n), II = new Float32Array(n);
+  for(let j = 0; j < n; j++){ IP[j] = I[j] * P[j]; II[j] = I[j] * I[j]; }
+  const mI = box(I), mP = box(P), mIP = box(IP), mII = box(II);
+  const A = new Float32Array(n), B = new Float32Array(n);
+  for(let j = 0; j < n; j++){
+    const v = mII[j] - mI[j] * mI[j];
+    A[j] = (mIP[j] - mI[j] * mP[j]) / (v + eps);
+    B[j] = mP[j] - A[j] * mI[j];
+  }
+  const mA = box(A), mB = box(B), skin = new Uint8Array(n);
+  for(let j = 0; j < n; j++) if(mA[j] * I[j] + mB[j] > 0.5) skin[j] = 1;
+  return skin;
+}
+
+/* The skin on a shape with no face, keeping only the patches that pass every
+   test above. Patches a small gap apart (a bracelet across a wrist) count as
+   one, so a hand and its arm are judged together. */
+function strictSkin(img, w, h, p, x1, y1, cw, ch, s, cat, sure, mw, mhh, hair, strictMin, fine){
+  const out = new Uint8Array(w * h);
+  if(!sure) return out;                       // no confidence from the model: believe none
+  const n = cw * ch, skin = new Uint8Array(n), conf = new Float32Array(n);
+  for(let yy = 0; yy < ch; yy++){
+    const my = Math.min(mhh-1, Math.floor(yy * s * mhh / 512));
+    for(let xx = 0; xx < cw; xx++){
+      const mx = Math.min(mw-1, Math.floor(xx * s * mw / 512)), k = cat[my * mw + mx], j = yy*cw + xx;
+      if(fine ? fine[j] === 1 : (k === BODY || k === FACE || (hair && k === HAIR))){ skin[j] = 1; conf[j] = sure[my * mw + mx]; }
+    }
+  }
+  const px = img.getContext("2d", { willReadFrequently: true }).getImageData(x1, y1, cw, ch).data;
+  const joined = dilate(skin, cw, ch, Math.max(1, Math.round(0.02 * Math.max(cw, ch))));
+  const lab = new Int32Array(n), queue = new Int32Array(n), keep = new Uint8Array(n);
+  let next = 0;
+  for(let start = 0; start < n; start++){
+    if(!joined[start] || lab[start]) continue;
+    next++; let qn = 0, a = 0, cs = 0, col = 0, outside = 0, edge = false;
+    lab[start] = next; queue[qn++] = start;
+    for(let q = 0; q < qn; q++){
+      const j = queue[q], xx = j % cw, yy = (j - xx) / cw;
+      if(skin[j]){
+        a++; cs += conf[j];
+        const r = px[j*4], g = px[j*4+1], b = px[j*4+2], Y = 0.299*r + 0.587*g + 0.114*b;
+        const cr = (r - Y) * 0.713 + 128, cb = (b - Y) * 0.564 + 128;
+        if(cr >= 136 && cr <= 180 && cb >= 77 && cb <= 135) col++;
+        const ix = x1 + xx, iy = y1 + yy;
+        if(!p.mask[iy * w + ix]) outside++;
+        if(ix <= 1 || iy <= 1 || ix >= w - 2 || iy >= h - 2) edge = true;
+      }
+      if(xx > 0      && joined[j-1]  && !lab[j-1]) { lab[j-1] = next;  queue[qn++] = j-1; }
+      if(xx < cw - 1 && joined[j+1]  && !lab[j+1]) { lab[j+1] = next;  queue[qn++] = j+1; }
+      if(yy > 0      && joined[j-cw] && !lab[j-cw]){ lab[j-cw] = next; queue[qn++] = j-cw; }
+      if(yy < ch - 1 && joined[j+cw] && !lab[j+cw]){ lab[j+cw] = next; queue[qn++] = j+cw; }
+    }
+    if(a < 0.001 * n) continue;                                   // a speck
+    const meanConf = cs / a, fromOutside = edge || outside >= 0.3 * a;
+    const believed = col >= LOOSE_COLOUR * a
+      && (strictMin ? meanConf >= strictMin
+                    : (meanConf >= LOOSE_SURE || (fromOutside && meanConf >= LOOSE_EDGE)));
+    if(!believed) continue;
+    for(let q = 0; q < qn; q++){ const j = queue[q]; if(skin[j]) keep[j] = 1; }
+  }
+  // close the small gaps inside what was kept (a bracelet across a wrist, a
+  // ring, a shadow line) without making the cover any bigger around the edge
+  const r = Math.max(1, Math.round(0.012 * Math.max(cw, ch)));
+  const grown = dilate(keep, cw, ch, r), inv = new Uint8Array(n);
+  for(let j = 0; j < n; j++) inv[j] = grown[j] ? 0 : 1;
+  const shrunk = dilate(inv, cw, ch, r);
+  for(let j = 0; j < n; j++) if((keep[j] || !shrunk[j])){ const xx = j % cw, yy = (j - xx) / cw; out[(y1+yy)*w + x1+xx] = 1; }
   return out;
 }
 
-function render(item){
-  const canvas = compose(item);
-  item.out = canvas;
-  const plate = item.el.querySelector(".plate");
-  plate.querySelectorAll("canvas,img").forEach(n => n.remove());
-  plate.appendChild(canvas);
-  // keep a file ready so the frame can be dragged out at any moment
-  canvas.toBlob(b => {
-    if (item.url) URL.revokeObjectURL(item.url);
-    item.url = b ? URL.createObjectURL(b) : null;
-  }, "image/jpeg", 0.92);
-}
-
-/* ---------------- editor: cover more / show again ---------------- */
-let ed = { item:null, tool:"cover", drag:null };
-const edCanvas = $("edCanvas"), edCtx = edCanvas.getContext("2d");
-
-function openEditor(item){
-  ed.item = item; ed.drag = null;
-  setTool("cover");
-  const max = Math.min(window.innerWidth - 80, 1100);
-  const scale = Math.min(1, max / item.base.width, (window.innerHeight - 190) / item.base.height);
-  edCanvas.width = Math.round(item.base.width * scale);
-  edCanvas.height = Math.round(item.base.height * scale);
-  paintEditor();
-  $("editor").classList.add("open");
-}
-function setTool(t){
-  ed.tool = t;
-  $("toolCover").classList.toggle("on", t === "cover");
-  $("toolKeep").classList.toggle("on", t === "keep");
-  $("edHint").textContent = t === "cover"
-    ? "Drag over anything that still needs covering."
-    : "Drag over a necklace, bracelet or anything else that should stay visible.";
-  edCanvas.style.cursor = "crosshair";
-}
-$("toolCover").addEventListener("click", () => setTool("cover"));
-$("toolKeep").addEventListener("click", () => setTool("keep"));
-
-function paintEditor(){
-  const item = ed.item;
-  edCtx.drawImage(compose(item), 0, 0, edCanvas.width, edCanvas.height);
-  if (ed.drag){
-    const d = ed.drag;
-    edCtx.save();
-    edCtx.setLineDash([5,4]);
-    edCtx.strokeStyle = ed.tool === "cover" ? "#E8A33D" : "#6FBF8B";
-    edCtx.lineWidth = 2;
-    edCtx.strokeRect(d.x, d.y, d.w, d.h);
-    edCtx.fillStyle = ed.tool === "cover" ? "rgba(232,163,61,.20)" : "rgba(111,191,139,.20)";
-    edCtx.fillRect(d.x, d.y, d.w, d.h);
-    edCtx.restore();
+/* ---- edges -------------------------------------------------------------- */
+/* The skin model works on a coarse grid, so its edge wanders a few pixels off
+   the real one — a shaded side of an arm is left showing, or the cover stops
+   short of the fingertips. This walks the edge out pixel by pixel into
+   anything that has the colour of the skin right next to it, never more than
+   a short distance, so it hugs the real outline without spilling into the
+   background. */
+function refineEdges(mask, img, w, h, r, T){
+  if(r <= 0) return mask;
+  const px = img.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, w, h).data;
+  let cur = mask;
+  const steps = 3, rr = Math.max(1, Math.round(r / steps)), W = w + 1;
+  for(let step = 0; step < steps; step++){
+    // the local average colour of what is covered, from summed-area tables
+    const S = [new Float64Array(W*(h+1)), new Float64Array(W*(h+1)), new Float64Array(W*(h+1))], C = new Float64Array(W*(h+1));
+    for(let y = 0; y < h; y++){ let a = 0, b = 0, c = 0, k = 0;
+      for(let x = 0; x < w; x++){ const i = y*w + x;
+        if(cur[i]){ a += px[i*4]; b += px[i*4+1]; c += px[i*4+2]; k++; }
+        const o = (y+1)*W + x+1, u = y*W + x+1;
+        S[0][o] = S[0][u] + a; S[1][o] = S[1][u] + b; S[2][o] = S[2][u] + c; C[o] = C[u] + k; } }
+    const ring = dilate(cur, w, h, rr), next = new Uint8Array(cur);
+    const win = Math.max(3, rr * 3);
+    for(let y = 0; y < h; y++){
+      const ya = Math.max(0, y - win), yb = Math.min(h, y + win + 1);
+      for(let x = 0; x < w; x++){
+        const i = y*w + x; if(cur[i] || !ring[i]) continue;
+        const xa = Math.max(0, x - win), xb = Math.min(w, x + win + 1);
+        const box = t => t[yb*W + xb] - t[ya*W + xb] - t[yb*W + xa] + t[ya*W + xa];
+        const k = box(C); if(k < 4) continue;
+        const dr = px[i*4] - box(S[0])/k, dg = px[i*4+1] - box(S[1])/k, db = px[i*4+2] - box(S[2])/k;
+        if(dr*dr + dg*dg + db*db < T*T) next[i] = 1;
+      }
+    }
+    cur = next;
   }
+  return cur;
 }
-function edPos(e){
-  const r = edCanvas.getBoundingClientRect();
-  const p = e.touches ? e.touches[0] : e;
-  return {
-    x: (p.clientX - r.left) * edCanvas.width / r.width,
-    y: (p.clientY - r.top) * edCanvas.height / r.height
-  };
-}
-function edStart(e){ e.preventDefault(); const p = edPos(e); ed.drag = { sx:p.x, sy:p.y, x:p.x, y:p.y, w:0, h:0 }; }
-function edMove(e){
-  if (!ed.drag) return;
-  e.preventDefault();
-  const p = edPos(e), d = ed.drag;
-  d.x = Math.min(d.sx, p.x); d.y = Math.min(d.sy, p.y);
-  d.w = Math.abs(p.x - d.sx); d.h = Math.abs(p.y - d.sy);
-  paintEditor();
-}
-function edEnd(){
-  const d = ed.drag; ed.drag = null;
-  if (!d || d.w < 5 || d.h < 5){ paintEditor(); return; }
-  const rect = { x:d.x/edCanvas.width, y:d.y/edCanvas.height, w:d.w/edCanvas.width, h:d.h/edCanvas.height };
-  (ed.tool === "cover" ? ed.item.bars : ed.item.keeps).push(rect);
-  ed.item.lastEdit = ed.tool;
-  paintEditor();
-}
-edCanvas.addEventListener("mousedown", edStart);
-edCanvas.addEventListener("mousemove", edMove);
-window.addEventListener("mouseup", () => { if (ed.item && $("editor").classList.contains("open")) edEnd(); });
-edCanvas.addEventListener("touchstart", edStart, { passive:false });
-edCanvas.addEventListener("touchmove", edMove, { passive:false });
-edCanvas.addEventListener("touchend", edEnd);
 
-$("edUndo").addEventListener("click", () => {
-  const it = ed.item; if (!it) return;
-  const list = it.lastEdit === "keep" ? it.keeps : it.bars;
-  if (list.length) list.pop();
-  else if (it.keeps.length) it.keeps.pop();
-  paintEditor();
-});
-$("edReset").addEventListener("click", () => {
-  if (!ed.item) return;
-  ed.item.bars = []; ed.item.keeps = []; paintEditor();
-});
-$("edCopy").addEventListener("click", () => {
-  if (ed.item) copyCanvas(compose(ed.item), "Copied " + ed.item.file.name);
-});
-$("edDone").addEventListener("click", () => {
-  if (ed.item){ render(ed.item); logToServer(ed.item, ed.item.out); }
-  $("editor").classList.remove("open"); ed.item = null;
-});
-window.addEventListener("keydown", e => {
-  if (e.key === "Escape" && $("editor").classList.contains("open")) $("edDone").click();
-});
-
-/* ---------------- getting photos out ---------------- */
-function safeName(name){ return name.replace(/\.[^.]+$/, "") + "-safe.jpg"; }
-function toBlob(canvas){ return new Promise(res => canvas.toBlob(res, "image/jpeg", 0.92)); }
-function triggerDownload(blob, name){
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url; a.download = name;
-  document.body.appendChild(a); a.click(); a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 4000);
-}
-/* Copy the finished photo to the clipboard so it can be pasted straight into
-   WhatsApp, an email or a chat — no saving to disk and hunting for the file.
-   The clipboard only takes PNG, so the copy is a PNG even though saved files
-   stay JPG. */
-async function copyCanvas(canvas, label){
-  if (!navigator.clipboard || !window.ClipboardItem){
-    toast("This browser can't copy images — use Save, or drag the photo out");
-    return false;
+/* The skin model often sees only part of a close-up hand — the fingers, not
+   the palm. Each patch of hand found is followed outward into touching pixels
+   of the same skin colour, so the rest of the hand and the arm are covered
+   too. A patch that would grow to more than twice its size again is not
+   following a hand any more but something skin-coloured behind it (a beige
+   shirt, a wooden table), and is left as it was. */
+function growSkin(mask, img, w, h, T, within, capTimes){
+  const px = img.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, w, h).data;
+  // how sharply the picture changes at each pixel: growth stops at an outline
+  // (the edge of an arm against a beige sofa), so it cannot leak across one
+  const lum = new Float32Array(w * h);
+  for(let i = 0; i < w*h; i++) lum[i] = 0.299*px[i*4] + 0.587*px[i*4+1] + 0.114*px[i*4+2];
+  const edge = new Uint8Array(w * h);
+  for(let y = 1; y < h - 1; y++) for(let x = 1; x < w - 1; x++){
+    const i = y*w + x;
+    const gx = lum[i-w+1] + 2*lum[i+1] + lum[i+w+1] - lum[i-w-1] - 2*lum[i-1] - lum[i+w-1];
+    const gy = lum[i+w-1] + 2*lum[i+w] + lum[i+w+1] - lum[i-w-1] - 2*lum[i-w] - lum[i-w+1];
+    if(Math.abs(gx) + Math.abs(gy) > 90) edge[i] = 1;
   }
-  try{
-    const blob = await new Promise(res => canvas.toBlob(res, "image/png"));
-    if (!blob) throw new Error("no image");
-    await navigator.clipboard.write([ new ClipboardItem({ "image/png": blob }) ]);
-    toast(label || "Copied — paste it wherever you need it");
-    return true;
-  }catch(e){
-    console.warn("[SkinBlock] copy failed:", e);
-    toast("Couldn't copy — use Save, or drag the photo out");
-    return false;
+  const out = new Uint8Array(mask), seen = new Uint8Array(w * h), queue = new Int32Array(w * h);
+  const skinCol = i => { const r = px[i*4], g = px[i*4+1], b = px[i*4+2], Y = 0.299*r + 0.587*g + 0.114*b;
+    const cr = (r - Y) * 0.713 + 128, cb = (b - Y) * 0.564 + 128; return cr >= 136 && cr <= 180 && cb >= 77 && cb <= 135; };
+  for(let start = 0; start < w*h; start++){
+    if(!mask[start] || seen[start]) continue;
+    // one patch of found skin, and its average colour
+    let qn = 0, sr = 0, sg = 0, sb = 0; queue[qn++] = start; seen[start] = 1;
+    for(let q = 0; q < qn; q++){
+      const i = queue[q], x = i % w; sr += px[i*4]; sg += px[i*4+1]; sb += px[i*4+2];
+      for(const j of [x > 0 ? i-1 : -1, x < w-1 ? i+1 : -1, i-w, i+w])
+        if(j >= 0 && j < w*h && mask[j] && !seen[j]){ seen[j] = 1; queue[qn++] = j; }
+    }
+    const n = qn, mr = sr/n, mg = sg/n, mb = sb/n, patch = queue.slice(0, n);
+    // follow it out into matching skin
+    const added = []; let grown = 0, cap = n * (capTimes || 2);
+    const fq = Array.from(patch);
+    for(let q = 0; q < fq.length && grown <= cap; q++){
+      const i = fq[q], x = i % w;
+      for(const j of [x > 0 ? i-1 : -1, x < w-1 ? i+1 : -1, i-w, i+w]){
+        if(j < 0 || j >= w*h || seen[j] || out[j] || edge[j] || (within && !within[j])) continue;
+        const dr = px[j*4] - mr, dg = px[j*4+1] - mg, db = px[j*4+2] - mb;
+        if(dr*dr + dg*dg + db*db < T*T && skinCol(j)){ seen[j] = 2; added.push(j); fq.push(j); grown++; }
+      }
+    }
+    if(grown <= cap) for(const j of added) out[j] = 1;
+    else for(const j of added) seen[j] = 0;            // spilled: undo, the patch stays as found
   }
-}
-async function copyOne(item){
-  if (!item.done) return;
-  await copyCanvas(item.out || compose(item), "Copied " + item.file.name);
-}
-async function copyFromDataUrl(dataUrl, name){
-  const img = new Image();
-  await new Promise(res => { img.onload = res; img.onerror = res; img.src = dataUrl; });
-  const c = document.createElement("canvas");
-  c.width = img.naturalWidth || img.width; c.height = img.naturalHeight || img.height;
-  c.getContext("2d").drawImage(img, 0, 0);
-  await copyCanvas(c, "Copied " + name);
+  return out;
 }
 
-async function saveOne(item){
-  if (!item.done) return;
-  triggerDownload(await toBlob(item.out || compose(item)), safeName(item.file.name));
+/* On a close-up the skin model's patch spills a little past the fingers onto
+   the background; keep only what is skin-coloured, or right beside it. */
+function trimToSkin(mask, img, w, h){
+  const px = img.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, w, h).data;
+  const col = new Uint8Array(w * h);
+  for(let i = 0; i < w*h; i++){
+    if(!mask[i]) continue;
+    const r = px[i*4], g = px[i*4+1], b = px[i*4+2], Y = 0.299*r + 0.587*g + 0.114*b;
+    const cr = (r - Y) * 0.713 + 128, cb = (b - Y) * 0.564 + 128;
+    if(cr >= 136 && cr <= 180 && cb >= 77 && cb <= 135) col[i] = 1;
+  }
+  const near = dilate(col, w, h, Math.max(2, Math.round(Math.min(w, h) / 200)));
+  const out = new Uint8Array(w * h);
+  for(let i = 0; i < w*h; i++) if(mask[i] && near[i]) out[i] = 1;
+  return out;
 }
-async function saveAll(){
-  const done = items.filter(i => i.done);
-  if (!done.length) return;
-  saveAllBtn.disabled = true; saveAllBtn.textContent = "Saving…";
-  const groupsSaved = new Set();
-  try{ for (const item of done){
-    if (item.pdfGroup){
-      if (!groupsSaved.has(item.pdfGroup)){ groupsSaved.add(item.pdfGroup); await savePdf(item.pdfGroup); await sleep(220); }
+
+/* ---- smooth, grow, cover ------------------------------------------------ */
+/* Rounds off the stair-steps the models leave at their own resolution: each
+   pixel takes the majority of its small neighbourhood. */
+function smoothMask(mask, w, h, r){
+  if(r <= 0) return mask;
+  const W = w + 1, I = new Uint32Array(W * (h + 1));
+  for(let y = 0; y < h; y++){ let row = 0;
+    for(let x = 0; x < w; x++){ row += mask[y*w+x]; I[(y+1)*W + x+1] = I[y*W + x+1] + row; } }
+  const out = new Uint8Array(w * h);
+  for(let y = 0; y < h; y++){
+    const a = Math.max(0, y - r), b = Math.min(h, y + r + 1);
+    for(let x = 0; x < w; x++){
+      const l = Math.max(0, x - r), rr = Math.min(w, x + r + 1);
+      const sum = I[b*W + rr] - I[a*W + rr] - I[b*W + l] + I[a*W + l];
+      if(sum * 2 > (b - a) * (rr - l)) out[y*w+x] = 1;
+    }
+  }
+  return out;
+}
+
+function dilate(mask, w, h, r){
+  if(r <= 0) return mask;
+  const tmp = new Uint8Array(w*h), out = new Uint8Array(w*h);
+  for(let y = 0; y < h; y++){ let run = 0;
+    for(let x = 0; x < w + r; x++){ if(x < w && mask[y*w+x]) run = 2*r+1;
+      if(run > 0 && x-r >= 0 && x-r < w) tmp[y*w+(x-r)] = 1; if(run > 0) run--; } }
+  for(let x = 0; x < w; x++){ let run = 0;
+    for(let y = 0; y < h + r; y++){ if(y < h && tmp[y*w+x]) run = 2*r+1;
+      if(run > 0 && y-r >= 0 && y-r < h) out[(y-r)*w+x] = 1; if(run > 0) run--; } }
+  return out;
+}
+
+/* The colour around the edges of the picture — usually its background — never
+   sampling a person, nudged a little so the covered shape still reads. This is
+   the default, so a grey studio photo gets grey covers and a purple one purple. */
+function autoColour(d, w, h, mask){
+  const ring = Math.max(4, Math.round(Math.min(w, h) * 0.04));
+  const R = [], G = [], B = [];
+  for(let y = 0; y < h; y += 2) for(let x = 0; x < w; x += 2){
+    if(!(x < ring || x >= w - ring || y < ring || y >= h - ring)) continue;
+    const i = y * w + x; if(mask[i]) continue;
+    R.push(d[i*4]); G.push(d[i*4+1]); B.push(d[i*4+2]);
+  }
+  if(R.length < 20) return [154, 154, 154];
+  const med = a => { a.sort((p, q) => p - q); return a[a.length >> 1]; };
+  let c = [med(R), med(G), med(B)];
+  const lum = 0.2126*c[0] + 0.7152*c[1] + 0.0722*c[2];
+  if(lum > 200) c = c.map(v => v * 0.86);
+  else if(lum > 120) c = c.map(v => v * 0.92);
+  else if(lum < 45) c = c.map(v => v + 38);
+  else c = c.map(v => v + 16);
+  return c.map(v => Math.max(0, Math.min(255, Math.round(v))));
+}
+function hexRgb(hex){ const v = String(hex || "#000").replace("#", ""); return [0, 2, 4].map(i => parseInt(v.substr(i, 2), 16) || 0); }
+
+function cover(img, w, h, mask, style){
+  const c = document.createElement("canvas"); c.width = w; c.height = h;
+  const ctx = c.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0, w, h);
+  const src = ctx.getImageData(0, 0, w, h);
+  let alt = null, fill = [38, 40, 52];
+  if(style === "auto") fill = autoColour(src.data, w, h, mask);
+  else if(style === "custom") fill = hexRgb($("opt-colour").value);
+  else if(String(style).startsWith("#")) fill = hexRgb(style);
+  if(style === "blur" || style === "pixel"){
+    const t = document.createElement("canvas"); t.width = w; t.height = h;
+    const tc = t.getContext("2d");
+    if(style === "blur"){ tc.filter = "blur(" + Math.max(12, Math.round(w/40)) + "px)"; tc.drawImage(img, 0, 0, w, h); }
+    else{ const bk = Math.max(10, Math.round(w/45)); tc.imageSmoothingEnabled = false;
+          tc.drawImage(img, 0, 0, w, h, 0, 0, Math.ceil(w/bk), Math.ceil(h/bk));
+          tc.drawImage(t, 0, 0, Math.ceil(w/bk), Math.ceil(h/bk), 0, 0, w, h); }
+    alt = tc.getImageData(0, 0, w, h).data;
+  }
+  const d = src.data;
+  for(let i = 0; i < w*h; i++){
+    if(!mask[i]) continue;
+    if(alt){ d[i*4] = alt[i*4]; d[i*4+1] = alt[i*4+1]; d[i*4+2] = alt[i*4+2]; }
+    else{ d[i*4] = fill[0]; d[i*4+1] = fill[1]; d[i*4+2] = fill[2]; }
+  }
+  ctx.putImageData(src, 0, 0);
+  return c;
+}
+
+/* ---- one file ------------------------------------------------------------ */
+async function processFile(file){
+  const url = URL.createObjectURL(file);
+  const pic = await new Promise((ok, no) => { const i = new Image(); i.onload = () => ok(i); i.onerror = no; i.src = url; });
+  URL.revokeObjectURL(url);
+  return processPicture(pic, pic.naturalWidth, pic.naturalHeight, file.name);
+}
+
+/* Works on anything that can be drawn — a photo, or a PDF page rendered to a
+   canvas. It is first drawn at the working size, so every step below reads
+   the same pixels at the same scale (a very large photo used to be cropped
+   from the wrong place when the skin step zoomed in on a person). */
+async function processPicture(srcPic, sw, sh, name, askUnsure = true){
+  const scale = Math.min(1, 2000 / Math.max(sw, sh));
+  const w = Math.round(sw * scale), h = Math.round(sh * scale);
+  const img = document.createElement("canvas"); img.width = w; img.height = h;
+  img.getContext("2d").drawImage(srcPic, 0, 0, w, h);
+  const mode = document.querySelector('input[name="mode"]:checked').value;
+  const hair = $("opt-hair").checked, grow = Number($("opt-grow").value);
+  const began = performance.now();
+
+  const people = await findPeople(img, w, h);
+  let mask = new Uint8Array(w * h), unsureMask = null, whole = 0, unsure = 0, skipped = 0, handsOnClothes = 0, handMask = null, facesAdded = 0;
+  const soft = Math.max(1, Math.round(Math.min(w, h) / 400));
+  // Every shape is looked at first, and only then decided — a picture with
+  // real people in it makes its other person-shapes people too (an umpire seen
+  // from behind next to two players), while a product photo has none.
+  const ev = [];
+  if(poseNet) for(const p of people){
+    let ps = 0; for(let i = 0; i < w*h; i++) ps += p.mask[i];
+    const sk = skinInside(img, w, h, p, hair);
+    let ss = 0; for(let i = 0; i < w*h; i++) ss += sk[i];
+    const human = sk.human / Math.max(1, ps);
+    const body = await faceOn(img, w, h, p);
+    const headOK = headSeen(sk.grid, body.head);
+    // a small figure in a scene is a person: clothes for sale fill the picture
+    const small = (p.y2 - p.y1) < SMALL_SHAPE * h && (p.x2 - p.x1) * (p.y2 - p.y1) < 0.15 * w * h;
+    const faceSeen = !body.printed && body.face >= FACE_SEEN && headOK;
+    // seen from behind: an ear or the back of a head, with hair there, on shoulders
+    const backOfHead = !body.printed && body.face >= 0.5 && headOK && body.shoulders >= SHOULDER_SEEN;
+    // lots of face, hair or skin with no shoulders at all is a close-up (a hand,
+    // a face filling the picture); on a body with shoulders but no head it is
+    // more likely a print or a collar on clothes, so it does not count there
+    const closeUp = !faceSeen && human >= FALLBACK_BELOW && body.shoulders < SHOULDER_SEEN;
+    const own = !body.printed && (faceSeen || backOfHead || body.legs || small || closeUp);
+    ev.push({ ps, sk, ss, human, body, faceSeen, own, closeUp });
+  }
+  const sceneHasPeople = ev.some(e => e.own);
+  for(let pi = 0; pi < people.length; pi++){
+    const p = people[pi], e = ev[pi];
+    let m = p.mask, isUnsure = false, isClothes = false;
+    let ps = 0; if(e) ps = e.ps; else for(let i = 0; i < w*h; i++) ps += p.mask[i];
+    if(e){
+      const { sk, ss, faceSeen } = e;
+      const person = e.own || (sceneHasPeople && p.score >= 0.5 && !e.body.printed);
+      const toHands = src => {            // skin of a body with no face: a hand or an arm
+        handMask = handMask || new Uint8Array(w * h);
+        let n = 0; for(let i = 0; i < w*h; i++) if(src[i]){ handMask[i] = 1; n++; }
+        return n;
+      };
+      if(!person) isClothes = true;
+      else if(mode !== "skin") { /* whole person */ }
+      // a close-up hand: the skin model calls much of a palm "clothes", so the
+      // skin it did find is followed out across the rest of the hand — inside
+      // the hand's own outline only, and only into skin colours
+      else if(e.closeUp){ toHands(trimToSkin(growSkin(sk, img, w, h, 48, p.mask, 8), img, w, h)); m = null; }
+      else if(ss >= FALLBACK_BELOW * ps){                                // plenty of skin: cover the skin
+        if(faceSeen) m = sk; else { toHands(sk); m = null; }
+      }
+      else if(!faceSeen && ss >= SKIN_SOME * ps){ toHands(sk); m = null; } // headless: just the skin that shows
+      else whole++;                                                      // a person, no skin seen: whole
+      if(isClothes && toHands(sk.strict)) handsOnClothes++;              // a real hand on clothes is covered
+    }
+    const sk = poseNet ? null : (mode === "skin" || p.score < SURE_PERSON ? skinInside(img, w, h, p, hair) : null);
+    if(isClothes){
+      skipped++;
+      unsureMask = unsureMask || new Uint8Array(w * h);
+      for(let i = 0; i < w*h; i++) if(p.mask[i]) unsureMask[i] = 1;
       continue;
     }
-    await saveOne(item); await sleep(220); } }
-  finally{ saveAllBtn.textContent = "Save all"; saveAllBtn.disabled = false; }
-  toast(done.length === 1 ? "Photo saved" : done.length + " photos saved");
-}
-saveAllBtn.addEventListener("click", saveAll);
-
-$("copyAllBtn").addEventListener("click", async () => {
-  const done = items.filter(i => i.done);
-  if (!done.length) return;
-  if (done.length === 1){ await copyOne(done[0]); return; }
-  // The clipboard holds one image at a time, so several photos are stacked into
-  // a single sheet — one paste, every photo, in the order they were processed.
-  const cols = Math.ceil(Math.sqrt(done.length));
-  const rows = Math.ceil(done.length / cols);
-  const cw = 640, ch = 480, GAP = 10;
-  const sheetC = document.createElement("canvas");
-  sheetC.width = cols*cw + (cols+1)*GAP;
-  sheetC.height = rows*ch + (rows+1)*GAP;
-  const ctx = sheetC.getContext("2d");
-  ctx.fillStyle = "#13151B"; ctx.fillRect(0,0,sheetC.width,sheetC.height);
-  done.forEach((item, n) => {
-    const src = item.out || compose(item);
-    const s = Math.min(cw/src.width, ch/src.height);
-    const w = src.width*s, h = src.height*s;
-    const x = GAP + (n % cols)*(cw+GAP) + (cw-w)/2;
-    const y = GAP + Math.floor(n / cols)*(ch+GAP) + (ch-h)/2;
-    ctx.drawImage(src, x, y, w, h);
-  });
-  await copyCanvas(sheetC, `Copied all ${done.length} photos as one sheet`);
-});
-$("clearBtn").addEventListener("click", () => {
-  items.forEach(i => { if (i.url) URL.revokeObjectURL(i.url); });
-  items.length = 0; sheet.innerHTML = ""; bay.classList.remove("slim"); updateTally();
-});
-
-function updateTally(){
-  const done = items.filter(i => i.done).length;
-  const working = items.length - done;
-  tally.textContent = items.length
-    ? `${done} OF ${items.length} READY` + (working ? ` · ${working} WORKING` : "")
-    : "";
-  saveAllBtn.disabled = done === 0;
-  $("copyAllBtn").disabled = done === 0;
-}
-
-/* ---------------- logging (never blocks the agent) ---------------- */
-async function logToServer(item, outCanvas){
-  try{
-    const d = c => c.toDataURL('image/jpeg', 0.7);
-    await fetch('/api/skinblock/submit', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({
-        agent_ext: AGENT_EXT,
-        file_name: item.file.name,
-        original_image: d(item.base),
-        covered_image: d(outCanvas),
-        person_found: !!item.found,
-        faces_found: 0,
-        manual_bars: (item.bars||[]).length + (item.keeps||[]).length,
-        coverage_pct: 0,
-        settings_used: SETTINGS
-      })
-    });
-  }catch(e){}
-}
-
-/* ---------------- earlier today ----------------
-   Photos are already stored per agent when they're processed, so a hard refresh
-   or a closed tab doesn't lose them — this pulls the agent's own recent work
-   back onto the page. It's their extension's work only, and only the last few
-   hours; the full archive stays in the manager's view. */
-async function loadEarlier(){
-  const wrap = $("earlier"), row = $("earlierRow"), note = $("earlierNote");
-  if (!AGENT_EXT) return;
-  try{
-    const r = await fetch(`/api/skinblock/my-recent?agent_ext=${encodeURIComponent(AGENT_EXT)}`);
-    if (!r.ok) return;
-    const data = await r.json();
-    const list = data.items || [];
-    // don't repeat what's already on the sheet from this run
-    const onSheet = new Set(items.map(i => i.file.name));
-    const past = list.filter(p => !onSheet.has(p.file_name));
-    if (!past.length){ wrap.style.display = "none"; return; }
-    wrap.style.display = "";
-    note.textContent = past.length + (past.length === 1 ? " photo" : " photos") + " from the last " + (data.hours||12) + " hours";
-    row.innerHTML = "";
-    for (const p of past){
-      const card = document.createElement("div");
-      card.className = "past";
-      const when = p.created_at ? new Date(p.created_at).toLocaleTimeString([], {hour:"numeric", minute:"2-digit"}) : "";
-      card.innerHTML = `
-        <div class="thumb"><img alt="${p.file_name}" draggable="true"></div>
-        <div class="meta"><span title="${p.file_name}">${when} · ${p.file_name}</span>
-          <button class="past-copy">Copy</button><button class="past-save">Save</button></div>`;
-      const img = card.querySelector("img");
-      img.src = p.covered_image;
-      img.addEventListener("dragstart", e => {
-        e.dataTransfer.effectAllowed = "copy";
-        e.dataTransfer.setData("DownloadURL", `image/jpeg:${safeName(p.file_name)}:${p.covered_image}`);
-      });
-      card.querySelector(".past-save").addEventListener("click", async () => {
-        const blob = await (await fetch(p.covered_image)).blob();
-        triggerDownload(blob, safeName(p.file_name));
-      });
-      card.querySelector(".past-copy").addEventListener("click", () =>
-        copyFromDataUrl(p.covered_image, p.file_name));
-      row.appendChild(card);
+    if(sk){
+      let ss = 0; for(let i = 0; i < w*h; i++) ss += sk[i];
+      const human = sk.human / Math.max(1, ps);
+      if(mode === "skin" && ss >= FALLBACK_BELOW * ps) m = sk;           // skin found: cover the skin
+      else if(p.score >= SURE_PERSON || human >= FALLBACK_BELOW){ if(mode === "skin") whole++; }  // a person: whole
+      else isUnsure = true;            // not sure it is a person, and no face, hair or skin seen
     }
-  }catch(e){ /* the strip is a convenience; never block the page on it */ }
+    if(isUnsure){
+      unsure++;
+      if(!askUnsure){ for(let i = 0; i < w*h; i++) if(m[i]) mask[i] = 1; continue; }   // a PDF: stay safe, cover
+      unsureMask = unsureMask || new Uint8Array(w * h);
+      for(let i = 0; i < w*h; i++) if(m[i]) unsureMask[i] = 1;
+      continue;
+    }
+    if(m) for(let i = 0; i < w*h; i++) if(m[i]) mask[i] = 1;
+  }
+  // Skin with no person outline around it at all — a hand holding a product,
+  // a hand on its own, an arm reaching in. The outline model often finds no
+  // person there, so the skin model also looks at the whole picture, and only
+  // patches it is sure of (and that are skin-coloured) are believed.
+  if(mode === "skin" && poseNet){
+    const frame = { x1: 0, y1: 0, x2: w, y2: h, mask: new Uint8Array(w * h) };
+    // in a picture that clearly has people in it, skin reaching in from the
+    // edge is believed more easily (someone cut off at the bottom of a photo)
+    const sk = skinInside(img, w, h, frame, hair, sceneHasPeople ? null : LOOSE_SURE);
+    let n = 0; for(let i = 0; i < w*h; i++) if(sk.strict[i] && !mask[i]){ (handMask = handMask || new Uint8Array(w * h))[i] = 1; n++; }
+    if(n > 0.0005 * w * h) handsOnClothes++;
+  }
+  // hands on clothes: the skin model is least exact there, so their edge is
+  // walked out to the real outline (faces and people keep the model's edge —
+  // walking it out would creep into blond hair, which is skin-coloured)
+  if(handMask){
+    handMask = growSkin(handMask, img, w, h, 42);
+    handMask = refineEdges(handMask, img, w, h, Math.max(2, Math.round(Math.min(w, h) / 70)), 40);
+    for(let i = 0; i < w*h; i++) if(handMask[i]) mask[i] = 1;
+  }
+  // faces the face finder is sure of and that are not covered yet
+  try{
+    for(const f of await findFaces(img, w, h, people)){
+      let inF = 0, cov = 0;
+      for(let y = Math.max(0, Math.floor(f.y1)); y < Math.min(h, Math.ceil(f.y2)); y++)
+        for(let x = Math.max(0, Math.floor(f.x1)); x < Math.min(w, Math.ceil(f.x2)); x++){ inF++; cov += mask[y*w + x]; }
+      if(inF && cov < 0.6 * inF){ coverFace(mask, w, h, f); facesAdded++; }
+    }
+  }catch(e){ console.warn("face finder", e); }
+  mask = dilate(smoothMask(mask, w, h, soft), w, h, grow);
+  if(unsureMask) unsureMask = dilate(smoothMask(unsureMask, w, h, soft), w, h, grow);
+  let covered = 0; for(let i = 0; i < mask.length; i++) covered += mask[i];
+  const style = $("opt-style").value;
+  const out = cover(img, w, h, mask, style);
+  const r = { canvas: out, ms: Math.round(performance.now() - began), pct: Math.round(100*covered/mask.length),
+              people: people.length - skipped - (askUnsure ? unsure : 0), whole,
+              unsure: askUnsure ? unsure : 0, skipped, hands: handsOnClothes, name };
+  if(r.unsure || r.skipped){
+    // kept so the agent's "cover it too" can redo the picture without the models
+    r.coverAll = () => {
+      const both = new Uint8Array(w * h);
+      let n = 0; for(let i = 0; i < w*h; i++){ both[i] = mask[i] | unsureMask[i]; n += both[i]; }
+      r.pct = Math.round(100 * n / (w*h));
+      r.canvas = cover(img, w, h, both, style); r.unsure = 0; r.people += r.skipped; r.skipped = 0; return r.canvas;
+    };
+    // what the agent looks at: the covered picture with the doubtful shape tinted red
+    r.preview = () => {
+      const c = document.createElement("canvas"); c.width = w; c.height = h;
+      const ctx = c.getContext("2d"); ctx.drawImage(out, 0, 0);
+      const d = ctx.getImageData(0, 0, w, h), px = d.data;
+      for(let i = 0; i < w*h; i++) if(unsureMask[i] && !mask[i]){
+        px[i*4] = Math.round(px[i*4] * 0.45 + 229 * 0.55);
+        px[i*4+1] = Math.round(px[i*4+1] * 0.45 + 52 * 0.55);
+        px[i*4+2] = Math.round(px[i*4+2] * 0.45 + 61 * 0.55);
+      }
+      ctx.putImageData(d, 0, 0); return c;
+    };
+  }
+  return r;
 }
-$("earlierRefresh").addEventListener("click", loadEarlier);
 
-/* ---------------- start ---------------- */
-loadSettings().then(initGate);
+/* ---- PDFs: every page is turned into a picture, covered, and put back
+   together as a new PDF. The covering is burned into the page, so nothing
+   underneath can be copied out of the file afterwards. -------------------- */
+let pdfjs = null, jsPDFLib = null;
+async function pdfTools(){
+  if(!pdfjs){
+    pdfjs = await import("https://cdn.jsdelivr.net/npm/pdfjs-dist@4.4.168/build/pdf.min.mjs");
+    pdfjs.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.4.168/build/pdf.worker.min.mjs";
+  }
+  if(!jsPDFLib){
+    await new Promise((ok, no) => { const t = document.createElement("script");
+      t.src = "https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"; t.crossOrigin = "anonymous";
+      t.onload = ok; t.onerror = () => no(new Error("could not load the PDF writer")); document.head.appendChild(t); });
+    jsPDFLib = window.jspdf.jsPDF;
+  }
+}
+async function processPdf(file, onPage){
+  await pdfTools();
+  const doc = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
+  if(doc.numPages > 40) throw new Error("more than 40 pages — split it first");
+  let pdf = null, first = null, people = 0, ms = 0, skipped = 0;
+  for(let n = 1; n <= doc.numPages; n++){
+    onPage(n, doc.numPages);
+    const page = await doc.getPage(n);
+    const v1 = page.getViewport({ scale: 1 });                     // size in points
+    const sc = Math.min(3, 2000 / Math.max(v1.width, v1.height));  // sharp, not huge
+    const vp = page.getViewport({ scale: sc });
+    const c = document.createElement("canvas"); c.width = Math.round(vp.width); c.height = Math.round(vp.height);
+    const ctx = c.getContext("2d"); ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, c.width, c.height);
+    await page.render({ canvasContext: ctx, viewport: vp }).promise;
+    const r = await processPicture(c, c.width, c.height, file.name, false);
+    people += r.people; ms += r.ms; skipped += r.skipped || 0; if(!first) first = r.canvas;
+    const orient = v1.width > v1.height ? "l" : "p";
+    if(!pdf) pdf = new jsPDFLib({ orientation: orient, unit: "pt", format: [v1.width, v1.height] });
+    else pdf.addPage([v1.width, v1.height], orient);
+    pdf.addImage(r.canvas.toDataURL("image/jpeg", 0.9), "JPEG", 0, 0, v1.width, v1.height);
+  }
+  return { canvas: first, pdfBlob: pdf.output("blob"), pages: doc.numPages, people, ms, pct: null,
+           whole: 0, skipped, name: file.name };
+}
 
+/* ---- queue -------------------------------------------------------------- */
+function addFiles(list){
+  for(const f of list){
+    const isPdf = f.type === "application/pdf" || /\.pdf$/i.test(f.name);
+    if(!f.type.startsWith("image/") && !isPdf) continue;
+    const card = document.createElement("div"); card.className = "card busy";
+    card.innerHTML = '<div style="aspect-ratio:4/3;background:var(--surface2);"></div>'
+      + '<div class="meta"><span>' + esc(f.name) + '</span><b>waiting</b></div>';
+    $("grid").prepend(card); queue.push({ file: f, card, isPdf });
+  }
+  pump();
+}
+async function pump(){
+  if(working) return; working = true;
+  while(queue.length){
+    const { file, card, isPdf } = queue.shift();
+    if(!yolo || !segmenter){ card.querySelector("b").textContent = "detectors not loaded"; card.className = "card fail"; continue; }
+    card.querySelector("b").textContent = "covering…";
+    // let the page draw "covering…" (and answer clicks) before the heavy work starts
+    await new Promise(r => setTimeout(r, 30));
+    try{
+      const r = isPdf
+        ? await processPdf(file, (n, all) => { card.querySelector("b").textContent = "page " + n + " of " + all + "…"; })
+        : await processFile(file);
+      const label = () => (isPdf ? "PDF · " + r.pages + (r.pages === 1 ? " page · " : " pages · ") : "")
+        + r.people + (r.people === 1 ? " person" : " people")
+        + (r.whole ? " (" + r.whole + " whole)" : "") + (r.pct != null ? " · " + r.pct + "%" : "")
+        + (r.skipped ? " · " + r.skipped + " clothes left" : "") + (r.hands && r.skipped ? " · hand covered" : "") + " · " + r.ms + " ms";
+      if(r.unsure){
+        // not saved yet: the agent decides about the shape in red
+        card.replaceChild(r.preview(), card.firstChild);
+        card.querySelector("b").textContent = "check this one";
+        card.className = "card check";
+        const ask = document.createElement("div"); ask.className = "ask";
+        ask.innerHTML = "The part in <b style='color:#FF6B72'>red</b> might be a person, or might be just "
+          + "clothes or an object. Is it a person?"
+          + "<div><button class='cov'>Yes — cover it</button><button class='keep'>No — leave it</button></div>";
+        card.appendChild(ask);
+        const done = () => { ask.remove(); card.replaceChild(r.canvas, card.firstChild);
+          card.querySelector("b").textContent = label(); card.className = "card done";
+          results.push(r); autoDownload(r); $("dl-all").disabled = false; };
+        ask.querySelector(".cov").onclick = () => { r.coverAll(); r.people++; done(); };
+        ask.querySelector(".keep").onclick = () => { r.unsure = 0; done(); };
+      }else if(r.skipped && !isPdf){
+        card.replaceChild(r.canvas, card.firstChild);
+        card.querySelector("b").textContent = label();
+        card.className = "card done"; results.push(r); autoDownload(r);
+        const note = document.createElement("div"); note.className = "ask";
+        note.innerHTML = "Left uncovered: " + r.skipped + (r.skipped === 1 ? " shape that looks" : " shapes that look")
+          + " like clothes, not a person" + (r.hands ? " — the hand holding it is covered." : " (no face, hair or skin).")
+          + "<div><button class='cov'>Cover it anyway</button></div>";
+        card.appendChild(note);
+        note.querySelector(".cov").onclick = () => {
+          r.coverAll(); card.replaceChild(r.canvas, card.firstChild);
+          card.querySelector("b").textContent = label(); note.remove(); autoDownload(r);
+        };
+      }else{
+        card.replaceChild(r.canvas, card.firstChild);
+        card.querySelector("b").textContent = label();
+        card.className = "card done"; results.push(r); autoDownload(r);
+      }
+    }catch(e){ card.querySelector("b").textContent = "failed: " + e.message; card.className = "card fail"; }
+    status(results.length + " done" + (queue.length ? ", " + queue.length + " waiting" : ""));
+  }
+  $("dl-all").disabled = results.length === 0; working = false;
+}
+function autoDownload(r){
+  if(r.pdfBlob){
+    const a = document.createElement("a"); a.href = URL.createObjectURL(r.pdfBlob);
+    a.download = r.name.replace(/\.[^.]+$/, "") + "-covered.pdf"; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000); return;
+  }
+  r.canvas.toBlob(blob => { const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+    a.download = r.name.replace(/\.[^.]+$/, "") + "-covered.jpg"; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000); }, "image/jpeg", 0.92);
+}
+function esc(s){ return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+$("files").addEventListener("change", e => addFiles(e.target.files));
+try{ const st = localStorage.getItem("sb3_style"), cl = localStorage.getItem("sb3_colour");
+     if(st && [...$("opt-style").options].some(o => o.value === st)) $("opt-style").value = st;
+     if(cl) $("opt-colour").value = cl; }catch(e){}
+const showPick = () => { $("opt-colour").style.display = $("opt-style").value === "custom" ? "" : "none"; };
+showPick();
+$("opt-style").addEventListener("change", () => { showPick(); try{ localStorage.setItem("sb3_style", $("opt-style").value); }catch(e){}
+                                                   if($("opt-style").value === "custom") $("opt-colour").click(); });
+$("opt-colour").addEventListener("input", () => { try{ localStorage.setItem("sb3_colour", $("opt-colour").value); }catch(e){} });
+// a file dropped outside the drop area must not open in place of the page
+["dragover", "drop"].forEach(ev => window.addEventListener(ev, e => { e.preventDefault(); }));
+window.addEventListener("drop", e => { if(!$("drop").contains(e.target) && e.dataTransfer?.files?.length) addFiles(e.dataTransfer.files); });
+$("drop").addEventListener("dragover", e => { e.preventDefault(); $("drop").classList.add("over"); });
+$("drop").addEventListener("dragleave", () => $("drop").classList.remove("over"));
+$("drop").addEventListener("drop", e => { e.preventDefault(); $("drop").classList.remove("over"); addFiles(e.dataTransfer.files); });
+document.addEventListener("paste", e => { if(e.clipboardData?.files?.length) addFiles(e.clipboardData.files); });
+$("opt-grow").addEventListener("input", e => { $("grow-v").textContent = e.target.value; });
+$("clear").addEventListener("click", () => { $("grid").innerHTML = ""; results = []; $("dl-all").disabled = true; });
+$("dl-all").addEventListener("click", () => results.forEach(autoDownload));
+boot();
 </script>
 </body>
 </html>
