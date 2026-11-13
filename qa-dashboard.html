@@ -11722,6 +11722,10 @@ function wbSeconds(){
   const paused = (openWork.paused_seconds || 0) + (openWork.paused_now ? since : 0);
   return {worked: Math.max(0, open - paused), paused, open};
 }
+function wbBillMinutes(sec){
+  sec = Math.max(0, Math.floor(sec));
+  return Math.floor(sec / 60) + (sec % 60 > 30 ? 1 : 0);
+}
 function wbClockText(sec){
   sec = Math.max(0, Math.floor(sec));
   // spelled out, so 7 minutes 5 seconds can never be read as 7 hours 5 minutes
@@ -11760,10 +11764,11 @@ function wbEndOpen(){
     ' · they have ' + openWork.minutes_left + ' minutes left'
     + (pausedMin ? ' · ' + pausedMin + ' minutes were paused and are not suggested' : '');
   document.getElementById('we-note').value = '';
-  // suggest the full minutes actually worked: 7:01 and 7:59 both suggest 7.
+  // David's rule: up to 30 seconds stays the same minute, 31 seconds and up
+  // goes to the next one. 2:30 suggests 2, 2:31 suggests 3.
   // The exact time is shown beside it, so the agent can see why.
   const t = wbSeconds();
-  const suggest = Math.floor(t.worked / 60);
+  const suggest = wbBillMinutes(t.worked);
   document.getElementById('we-minutes').value = String(suggest);
   document.getElementById('we-clock').textContent = wbClockText(t.worked);
   document.getElementById('we-task').value = '';
