@@ -17395,7 +17395,8 @@ async function retryCall(callId){
   }
 
   try{
-    await API.post(`/api/retry-call/${callId}`, {});
+    // the reviewer-level address: QA staff, TLs and managers may retry, not only admins
+    await API.post('/api/calls/' + encodeURIComponent(callId) + '/score-now', {});
     showToast(`Retry started for call #${callId.slice(-8)}`);
 
     // Poll every 3 seconds until status changes from Processing

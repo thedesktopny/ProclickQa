@@ -3481,6 +3481,12 @@ def score_call_now(call_id):
     if not row:
         return jsonify({'error': 'Call not found'}), 404
     status, started, has_transcript = row
+    # the AI account is out of credit: a retry now would only fail again
+    wait = _credit_state().get('until', 0) - time.time()
+    if wait > 0:
+        return jsonify({'error': 'The AI account is out of credit, so scoring is paused '
+                                 '(next try in about %d min). Top up the Gemini credit, '
+                                 'then press Retry again.' % max(1, int(wait // 60) + 1)}), 409
     # do not start a second run of something already running
     if status == 'Processing' and started and \
        (datetime.now() - started).total_seconds() < 20 * 60:
@@ -3522,7 +3528,17 @@ def retry_single_call(call_id):
     conn.close()
 
     import threading
+    global _SCORE_SLOTS
+    if _SCORE_SLOTS is None:
+        _SCORE_SLOTS = threading.BoundedSemaphore(3)
+
     def process_single():
+        # at most three recordings scored at once, shared with the automatic
+        # scoring — someone pressing Retry on 20 calls must not start 20 downloads
+        with _SCORE_SLOTS:
+            _process_single()
+
+    def _process_single():
         from ai_engine import analyze_call as run_analysis
         UPLOAD_DIR = os.path.join(os.getenv('HOME', '.'), 'uploads')
         os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -3573,8 +3589,11 @@ def retry_single_call(call_id):
             conn2.commit()
             conn2.close()
             print(f"[RetryCall] ✅ {call_id} scored: {result['overall_score']}%")
+            _credit_ok()
         except Exception as e:
-            error_str = str(e)[:500]
+            error_str = _safe_err(e)[:500]
+            if _is_out_of_credit(error_str):
+                _credit_failed()
             print(f"[RetryCall] ❌ {call_id} failed: {error_str}")
             try:
                 conn3 = get_db()
