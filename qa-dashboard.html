@@ -445,6 +445,13 @@ td.agent{color:var(--text);font-weight:500;}
    their history; once scrolled, the block shrinks to a slim bar. */
 .cu-head{ position:sticky; top:var(--cu-top,73px); z-index:30; background:var(--bg);
           padding-top:6px; transition:box-shadow .15s; overflow-anchor:none; }
+/* name and main phone side by side, like the old CMS: selecting them copies
+   just "Name 7321234567" — the buttons and labels around them can't be selected */
+.cu-phone{ font-weight:500; color:var(--text2); margin-left:10px; letter-spacing:0; }
+.cu-titlerow .pill, .cu-titlerow .cu-actions, .cu-titlerow .cu-copy, #cu-bday-today{ user-select:none; -webkit-user-select:none; }
+.cu-copy{ font:inherit; font-size:11.5px; color:var(--text3); background:none; border:1px solid var(--border);
+  border-radius:7px; padding:3px 8px; cursor:pointer; align-self:center; }
+.cu-copy:hover{ color:var(--text); border-color:var(--accent); }
 .cu-head.stuck{ box-shadow:0 10px 14px -12px rgba(0,0,0,.7); }
 .cu-head.stuck .cu-contact{ display:none; }
 .cu-head.stuck .cu-name{ font-size:17px !important; }
@@ -11211,6 +11218,20 @@ function cuSearch(){
 
 const cuMoney = c => '$' + (Math.round(c||0)/100).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
 const cuWhen = d => d ? new Date(d).toLocaleString([], {month:'short',day:'numeric',year:'numeric',hour:'2-digit',minute:'2-digit'}) : '';
+function cuMainPhone(a){
+  return [a.phone, a.mobile, a.home_phone, a.other_phone].find(Boolean) || '';
+}
+async function cuCopyNamePhone(){
+  const nameEl = document.querySelector('#cu-head .cu-name');
+  const text = nameEl ? nameEl.textContent.replace(/\s+/g, ' ').trim() : '';
+  if(!text) return;
+  try{ await navigator.clipboard.writeText(text); }
+  catch(e){
+    const t = document.createElement('textarea'); t.value = text; document.body.appendChild(t);
+    t.select(); try{ document.execCommand('copy'); }catch(_){} t.remove();
+  }
+  showToast('Copied: ' + text);
+}
 const cuDate = d => d ? new Date(d).toLocaleDateString([], {month:'short',day:'numeric',year:'numeric'}) : '';
 /* "08/06/25 07:00:27 PM - 07:02:16 PM (1 min 48 s)", as the old CMS showed a
    piece of work: when it started, when it ended, and how long it lasted. */
@@ -13014,7 +13035,8 @@ async function cuOpen(id){
     box.innerHTML = `
       <div class="cu-head" id="cu-head">
       <div class="cu-titlerow" style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:6px;">
-        <div class="cu-name" style="font-size:22px;font-weight:660;letter-spacing:-.02em;">${esc(a.name)}</div>
+        <div class="cu-name" style="font-size:22px;font-weight:660;letter-spacing:-.02em;">${esc(a.name)}${cuMainPhone(a) ? ` <span class="cu-phone">${esc(cuMainPhone(a))}</span>` : ''}</div>
+        <button class="cu-copy" onclick="cuCopyNamePhone()" title="Copy name and phone">📋 Copy</button>
         ${a.business?'<span class="pill">business</span>':''}
         ${a.deleted?'<span class="pill" style="color:var(--red)">deleted</span>':''}
         ${a.is_free?'<span class="pill" style="color:var(--yellow)">free account</span>':''}
@@ -13030,7 +13052,7 @@ async function cuOpen(id){
         </span>
       </div>
       <div class="cu-contact" style="font-size:12.5px;color:var(--text3);margin-bottom:18px;">
-        <span id="cu-bday"></span>${[a.phone,a.mobile,a.home_phone,a.other_phone].filter(Boolean).join(' · ')}
+        <span id="cu-bday"></span>${[a.phone,a.mobile,a.home_phone,a.other_phone].filter(Boolean).filter(x => x !== cuMainPhone(a)).join(' · ')}
         ${a.email?' · '+esc(a.email):''}
         ${a.sms_number?' · texts from '+a.sms_number:''}
         · customer since ${cuDate(a.created)}
