@@ -916,7 +916,15 @@ def portal_login(username, password):
     import datetime as _dt
     if lockout_on and lockout_until and lockout_until > _dt.datetime.utcnow():
         conn.close()
-        raise RuntimeError('That account is locked in the CMS')
+        # Two very different locks share this column: a login switched off in
+        # Employees (locked until the year 9999), and the old CMS's automatic
+        # lock after several wrong passwords, which lifts by itself after a few
+        # minutes. Say which, so nobody switches logins off and on to fix it.
+        if lockout_until.year >= 9000:
+            raise RuntimeError('This login is switched off in the CMS. A manager can turn it back on in Employees.')
+        mins = int((lockout_until - _dt.datetime.utcnow()).total_seconds() // 60) + 1
+        raise RuntimeError('Locked for %d more minute%s after too many wrong passwords (usually in the old CMS). '
+                           'Wait, then try again.' % (mins, '' if mins == 1 else 's'))
 
     # who they are on the floor, and whether they do QA
     cu.execute("""SELECT TOP 1 Id, FirstName, LastName, Extension, LeftFirm, QA
