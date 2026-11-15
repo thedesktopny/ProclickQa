@@ -4952,3 +4952,53 @@ def waiting_why():
             x['free_not_enrolled'] = sum(1 for a in live if a['state'] == 'free'
                                          and a['employee_id'] not in ids_for_line)
     return w
+
+
+def status_table_origin():
+    """How Tmp_LiveEmployeesStatusFinal — the table the phone system reads to
+    know who is clocked in, on break or on DND (Igor, Nov 15) — gets filled.
+    READ ONLY: object types, definitions, what refers to it, triggers, and
+    whether it agrees with the clock records right now."""
+    conn = _connect(); cu = conn.cursor()
+    out = {}
+    def q(sql, args=()):
+        try:
+            cu.execute(sql, args)
+            return [[_plain(v) if hasattr(v, 'year') else v for v in r] for r in cu.fetchall()]
+        except Exception as e:
+            return [['error', str(e)[:200]]]
+    out['objects'] = q("""SELECT name, type_desc, modify_date FROM sys.objects
+                          WHERE name LIKE 'Tmp_LiveEmployee%' ORDER BY name""")
+    out['definitions'] = q("""SELECT o.name, o.type_desc, OBJECT_DEFINITION(o.object_id)
+                              FROM sys.objects o
+                              WHERE o.name LIKE 'Tmp_LiveEmployee%'
+                                AND o.type IN ('V','P','FN','IF','TF')""")
+    out['used_by'] = q("""SELECT o.name, o.type_desc, LEN(m.definition)
+                          FROM sys.sql_modules m JOIN sys.objects o ON o.object_id = m.object_id
+                          WHERE m.definition LIKE '%Tmp_LiveEmployeesStatus%'
+                            AND o.name NOT LIKE 'Tmp_LiveEmployee%'""")
+    out['used_by_definitions'] = q("""SELECT TOP 5 o.name, OBJECT_DEFINITION(o.object_id)
+                          FROM sys.sql_modules m JOIN sys.objects o ON o.object_id = m.object_id
+                          WHERE m.definition LIKE '%Tmp_LiveEmployeesStatus%'
+                            AND o.name NOT LIKE 'Tmp_LiveEmployee%'""")
+    out['triggers'] = q("""SELECT t.name, OBJECT_NAME(t.parent_id), t.is_disabled,
+                                  OBJECT_DEFINITION(t.object_id)
+                           FROM sys.triggers t
+                           WHERE OBJECT_NAME(t.parent_id) IN
+                             ('EmployeeClocker','NotDistrubStatus','Tmp_LiveEmployeesStatusFinal',
+                              'Tmp_LiveEmployeesStatus','Employee')""")
+    out['jobs'] = q("""SELECT j.name, j.enabled, s.step_name, LEFT(s.command, 400)
+                       FROM msdb.dbo.sysjobs j JOIN msdb.dbo.sysjobsteps s ON s.job_id = j.job_id
+                       WHERE s.command LIKE '%LiveEmployees%'""")
+    # does it agree with the clock records right now?
+    out['in_sync'] = q("""SELECT t.EmployeeId, t.EmployeeName, t.ClockerStatus, c.Status,
+                                 t.ClockerTime, c.Created
+                          FROM Tmp_LiveEmployeesStatusFinal t
+                          OUTER APPLY (SELECT TOP 1 Status, Created FROM EmployeeClocker
+                                       WHERE EmployeeId = t.EmployeeId AND Status IS NOT NULL
+                                       ORDER BY Created DESC, Id DESC) c
+                          WHERE ISNULL(t.ClockerStatus, 0) <> ISNULL(c.Status, 0)""")
+    out['freshest'] = q("SELECT COUNT(*), MAX(ClockerTime), MAX(SipPhoneTime), GETDATE() "
+                        "FROM Tmp_LiveEmployeesStatusFinal")
+    conn.close()
+    return out

@@ -1859,6 +1859,16 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
     </div>
 
     <div class="card" style="padding:16px 20px;margin-top:14px;">
+      <h2 class="payh">How agent status reaches the phone system</h2>
+      <div class="payhint">The phone system reads who is clocked in, on break or on DND from
+        the CMS table Tmp_LiveEmployeesStatusFinal. This shows what fills that table, and
+        whether it matches the clock records right now. Read only.</div>
+      <button onclick="checkStatusOrigin()" class="btn btn-outline" style="font-size:12px;">Check</button>
+      <pre id="so-out" style="white-space:pre-wrap;font-size:11px;color:var(--text2);
+           margin:12px 0 0;line-height:1.6;max-height:520px;overflow:auto;"></pre>
+    </div>
+
+    <div class="card" style="padding:16px 20px;margin-top:14px;">
       <h2 class="payh">Calls we might have missed</h2>
       <div class="payhint">Everything needed to score a call is already in the CMS database,
         so a call can be picked up from there rather than waiting to be told about it.
@@ -10413,6 +10423,25 @@ function stRenderGrid(){
 const MC_CB_COLOUR = { dialed:'var(--green)', through:'var(--green)', calling:'var(--yellow)',
   retry:'var(--yellow)', waiting:'var(--yellow)', later:'var(--text2)', manager:'var(--red)',
   gone:'var(--text3)', business:'var(--text3)', answered:'var(--green)', noanswer:'var(--red)' };
+async function checkStatusOrigin(){
+  const out = document.getElementById('so-out');
+  out.textContent = 'Checking…';
+  try{
+    const r = await API.get('/api/cms-db/status-origin');
+    if(r.error){ out.textContent = r.error; return; }
+    const sec = (t, rows) => '=== ' + t + ' ===\n' + ((rows && rows.length)
+      ? rows.map(x => x.map(v => v === null ? '' : String(v)).join('  |  ')).join('\n') : '(none)') + '\n\n';
+    out.textContent =
+      sec('What it is', r.objects) +
+      sec('Its own definition (if it is a view or procedure)', r.definitions) +
+      sec('Procedures/views that refer to it', r.used_by) +
+      sec('Their code (first 5)', r.used_by_definitions) +
+      sec('Triggers on the clock and DND tables', r.triggers) +
+      sec('Scheduled database jobs that mention it', r.jobs) +
+      sec('Rows, newest clock time, newest phone time, database clock now', r.freshest) +
+      sec('Agents where it does NOT match their latest clock record', r.in_sync);
+  }catch(e){ out.textContent = e.message; }
+}
 async function loadMissed(){
   const list = document.getElementById('mc-list');
   list.innerHTML = '<div style="color:var(--text3);font-size:12.5px;">Loading…</div>';
@@ -10437,8 +10466,7 @@ async function loadMissed(){
            cb.later ? `${cb.later} missed after hours \u00b7 start 8:46 AM` : 'the automatic callback will ring them',
            (cb.in_line + cb.later) ? 'warn' : '') +
       (known ? stat('Callback answered', cb.answered, 'they talked to an agent', 'pos') : '') +
-      stat('Manager line', cb.manager, 'for the manager \u00b7 not called back automatically',
-           cb.manager ? 'neg' : '') +
+      stat('Not on the callback list', cb.gone, 'Manager line, other lines, or already handled', '') +
       (known ? '' : stat('Missed', r.missed, `of ${r.total_inbound} calls in`, '')) +
       `<div style="grid-column:1/-1;font-size:11.5px;color:var(--text3);">Each person counted once \u00b7
         ${r.missed} missed of ${r.total_inbound} calls in (${r.missed_rate}%)${cb.through ? ` \u00b7 ${cb.through} got through to us later` : ''}${cb.gone ? ` \u00b7 ${cb.gone} no longer on the phone system's list` : ''}${cb.business ? ` \u00b7 ${cb.business} were for other businesses (not counted)` : ''}</div>` +
@@ -10992,10 +11020,7 @@ function lvRenderFloor(){
         <div><span class="k">calls today:</span> ${a.calls_in} in · ${a.calls_out} out</div>
         ${a.minutes_on_call?`<div><span class="k">time on calls:</span> ${a.minutes_on_call} min</div>`:''}
         ${a.last_call_at?`<div><span class="k">last call:</span> ${lvAgo(a.last_call_at)}${a.last_call_phone?' · '+a.last_call_phone:''}</div>`:'<div class="k">no calls yet today</div>'}
-        ${busy && (portalIsManager || portalIsTL || !IS_PORTAL_EARLY) ? `<div style="margin-top:6px;">
-          <button class="btn btn-outline" style="font-size:11px;padding:4px 8px;"
-                  onclick="event.stopPropagation(); lvPhoneReset('${esc(String(a.extension||''))}', '${esc(a.name||'').replace(/'/g, '')}')"
-                  title="Use when the phone shows 'in use' but the agent has no call">🔄 Stuck on "in use"? Reset phone</button></div>` : ''}
+        ${''/* "Reset phone" removed Nov 15: it wrote the phone server's ps_auths directly — Igor asked us not to */}
         <div style="margin-top:6px;color:var(--accent);">click for their full day →</div>
 
       </div>

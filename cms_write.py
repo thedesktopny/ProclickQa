@@ -2403,9 +2403,6 @@ def clock_status(employee_id):
 def clock(employee_id, action, who, minutes=None, reason=None, logged_out_by=None):
     """Start a shift ('in'), go on a break ('break'), come back ('back') or end
     the shift ('out'). Only moves that make sense from where they are now."""
-    if not asterisk_configured():
-        raise WriteRefused('Clocking here is not switched on yet — the phone system connection '
-                           'is not set up. Use the old CMS for now.')
     now = clock_status(employee_id)
     cur = now['status']
     allowed = {'in': ('out',), 'break': ('in',), 'back': ('break',), 'out': ('in', 'break')}
@@ -2488,16 +2485,10 @@ def clock(employee_id, action, who, minutes=None, reason=None, logged_out_by=Non
     except Exception as ex:
         out['dnd_note'] = 'Could not check Do Not Disturb: ' + str(ex)[:120]
 
-    # the clock row is the record; now tell the phone system
-    try:
-        n = asterisk_set_status(now['extension'], phone_status)
-        out['phone_updated'] = bool(n)
-        if not n:
-            out['phone_warning'] = ('The phone system has no line for extension %s, so it was not updated.'
-                                    % now['extension'])
-    except Exception as ex:
-        out['phone_updated'] = False
-        out['phone_warning'] = 'Saved, but the phone system could not be told: ' + str(ex)[:160]
+    # The clock row in the CMS is the record, and it is all the phone system
+    # needs: the voice server reads agent status straight from the CMS's live
+    # status table (Igor, Nov 15). We no longer write ps_auths on the phone
+    # server — he asked us not to touch it at all.
     out['ok'] = True
     out['status'] = CLOCK_NAMES[status]
     out['since'] = _ny_iso(when)
@@ -2575,9 +2566,6 @@ def _dnd_insert(conn, employee_id, status, when, note, kind):
 
 def dnd(employee_id, turn_on, who, reason=None, kind=None):
     """Go on Do Not Disturb (a reason is required) or come off it."""
-    if not asterisk_configured():
-        raise WriteRefused('Do Not Disturb here is not switched on yet — the phone system connection '
-                           'is not set up. Use the old CMS for now.')
     clock_now = clock_status(employee_id)
     state = dnd_state(employee_id)
     reason = (reason or '').strip()[:300]
@@ -2618,16 +2606,8 @@ def dnd(employee_id, turn_on, who, reason=None, kind=None):
         except Exception:
             pass
 
-    # phone system: 3 while on DND; when it ends, back to whatever the clock says
-    phone = 3 if turn_on else {'in': 1, 'break': 2, 'out': 0}.get(clock_now['status'], 1)
-    try:
-        n = asterisk_set_status(clock_now['extension'], phone)
-        out['phone_updated'] = bool(n)
-        if not n:
-            out['phone_warning'] = 'The phone system has no line for extension %s.' % clock_now['extension']
-    except Exception as ex:
-        out['phone_updated'] = False
-        out['phone_warning'] = 'Saved, but the phone system could not be told: ' + str(ex)[:160]
+    # the NotDistrubStatus row in the CMS is what the phone system reads; no
+    # write to ps_auths on the phone server any more (Igor, Nov 15)
     out['ok'] = True
     out['dnd'] = bool(turn_on)
     _log(who, out)
