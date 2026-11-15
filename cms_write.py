@@ -2116,6 +2116,99 @@ def _asterisk_connect():
                            connect_timeout=6, read_timeout=8, write_timeout=8, autocommit=True)
 
 
+def asterisk_missed_list(uniqs, numbers):
+    """The phone system's own missed-call records for these calls. READ ONLY.
+
+    missed_calls is ProClick's list, which the callback job
+    (proclick_connect_job.php) works through; business_missed_calls holds the
+    other businesses on the same phone system. Looked up by the call's id and
+    by the caller's number (the number as the phone system wrote it may or may
+    not start with 1, so both are asked for).
+    """
+    uniqs = [u for u in set(uniqs) if u][:400]
+    nums = set()
+    for n in numbers:
+        if len(n) == 10:
+            nums.update([n, '1' + n])
+    nums = list(nums)[:800]
+    out = {'proclick': [], 'business': [], 'agents': {}}
+    if not uniqs and not nums:
+        return out
+    conn = _asterisk_connect()
+    try:
+        cu = conn.cursor()
+        where, args = [], []
+        if uniqs:
+            where.append('uniqueid IN (%s)' % ','.join(['%s'] * len(uniqs))); args += uniqs
+        if nums:
+            where.append('src IN (%s)' % ','.join(['%s'] * len(nums))); args += nums
+        cu.execute('SELECT * FROM missed_calls WHERE ' + ' OR '.join(where)
+                   + ' ORDER BY id DESC LIMIT 3000', tuple(args))
+        cols = [d[0].lower() for d in cu.description]
+        out['proclick'] = [dict(zip(cols, r)) for r in cu.fetchall()]
+        if uniqs:
+            um = ','.join(['%s'] * len(uniqs))
+            # other business clients on the same phone system — their own list
+            try:
+                cu.execute('SELECT uniqueid, business_name FROM business_missed_calls '
+                           'WHERE uniqueid IN (%s)' % um, tuple(uniqs))
+                out['business'] = [{'uniqueid': r[0], 'business_name': r[1]} for r in cu.fetchall()]
+            except Exception:
+                pass
+            # Shop As Go has its own call table and its own callback queue
+            try:
+                cu.execute('SELECT uniqueid FROM shopasgo_cdr WHERE uniqueid IN (%s)' % um, tuple(uniqs))
+                out['business'] += [{'uniqueid': r[0], 'business_name': 'Shop As Go'} for r in cu.fetchall()]
+            except Exception:
+                pass
+            # which agent the ProClick callback job rang for each missed call
+            try:
+                cu.execute("SELECT uid, agent FROM jobs_log WHERE uid IN (%s) "
+                           "AND job IN ('missed-calls', 'callback')" % um, tuple(uniqs))
+                out['agents'] = {str(r[0]): str(r[1] or '') for r in cu.fetchall()}
+            except Exception:
+                out['agents'] = {}
+        return out
+    finally:
+        conn.close()
+
+
+def asterisk_answered_calls(numbers, since):
+    """Answered calls with these numbers since a time, from the phone system's
+    call log (table cdr — Asterisk logs ANSWERED calls only, so a row here
+    means somebody picked up). READ ONLY. Used to tell whether an automatic
+    callback was answered."""
+    nums = set()
+    for n in numbers:
+        if len(n) == 10:
+            nums.update([n, '1' + n, '+1' + n])
+    nums = list(nums)[:900]
+    if not nums:
+        return []
+    conn = _asterisk_connect()
+    try:
+        cu = conn.cursor()
+        marks = ','.join(['%s'] * len(nums))
+        last = None
+        for when_col in ('calldate', 'start'):
+            try:
+                cu.execute('SELECT * FROM cdr WHERE %s >= %%s AND (dst IN (%s) OR src IN (%s)) '
+                           'ORDER BY %s LIMIT 5000' % (when_col, marks, marks, when_col),
+                           tuple([since] + nums + nums))
+                cols = [d[0].lower() for d in cu.description]
+                out = []
+                for r in cu.fetchall():
+                    row = dict(zip(cols, r))
+                    row['_at'] = row.get(when_col)
+                    out.append(row)
+                return out
+            except Exception as e:
+                last = e
+        raise last
+    finally:
+        conn.close()
+
+
 def asterisk_set_status(extension, cms_status):
     """The same statement the old CMS runs on every clock change."""
     conn = _asterisk_connect()

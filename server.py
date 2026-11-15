@@ -10159,6 +10159,195 @@ def call_flow_route():
     return jsonify(out)
 
 
+def _cb_when(v):
+    return v.isoformat() if hasattr(v, 'isoformat') else (str(v) if v else None)
+
+
+def _cb_state(m):
+    """One row of the phone system's missed list (missed_calls), in words.
+
+    Read from the phone server's own scripts (Nov 15):
+    - resolved=1 is written the moment the callback STARTS DIALING (agent rung
+      first, then the customer), and also when the caller later gets through
+      on their own or an agent rings them by hand. Whether the customer picked
+      up the callback is NOT recorded here — so we say "dialed", not "reached".
+    - resolved=10 = missed outside callback hours; set back to 0 at 8:46 AM,
+      then the dialer works through them.
+    - combinedlist 2 = in the callback line, 4 = being dialed now (back to 2
+      after 5 minutes if it failed), 3 = held for later, 0 = the missed list
+      the dialer takes from, 1 = still waiting in the live queue.
+    - manager=1 = the Manager line, never called back automatically.
+    """
+    def num(k):
+        try:
+            return int(m.get(k) or 0)
+        except (TypeError, ValueError):
+            return 0
+    resolved, cl, tries = num('resolved'), num('combinedlist'), num('attempts')
+    cb_at, agent = _cb_when(m.get('callback')), str(m.get('cbagent') or '').strip()
+    if num('manager'):
+        return 'manager', 'Manager line — for the manager, not called back automatically', None
+    if resolved == 1:
+        if cb_at:
+            who = (' by ext ' + agent) if agent.isdigit() else ''
+            return 'dialed', 'callback dialed' + who, cb_at
+        return 'through', 'got through to us later', None
+    if resolved == 10 or cl in (3, 10):
+        return 'later', 'missed after hours — callbacks start 8:46 AM', None
+    if cl == 4:
+        return 'calling', 'being called back right now', None
+    if cl == 2 and tries:
+        return 'retry', 'called back %d×, no answer yet — will try again' % tries, None
+    if cl == 1:
+        return 'waiting', 'still waiting in the queue', None
+    return 'waiting', 'waiting for the automatic callback', None
+
+
+def _add_callback_status(out, hours):
+    """Says, for each missed call, what the phone system did about it, and
+    counts each person once (their newest missed call decides).
+
+    The CMS only knows whether the caller later got through on their own; the
+    phone system's own lists say whether the automatic callback dialed them,
+    is about to, or never will (Manager line). Read only."""
+    import cms_write
+    calls = out.get('calls') or []
+    if not cms_write.asterisk_configured():
+        out['callback_error'] = 'The phone system database is not set up on this server.'
+        return
+    digits = lambda v: ''.join(ch for ch in str(v or '') if ch.isdigit())[-10:]
+    uniqs = [c.get('uniq') or '' for c in calls]
+    nums = [digits(c.get('phone')) for c in calls]
+    try:
+        key = (tuple(sorted(set(uniqs))), tuple(sorted(set(nums))))
+        hit = _CB_CACHE.get('last')
+        if hit and hit[1] == key and time.time() - hit[0] < 30:   # the Live badge asks often
+            got = hit[2]
+        else:
+            got = cms_write.asterisk_missed_list(uniqs, nums)
+            _CB_CACHE['last'] = (time.time(), key, got)
+    except Exception as e:
+        out['callback_error'] = "Couldn't read the phone system's callback list: " + str(e)[:160]
+        return
+    by_uniq, by_num = {}, {}
+    for m in got['proclick']:                        # newest first
+        u = str(m.get('uniqueid') or '')
+        if u:
+            by_uniq.setdefault(u, m)
+        d = digits(m.get('src'))
+        if len(d) == 10:
+            by_num.setdefault(d, m)
+    biz = {str(b['uniqueid']): b.get('business_name') or 'another business' for b in got['business']}
+    for c in calls:
+        u, d = c.get('uniq') or '', digits(c.get('phone'))
+        if u in biz:
+            c['cb'] = {'state': 'business', 'text': 'missed call for ' + str(biz[u])}
+            continue
+        # the newest record for this caller is their current state; the call's
+        # own record is used when the number can't be matched
+        m = (by_num.get(d) if len(d) == 10 else None) or by_uniq.get(u)
+        if m is None:
+            c['cb'] = {'state': 'gone', 'text': "no longer on the phone system's list"}
+        else:
+            if not str(m.get('cbagent') or '').strip().isdigit():
+                ag = (got.get('agents') or {}).get(str(m.get('uniqueid') or ''), '')
+                if ag.isdigit():
+                    m = dict(m, cbagent=ag)
+            st, text, when = _cb_state(m)
+            c['cb'] = {'state': st, 'text': text, 'when': when,
+                       'agent': str(m.get('cbagent') or '').strip()}
+    _add_callback_answered(calls, out, digits)
+    people = {}
+    for c in calls:
+        if c.get('resolved_by'):
+            continue
+        d = digits(c.get('phone')) or str(c.get('call_id'))
+        people.setdefault(d, (c.get('cb') or {}).get('state', 'gone'))
+    n = lambda *states: sum(1 for v in people.values() if v in states)
+    out['callback'] = {
+        'people': n('waiting', 'calling', 'retry', 'later', 'dialed', 'answered', 'noanswer', 'through', 'manager', 'gone'),
+        'in_line': n('waiting', 'calling', 'retry'),
+        'later': n('later'),
+        'dialed': n('dialed'),
+        'answered': n('answered'),
+        'noanswer': n('noanswer'),
+        'through': n('through'),
+        'manager': n('manager'),
+        'gone': n('gone'),
+        'business': n('business'),
+        'rows_read': len(got['proclick']),
+    }
+
+
+def _add_callback_answered(calls, out, digits):
+    """For callbacks the phone system dialed: did the customer pick up?
+
+    The callback job marks a call done the moment it starts dialing, so on its
+    own "dialed" can't tell an answered callback from one that rang out. The
+    phone system's call log (cdr) keeps only ANSWERED calls, so an answered
+    call with that number at or after the callback time means they talked."""
+    import cms_write, datetime as _dt
+    dialed = [c for c in calls if (c.get('cb') or {}).get('state') == 'dialed' and c['cb'].get('when')]
+    if not dialed:
+        return
+    def parse(v):
+        try:
+            return _dt.datetime.fromisoformat(str(v)[:19])
+        except Exception:
+            return None
+    times = [t for t in (parse(c['cb']['when']) for c in dialed) if t]
+    if not times:
+        return
+    since = min(times) - _dt.timedelta(minutes=2)
+    try:
+        key = ('cdr', tuple(sorted({digits(c.get('phone')) for c in dialed})), since)
+        hit = _CB_CACHE.get('cdr')
+        if hit and hit[1] == key and time.time() - hit[0] < 30:
+            rows = hit[2]
+        else:
+            rows = cms_write.asterisk_answered_calls([digits(c.get('phone')) for c in dialed], since)
+            _CB_CACHE['cdr'] = (time.time(), key, rows)
+    except Exception as e:
+        out['answered_error'] = "Couldn't read the phone system's call log to see if callbacks were answered: " + str(e)[:140]
+        return
+    # The call log holds every company on the phone system (Shop As Go and the
+    # business clients too), so a later answered call with the same number is
+    # NOT proof on its own: the same person may have rung another business.
+    # Count it only if it started within 30 minutes of the callback and, when
+    # we know which agent the callback rang, that agent's line was on it.
+    import re as _re
+    by_num = {}
+    for r in rows:
+        talk = int(r.get('billsec') or 0)
+        disp = str(r.get('disposition') or 'ANSWERED').upper()
+        if talk < 5 or 'ANSWER' not in disp:
+            continue
+        at = r.get('_at')
+        lines = ' '.join(str(r.get(k) or '') for k in ('channel', 'dstchannel', 'src', 'dst', 'lastdata'))
+        for k in ('dst', 'src'):
+            d = digits(r.get(k))
+            if len(d) == 10:
+                by_num.setdefault(d, []).append((at, talk, lines))
+    def on_agent_line(lines, agent):
+        return (not agent.isdigit()) or bool(_re.search(r'(^|[/\s])' + agent + r'([-@\s]|$)', lines))
+    for c in dialed:
+        t = parse(c['cb']['when'])
+        agent = c['cb'].get('agent') or ''
+        hits = [(at, talk) for at, talk, lines in by_num.get(digits(c.get('phone')), [])
+                if t and hasattr(at, 'year')
+                and t - _dt.timedelta(minutes=2) <= at <= t + _dt.timedelta(minutes=30)
+                and on_agent_line(lines, agent)]
+        if hits:
+            at, talk = hits[0]
+            c['cb'].update(state='answered',
+                           text='callback answered \u00b7 talked %d:%02d' % (talk // 60, talk % 60))
+        else:
+            c['cb'].update(state='noanswer', text=c['cb']['text'] + ' \u2014 no answer')
+
+
+_CB_CACHE = {}
+
+
 @app.route('/api/missed-calls', methods=['GET'])
 @portal_or_manager
 def missed_calls_route():
@@ -10174,6 +10363,10 @@ def missed_calls_route():
         # anything the phone system told us in the last few minutes, before the
         # CMS has written it
         out['just_now'] = _LIVE_CALLS.get('missed', [])[:10]
+        try:
+            _add_callback_status(out, hours)
+        except Exception as e:
+            out['callback_error'] = 'Callback status: ' + str(e)[:160]
         return jsonify(out)
     except Exception as e:
         return jsonify({'error': str(e)[:200], 'calls': []}), 400

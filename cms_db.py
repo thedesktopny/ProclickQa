@@ -2643,7 +2643,7 @@ def missed_calls(hours=48, include_resolved=False, limit=200):
 
     cu.execute("""SELECT TOP %d c.Id, c.Phone, c.CallersName, c.Started, c.DialStatus,
                          c.CalledExtension, c.MissedResolvedId, c.RequestedCallBack,
-                         c.SpecificExten
+                         c.SpecificExten, c.AstriskUniqId
                   FROM PhoneCallsLog c WHERE %s
                   ORDER BY c.Started DESC""" % (int(limit), where))
     n = lambda v: int(v or 0)
@@ -2656,6 +2656,7 @@ def missed_calls(hours=48, include_resolved=False, limit=200):
                     'when': _plain(r[3]), 'status': r[4], 'called': r[5],
                     'resolved_by': n(r[6]) or None,
                     'requested_callback': bool(r[7]), 'asked_for': r[8],
+                    'uniq': str(r[9] or ''),
                     'account_id': None, 'account': None, 'minutes_left': 0})
 
     last10 = {}

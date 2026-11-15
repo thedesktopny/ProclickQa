@@ -2162,7 +2162,7 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
     <div id="mc-head" class="payhead" style="padding-top:0;"></div>
     <div class="paygrid" style="margin-top:14px;">
       <div class="card" style="padding:16px 20px;">
-        <h2 class="payh">Nobody reached them</h2>
+        <h2 class="payh">Missed callers</h2>
         <div class="payhint">Newest first. Click a caller to open their account, or to
           find them if they are not a customer yet.</div>
         <div id="mc-list"></div>
@@ -10410,6 +10410,9 @@ function stRenderGrid(){
   document.getElementById('st-grid').innerHTML = grid;
 }
 
+const MC_CB_COLOUR = { dialed:'var(--green)', through:'var(--green)', calling:'var(--yellow)',
+  retry:'var(--yellow)', waiting:'var(--yellow)', later:'var(--text2)', manager:'var(--red)',
+  gone:'var(--text3)', business:'var(--text3)', answered:'var(--green)', noanswer:'var(--red)' };
 async function loadMissed(){
   const list = document.getElementById('mc-list');
   list.innerHTML = '<div style="color:var(--text3);font-size:12.5px;">Loading…</div>';
@@ -10421,13 +10424,33 @@ async function loadMissed(){
 
     const stat = (lab,val,sub,cls) => `<div class="paycard"><div class="lab">${lab}</div>
       <div class="payfig paynum ${cls||''}">${val}</div><div class="sub">${sub||'&nbsp;'}</div></div>`;
-    document.getElementById('mc-head').innerHTML =
-      stat('Never reached us', r.unresolved,
-           'still waiting to be called back', r.unresolved ? 'neg' : 'pos') +
+    // What the phone system's automatic callback has done, counted per person.
+    // Without it we only know whether they got through again on their own.
+    const cb = r.callback;
+    const known = cb && !r.answered_error;   // could we tell answered from not?
+    document.getElementById('mc-head').innerHTML = cb ? (
+      (known
+        ? stat('Callback not answered', cb.noanswer,
+               'the callback rang, nobody picked up \u2014 call them', cb.noanswer ? 'neg' : 'pos')
+        : stat('Callback dialed', cb.dialed, 'couldn\'t check if they answered', '')) +
+      stat('Waiting for callback', cb.in_line + cb.later,
+           cb.later ? `${cb.later} missed after hours \u00b7 start 8:46 AM` : 'the automatic callback will ring them',
+           (cb.in_line + cb.later) ? 'warn' : '') +
+      (known ? stat('Callback answered', cb.answered, 'they talked to an agent', 'pos') : '') +
+      stat('Manager line', cb.manager, 'for the manager \u00b7 not called back automatically',
+           cb.manager ? 'neg' : '') +
+      (known ? '' : stat('Missed', r.missed, `of ${r.total_inbound} calls in`, '')) +
+      `<div style="grid-column:1/-1;font-size:11.5px;color:var(--text3);">Each person counted once \u00b7
+        ${r.missed} missed of ${r.total_inbound} calls in (${r.missed_rate}%)${cb.through ? ` \u00b7 ${cb.through} got through to us later` : ''}${cb.gone ? ` \u00b7 ${cb.gone} no longer on the phone system's list` : ''}${cb.business ? ` \u00b7 ${cb.business} were for other businesses (not counted)` : ''}</div>` +
+      (r.answered_error ? `<div style="grid-column:1/-1;font-size:11.5px;color:var(--yellow);">${esc(r.answered_error)}</div>` : '')
+    ) : (
+      stat('No answered call since', r.unresolved,
+           'they haven\'t got through to an agent since', r.unresolved ? 'neg' : 'pos') +
       stat('Missed', r.missed, `of ${r.total_inbound} calls in`, r.missed ? 'warn' : '') +
       stat('Missed rate', r.missed_rate + '%', 'of everything inbound',
            r.missed_rate > 15 ? 'neg' : r.missed_rate > 7 ? 'warn' : 'pos') +
-      stat('Just now', (r.just_now||[]).length, 'reported in the last minutes', '');
+      stat('Just now', (r.just_now||[]).length, 'reported in the last minutes', '')
+    ) + (r.callback_error ? `<div style="grid-column:1/-1;font-size:11.5px;color:var(--yellow);">${esc(r.callback_error)}</div>` : '');
 
     const ago = d => {
       if(!d) return '';
@@ -10439,13 +10462,15 @@ async function loadMissed(){
     list.innerHTML = (r.calls||[]).map(c=>`
       <div class="payrow" ${c.account_id ? `onclick="showPage('customers');cuOpen(${c.account_id})"` : 'style="cursor:default"'}>
         <span style="width:8px;height:8px;border-radius:50%;flex:none;
-              background:${c.resolved_by ? 'var(--text3)' : 'var(--red)'};"></span>
+              background:${c.resolved_by ? 'var(--text3)' : (c.cb ? MC_CB_COLOUR[c.cb.state] : 'var(--red)')};"></span>
         <div class="nm">${esc(c.account || c.caller_name || c.phone || 'unknown')}
           <div class="mt">${esc(c.phone)||''}${c.account ? '' : ' · not a customer'}
             ${c.called ? ' · called ' + esc(c.called) : ''}
             ${c.status ? ' · ' + esc(c.status) : ''}
             ${c.requested_callback ? ' · <span style="color:var(--yellow)">asked for a call back</span>' : ''}
-            ${c.resolved_by ? ' · <span style="color:var(--green)">reached us later</span>' : ''}</div></div>
+            ${c.resolved_by ? ' · <span style="color:var(--green)">reached us later</span>' : ''}
+            ${(!c.resolved_by && c.cb) ? ' · <span style="color:' + MC_CB_COLOUR[c.cb.state] + '">'
+                + esc(c.cb.text) + (c.cb.when ? ' ' + ago(c.cb.when) : '') + '</span>' : ''}</div></div>
         <div style="text-align:right;font-size:11.5px;color:var(--text3);white-space:nowrap;">
           ${ago(c.when)}${c.minutes_left ? `<div>${c.minutes_left} min left</div>` : ''}</div>
       </div>`).join('')
@@ -10471,7 +10496,9 @@ async function loadMissedCount(){
   try{
     const r = await API.get('/api/missed-calls?hours=24');
     const el = document.getElementById('lv-missed-badge');
-    if(el) el.textContent = r.unresolved ? r.unresolved + ' waiting' : '';
+    const cb = r.callback;
+    const n = cb ? (r.answered_error ? cb.in_line + cb.later : cb.noanswer) : r.unresolved;
+    if(el) el.textContent = n ? n + (cb && !r.answered_error ? ' to call back' : ' waiting') : '';
   }catch(e){}
 }
 
