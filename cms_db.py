@@ -3453,6 +3453,51 @@ def personal_info(info_id):
             'added': _plain(r[4]), 'changed': _plain(r[5])}
 
 
+def _work_activity(conn, agents):
+    """What each agent is doing between calls, the way the old CMS words it:
+    working on an account right now (notes not submitted yet), or which came
+    last — the last finished work or the last call. Sets a['activity'] =
+    {'kind': 'working'|'last_work'|'last_call', 'at': time, 'with': who}.
+    The newest AccountWork row per agent (last 16 hours) decides: no EndTime
+    means they are still working on it."""
+    import datetime as _d
+    ids = [int(a['employee_id']) for a in agents if a.get('employee_id')]
+    work = {}
+    if ids:
+        try:
+            cu = conn.cursor()
+            cu.execute("""SELECT w.EmployeeId, w.StartTime, w.EndTime,
+                                 a.FirstName, a.LastName, a.Phone
+                          FROM AccountWork w
+                          JOIN (SELECT EmployeeId, MAX(Id) AS mid FROM AccountWork
+                                WHERE EmployeeId IN (%s)
+                                  AND StartTime >= DATEADD(hour, -16, GETDATE())
+                                GROUP BY EmployeeId) m ON m.mid = w.Id
+                          LEFT JOIN Account a ON a.Id = w.AccountId"""
+                       % ','.join(str(i) for i in ids))
+            for eid, st, en, fn, ln, ph in cu.fetchall():
+                who = ('%s %s' % (fn or '', ln or '')).strip() or (ph or '')
+                work[int(eid)] = (st, en, who, ph)
+        except Exception as e:
+            print('[live] work activity not read: ' + str(e)[:120])
+    def parse(v):
+        try:
+            return _d.datetime.fromisoformat(str(v)[:19]) if v else None
+        except Exception:
+            return None
+    for a in agents:
+        w = work.get(int(a.get('employee_id') or 0))
+        call_at = parse(a.get('last_call_at'))
+        act = None
+        if w and w[1] is None:
+            act = {'kind': 'working', 'at': _plain(w[0]), 'with': w[2]}
+        elif w and w[1] is not None and (call_at is None or w[1] >= call_at):
+            act = {'kind': 'last_work', 'at': _plain(w[1]), 'with': w[2]}
+        elif a.get('last_call_at'):
+            act = {'kind': 'last_call', 'at': a.get('last_call_at'), 'with': a.get('last_call_phone')}
+        a['activity'] = act
+
+
 def _dnd_now(conn):
     """Who is on Do Not Disturb right now.
 
@@ -3569,15 +3614,18 @@ def _live_snapshot(feed_limit=70, hours=6):
         'phone': (r[6] or ''), 'phone_since': _plain(r[7]), 'minutes_on_call': n(r[8]),
         'calls_in': n(r[9]), 'calls_out': n(r[10]),
         'last_call_phone': r[11], 'last_call_at': _plain(r[12]),
+        'last_call_secs': (int(r[13]) if r[13] is not None else None),
     } for r in rows("""SELECT EmployeeId, EmployeeName, Extension, ClockerStatus, ClockerTime,
                               BreakMinutes, SipPhoneStatus, SipPhoneTime, MinutesOnCall,
-                              NumCallsIn, NumCallsOut, LastCallPhone, LastCallStartAt
+                              NumCallsIn, NumCallsOut, LastCallPhone, LastCallStartAt,
+                              DATEDIFF(second, LastCallStartAt, GETDATE())
                        FROM Tmp_LiveEmployeesStatusFinal""")]
 
     # Everyone on a break: how long they said it would be and how long it has
     # been, straight from their own clock rows and the CMS's clock — so the
     # floor can line them up by who is back soonest, whatever time zone the
     # viewer's computer is in.
+    _work_activity(conn, agents)
     on_break = [int(a['employee_id']) for a in agents if a.get('on_break') and a.get('employee_id')]
     if on_break:
         try:
@@ -3677,7 +3725,8 @@ def agents_live():
     conn = _connect(); cu = conn.cursor()
     cu.execute("""SELECT EmployeeId, EmployeeName, Extension, ClockerStatus, ClockerTime,
                          BreakMinutes, SipPhoneStatus, SipPhoneTime, MinutesOnCall,
-                         NumCallsIn, NumCallsOut, LastCallPhone, LastCallStartAt
+                         NumCallsIn, NumCallsOut, LastCallPhone, LastCallStartAt,
+                              DATEDIFF(second, LastCallStartAt, GETDATE())
                   FROM Tmp_LiveEmployeesStatusFinal ORDER BY EmployeeName""")
     out = []
     while True:
@@ -3695,6 +3744,7 @@ def agents_live():
             'break_minutes': n(r[5]), 'phone': (r[6] or ''), 'phone_since': _plain(r[7]),
             'minutes_on_call': n(r[8]), 'calls_in': n(r[9]), 'calls_out': n(r[10]),
             'last_call_phone': r[11], 'last_call_at': _plain(r[12]),
+        'last_call_secs': (int(r[13]) if r[13] is not None else None),
         })
     dnd = _dnd_now(conn)
     for a in out:
@@ -3702,6 +3752,7 @@ def agents_live():
         a['dnd'] = bool(d) or a.get('cms_dnd', False)
         a['dnd_since'] = d['since'] if d else None
         a['dnd_note'] = (d.get('note') if d else None)
+    _work_activity(conn, out)
     conn.close()
     return out
 

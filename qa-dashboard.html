@@ -10941,6 +10941,22 @@ function lvRenderToday(){
    "Unavailable" in red. It comes straight from the phone status the CMS keeps
    (SipPhoneStatus), so it means calls cannot reach them right now. */
 const PHONE_OFF_STATES = ['UNAVAILABLE', 'INVALID', 'UNKNOWN', 'UNREACHABLE'];
+/* The agent's line in words, the way the old CMS showed it:
+   on a call  → "on call since 3 min ago with 718…"
+   after call, notes not submitted → "working on account since 2 min ago — Name"
+   otherwise  → whichever came last: "last work with Name finished 1 min ago"
+                or "last call started 24 min ago (718…)" */
+function agentActivity(a, agoFn){
+  const busy = (a.phone||'').toUpperCase()==='IN_USE';
+  if(busy) return 'on call' + (a.phone_since ? ' since ' + agoFn(a.phone_since) : '')
+                 + (a.last_call_phone ? ' with ' + esc(a.last_call_phone) : '');
+  const w = a.activity;
+  if(!w) return '';
+  if(w.kind === 'working') return '<span style="color:var(--accent)">working on account since ' + agoFn(w.at)
+                                  + (w.with ? ' — ' + esc(w.with) : '') + '</span>';
+  if(w.kind === 'last_work') return 'last work' + (w.with ? ' with ' + esc(w.with) : '') + ' finished ' + agoFn(w.at);
+  return 'last call started ' + agoFn(w.at) + (w.with ? ' (' + esc(w.with) + ')' : '');
+}
 function phoneNotLoggedIn(a){
   return !!a.clocked_in && PHONE_OFF_STATES.includes(String(a.phone||'').toUpperCase());
 }
@@ -11019,7 +11035,7 @@ function lvRenderFloor(){
         ${a.break_minutes?`<div><span class="k">break time today:</span> ${a.break_minutes} min</div>`:''}
         <div><span class="k">calls today:</span> ${a.calls_in} in · ${a.calls_out} out</div>
         ${a.minutes_on_call?`<div><span class="k">time on calls:</span> ${a.minutes_on_call} min</div>`:''}
-        ${a.last_call_at?`<div><span class="k">last call:</span> ${lvAgo(a.last_call_at)}${a.last_call_phone?' · '+a.last_call_phone:''}</div>`:'<div class="k">no calls yet today</div>'}
+        ${(()=>{ const t = agentActivity(a, lvAgo); return t ? `<div><span class="k">doing:</span> ${t}</div>` : '<div class="k">no calls yet today</div>'; })()}
         ${''/* "Reset phone" removed Nov 15: it wrote the phone server's ps_auths directly — Igor asked us not to */}
         <div style="margin-top:6px;color:var(--accent);">click for their full day →</div>
 
@@ -13656,9 +13672,8 @@ async function acLoadLive(){
         return `<div class="payrow ${acSelected===a.employee_id?'sel':''}" onclick="acOpen(${a.employee_id})">
           <span style="width:9px;height:9px;border-radius:50%;background:${dot};flex:none;"></span>
           <div class="nm">${esc(a.name)} <span style="color:var(--text3);font-size:11px;">ext ${a.extension||'—'}</span>
-            <div class="mt">${state}${a.clocked_in&&a.clocker_since?' since '+new Date(a.clocker_since).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}):''}
-              ${a.last_call_at?' · last call '+ago(a.last_call_at):''}
-              ${a.last_call_phone?' ('+a.last_call_phone+')':''}</div></div>
+            <div class="mt">${busy ? '' : state + (a.clocked_in&&a.clocker_since?' since '+new Date(a.clocker_since).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}):'')}
+              ${(()=>{ const t = agentActivity(a, ago); return t ? (busy ? '' : ' · ') + t : ''; })()}</div></div>
           ${canOut && a.clocked_in ? `<button class="ac-out" title="End this agent's shift"
               onclick="event.stopPropagation();acLogOutAsk(${a.employee_id}, '${esc(a.name).replace(/'/g,"&#39;")}', ${busy?1:0})">Log out</button>` : ''}
           <div style="text-align:right;font-size:11.5px;color:var(--text3);">
