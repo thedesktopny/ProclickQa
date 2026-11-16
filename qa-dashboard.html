@@ -10976,7 +10976,8 @@ function lvRenderFloor(){
     `${onShift} on shift · ${onCall} on a call · ${onShift-onCall-onDnd-onBreak-noPhone} free`
     + `${noPhone?` · ${noPhone} unavailable (phone not logged in)`:''}`
     + `${onDnd?` · ${onDnd} on do not disturb`:''}${onBreak?` · ${onBreak} on break`:''}`
-    + ` · ${list.length} agents in total`;
+    + ` · ${list.length} agents in total`
+    + (lvData && lvData.phone_status_error ? ` · ⚠ couldn't reach the phone system for live phone status (${lvData.phone_status_error})` : '');
 
   // Everyone on a break, together, the one due back soonest first — the
   // floor's rule is to wait for someone to come back before going yourself.

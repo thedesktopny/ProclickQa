@@ -11101,6 +11101,49 @@ def customer_texts_latest(account_id):
         return jsonify({'error': str(e)[:240]}), 400
 
 
+_AST_STATUS = {'at': 0.0, 'map': {}, 'error': None}
+_AST_GUARD = threading.Lock()
+
+
+def _asterisk_status_all():
+    """Every extension's live phone state, straight from the phone system —
+    Igor's API (Nov 16):  POST https://voice.myhellodesk.com/admin/api/agents
+    header api-key, body {"status":"all"} → [{"Agent":"506","asteriskStatus":"IN_USE"}, …]
+      IN_USE = busy / on a call · NOT_IN_USE = available · UNAVAILABLE = phone not registered
+    Key: PHONE_AGENTS_KEY, or PHONE_API_KEY (Igor's token we already use).
+    Asked at most every 3 seconds per worker; on failure the last answer is
+    kept for up to a minute, then we say we don't know rather than guess."""
+    now = time.time()
+    if now - _AST_STATUS['at'] < 3:
+        return _AST_STATUS['map']
+    with _AST_GUARD:
+        if time.time() - _AST_STATUS['at'] < 3:
+            return _AST_STATUS['map']
+        url = os.getenv('PHONE_AGENTS_URL', 'https://voice.myhellodesk.com/admin/api/agents').strip()
+        key = (os.getenv('PHONE_AGENTS_KEY') or os.getenv('PHONE_API_KEY') or '').strip()
+        try:
+            if not key:
+                raise RuntimeError('no PHONE_API_KEY set')
+            req = urllib.request.Request(url, data=json.dumps({'status': 'all'}).encode(),
+                                         headers={'api-key': key, 'Content-Type': 'application/json',
+                                                  'Accept': 'application/json'}, method='POST')
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                rows = json.loads(resp.read().decode('utf-8', 'replace') or '[]')
+            if isinstance(rows, dict):
+                rows = next((rows[k] for k in ('agents', 'data', 'items') if isinstance(rows.get(k), list)), [])
+            m = {}
+            for r in rows:
+                if isinstance(r, dict) and r.get('Agent') is not None:
+                    m[str(r.get('Agent')).strip()] = str(r.get('asteriskStatus') or '').strip().upper()
+            _AST_STATUS.update(at=time.time(), map=m, error=None, ok_at=time.time())
+        except Exception as e:
+            _AST_STATUS['error'] = str(e)[:160]
+            _AST_STATUS['at'] = time.time()
+            if time.time() - _AST_STATUS.get('ok_at', 0) > 60:
+                _AST_STATUS['map'] = {}
+        return _AST_STATUS['map']
+
+
 def _overlay_calls(agents):
     """Correct each agent's phone state from the call records themselves.
 
@@ -11113,8 +11156,6 @@ def _overlay_calls(agents):
     extension means that agent IS on that call, so it wins over the table.
     Nothing here guesses from earlier calls: no open call, no change."""
     calls = dict(_LIVE_CALLS.get('by_ext') or {})
-    if not calls:
-        return agents
     try:
         from zoneinfo import ZoneInfo
         now_ny = datetime.now(ZoneInfo('America/New_York')).replace(tzinfo=None)
@@ -11143,6 +11184,26 @@ def _overlay_calls(agents):
             if c.get('phone'):
                 a['last_call_phone'] = c.get('phone')
         a['phone_source'] = 'call records'
+    # The phone system's own word on each phone beats both the CMS table and
+    # the call records: IN_USE / NOT_IN_USE / UNAVAILABLE, exactly as it sees it.
+    try:
+        live = _asterisk_status_all()
+    except Exception:
+        live = {}
+    for a in agents or []:
+        st = live.get(str(a.get('extension') or '').strip())
+        if not st:
+            continue
+        if 'phone_table' not in a:
+            a['phone_table'] = a.get('phone')
+        if st != str(a.get('phone') or '').upper():
+            if st == 'IN_USE':
+                c = calls.get(str(a.get('extension') or '').strip())
+                a['phone_since'] = (c and (c.get('picked_up') or c.get('started'))) or None
+            elif st != 'RINGING':
+                a['phone_since'] = None      # the table's time belonged to its wrong state
+        a['phone'] = st
+        a['phone_source'] = 'phone system'
     return agents
 
 
@@ -11157,6 +11218,7 @@ def live_route():
         # never change the shared cached copy in place — work on our own
         out = dict(out)
         out['agents'] = _overlay_calls([dict(a) for a in (out.get('agents') or [])])
+        out['phone_status_error'] = _AST_STATUS.get('error')
 
         # Money is for admins. Agents have no reason to see the day's takings,
         # and hiding the card in the page would not do — the figure travels in
@@ -11193,6 +11255,7 @@ def agents_live_route():
         out = dict(_shared('agents_live', 5, lambda: {
             'agents': cms_db.agents_live(), 'as_of': datetime.utcnow().isoformat() + 'Z'}))
         out['agents'] = _overlay_calls([dict(a) for a in (out.get('agents') or [])])
+        out['phone_status_error'] = _AST_STATUS.get('error')
         return jsonify(out)
     except Exception as e:
         return jsonify({'error': str(e)[:240]}), 400
