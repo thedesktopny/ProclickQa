@@ -10056,7 +10056,7 @@ def waiting_why_route():
     if not _can_hear_recordings():
         return jsonify({'error': 'For team leaders, QA and managers.'}), 403
     try:
-        out = _shared('waiting_why', 5, cms_db.waiting_why)
+        out = _shared('waiting_why', 5, lambda: cms_db.waiting_why(_overlay_calls))
     except Exception as e:
         return jsonify({'error': str(e)[:200], 'waiting': []}), 400
     # Does the phone system itself still show the caller? Only worth saying when
@@ -11101,6 +11101,51 @@ def customer_texts_latest(account_id):
         return jsonify({'error': str(e)[:240]}), 400
 
 
+def _overlay_calls(agents):
+    """Correct each agent's phone state from the call records themselves.
+
+    The floor's phone state comes from the CMS table Tmp_LiveEmployeesStatusFinal,
+    and that column lags: agents taking call after call showed "free" (and once
+    "unavailable") for long stretches (Nov 15-16). The phone system writes a
+    PhoneCallsLog row when a call starts and fills Ended when it finishes, and
+    tells us directly as it rings and connects — the same records the caller
+    popup runs on (_LIVE_CALLS, refreshed every 2 seconds). An open call on an
+    extension means that agent IS on that call, so it wins over the table.
+    Nothing here guesses from earlier calls: no open call, no change."""
+    calls = dict(_LIVE_CALLS.get('by_ext') or {})
+    if not calls:
+        return agents
+    try:
+        from zoneinfo import ZoneInfo
+        now_ny = datetime.now(ZoneInfo('America/New_York')).replace(tzinfo=None)
+    except Exception:
+        now_ny = datetime.utcnow() - timedelta(hours=5)
+    for a in agents or []:
+        c = calls.get(str(a.get('extension') or '').strip())
+        if not c:
+            continue
+        # a call row the CMS never closed must not keep someone "on a call"
+        # for hours: past 90 minutes, believe it only if the table agrees
+        try:
+            started = datetime.fromisoformat(str(c.get('started') or '')[:19])
+            stale = (now_ny - started).total_seconds() > 90 * 60
+        except Exception:
+            stale = False
+        if stale and str(a.get('phone') or '').upper() != 'IN_USE':
+            continue
+        a['phone_table'] = a.get('phone')          # what the CMS table said, kept for checking
+        if c.get('ringing'):
+            if str(a.get('phone') or '').upper() not in ('IN_USE', 'BUSY', 'ONHOLD'):
+                a['phone'] = 'RINGING'
+        else:
+            a['phone'] = 'IN_USE'
+            a['phone_since'] = c.get('picked_up') or c.get('started') or a.get('phone_since')
+            if c.get('phone'):
+                a['last_call_phone'] = c.get('phone')
+        a['phone_source'] = 'call records'
+    return agents
+
+
 @app.route('/api/live', methods=['GET'])
 @portal_or_manager
 def live_route():
@@ -11109,6 +11154,9 @@ def live_route():
     try:
         out = _shared('live', 5, lambda: dict(cms_db.live_snapshot(),
                                               as_of=datetime.utcnow().isoformat() + 'Z'))
+        # never change the shared cached copy in place — work on our own
+        out = dict(out)
+        out['agents'] = _overlay_calls([dict(a) for a in (out.get('agents') or [])])
 
         # Money is for admins. Agents have no reason to see the day's takings,
         # and hiding the card in the page would not do — the figure travels in
@@ -11142,8 +11190,10 @@ def agents_live_route():
     """Who is on shift and on the phone right now."""
     import cms_db
     try:
-        return jsonify(_shared('agents_live', 5, lambda: {
+        out = dict(_shared('agents_live', 5, lambda: {
             'agents': cms_db.agents_live(), 'as_of': datetime.utcnow().isoformat() + 'Z'}))
+        out['agents'] = _overlay_calls([dict(a) for a in (out.get('agents') or [])])
+        return jsonify(out)
     except Exception as e:
         return jsonify({'error': str(e)[:240]}), 400
 

@@ -4877,7 +4877,7 @@ def _os_env(k, default=''):
     return os.getenv(k, default)
 
 
-def waiting_why():
+def waiting_why(overlay=None):
     """For each caller holding right now: which line they dialled, who the
     phone system already tried, and who is enrolled to answer that line and
     what each of those people is doing. Answers "why is someone waiting when
@@ -4930,6 +4930,8 @@ def waiting_why():
 
     try:
         live = agents_live()
+        if overlay:
+            overlay(live)        # who is really on a call, from the call records
     except Exception as e:
         live = []
         w['live_error'] = str(e)[:160]
