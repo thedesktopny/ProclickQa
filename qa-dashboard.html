@@ -7336,7 +7336,7 @@ function slogWhat(e){
     case 'static_on':    return `Made static${c ? ' on ' + c : ''}`;
     case 'static_off':   return `Static removed`;
     case 'send_lost':    return `<b style="color:var(--red)">Text to ${to} was never sent</b>`;
-    case 'texting_on':   return `Texting turned on for customer #${e.account_id}${d.bought_first ? ' (number bought first)' : ''}`;
+    case 'texting_on':   return `Texting turned on for customer #${e.account_id}${d.bought_first ? ' (number bought first)' : ''}${d.fallback_from ? ` <span style="color:var(--yellow)">· no ${esc(d.fallback_from)} number available, gave 845</span>` : ''}`;
     case 'texting_off':  return `Texting turned off for customer #${e.account_id}${d.released ? ' — number released' : ''}`;
     case 'bought':       return `Bought a new number`;
     case 'pool_removed': return `Taken out of the spare pool`;

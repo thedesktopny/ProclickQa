@@ -827,7 +827,11 @@ def send_text(account_id, message, who, media_url=None, to=None):
     try:
         plan = campaign_plan(our_number)
         if plan['step'] in ('join', 'swap'):
-            apply_campaign_plan(our_number, plan)
+            # apply works the plan out again inside the lock and returns what
+            # it ACTUALLY did. Labelling the send with the first guess showed
+            # "swapped onto CSMPGMO" when nothing was swapped (another send a
+            # second earlier had already put the number on CM4D4PP, Nov 15).
+            plan = apply_campaign_plan(our_number, plan) or plan
         out['campaign'] = {k: plan.get(k) for k in ('step', 'tcr', 'move_out', 'meaning')}
         if plan['step'] in ('missing', 'stuck'):
             out['campaign_warning'] = plan['meaning']
@@ -3710,17 +3714,47 @@ def activate_texting(account_id, who, npa=None):
     out = {'table': 'Account', 'action': 'activate_texting', 'row_id': account_id,
            'dry_run': False, 'values': {'area_code': npa}}
     bought_first = None
+    fallback = None
     num = _take_spare(npa)
     if not num:
-        o = order_number(npa, who)
-        if not o.get('ok'):
-            raise WriteRefused('No spare %s number, and buying one failed: %s'
-                               % (npa, o.get('error') or '?'))
-        bought_first = o['number']
-        num = _take_spare(npa)
-        if not num:
-            raise WriteRefused('Bought %s but could not take it from the pool. '
-                               'Look at SMS Numbers.' % bought_first)
+        try:
+            o = order_number(npa, who)
+        except WriteRefused:
+            raise
+        except Exception as e:
+            o = {'ok': False, 'error': str(e)[:200]}
+        if o.get('ok'):
+            bought_first = o['number']
+            num = _take_spare(npa)
+            if not num:
+                raise WriteRefused('Bought %s but could not take it from the pool. '
+                                   'Look at SMS Numbers.' % bought_first)
+        else:
+            # David, Nov 16: if the customer's own area code can't be had,
+            # give an 845 number instead of leaving them without texting.
+            # A spare 845 from the pool first; buy one only if there is none.
+            fb = ''.join(ch for ch in os.getenv('SMS_FALLBACK_AREA', '845') if ch.isdigit())[:3] or '845'
+            if fb == npa:
+                raise WriteRefused('No spare %s number, and buying one failed: %s'
+                                   % (npa, o.get('error') or '?'))
+            num = _take_spare(fb)
+            if not num:
+                try:
+                    o2 = order_number(fb, who)
+                except WriteRefused:
+                    raise
+                except Exception as e:
+                    o2 = {'ok': False, 'error': str(e)[:200]}
+                if not o2.get('ok'):
+                    raise WriteRefused('No spare %s number and buying one failed (%s); an %s number '
+                                       'could not be had either (%s).'
+                                       % (npa, o.get('error') or '?', fb, o2.get('error') or '?'))
+                bought_first = o2['number']
+                num = _take_spare(fb)
+                if not num:
+                    raise WriteRefused('Bought %s but could not take it from the pool. '
+                                       'Look at SMS Numbers.' % bought_first)
+            fallback = {'wanted': npa, 'used': fb, 'why': str(o.get('error') or '?')[:160]}
     conn = cms_db._connect()
     try:
         cu = conn.cursor()
@@ -3748,9 +3782,13 @@ def activate_texting(account_id, who, npa=None):
 
     out.update(ok=True, committed=True, number=num, bought_first=bought_first)
     out['values']['number'] = num
-    # top the pool back up, as the old CMS does every time
+    if fallback:
+        out['fallback'] = fallback
+        out['values']['fallback_from'] = fallback['wanted']
+    # top the pool back up, as the old CMS does every time — in the area code
+    # actually used (after a fallback, the wanted one would only fail again)
     try:
-        refill = order_number(npa, who)
+        refill = order_number(fallback['used'] if fallback else npa, who)
         out['refill'] = refill.get('number') if refill.get('ok') else None
         if not refill.get('ok'):
             out['refill_warning'] = 'Could not buy a replacement spare: ' + str(refill.get('error'))[:160]
@@ -3758,6 +3796,9 @@ def activate_texting(account_id, who, npa=None):
         out['refill'] = None
         out['refill_warning'] = 'Could not buy a replacement spare: ' + str(e)[:160]
     out['meaning'] = '%s can now text from %s.' % (name, num)
+    if fallback:
+        out['meaning'] += (' No %s number could be had (%s), so an %s number was given instead.'
+                           % (fallback['wanted'], fallback['why'][:100], fallback['used']))
     _log(who, out)
     return out
 
@@ -4416,6 +4457,7 @@ def _logged(kind, fn, number_of):
                       bool(out.get('ok')), who,
                       error=out.get('error'), bought_first=out.get('bought_first'),
                       refill=out.get('refill'), released=out.get('released'),
+                      fallback_from=(out.get('fallback') or {}).get('wanted'),
                       meaning=out.get('meaning'), reason=(out.get('values') or {}).get('reason'))
         sms_ctx(who=None, why=None)
         return out
