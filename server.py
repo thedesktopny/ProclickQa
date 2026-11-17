@@ -269,15 +269,241 @@ def is_processing_paused():
 # is thrown away and replaced. DB_REUSE=0 in the app settings turns it all off.
 _PG_IDLE = []
 _PG_GUARD = threading.RLock()   # re-entrant: a forgotten connection can be shelved by the garbage collector mid-shelve
-_PG_KEEP = 12
+# idle connections kept per worker process. Several workers each keep their
+# own shelf, and the database has a connection limit — keep this modest.
+_PG_KEEP = int(os.getenv('DB_KEEP_IDLE', '6') or 6)
+
+# ─── Hard limits on every database connection ────────────────────────────────
+# Nov 17 2026 the site hung for two hours: a statement waiting for a lock held
+# by somebody else waits FOREVER by default, and every other query on that
+# table then queues behind it. These limits make the database itself give up:
+#   lock_timeout     — waiting for another session's lock
+#   statement_timeout — one statement running too long
+#   idle_in_transaction_session_timeout — a session that opened a transaction
+#                      and then went quiet (it keeps its locks while it waits)
+# They ride along in the connection itself, so they survive the clean-up a
+# shelved connection gets (DISCARD ALL resets to these, not to "no limit").
+# Each can be changed in the Azure app settings without a code change.
+PG_LOCK_TIMEOUT_MS = int(os.getenv('PG_LOCK_TIMEOUT_MS', '10000') or 10000)
+PG_STATEMENT_TIMEOUT_MS = int(os.getenv('PG_STATEMENT_TIMEOUT_MS', '120000') or 120000)
+PG_IDLE_TX_TIMEOUT_MS = int(os.getenv('PG_IDLE_TX_TIMEOUT_MS', '900000') or 900000)
+_PG_OPTIONS = ('-c lock_timeout=%d -c statement_timeout=%d -c idle_in_transaction_session_timeout=%d'
+               % (PG_LOCK_TIMEOUT_MS, PG_STATEMENT_TIMEOUT_MS, PG_IDLE_TX_TIMEOUT_MS))
+_PG_OPTIONS_OK = {'ok': True}
+
+
+def _pg_connect(**extra):
+    """A new connection with the limits above (and a connect time limit)."""
+    kw = dict(sslmode='require', connect_timeout=10, keepalives=1, keepalives_idle=30,
+              keepalives_interval=10, keepalives_count=3)
+    kw.update(extra)
+    if _PG_OPTIONS_OK['ok']:
+        try:
+            return psycopg2.connect(DATABASE_URL, options=_PG_OPTIONS, **kw)
+        except psycopg2.OperationalError as e:
+            # a server that refuses settings at connect time: run without them
+            # rather than not at all (and say so once)
+            if 'options' not in str(e).lower() and 'parameter' not in str(e).lower():
+                raise
+            _PG_OPTIONS_OK['ok'] = False
+            print('[db] the database refused the time limits at connect: ' + str(e)[:160])
+    return psycopg2.connect(DATABASE_URL, **kw)
 
 
 def _pg_fresh():
     # connect_timeout: without it a database that stops answering makes every
     # request wait forever, the workers fill up, and Azure answers 503
-    return psycopg2.connect(DATABASE_URL, sslmode='require', connect_timeout=10,
-                            keepalives=1, keepalives_idle=30,
-                            keepalives_interval=10, keepalives_count=3)
+    return _pg_connect()
+
+
+# ─── Schema statements that are already done cost nothing ────────────────────
+# "ALTER TABLE x ADD COLUMN IF NOT EXISTS y" and "CREATE INDEX IF NOT EXISTS"
+# still take a lock on the table before Postgres notices there is nothing to
+# do — the strongest lock there is, for ALTER TABLE. Run at every worker start
+# (and inside some pages), one of those waiting behind a long-running query made
+# every other query on the table wait behind IT. Now each such statement is
+# first checked against the database's own catalogue, which takes no table lock,
+# and skipped when it is already true. Once true it is remembered, so the next
+# time costs nothing at all. Anything else runs exactly as written.
+_DDL_DONE = set()
+_DDL_GUARD = threading.Lock()
+_RX_CREATE_TABLE = re.compile(r'^\s*CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+([A-Za-z0-9_."]+)', re.I)
+_RX_CREATE_INDEX = re.compile(r'^\s*CREATE\s+(UNIQUE\s+)?INDEX\s+(CONCURRENTLY\s+)?IF\s+NOT\s+EXISTS\s+([A-Za-z0-9_."]+)\s+ON\s+(ONLY\s+)?([A-Za-z0-9_."]+)', re.I)
+_RX_ALTER = re.compile(r'^\s*ALTER\s+TABLE\s+(IF\s+EXISTS\s+)?(ONLY\s+)?([A-Za-z0-9_."]+)\s+(.*)$', re.I | re.S)
+_RX_ADD_COL = re.compile(r'^ADD\s+(COLUMN\s+)?IF\s+NOT\s+EXISTS\s+"?([A-Za-z0-9_]+)"?\s', re.I)
+_RX_DROP_CON = re.compile(r'^DROP\s+CONSTRAINT\s+IF\s+EXISTS\s+"?([A-Za-z0-9_]+)"?\s*;?\s*$', re.I)
+
+
+def _split_top(text):
+    """Split on commas that are not inside brackets or quotes."""
+    parts, depth, cur, q = [], 0, [], None
+    for ch in text:
+        if q:
+            cur.append(ch)
+            if ch == q:
+                q = None
+            continue
+        if ch in ("'", '"'):
+            q = ch
+        elif ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+        elif ch == ',' and depth == 0:
+            parts.append(''.join(cur).strip()); cur = []
+            continue
+        cur.append(ch)
+    if ''.join(cur).strip():
+        parts.append(''.join(cur).strip())
+    return parts
+
+
+def _ddl_kind(sql):
+    """What a statement would change, if it is one of the kinds checked here."""
+    m = _RX_CREATE_TABLE.match(sql)
+    if m:
+        return ('table', m.group(1).replace('"', ''))
+    m = _RX_CREATE_INDEX.match(sql)
+    if m:
+        return ('index', m.group(3).replace('"', ''), m.group(5).replace('"', ''))
+    m = _RX_ALTER.match(sql)
+    if m:
+        table = m.group(3).replace('"', '')
+        rest = m.group(4).strip().rstrip(';').strip()
+        clauses = _split_top(rest)
+        cols = []
+        for cl in clauses:
+            mc = _RX_ADD_COL.match(cl + ' ')
+            if not mc:
+                break
+            cols.append(mc.group(2))
+        else:
+            if cols:
+                return ('columns', table, cols)
+        if len(clauses) == 1:
+            md = _RX_DROP_CON.match(clauses[0])
+            if md:
+                return ('drop_constraint', table, md.group(1))
+    return None
+
+
+def _ddl_already_true(cur, kind):
+    """Asks the catalogue — no lock on the table itself."""
+    if kind[0] == 'table':
+        cur.execute('SELECT to_regclass(%s) IS NOT NULL', (kind[1],))
+        return bool(cur.fetchone()[0])
+    if kind[0] == 'index':
+        cur.execute('SELECT to_regclass(%s) IS NOT NULL', (kind[1],))
+        return bool(cur.fetchone()[0])
+    if kind[0] == 'columns':
+        cur.execute('SELECT to_regclass(%s)::oid', (kind[1],))
+        r = cur.fetchone()
+        if not r or r[0] is None:
+            return False
+        cur.execute('SELECT attname FROM pg_attribute WHERE attrelid = %s AND attnum > 0 '
+                    'AND NOT attisdropped', (r[0],))
+        have = {x[0].lower() for x in cur.fetchall()}
+        return all(c.lower() in have for c in kind[2])
+    if kind[0] == 'drop_constraint':
+        cur.execute('SELECT to_regclass(%s)::oid', (kind[1],))
+        r = cur.fetchone()
+        if not r or r[0] is None:
+            return True                      # no table, so nothing to drop
+        cur.execute('SELECT 1 FROM pg_constraint WHERE conrelid = %s AND conname = %s',
+                    (r[0], kind[2]))
+        return cur.fetchone() is None
+    return False
+
+
+def _build_index_concurrently(sql):
+    """A new index built without blocking writes, on its own connection.
+    Returns True when built. On any trouble the half-built index is removed and
+    False comes back, so the caller can fall back to the plain statement."""
+    m = _RX_CREATE_INDEX.match(sql)
+    if not m:
+        return False
+    name = m.group(3)
+    conc = re.sub(r'^\s*CREATE\s+(UNIQUE\s+)?INDEX\s+(CONCURRENTLY\s+)?',
+                  lambda x: 'CREATE ' + (x.group(1) or '') + 'INDEX CONCURRENTLY ', sql, count=1, flags=re.I)
+    conn = None
+    try:
+        conn = _pg_connect()
+        conn.autocommit = True
+        cu = conn.cursor()
+        cu.execute("SET lock_timeout = '5s'")
+        cu.execute("SET statement_timeout = '300s'")
+        cu.execute(conc)
+        return True
+    except Exception as e:
+        # a table made a moment ago in the same set-up is not visible from here
+        # yet — normal on a first start, so not worth a log line
+        if 'does not exist' not in str(e):
+            print('[db] index %s could not be built alongside traffic (%s) — building it the plain way'
+                  % (name, str(e)[:120].strip()))
+        try:
+            if conn is not None and not conn.closed:
+                cu = conn.cursor()
+                cu.execute("SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass(%s)", (name,))
+                r = cu.fetchone()
+                if r is not None and not r[0]:
+                    cu.execute('DROP INDEX CONCURRENTLY IF EXISTS ' + name)
+        except Exception:
+            pass
+        return False
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
+
+
+class _SafeCursor(object):
+    """A psycopg2 cursor that skips schema statements already in effect."""
+    __slots__ = ('_cur',)
+
+    def __init__(self, cur):
+        object.__setattr__(self, '_cur', cur)
+
+    def __getattr__(self, name):
+        return getattr(self._cur, name)
+
+    def __setattr__(self, name, value):
+        setattr(self._cur, name, value)
+
+    def __iter__(self):
+        return iter(self._cur)
+
+    def __enter__(self):
+        self._cur.__enter__()
+        return self
+
+    def __exit__(self, *a):
+        return self._cur.__exit__(*a)
+
+    def execute(self, sql, params=None):
+        kind = None
+        key = None
+        if params is None and isinstance(sql, str) and len(sql) < 20000:
+            head = sql.lstrip()[:6].upper()
+            if head in ('CREATE', 'ALTER '):
+                key = ' '.join(sql.split())
+                if key in _DDL_DONE:
+                    return None
+                kind = _ddl_kind(sql)
+                if kind is not None and _ddl_already_true(self._cur, kind):
+                    with _DDL_GUARD:
+                        _DDL_DONE.add(key)
+                    return None
+        if kind is not None and kind[0] == 'index' and _build_index_concurrently(sql):
+            with _DDL_GUARD:
+                _DDL_DONE.add(key)
+            return None
+        r = self._cur.execute(sql) if params is None else self._cur.execute(sql, params)
+        if kind is not None:
+            with _DDL_GUARD:
+                _DDL_DONE.add(key)
+        return r
 
 
 class _PooledPg(object):
@@ -302,6 +528,9 @@ class _PooledPg(object):
 
     def __exit__(self, *a):
         return self._c.__exit__(*a)
+
+    def cursor(self, *a, **k):
+        return _SafeCursor(self._c.cursor(*a, **k))
 
     def close(self):
         if self._done:
@@ -342,7 +571,7 @@ class _PooledPg(object):
 
 def get_db():
     if os.getenv('DB_REUSE', '1') == '0':
-        return psycopg2.connect(DATABASE_URL, sslmode='require')
+        return _pg_connect()
     while True:
         with _PG_GUARD:
             item = _PG_IDLE.pop() if _PG_IDLE else None
@@ -418,6 +647,10 @@ def download_recording(url, dest_path, timeout=60, retries=2):
 def init_db():
     conn = get_db()
     c = conn.cursor()
+    # set-up must never hold the site up: if a table is busy, give up quickly
+    # (the next start tries again) instead of queueing everybody behind it
+    c.execute("SET lock_timeout = '3s'")
+    c.execute("SET statement_timeout = '60s'")
 
     c.execute('''
         CREATE TABLE IF NOT EXISTS rules (
@@ -2247,7 +2480,7 @@ def submit_resolution():
     ai_feedback = ''
     try:
         import anthropic as anthropic_lib
-        client = anthropic_lib.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
+        client = anthropic_lib.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'), timeout=120.0, max_retries=2)
         sc = call.get('scorecard') or '{}'
         if isinstance(sc, str): sc = json.loads(sc)
         flags = sc.get('flags', [])
@@ -5970,7 +6203,7 @@ def call_notes_ask():
                                  '(ANTHROPIC_API_KEY). The free analysis above still works.'}), 400
     try:
         import anthropic
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=120.0, max_retries=2)
         prompt = f"""These are notes call-center agents wrote after phone calls. Each line is:
 number. [date time | agent | account] the note text.
 
@@ -9560,7 +9793,14 @@ def phone_event():
         else:
             event = 'start'
 
-    now = datetime.now().isoformat()
+    # New York time, like every call time read from the CMS. The server runs
+    # on UTC, so datetime.now() put these 5 hours ahead of the CMS's own times
+    # and a call that had just started showed "on a call · -17967s" (Nov 16).
+    try:
+        from zoneinfo import ZoneInfo
+        now = datetime.now(ZoneInfo('America/New_York')).replace(tzinfo=None).isoformat()
+    except Exception:
+        now = (datetime.utcnow() - timedelta(hours=5)).isoformat()
     calls = _LIVE_CALLS.setdefault('by_uniq', {})
     # count each kind as it arrives, so it is obvious at a glance when the
     # phone system is sending some events but not others
@@ -13566,7 +13806,7 @@ def manager_suggest_rule_fix():
 
     try:
         import anthropic
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=120.0, max_retries=2)
         prompt = f"""You are helping refine a call-center QA rule that produced a false positive.
 
 CURRENT RULE: "{current_rule}"
@@ -13861,7 +14101,7 @@ def test_analyze():
     # Test 2: Anthropic / Claude
     try:
         import anthropic as anthropic_lib
-        client = anthropic_lib.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
+        client = anthropic_lib.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'), timeout=120.0, max_retries=2)
         msg = client.messages.create(
             model='claude-sonnet-4-6',
             max_tokens=20,
@@ -13876,7 +14116,7 @@ def test_analyze():
         import google.generativeai as genai
         genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
         model = genai.GenerativeModel('gemini-2.5-flash')
-        resp = model.generate_content('Reply with just the word OK')
+        resp = model.generate_content('Reply with just the word OK', request_options={'timeout': 30})
         results['gemini'] = f'OK — {resp.text.strip()}'
     except Exception as e:
         results['gemini'] = f'FAIL: {str(e)}'
@@ -14235,7 +14475,81 @@ import time as _time_at_start
 _APP_STARTED_AT = _time_at_start.time()
 _APP_STARTED = datetime.now().isoformat()
 
-SERVER_BUILD = 'no-stream-1'      # bump when you need to confirm a deploy landed
+SERVER_BUILD = 'no-hang-1'      # bump when you need to confirm a deploy landed
+
+
+# ─── Health check and a watchdog for stuck requests ─────────────────────────
+# Gunicorn only replaces a worker whose main loop stops; with threads, a worker
+# whose request threads are all stuck still looks alive to it, and the site
+# just hangs (Nov 17 2026). So each worker keeps a list of the requests it is
+# working on. A background check every 15 seconds: when most of a worker's
+# threads have been on one request for minutes, the worker asks to be
+# replaced (a normal graceful restart — gunicorn starts a fresh one).
+# /healthz answers without touching any database, and says 503 when this worker
+# is jammed, so Azure's Health check can restart the app on its own.
+_INFLIGHT = {}
+_INFLIGHT_GUARD = threading.Lock()
+_STUCK_AFTER_S = int(os.getenv('STUCK_REQUEST_SECONDS', '180') or 180)
+_WORKER_THREADS = int(os.getenv('GUNICORN_THREADS', '8') or 8)
+_JAMMED_AT = max(2, _WORKER_THREADS - 2)      # this many stuck requests = jammed
+_WATCHDOG = {'started': False, 'restarting': False}
+
+
+@app.before_request
+def _inflight_start():
+    with _INFLIGHT_GUARD:
+        _INFLIGHT[threading.get_ident()] = (time.time(), request.path)
+
+
+@app.teardown_request
+def _inflight_end(_exc=None):
+    with _INFLIGHT_GUARD:
+        _INFLIGHT.pop(threading.get_ident(), None)
+
+
+def _stuck_requests():
+    now = time.time()
+    with _INFLIGHT_GUARD:
+        items = list(_INFLIGHT.values())
+    return [(round(now - t), p) for t, p in items if now - t > _STUCK_AFTER_S]
+
+
+def _start_watchdog():
+    if _WATCHDOG['started']:
+        return
+    _WATCHDOG['started'] = True
+    import signal as _signal
+
+    def run():
+        while True:
+            time.sleep(15)
+            try:
+                stuck = _stuck_requests()
+                if len(stuck) >= _JAMMED_AT and not _WATCHDOG['restarting']:
+                    _WATCHDOG['restarting'] = True
+                    print('[watchdog] worker %d is jammed: %d requests stuck (%s) — asking for a fresh worker'
+                          % (os.getpid(), len(stuck),
+                             ', '.join('%s %ss' % (p, a) for a, p in sorted(stuck, reverse=True)[:6])))
+                    os.kill(os.getpid(), _signal.SIGTERM)
+                elif stuck:
+                    print('[watchdog] slow requests in worker %d: %s'
+                          % (os.getpid(), ', '.join('%s %ss' % (p, a) for a, p in stuck[:6])))
+            except Exception as e:
+                print('[watchdog] ' + str(e)[:120])
+    threading.Thread(target=run, daemon=True).start()
+
+
+@app.route('/healthz')
+def healthz():
+    """Is this worker able to answer? No database, no login, no page."""
+    stuck = _stuck_requests()
+    jammed = len(stuck) >= _JAMMED_AT
+    body = {'ok': not jammed, 'pid': os.getpid(), 'up_s': round(time.time() - _APP_STARTED_AT),
+            'busy': len(_INFLIGHT) - 1, 'stuck': len(stuck), 'build': SERVER_BUILD}
+    resp = jsonify(body)
+    resp.status_code = 503 if jammed else 200
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
 
 PORTAL_HOSTS = [hh.strip().lower() for hh in
                 os.getenv('PORTAL_HOSTS',
@@ -14252,6 +14566,7 @@ def _is_portal_host():
 # the QA dashboard, the Skin Block tool and the QA APIs are simply not part of
 # this system.
 PORTAL_ALLOWED_PREFIXES = (
+    '/healthz',
     '/api/whoami', '/api/portal/', '/api/live', '/api/customers',
     '/api/agents', '/api/agent-list', '/api/packages', '/api/company-info', '/api/my-scores',
     '/api/recording-link', '/api/recordings/', '/api/payments/', '/api/cms-settings',
@@ -14623,12 +14938,48 @@ def _notes_pass(refresh_days=None):
         conn.close()
 
 
+_NOTES_LOCK_KEY = 7461002
+
+
 def _notes_refresher():
+    """Runs in every worker, but each pass is done by one worker only: the
+    worker that gets the database lock does it, the others skip that round.
+    Before, every worker did the same work at the same time."""
     import threading
 
     def loop():
         time.sleep(60)
         while True:
+            lk = None
+            try:
+                lk = _pg_connect()
+                lk.autocommit = True
+                lc = lk.cursor()
+                lc.execute('SELECT pg_try_advisory_lock(%s)', (_NOTES_LOCK_KEY,))
+                mine = bool(lc.fetchone()[0])
+            except Exception as e:
+                mine = False
+                print('[notes] could not check whose turn it is: ' + str(e)[:120])
+            if not mine:
+                try:
+                    if lk is not None:
+                        lk.close()
+                except Exception:
+                    pass
+                time.sleep(90)
+                continue
+            try:
+                _notes_round()
+            finally:
+                try:
+                    lc.execute('SELECT pg_advisory_unlock(%s)', (_NOTES_LOCK_KEY,))
+                    lk.close()
+                except Exception:
+                    pass
+            time.sleep(90)
+
+    def _notes_round():
+        if True:
             try:
                 _sync_left_firm_removals()
             except Exception as e:
@@ -14648,7 +14999,6 @@ def _notes_refresher():
                 cms_write.sms_sweep_lost()      # waiting texts that never went out
             except Exception as e:
                 print('[sms watch] ' + str(e)[:120])
-            time.sleep(90)
     threading.Thread(target=loop, daemon=True).start()
 
 
@@ -15074,10 +15424,70 @@ def index():
         return portal_page()
     return _serve_page('qa-dashboard.html')
 
+_SETUP_LOCK_KEY = 7461001          # any fixed number; shared by every worker
+
+
+def _init_db_once():
+    """Database set-up once per change of the set-up code, not once per worker.
+
+    Workers restart all day. Each used to run the whole set-up — about a hundred
+    schema statements — every time, and on Nov 17 two of them got stuck there
+    and took the site down. Now:
+      * only one worker at a time may run it (a database lock, not a file, so
+        it works across processes) — any other worker skips it and starts;
+      * it only runs when the set-up code itself changed since the last
+        successful run (a fingerprint of init_db is stored in app_settings);
+      * every statement inside has short time limits, and statements that are
+        already in effect are skipped without touching the table.
+    """
+    import hashlib, inspect
+    try:
+        ver = hashlib.sha1(inspect.getsource(init_db).encode('utf-8')).hexdigest()[:16]
+    except Exception:
+        ver = None
+    t0 = time.time()
+    lk = _pg_connect()
+    try:
+        lk.autocommit = True
+        cu = lk.cursor()
+        cu.execute("SET lock_timeout = '3s'")
+        cu.execute('SELECT pg_try_advisory_lock(%s)', (_SETUP_LOCK_KEY,))
+        if not cu.fetchone()[0]:
+            print('✅ Database set-up is being done by another worker — skipped here')
+            return
+        try:
+            if ver:
+                try:
+                    cu.execute("SELECT value FROM app_settings WHERE key = 'schema_version'")
+                    r = cu.fetchone()
+                    if r and r[0] == ver:
+                        print('✅ Database ready (set-up %s already done)' % ver)
+                        return
+                except Exception:
+                    pass                       # first run ever: no settings table yet
+            init_db()
+            if ver:
+                cu.execute("""INSERT INTO app_settings (key, value, updated_at)
+                              VALUES ('schema_version', %s, CURRENT_TIMESTAMP)
+                              ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value,
+                                                              updated_at = CURRENT_TIMESTAMP""", (ver,))
+            print('✅ Database set-up %s done in %.1fs' % (ver, time.time() - t0))
+        finally:
+            try:
+                cu.execute('SELECT pg_advisory_unlock(%s)', (_SETUP_LOCK_KEY,))
+            except Exception:
+                pass
+    finally:
+        try:
+            lk.close()
+        except Exception:
+            pass
+
+
 try:
-    init_db()
+    _init_db_once()
 except Exception as e:
-    print(f'⚠️ DB init warning: {e}')
+    print(f'⚠️ DB init warning (the site starts anyway; the next start tries again): {e}')
 
 
 _SB_WARM = {'errors': [], 'last_run': None, 'fetched': 0}
@@ -15122,6 +15532,11 @@ def _warm_skinblock_assets():
 # The old Skin Block page downloaded these at every start (a large model, in
 # every worker). The current page uses its own small models from /models, so
 # the warm-up no longer runs — it only slowed down every restart.
+
+try:
+    _start_watchdog()
+except Exception as e:
+    print('[watchdog] could not start: ' + str(e)[:140])
 
 try:
     _notes_refresher()

@@ -10,7 +10,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-anthropic_client = anthropic.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
+# time limits: the library default is ten minutes per try, which ties a worker up
+GEMINI_TIMEOUT_S = int(os.getenv('GEMINI_TIMEOUT_S', '600') or 600)   # one scoring answer
+anthropic_client = anthropic.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'), timeout=180.0, max_retries=2)
 genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
 
 DATABASE_URL = os.getenv('DATABASE_URL', '')
@@ -18,7 +20,18 @@ DATABASE_URL = os.getenv('DATABASE_URL', '')
 def get_db():
     if DATABASE_URL:
         import psycopg2
-        return psycopg2.connect(DATABASE_URL, sslmode='require')
+        # same limits as the web app: give up instead of waiting forever
+        kw = dict(sslmode='require', connect_timeout=10, keepalives=1, keepalives_idle=30,
+                  keepalives_interval=10, keepalives_count=3)
+        try:
+            return psycopg2.connect(DATABASE_URL, options=(
+                '-c lock_timeout=%s -c statement_timeout=%s -c idle_in_transaction_session_timeout=%s'
+                % (os.getenv('PG_LOCK_TIMEOUT_MS', '10000'), os.getenv('PG_STATEMENT_TIMEOUT_MS', '120000'),
+                   os.getenv('PG_IDLE_TX_TIMEOUT_MS', '900000'))), **kw)
+        except psycopg2.OperationalError as e:
+            if 'options' not in str(e).lower() and 'parameter' not in str(e).lower():
+                raise
+            return psycopg2.connect(DATABASE_URL, **kw)
     import sqlite3
     return sqlite3.connect(os.path.join(os.getenv('HOME', '.'), 'voiceguard.db'))
 
@@ -40,7 +53,13 @@ CLAUDE_OUTPUT_COST_PER_M = 15.00
 # capabilities this work does not need.
 #
 # Kept as a setting so the model can be changed without a deploy.
-GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-3-flash')
+# I first set this to 'gemini-3-flash', which does not exist — the name came
+# from a pricing page rather than from the account. Every call failed, and a
+# bad model name looks exactly like a broken key, so it cost hours. The names
+# that actually exist on this key are gemini-3-flash-preview, gemini-3.5-flash,
+# gemini-3.6-flash and gemini-3.7-flash. 3.5 is the stable current-generation
+# Flash; anything ending -preview can be withdrawn without notice.
+GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-3.5-flash')
 
 # Gemini 2.5 Flash pricing
 # Gemini 3 Flash: audio input is billed at twice the text rate ($1.00 per
@@ -77,6 +96,36 @@ def redact_credentials(text):
     return text
 
 # ─── LOAD RULES ───────────────────────────────────────────────────────────────
+def check_model_available(model=None):
+    """Asks Google whether this model name really exists for this key.
+
+    A wrong name fails every single call with an error that reads like an
+    authentication problem, so it is worth one request at startup to find out
+    plainly instead of discovering it through a day of failures.
+    """
+    import json as _json
+    import urllib.request as _u
+    name = model or GEMINI_MODEL
+    key = os.getenv('GEMINI_API_KEY', '').strip()
+    if not key:
+        return {'ok': False, 'why': 'GEMINI_API_KEY is not set'}
+    try:
+        with _u.urlopen(
+                'https://generativelanguage.googleapis.com/v1beta/models?key=' + key,
+                timeout=20) as resp:
+            data = _json.loads(resp.read().decode())
+        usable = [m.get('name', '').replace('models/', '') for m in data.get('models', [])
+                  if 'generateContent' in (m.get('supportedGenerationMethods') or [])]
+        if name in usable:
+            return {'ok': True, 'model': name}
+        near = [n for n in usable if n.startswith('gemini-3') and 'image' not in n]
+        return {'ok': False, 'model': name,
+                'why': '"%s" is not a model this key can use' % name,
+                'available': sorted(near)[:8]}
+    except Exception as e:
+        return {'ok': False, 'why': 'could not ask Google: ' + str(e)[:140]}
+
+
 def load_active_rules():
     try:
         conn = get_db()
@@ -256,7 +305,8 @@ Do NOT include vague category-level issues (e.g. "agent seemed unprofessional ov
         generation_config=genai.GenerationConfig(
             max_output_tokens=8192,
             temperature=0.1
-        )
+        ),
+        request_options={'timeout': GEMINI_TIMEOUT_S}
     )
 
     # Clean up uploaded file if we used the File API (avoid storage buildup)
@@ -708,7 +758,8 @@ Respond ONLY with valid compact JSON (evidence fields up to 140 chars):
     # sees exactly the same content either way.
     response = model.generate_content(
         [prompt, audio_part],
-        generation_config=genai.GenerationConfig(max_output_tokens=8192, temperature=0.1)
+        generation_config=genai.GenerationConfig(max_output_tokens=8192, temperature=0.1),
+        request_options={'timeout': GEMINI_TIMEOUT_S}
     )
 
     if uploaded_file_name:
