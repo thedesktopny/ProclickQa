@@ -2233,7 +2233,9 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
       <div id="lv-callbacks" style="max-height:40vh;overflow:auto;margin-top:8px;"></div>
     </div>
 
-    <div class="card" style="padding:16px 20px;margin-top:14px;">
+    <!-- overflow:visible — every card clips what sticks out of it, and that cut
+         off the bottom of the agent panels on the last row of the floor -->
+    <div class="card" style="padding:16px 20px;margin-top:14px;overflow:visible;">
       <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:12px;">
         <h2 class="payh" style="margin:0;">The floor</h2>
         <span id="lv-floor-counts" style="font-size:11.5px;color:var(--text3);"></span>
@@ -7175,11 +7177,18 @@ function lvPlacePopup(tile){
   const pop = tile.querySelector('.lvpop');
   if(!pop) return;
   pop.classList.remove('up', 'toleft');
+  pop.style.maxHeight = ''; pop.style.overflowY = '';
   const box = tile.getBoundingClientRect();
-  const h = pop.offsetHeight || 190;
+  const h = pop.scrollHeight || pop.offsetHeight || 190;
   const w = pop.offsetWidth || 240;
-  // not enough room below, but room above → open upwards
-  if(box.bottom + h + 14 > window.innerHeight && box.top - h - 14 > 0) pop.classList.add('up');
+  const below = window.innerHeight - box.bottom - 14;
+  const above = box.top - 14;
+  // open on the side with room; if neither side fits the whole panel, take the
+  // roomier side and let the panel scroll, so its last lines are never cut off
+  const up = h > below && above > below;
+  if(up) pop.classList.add('up');
+  const room = up ? above : below;
+  if(h > room){ pop.style.maxHeight = Math.max(120, room - 6) + 'px'; pop.style.overflowY = 'auto'; }
   // would run off the right edge → align to the tile's right instead
   if(box.left + w + 14 > window.innerWidth) pop.classList.add('toleft');
 }
