@@ -491,10 +491,18 @@ class _SafeCursor(object):
                 if key in _DDL_DONE:
                     return None
                 kind = _ddl_kind(sql)
-                if kind is not None and _ddl_already_true(self._cur, kind):
-                    with _DDL_GUARD:
-                        _DDL_DONE.add(key)
-                    return None
+                if kind is not None:
+                    # checked with a plain cursor of the same connection: the
+                    # caller's may hand rows back as dictionaries
+                    chk = self._cur.connection.cursor()
+                    try:
+                        done = _ddl_already_true(chk, kind)
+                    finally:
+                        chk.close()
+                    if done:
+                        with _DDL_GUARD:
+                            _DDL_DONE.add(key)
+                        return None
         if kind is not None and kind[0] == 'index' and _build_index_concurrently(sql):
             with _DDL_GUARD:
                 _DDL_DONE.add(key)
@@ -14475,7 +14483,7 @@ import time as _time_at_start
 _APP_STARTED_AT = _time_at_start.time()
 _APP_STARTED = datetime.now().isoformat()
 
-SERVER_BUILD = 'no-hang-1'      # bump when you need to confirm a deploy landed
+SERVER_BUILD = 'no-hang-2'      # bump when you need to confirm a deploy landed
 
 
 # ─── Health check and a watchdog for stuck requests ─────────────────────────
