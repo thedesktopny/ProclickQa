@@ -10829,7 +10829,17 @@ def media_upload():
     except Exception as e:
         return jsonify({'ok': False, 'error': 'Could not keep the file: ' + str(e)[:120]}), 400
 
-    base = os.getenv('PUBLIC_BASE_URL') or request.url_root.rstrip('/')
+    # Azure hands the app plain http behind its own https, so url_root says
+    # "http://…". The texting service fetches the picture from this link, and
+    # an http link only gets a redirect — so the link is always https unless
+    # we are running on this machine for testing.
+    host = request.host or ''
+    if os.getenv('PUBLIC_BASE_URL'):
+        base = os.getenv('PUBLIC_BASE_URL').rstrip('/')
+    elif host.split(':')[0] in ('localhost', '127.0.0.1'):
+        base = request.url_root.rstrip('/')
+    else:
+        base = 'https://' + host
     return jsonify({'ok': True, 'url': base + '/media/' + name,
                     'bytes': len(data), 'type': kind,
                     'warn': ('Over 500 KB — some carriers may not deliver it.'

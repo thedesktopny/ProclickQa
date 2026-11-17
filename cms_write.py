@@ -863,8 +863,8 @@ def send_text(account_id, message, who, media_url=None, to=None):
                                    % (', '.join(str(x.get('To', '?')) for x in results),
                                       ', '.join(statuses)))
             if not ref and not delivered:
-                raise RuntimeError('the texting service did not accept it: %s'
-                                   % str(answer)[:180])
+                raise RuntimeError('the texting service did not accept it%s: %s'
+                                   % (_send_refused_why(our_number, media_urls), str(answer)[:180]))
 
         # only now is it real, so only now is it written down
         cu2 = conn.cursor()
@@ -3354,6 +3354,29 @@ def _log_sent_rows(cu, account_id, our_number, their_number, message, media_urls
                         message, smsDate, smsNotRead, MediaURL)
                        VALUES (%s, %s, %s, 'Out', %s, GETDATE(), 0, %s)""",
                    (account_id, our_number, their_number, message if i == 0 else '', u))
+
+
+def _send_refused_why(our_number, media_urls=None):
+    """BulkVS sometimes refuses a send with no reason at all (no reference, no
+    status — seen on picture messages, Nov 16). Look at the number at BulkVS
+    and say the likeliest cause in words, instead of just the raw answer."""
+    try:
+        info = number_info(our_number)
+    except Exception:
+        return ''
+    if not info.get('at_bulkvs'):
+        return ' \u2014 BulkVS does not have %s' % _ten(our_number)
+    if not info.get('campaign'):
+        return ' \u2014 %s is not on a campaign, so it cannot text yet' % _ten(our_number)
+    if info.get('sms_enabled') is False:
+        return ' \u2014 texting (SMS) is switched off for %s at BulkVS' % _ten(our_number)
+    if media_urls and info.get('mms_enabled') is False:
+        return ' \u2014 picture messages (MMS) are switched off for %s at BulkVS' % _ten(our_number)
+    if media_urls:
+        return (' \u2014 the number is set up fine (on %s, MMS on), so the picture itself was '
+                'most likely refused: too big, or a file type carriers do not take. '
+                'Try a smaller photo, or send the words alone' % info.get('campaign'))
+    return ''
 
 
 def _send_via_bulkvs(body, tries=6, wait=10):
