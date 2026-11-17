@@ -9983,6 +9983,7 @@ async function loadCallFlow(force){
 
 function cfBadge(c){
   const s = (c.status || '').toUpperCase();
+  if(c.live && c.outbound) return ['OUTBOUND — IN PROGRESS', 'var(--accent)', '#fff'];
   if(c.live && c.answered_by) return ['IN PROGRESS', 'var(--green)', '#062'];
   // a call that has arrived and nobody has picked up yet — the one worth
   // seeing first, so it says so plainly
@@ -9998,9 +9999,8 @@ function cfTime(d){
   if(!d) return '';
   const t = new Date(d);
   const tm = t.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
-  // older calls (from a search) need their day as well
-  return t.toDateString() === new Date().toDateString() ? tm
-    : t.toLocaleDateString('en-US', {month:'2-digit', day:'2-digit', year:'2-digit'}) + ' ' + tm;
+  // always with the day (Rowena, Nov 16) — a screenshot of a list is no use without it
+  return t.toLocaleDateString('en-US', {month:'short', day:'numeric'}) + ', ' + tm;
 }
 
 function cfRender(){
@@ -10026,12 +10026,28 @@ function cfRender(){
 
   const cardHtml = c => {
     const [label, bg, fg] = cfBadge(c);
-    const cls = c.live ? (c.answered_by ? 'live' : 'ringing')
+    const cls = c.live ? ((c.answered_by || c.outbound) ? 'live' : 'ringing')
       : c.outbound ? 'outbound' : (c.missed ? 'missed' : '');
-    const who = c.answered_by
-      ? `${c.outbound ? 'Called out by' : 'Picked up by'} <b>${esc(c.answered_by)}</b>`
-        + (c.answered_by_name ? ` · ${esc(c.answered_by_name)}` : '')
-      : (c.live ? 'ringing the floor' : 'nobody answered');
+    // Outbound calls: the agent who dialed is in "Agent", and the phone system
+    // often leaves "picked up by" empty for them (Rowena's calls, Nov 16) — so
+    // an outbound call is never labelled "nobody answered" for that reason.
+    // Whether the customer answered comes from the dial status, when there is one.
+    let who;
+    if(c.outbound){
+      const ext = c.answered_by || c.agent;
+      const nm = c.answered_by ? c.answered_by_name : c.agent_name;
+      const s = (c.status || '').toUpperCase();
+      const result = s.startsWith('ANSWER') ? ' · <span style="color:var(--green)">customer answered</span>'
+        : (s === 'NOANSWER' || s === 'NO ANSWER') ? ' · customer didn\'t answer'
+        : s === 'BUSY' ? ' · line busy'
+        : (s === 'CANCEL' ? ' · cancelled' : '');
+      who = ext ? `Called out by <b>${esc(ext)}</b>` + (nm ? ` · ${esc(nm)}` : '') + result
+                : (c.live ? 'dialing out' : 'outbound call') + result;
+    } else {
+      who = c.answered_by
+        ? `Picked up by <b>${esc(c.answered_by)}</b>` + (c.answered_by_name ? ` · ${esc(c.answered_by_name)}` : '')
+        : (c.live ? 'ringing the floor' : 'nobody answered');
+    }
 
     // the walk: each extension it tried, in order
     const trail = (c.tried || []).length ? `
