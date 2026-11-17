@@ -1198,6 +1198,11 @@ def init_db():
         )""")
         c.execute("""CREATE INDEX IF NOT EXISTS idx_sample_period
                      ON review_sample(period, agent_name)""")
+        # manual reviews by team leaders: who sent the call to the AI, and the
+        # reviewer's own words once they have gone through the result
+        c.execute('ALTER TABLE review_sample ADD COLUMN IF NOT EXISTS sent_by TEXT')
+        c.execute('ALTER TABLE review_sample ADD COLUMN IF NOT EXISTS note TEXT')
+        c.execute('ALTER TABLE review_sample ADD COLUMN IF NOT EXISTS agent_employee_id INTEGER')
         conn.commit()
     except Exception as e:
         print('[init] review_sample: ' + str(e)[:140])
@@ -3359,6 +3364,12 @@ def analyze_call():
         def process_new_call():
             from ai_engine import analyze_call as run_analysis
 
+            # Manual scoring (Nov 17 2026): the call is kept, with its notes,
+            # and scored only when a team leader sends it to the AI.
+            if not _auto_scoring_on():
+                _set_status(call_id, 'Not scored', only_if='Processing')
+                return
+
             if is_processing_paused():
                 print(f"[AutoProcess] ⏸️  Processing is paused — call {call_id} saved but not analyzed.")
                 try:
@@ -3722,12 +3733,10 @@ def score_call_now(call_id):
     if not row:
         return jsonify({'error': 'Call not found'}), 404
     status, started, has_transcript = row
-    # the AI account is out of credit: a retry now would only fail again
-    wait = _credit_state().get('until', 0) - time.time()
-    if wait > 0:
-        return jsonify({'error': 'The AI account is out of credit, so scoring is paused '
-                                 '(next try in about %d min). Top up the Gemini credit, '
-                                 'then press Retry again.' % max(1, int(wait // 60) + 1)}), 409
+    # A person pressed this, so it is tried even while automatic scoring is
+    # waiting out an out-of-credit spell. Before, it refused for up to an hour
+    # after the credit was topped up ("next try in about 7 min"). If the credit
+    # is still missing, the call fails with that reason and the page says so.
     # do not start a second run of something already running
     if status == 'Processing' and started and \
        (datetime.now() - started).total_seconds() < 20 * 60:
@@ -6806,6 +6815,9 @@ def _issue_portal_session(user, remember_device=False):
         pages += PORTAL_MANAGER_PAGES
     elif _team_leader_agents(user.get('employee_id')) is not None:
         pages += ['time-report']          # their team's Timesheet, no money
+    if (user.get('is_qa') or user.get('is_admin') or user['is_manager']
+            or _team_leader_agents(user.get('employee_id')) is not None):
+        pages += ['reviews']              # send calls to the AI, review the result
     if user.get('is_admin'):
         pages += PORTAL_ADMIN_PAGES
 
@@ -6979,6 +6991,8 @@ def portal_me():
         pages += PORTAL_MANAGER_PAGES
     elif _team_leader_agents(p.get('e')) is not None:
         pages += ['time-report']
+    if p.get('q') or p.get('a') or p.get('m') or _team_leader_agents(p.get('e')) is not None:
+        pages += ['reviews']
     if p.get('a'):
         pages += PORTAL_ADMIN_PAGES
     ext = None
@@ -7709,6 +7723,346 @@ def review_sample_done(call_id):
         return jsonify({'ok': True})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)[:200]}), 400
+
+
+# ===================== manual reviews for team leaders =====================
+# Nov 17 2026: nothing is scored by the AI on its own any more. A team leader
+# (or QA reviewer) sees the calls of the agents assigned to them, picks one,
+# presses "Send to AI", then goes through the AI's result and marks it
+# reviewed. Managers set how many calls per agent must be reviewed each week
+# or month. The switch back to automatic scoring is in the same settings, for
+# when the AI is trusted.
+_REVIEW_DEFAULTS = {'per_agent': 2, 'period': 'month', 'min_seconds': 120, 'scoring': 'manual'}
+_REVIEW_SETTINGS_CACHE = {'at': 0, 'v': None}
+
+
+def _review_settings(fresh=False):
+    if not fresh and _REVIEW_SETTINGS_CACHE['v'] and time.time() - _REVIEW_SETTINGS_CACHE['at'] < 30:
+        return dict(_REVIEW_SETTINGS_CACHE['v'])
+    v = dict(_REVIEW_DEFAULTS)
+    try:
+        raw = _setting('review_settings', '')
+        if raw:
+            v.update({k: x for k, x in json.loads(raw).items() if k in _REVIEW_DEFAULTS})
+    except Exception:
+        pass
+    _REVIEW_SETTINGS_CACHE.update(at=time.time(), v=v)
+    return dict(v)
+
+
+def _auto_scoring_on():
+    """Only when a manager has switched scoring back to automatic."""
+    return _review_settings().get('scoring') == 'auto'
+
+
+def _review_period(which=None, kind=None):
+    """(label, start, end) in New York time. which: None for the current one,
+    'YYYY-MM' for a month or 'YYYY-Www' for a week."""
+    kind = kind or _review_settings().get('period') or 'month'
+    now = _ny_now()
+    w = (which or '').strip()
+    if re.match(r'^\d{4}-W\d{2}$', w):
+        start = datetime.strptime(w + '-1', '%G-W%V-%u')
+        return w, start, start + timedelta(days=7)
+    if re.match(r'^\d{4}-\d{2}$', w):
+        start = datetime.strptime(w + '-01', '%Y-%m-%d')
+        return w, start, (start.replace(day=28) + timedelta(days=5)).replace(day=1)
+    if kind == 'week':
+        start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+        return start.strftime('%G-W%V'), start, start + timedelta(days=7)
+    start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    return start.strftime('%Y-%m'), start, (start.replace(day=28) + timedelta(days=5)).replace(day=1)
+
+
+def _review_viewer():
+    """Who is asking and which agents are theirs. None = not allowed.
+    {'all': True} for managers and admins."""
+    p = _portal_user(request.headers.get('X-Portal-Ticket', ''))
+    if p:
+        if p.get('m') or p.get('a'):
+            return {'all': True, 'employee_id': p.get('e'), 'name': p.get('n'), 'manager': True}
+        ids = set()
+        try:
+            conn = get_db(); c = conn.cursor()
+            if p.get('e'):
+                c.execute('SELECT agent_employee_id FROM team_members WHERE leader_employee_id = %s', (int(p['e']),))
+                ids |= {int(r[0]) for r in c.fetchall()}
+                c.execute('SELECT agent_employee_id FROM qa_assignments WHERE reviewer_employee_id = %s', (int(p['e']),))
+                ids |= {int(r[0]) for r in c.fetchall()}
+            conn.close()
+        except Exception as e:
+            print('[reviews] could not read assignments: ' + str(e)[:120])
+        if not ids and not p.get('q') and _team_leader_agents(p.get('e')) is None:
+            return None
+        return {'all': False, 'ids': ids, 'employee_id': p.get('e'), 'name': p.get('n'), 'manager': False}
+    user = get_token_user(get_request_token())
+    if user and user.get('role') in ('admin', 'manager'):
+        return {'all': True, 'employee_id': None, 'name': user.get('full_name') or user.get('username'),
+                'manager': True}
+    return None
+
+
+def _review_agents(viewer, leader=None):
+    """[{id, name, extension}] the viewer reviews (a manager may pick a leader)."""
+    import cms_db
+    people = [a for a in cms_db.agent_list()['agents'] if a.get('extension')]
+    if viewer.get('all'):
+        if leader:
+            conn = get_db(); c = conn.cursor()
+            c.execute('SELECT agent_employee_id FROM team_members WHERE leader_employee_id = %s', (int(leader),))
+            ids = {int(r[0]) for r in c.fetchall()}
+            c.execute('SELECT agent_employee_id FROM qa_assignments WHERE reviewer_employee_id = %s', (int(leader),))
+            ids |= {int(r[0]) for r in c.fetchall()}
+            conn.close()
+            return [a for a in people if a['id'] in ids]
+        return people
+    return [a for a in people if a['id'] in viewer['ids']]
+
+
+_NY_CREATED = "((calls.created_at AT TIME ZONE current_setting('TimeZone')) AT TIME ZONE 'America/New_York')"
+
+
+def _review_call_row(r):
+    st = (r.get('status') or '').strip()
+    scored = bool(r.get('overall_score')) and st not in ('Processing', 'Failed', 'Paused',
+                                                          'Not scored', 'Waiting for notes')
+    return {
+        'call_id': r['call_id'], 'at': (r['created_ny'].isoformat() if r.get('created_ny') else None),
+        'seconds': int(r.get('call_duration_seconds') or 0), 'account': r.get('account_name'),
+        'caller': r.get('caller_id'), 'status': st,
+        'state': ('scored' if scored else 'scoring' if st == 'Processing'
+                  else 'failed' if st == 'Failed' else 'new'),
+        'score': (int(r['overall_score']) if scored else None),
+        'error': (r.get('error_message') or '')[:200] if st == 'Failed' else None,
+        'sent_at': (r['picked_at'].isoformat() if r.get('picked_at') else None),
+        'sent_by': r.get('sent_by'),
+        'reviewed_at': (r['reviewed_at'].isoformat() if r.get('reviewed_at') else None),
+        'reviewed_by': r.get('reviewed_by'), 'note': r.get('note'),
+    }
+
+
+@app.route('/api/reviews', methods=['GET'])
+def reviews_mine():
+    """The review page: each of my agents, how many of their calls I have
+    reviewed this period against the target, and their recent calls."""
+    viewer = _review_viewer()
+    if not viewer:
+        return jsonify({'error': 'For team leaders, QA reviewers and managers.'}), 403
+    st = _review_settings()
+    label, start, end = _review_period(request.args.get('period'))
+    try:
+        leader = int(request.args.get('leader')) if request.args.get('leader') else None
+    except ValueError:
+        leader = None
+    try:
+        agents = _review_agents(viewer, leader if viewer.get('all') else None)
+    except Exception as e:
+        return jsonify({'error': 'Could not read the agent list from the CMS: ' + str(e)[:160]}), 400
+    exts = [a['extension'] for a in agents]
+    names = [a['name'] for a in agents]
+    by_ext = {a['extension']: a for a in agents}
+    by_name = {a['name'].lower(): a for a in agents}
+    per_agent_calls = int(request.args.get('calls') or 12)
+    out_agents = {a['id']: dict(a, calls=[], reviewed=0, sent=0) for a in agents}
+    if agents:
+        conn = get_db(); c = conn.cursor(cursor_factory=RealDictCursor)
+        # what has been sent to the AI or reviewed this period, whatever its date
+        c.execute("""SELECT s.call_id, s.picked_at, s.sent_by, s.reviewed_at, s.reviewed_by, s.note,
+                            calls.agent_extension, calls.agent_name, calls.status, calls.overall_score,
+                            calls.call_duration_seconds, calls.account_name, calls.caller_id,
+                            calls.error_message, """ + _NY_CREATED + """ AS created_ny
+                     FROM review_sample s JOIN calls ON calls.call_id = s.call_id
+                     WHERE s.period = %s""", (label,))
+        sent_rows = [dict(r) for r in c.fetchall()]
+        # the latest calls of each agent, long enough to be worth a review
+        c.execute("""SELECT * FROM (
+                       SELECT calls.call_id, calls.agent_extension, calls.agent_name, calls.status,
+                              calls.overall_score, calls.call_duration_seconds, calls.account_name,
+                              calls.caller_id, calls.error_message, """ + _NY_CREATED + """ AS created_ny,
+                              ROW_NUMBER() OVER (PARTITION BY COALESCE(NULLIF(TRIM(calls.agent_extension), ''),
+                                                                       TRIM(calls.agent_name))
+                                                 ORDER BY calls.created_at DESC) AS n
+                       FROM calls
+                       WHERE (TRIM(calls.agent_extension) = ANY(%s) OR TRIM(calls.agent_name) = ANY(%s))
+                         AND COALESCE(calls.call_duration_seconds, 0) >= %s
+                         AND """ + _NY_CREATED + """ >= %s AND """ + _NY_CREATED + """ < %s
+                     ) x WHERE n <= %s""",
+                  (exts, names, int(st.get('min_seconds') or 0), start, end, per_agent_calls))
+        recent = [dict(r) for r in c.fetchall()]
+        conn.close()
+
+        def owner(r):
+            return by_ext.get((r.get('agent_extension') or '').strip()) or \
+                   by_name.get((r.get('agent_name') or '').strip().lower())
+
+        sent_ids = set()
+        for r in sent_rows:
+            a = owner(r)
+            if not a:
+                continue
+            sent_ids.add(r['call_id'])
+            row = _review_call_row(r)
+            oa = out_agents[a['id']]
+            oa['calls'].append(row)
+            oa['sent'] += 1
+            if row['reviewed_at']:
+                oa['reviewed'] += 1
+        for r in recent:
+            a = owner(r)
+            if not a or r['call_id'] in sent_ids:
+                continue
+            out_agents[a['id']]['calls'].append(_review_call_row(r))
+    target = int(st.get('per_agent') or 0)
+    result = []
+    for a in out_agents.values():
+        a['calls'].sort(key=lambda x: x['at'] or '', reverse=True)
+        a['target'] = target
+        a['left'] = max(0, target - a['reviewed'])
+        result.append(a)
+    # who still needs reviews first, then by name
+    result.sort(key=lambda a: (a['left'] == 0, a['name'].lower()))
+    leaders = []
+    if viewer.get('all'):
+        try:
+            import cms_db
+            people = {x['id']: x['name'] for x in cms_db.agent_list()['agents']}
+            conn = get_db(); c = conn.cursor()
+            c.execute("""SELECT employee_id FROM team_leaders
+                         UNION SELECT DISTINCT reviewer_employee_id FROM qa_assignments""")
+            leaders = sorted([{'id': int(r[0]), 'name': people.get(int(r[0]), 'Employee %s' % r[0])}
+                              for r in c.fetchall() if r[0] is not None], key=lambda x: x['name'].lower())
+            conn.close()
+        except Exception:
+            leaders = []
+    done = sum(min(a['reviewed'], target) for a in result)
+    return jsonify({
+        'period': label, 'period_kind': 'week' if 'W' in label else 'month',
+        'from': start.date().isoformat(), 'to': (end - timedelta(days=1)).date().isoformat(),
+        'settings': st, 'is_manager': bool(viewer.get('manager')), 'leaders': leaders,
+        'agents': result, 'needed': target * len(result), 'done': done,
+        'ai_out_of_credit_min': max(0, int((_credit_state().get('until', 0) - time.time()) // 60) + 1)
+                                if _credit_state().get('until', 0) > time.time() else 0,
+    })
+
+
+def _review_call_allowed(viewer, call_id):
+    """(call row, agent) when the viewer may review this call."""
+    conn = get_db(); c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute("""SELECT call_id, agent_extension, agent_name, status, overall_score, transcript IS NOT NULL AS has_t
+                 FROM calls WHERE call_id = %s""", (call_id,))
+    r = c.fetchone(); conn.close()
+    if not r:
+        return None, None
+    agents = _review_agents(viewer)
+    ext = (r.get('agent_extension') or '').strip()
+    nm = (r.get('agent_name') or '').strip().lower()
+    for a in agents:
+        if (ext and a['extension'] == ext) or a['name'].lower() == nm:
+            return dict(r), a
+    return dict(r), None
+
+
+@app.route('/api/reviews/<path:call_id>/send', methods=['POST'])
+def reviews_send(call_id):
+    """Send one call to the AI. Only ever on a person's request."""
+    viewer = _review_viewer()
+    if not viewer:
+        return jsonify({'error': 'For team leaders, QA reviewers and managers.'}), 403
+    try:
+        call, agent = _review_call_allowed(viewer, call_id)
+    except Exception as e:
+        return jsonify({'error': str(e)[:200]}), 400
+    if not call:
+        return jsonify({'error': 'Call not found'}), 404
+    if not agent:
+        return jsonify({'error': 'This agent is not one of yours.'}), 403
+    label, _s, _e = _review_period()
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute("""INSERT INTO review_sample (period, agent_name, call_id, reviewer_employee_id,
+                                                sent_by, agent_employee_id)
+                     VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (period, call_id) DO NOTHING""",
+                  (label, agent['name'], call_id, viewer.get('employee_id'), viewer.get('name'), agent['id']))
+        conn.commit(); conn.close()
+    except Exception as e:
+        return jsonify({'error': str(e)[:200]}), 400
+    st = (call.get('status') or '').strip()
+    if call.get('overall_score') and call.get('has_t') and st not in ('Processing', 'Failed'):
+        return jsonify({'ok': True, 'already_scored': True,
+                        'meaning': 'The AI had already scored this call — it is ready to review.'})
+    if st == 'Processing':
+        return jsonify({'ok': True, 'already_running': True, 'meaning': 'This call is already being scored.'})
+    # a person asked for it, so it is tried even while automatic scoring is
+    # waiting out an out-of-credit spell: if credit was topped up, it works
+    r = retry_single_call.__wrapped__(call_id)
+    return r
+
+
+@app.route('/api/reviews/<path:call_id>/done', methods=['POST'])
+def reviews_done(call_id):
+    """The reviewer went through the AI's result: mark it reviewed (or undo)."""
+    viewer = _review_viewer()
+    if not viewer:
+        return jsonify({'error': 'For team leaders, QA reviewers and managers.'}), 403
+    d = request.json or {}
+    try:
+        call, agent = _review_call_allowed(viewer, call_id)
+        if not call:
+            return jsonify({'error': 'Call not found'}), 404
+        if not agent:
+            return jsonify({'error': 'This agent is not one of yours.'}), 403
+        conn = get_db(); c = conn.cursor()
+        if d.get('undo'):
+            c.execute("""UPDATE review_sample SET reviewed_at = NULL, reviewed_by = NULL
+                         WHERE call_id = %s""", (call_id,))
+        else:
+            if not call.get('overall_score'):
+                conn.close()
+                return jsonify({'error': 'The AI has not scored this call yet — send it to the AI first.'}), 409
+            note = (d.get('note') or '').strip()[:4000] or None
+            c.execute("""UPDATE review_sample SET reviewed_at = NOW(), reviewed_by = %s, note = %s
+                         WHERE call_id = %s""", (viewer.get('name'), note, call_id))
+            if not c.rowcount:
+                label, _s, _e = _review_period()
+                c.execute("""INSERT INTO review_sample (period, agent_name, call_id, reviewer_employee_id,
+                                                        sent_by, agent_employee_id, reviewed_at, reviewed_by, note)
+                             VALUES (%s, %s, %s, %s, %s, %s, NOW(), %s, %s)""",
+                          (label, agent['name'], call_id, viewer.get('employee_id'), viewer.get('name'),
+                           agent['id'], viewer.get('name'), note))
+        conn.commit(); conn.close()
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'error': str(e)[:200]}), 400
+
+
+@app.route('/api/reviews/settings', methods=['GET', 'POST'])
+def reviews_settings():
+    """How many calls per agent, per week or month — set by managers. Also
+    whether the AI scores calls by itself (off for now: manual only)."""
+    viewer = _review_viewer()
+    if not viewer:
+        return jsonify({'error': 'For team leaders, QA reviewers and managers.'}), 403
+    if request.method == 'GET':
+        return jsonify(_review_settings(fresh=True))
+    if not viewer.get('manager'):
+        return jsonify({'error': 'Managers only'}), 403
+    d = request.json or {}
+    v = _review_settings(fresh=True)
+    try:
+        if 'per_agent' in d:
+            v['per_agent'] = max(0, min(100, int(d['per_agent'])))
+        if 'min_seconds' in d:
+            v['min_seconds'] = max(0, min(3600, int(d['min_seconds'])))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Numbers only.'}), 400
+    if d.get('period') in ('week', 'month'):
+        v['period'] = d['period']
+    if d.get('scoring') in ('manual', 'auto'):
+        v['scoring'] = d['scoring']
+    _put_setting('review_settings', json.dumps(v))
+    _REVIEW_SETTINGS_CACHE.update(at=0, v=None)
+    print('[reviews] settings changed by %s: %s' % (viewer.get('name'), v))
+    return jsonify({'ok': True, 'settings': v})
 
 
 @app.route('/api/qa-assignments', methods=['GET'])
@@ -14509,7 +14863,7 @@ import time as _time_at_start
 _APP_STARTED_AT = _time_at_start.time()
 _APP_STARTED = datetime.now().isoformat()
 
-SERVER_BUILD = 'no-hang-3'      # bump when you need to confirm a deploy landed
+SERVER_BUILD = 'manual-reviews-1'      # bump when you need to confirm a deploy landed
 
 
 # ─── Health check and a watchdog for stuck requests ─────────────────────────
@@ -14600,7 +14954,7 @@ def _is_portal_host():
 # the QA dashboard, the Skin Block tool and the QA APIs are simply not part of
 # this system.
 PORTAL_ALLOWED_PREFIXES = (
-    '/healthz',
+    '/healthz', '/api/reviews',
     '/api/whoami', '/api/portal/', '/api/live', '/api/customers',
     '/api/agents', '/api/agent-list', '/api/packages', '/api/company-info', '/api/my-scores',
     '/api/recording-link', '/api/recordings/', '/api/payments/', '/api/cms-settings',
@@ -14886,6 +15240,13 @@ def _notes_pass(refresh_days=None):
                      FROM calls WHERE status = 'Waiting for notes'
                      ORDER BY created_at LIMIT 300""")
         waiting = [dict(r) for r in c.fetchall()]
+        if waiting and not _auto_scoring_on():
+            # manual scoring: whatever was queued is simply kept, unscored —
+            # its notes keep being brought up to date like any other call
+            c.execute("""UPDATE calls SET status = 'Not scored', processing_started_at = NULL
+                         WHERE status = 'Waiting for notes'""")
+            conn.commit()
+            waiting = []
         cs = _credit_state()
         if time.time() < cs['until'] or is_processing_paused():
             # nothing can be scored right now, so don't fetch the CMS calls
@@ -15128,7 +15489,7 @@ def _requeue_credit_failures():
     while the AI account had no credit go back in the queue — once a day, so a
     recording that is genuinely broken is not retried over and over."""
     import datetime as _dt
-    if _AI_NO_CREDIT.get('checked'):
+    if _AI_NO_CREDIT.get('checked') or not _auto_scoring_on():
         return
     _AI_NO_CREDIT['checked'] = True
     today = _dt.date.today().isoformat()
@@ -15328,19 +15689,21 @@ def _pull_calls_from_cms(minutes=180, limit=50, dry_run=False):
                           customer_account_id, account_name, recording_url,
                           call_duration_seconds, billed_minutes, call_notes,
                           call_end_first, status, source)
-                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'Processing','cms-pull')
+                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'cms-pull')
                          ON CONFLICT (call_id) DO NOTHING
                          RETURNING call_id""",
                       (call['call_id'], call['agent_name'], call['agent_extension'],
                        call['caller_id'], call['customer_account_id'],
                        call['account_name'], url, call['call_duration_seconds'],
                        call['billed_minutes'], call['call_notes'],
-                       call['call_end_first']))
+                       call['call_end_first'],
+                       'Processing' if _auto_scoring_on() else 'Not scored'))
             claimed = c.fetchone()
             conn.commit()
             if not claimed:
                 continue          # somebody else already had it
-            _score_in_background(dict(call, recording_url=url))
+            if _auto_scoring_on():
+                _score_in_background(dict(call, recording_url=url))
             out['queued'] += 1
             out['queued_ids'].append(call['call_id'])
         except Exception as e:

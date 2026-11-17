@@ -1514,6 +1514,7 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
         <option value="Passed">Passed</option>
         <option value="Processing">Processing</option>
         <option value="Waiting for notes">Waiting for notes</option>
+        <option value="Not scored">Not scored yet</option>
       </select>
       <input class="date-filter" id="calls-search" placeholder="🔍 Search agent or customer..." oninput="filterCalls()" style="width:220px;">
     </div>
@@ -2473,6 +2474,49 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
   <div style="padding:18px 28px 44px;">
     <div class="payhint" style="margin-bottom:16px;">How your calls were scored by QA — only you can see your own scores here.</div>
     <div id="ms-body"></div>
+  </div>
+</div>
+
+<div class="page" id="page-reviews">
+  <div class="topbar">
+    <button class="navtoggle" onclick="toggleNav()" aria-label="Menu">☰</button>
+    <div class="page-title">✅ Reviews</div>
+    <div class="topbar-right" style="gap:8px;">
+      <select class="date-filter" id="rv-leader" onchange="rvLoad()" style="display:none;"></select>
+      <select class="date-filter" id="rv-period" onchange="rvLoad()">
+        <option value="">This period</option>
+        <option value="prev">Last period</option>
+      </select>
+    </div>
+  </div>
+  <div style="padding:18px 28px 44px;">
+    <div class="payhint" style="margin-bottom:14px;">Pick a call of one of your agents, press <b>Send to AI</b>, then
+      go through what the AI found and press <b>Mark reviewed</b>. Nothing is scored by itself — only the calls you send.</div>
+    <div id="rv-settings"></div>
+    <div id="rv-summary"></div>
+    <div id="rv-body"></div>
+  </div>
+</div>
+
+<div class="modal" id="rv-modal">
+  <div class="modal-box" style="width:760px;max-width:96vw;max-height:92vh;overflow:auto;">
+    <div style="display:flex;align-items:flex-start;gap:12px;">
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:18px;font-weight:660;" id="rv-m-title">Review</div>
+        <div style="font-size:12.5px;color:var(--text3);margin-top:3px;" id="rv-m-sub"></div>
+      </div>
+      <div id="rv-m-score"></div>
+    </div>
+    <div id="rv-m-body" style="margin-top:14px;"></div>
+    <div style="margin-top:14px;">
+      <div class="cn-lab">Your notes on this call (optional — the agent's team leader and managers see them)</div>
+      <textarea id="rv-m-note" class="cms-in" rows="3" style="width:100%;resize:vertical;"></textarea>
+    </div>
+    <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap;">
+      <button class="btn btn-outline" onclick="rvClose()" style="flex:1;min-width:120px;">Close</button>
+      <button class="btn btn-outline" id="rv-m-undo" onclick="rvDone(true)" style="flex:1;min-width:120px;display:none;">Not reviewed after all</button>
+      <button class="btn btn-primary" id="rv-m-done" onclick="rvDone(false)" style="flex:2;min-width:160px;">Mark reviewed</button>
+    </div>
   </div>
 </div>
 
@@ -6286,6 +6330,245 @@ function portalOpenAgent(id){
 
 /* An agent's own QA scores: the average, which way it is going, the rules
    missed most often, and every scored call with its coaching. */
+/* ================= Reviews (manual AI scoring) =================
+   Nothing is scored by itself any more (Nov 2026). A team leader or QA
+   reviewer sees the agents assigned to them, sends a call to the AI, goes
+   through what it found and marks it reviewed. Managers set how many calls per
+   agent are due each week or month, and can switch scoring back to
+   automatic when the AI is trusted. */
+var rvData = null, rvTimer = null, rvOpenCall = null;
+
+function rvPeriodArg(){
+  const sel = document.getElementById('rv-period');
+  if(!sel || !sel.value || !rvData) return '';
+  if(sel.value !== 'prev') return sel.value;
+  // the period before the one on screen
+  const from = new Date(rvData.from + 'T12:00:00');
+  if(rvData.period_kind === 'week'){
+    from.setDate(from.getDate() - 7);
+    const d = new Date(Date.UTC(from.getFullYear(), from.getMonth(), from.getDate()));
+    const day = d.getUTCDay() || 7; d.setUTCDate(d.getUTCDate() + 4 - day);
+    const y0 = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+    const wk = Math.ceil((((d - y0) / 86400000) + 1) / 7);
+    return d.getUTCFullYear() + '-W' + String(wk).padStart(2, '0');
+  }
+  from.setDate(1); from.setMonth(from.getMonth() - 1);
+  return from.getFullYear() + '-' + String(from.getMonth() + 1).padStart(2, '0');
+}
+
+async function rvLoad(quiet){
+  clearTimeout(rvTimer);
+  const body = document.getElementById('rv-body');
+  if(!body) return;
+  if(!quiet) body.innerHTML = '<div style="color:var(--text3);font-size:13px;">Loading…</div>';
+  const per = rvPeriodArg();
+  const lead = (document.getElementById('rv-leader') || {}).value || '';
+  let r;
+  try{ r = await API.get('/api/reviews?' + new URLSearchParams({period: per, leader: lead})); }
+  catch(e){ body.innerHTML = `<div style="color:var(--red)">${esc(e.message)}</div>`; return; }
+  if(r.error){ body.innerHTML = `<div style="color:var(--red)">${esc(r.error)}</div>`; return; }
+  rvData = r;
+  rvDrawSettings(); rvDrawSummary(); rvDraw();
+  // while the AI works on a call, check back every 10 seconds
+  const busy = (r.agents || []).some(a => a.calls.some(c => c.state === 'scoring'));
+  if(busy && document.getElementById('page-reviews').classList.contains('active'))
+    rvTimer = setTimeout(() => rvLoad(true), 10000);
+}
+
+function rvDrawSettings(){
+  const box = document.getElementById('rv-settings');
+  const r = rvData, st = r.settings || {};
+  const lsel = document.getElementById('rv-leader');
+  if(r.is_manager && lsel){
+    const keep = lsel.value;
+    lsel.style.display = '';
+    lsel.innerHTML = '<option value="">All agents</option>' + (r.leaders || [])
+      .map(l => `<option value="${l.id}">${esc(l.name)}'s agents</option>`).join('');
+    lsel.value = keep;
+  }
+  if(!r.is_manager){ box.innerHTML = ''; return; }
+  const auto = st.scoring === 'auto';
+  box.innerHTML = `<details class="card" style="padding:12px 16px;margin-bottom:14px;">
+    <summary style="cursor:pointer;font-size:13px;font-weight:600;">⚙️ Review settings (managers) —
+      <span style="font-weight:400;color:var(--text2);">${st.per_agent} call${st.per_agent == 1 ? '' : 's'} per agent each
+      ${st.period}, AI scoring ${auto ? '<b style="color:var(--yellow)">automatic</b>' : '<b>manual only</b>'}</span></summary>
+    <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;margin-top:12px;">
+      <label style="font-size:12px;color:var(--text3);">Calls to review per agent<br>
+        <input id="rv-s-n" type="number" min="0" max="100" class="cms-in" style="width:90px;" value="${st.per_agent}"></label>
+      <label style="font-size:12px;color:var(--text3);">Every<br>
+        <select id="rv-s-p" class="cms-in"><option value="week">week</option><option value="month">month</option></select></label>
+      <label style="font-size:12px;color:var(--text3);">Only calls longer than<br>
+        <select id="rv-s-m" class="cms-in">${[0,60,120,180,300,600].map(v =>
+          `<option value="${v}">${v ? v/60 + ' min' : 'any length'}</option>`).join('')}</select></label>
+      <label style="font-size:12px;color:var(--text3);">AI scoring<br>
+        <select id="rv-s-a" class="cms-in">
+          <option value="manual">Manual — only calls someone sends</option>
+          <option value="auto">Automatic — every call (costs much more)</option></select></label>
+      <button class="btn btn-primary" onclick="rvSaveSettings()">Save</button>
+    </div></details>`;
+  document.getElementById('rv-s-p').value = st.period;
+  document.getElementById('rv-s-m').value = String(st.min_seconds);
+  document.getElementById('rv-s-a').value = st.scoring;
+}
+
+async function rvSaveSettings(){
+  const d = {per_agent: +document.getElementById('rv-s-n').value,
+             period: document.getElementById('rv-s-p').value,
+             min_seconds: +document.getElementById('rv-s-m').value,
+             scoring: document.getElementById('rv-s-a').value};
+  if(d.scoring === 'auto' && (rvData.settings || {}).scoring !== 'auto' &&
+     !confirm('Automatic scoring sends EVERY call to the AI, which costs much more. Switch it on?')) return;
+  const r = await API.post('/api/reviews/settings', d);
+  if(r.error){ showToast(r.error, true); return; }
+  showToast('Saved'); rvLoad();
+}
+
+function rvDrawSummary(){
+  const r = rvData, box = document.getElementById('rv-summary');
+  const range = new Date(r.from + 'T12:00:00').toLocaleDateString([], {month:'short', day:'numeric'}) + ' – '
+              + new Date(r.to + 'T12:00:00').toLocaleDateString([], {month:'short', day:'numeric'});
+  const pct = r.needed ? Math.round(100 * r.done / r.needed) : 0;
+  box.innerHTML = `<div class="card" style="padding:14px 18px;margin-bottom:14px;display:flex;gap:18px;align-items:center;flex-wrap:wrap;">
+      <div><div style="font-size:24px;font-weight:700;">${r.done}<span style="font-size:15px;color:var(--text3);font-weight:500;"> / ${r.needed}</span></div>
+           <div style="font-size:11.5px;color:var(--text3);">reviews done · ${range}</div></div>
+      <div style="flex:1;min-width:180px;height:8px;background:var(--surface2);border-radius:5px;overflow:hidden;">
+        <div style="height:100%;width:${pct}%;background:${pct >= 100 ? 'var(--green)' : 'var(--accent)'};"></div></div>
+      <div style="font-size:12.5px;color:var(--text2);">${r.settings.per_agent} per agent each ${r.period_kind} · ${r.agents.length} agent${r.agents.length === 1 ? '' : 's'}</div>
+    </div>` + (r.ai_out_of_credit_min ? `<div class="alert-bar" style="background:rgba(242,88,95,.08);border-color:rgba(242,88,95,.3);margin-bottom:14px;">
+      <span>⚠️</span><span style="font-size:12.5px;color:var(--text2);">The last AI run said the AI account is out of credit.
+      Once it is topped up, sending a call works again straight away.</span></div>` : '');
+}
+
+function rvWhen(iso){
+  if(!iso) return '';
+  const d = new Date(iso);
+  return d.toLocaleDateString([], {month:'short', day:'numeric'}) + ', ' + d.toLocaleTimeString([], {hour:'numeric', minute:'2-digit'});
+}
+function rvDur(s){ s = +s || 0; return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }
+function rvScoreCol(v){ return v >= 85 ? 'var(--green)' : v >= 70 ? 'var(--yellow)' : 'var(--red)'; }
+
+function rvDraw(){
+  const box = document.getElementById('rv-body'), r = rvData;
+  if(!r.agents.length){
+    box.innerHTML = `<div class="card" style="padding:22px;color:var(--text2);font-size:13px;">No agents are assigned to you yet.
+      A manager assigns agents under <b>Team Leaders</b> or <b>QA Assignments</b>.</div>`;
+    return;
+  }
+  box.innerHTML = r.agents.map(a => {
+    const full = a.target && a.reviewed >= a.target;
+    const head = `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+        <div style="font-size:15px;font-weight:650;flex:1;min-width:160px;">${esc(a.name)}
+          <span style="font-size:12px;color:var(--text3);font-weight:400;">ext ${esc(a.extension)}</span></div>
+        <div style="font-size:12.5px;font-weight:600;color:${full ? 'var(--green)' : a.reviewed ? 'var(--yellow)' : 'var(--text3)'};">
+          ${full ? '✓ ' : ''}${a.reviewed} of ${a.target} reviewed</div></div>`;
+    const rows = a.calls.length ? a.calls.map(c => {
+      let state = '', act = '';
+      if(c.state === 'new'){
+        state = '<span style="color:var(--text3)">not scored</span>';
+        act = `<button class="btn btn-outline" style="font-size:12px;padding:4px 10px;" onclick="rvSend('${esc(c.call_id)}',this)">Send to AI</button>`;
+      }else if(c.state === 'scoring'){
+        state = '<span style="color:var(--accent)"><span class="spin"></span>AI is scoring…</span>';
+      }else if(c.state === 'failed'){
+        state = `<span style="color:var(--red)" title="${esc(c.error || '')}">AI could not score it${c.error ? ' ℹ️' : ''}</span>`;
+        act = `<button class="btn btn-outline" style="font-size:12px;padding:4px 10px;" onclick="rvSend('${esc(c.call_id)}',this)">Try again</button>`;
+      }else{
+        state = `<b style="color:${rvScoreCol(c.score)}">${c.score}%</b>`;
+        act = c.reviewed_at
+          ? `<span style="font-size:12px;color:var(--green);">✓ ${esc(c.reviewed_by || 'reviewed')}</span>
+             <button class="btn btn-outline" style="font-size:12px;padding:4px 10px;" onclick="rvOpen('${esc(c.call_id)}')">Open</button>`
+          : `<button class="btn btn-primary" style="font-size:12px;padding:4px 10px;" onclick="rvOpen('${esc(c.call_id)}')">Review</button>`;
+      }
+      return `<div style="display:flex;align-items:center;gap:10px;padding:7px 0;border-top:1px solid var(--border);flex-wrap:wrap;font-size:12.5px;">
+          <div style="width:120px;color:var(--text2);">${rvWhen(c.at)}</div>
+          <div style="width:50px;color:var(--text3);">${rvDur(c.seconds)}</div>
+          <div style="flex:1;min-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(c.account || c.caller || '')}</div>
+          <div style="min-width:110px;">${state}</div>
+          <div style="display:flex;gap:6px;align-items:center;">${act}</div></div>`;
+    }).join('') : `<div style="font-size:12.5px;color:var(--text3);padding-top:8px;">No calls long enough to review this ${r.period_kind} yet.</div>`;
+    return `<div class="card" style="padding:14px 18px;margin-bottom:12px;">${head}<div style="margin-top:8px;">${rows}</div></div>`;
+  }).join('');
+}
+
+async function rvSend(callId, btn){
+  btn.disabled = true; btn.textContent = 'Sending…';
+  let r;
+  try{ r = await API.post('/api/reviews/' + encodeURIComponent(callId) + '/send', {}); }
+  catch(e){ showToast(e.message, true); btn.disabled = false; btn.textContent = 'Send to AI'; return; }
+  if(r.error){ showToast(r.error, true); btn.disabled = false; btn.textContent = 'Send to AI'; return; }
+  showToast(r.meaning || 'Sent to the AI — usually ready in a minute or two');
+  rvLoad(true);
+}
+
+async function rvOpen(callId){
+  rvOpenCall = null;
+  document.getElementById('rv-m-title').textContent = 'Loading…';
+  document.getElementById('rv-m-sub').textContent = '';
+  document.getElementById('rv-m-score').innerHTML = '';
+  document.getElementById('rv-m-body').innerHTML = '';
+  showModal('rv-modal');
+  let c;
+  try{ c = await API.get('/api/calls/' + encodeURIComponent(callId)); }
+  catch(e){ document.getElementById('rv-m-body').innerHTML = `<div style="color:var(--red)">${esc(e.message)}</div>`; return; }
+  if(c.error){ document.getElementById('rv-m-body').innerHTML = `<div style="color:var(--red)">${esc(c.error)}</div>`; return; }
+  rvOpenCall = c;
+  let row = null;
+  (rvData.agents || []).forEach(a => a.calls.forEach(x => { if(x.call_id === callId) row = x; }));
+  const parse = v => { if(!v) return null; if(typeof v === 'object') return v; try{ return JSON.parse(v); }catch(e){ return null; } };
+  const moments = parse(c.flagged_moments) || [];
+  const failed = (c.rule_results || []).filter(x => x.passed === false);
+  document.getElementById('rv-m-title').textContent = (c.agent_name || 'Agent') + (c.account_name ? ' — ' + c.account_name : '');
+  document.getElementById('rv-m-sub').textContent = rvWhen(row && row.at) + ' · ' + rvDur(c.call_duration_seconds)
+      + (row && row.reviewed_at ? ' · reviewed by ' + (row.reviewed_by || '') : '');
+  document.getElementById('rv-m-score').innerHTML = c.overall_score
+    ? `<div style="font-size:28px;font-weight:700;color:${rvScoreCol(c.overall_score)};">${c.overall_score}%</div>` : '';
+  const sec = (title, html) => html ? `<div style="margin-top:14px;"><div class="cn-lab">${title}</div>${html}</div>` : '';
+  const audio = `<audio id="rv-audio" controls preload="none" style="width:100%;" src="/api/calls/${encodeURIComponent(callId)}/recording"></audio>`;
+  const mom = moments.length ? moments.map(m => `<div style="display:flex;gap:10px;padding:6px 0;border-top:1px solid var(--border);font-size:12.5px;">
+      <a href="#" onclick="rvSeek(${+m.timestamp_seconds || 0});return false;" style="width:46px;flex:none;color:var(--accent);">${esc(m.timestamp_display || rvDur(m.timestamp_seconds))}</a>
+      <div style="flex:1;"><b style="color:${m.severity === 'Critical' ? 'var(--red)' : 'var(--yellow)'};">${esc(m.severity || '')}</b>
+        ${esc(m.description || '')}${m.quote ? `<div style="color:var(--text3);margin-top:2px;">${esc(m.speaker || '')}: “${esc(m.quote)}”</div>` : ''}</div></div>`).join('')
+    : '<div style="font-size:12.5px;color:var(--text3);">Nothing flagged.</div>';
+  const rules = failed.length ? failed.map(x => `<div style="font-size:12.5px;padding:5px 0;border-top:1px solid var(--border);">
+      <b style="color:${x.severity === 'Critical' ? 'var(--red)' : 'var(--yellow)'};">${esc(x.severity || '')}</b> ${esc(x.rule_description || '')}
+      ${x.evidence ? `<div style="color:var(--text3);margin-top:2px;">${esc(x.evidence)}</div>` : ''}</div>`).join('') : '';
+  const p = t => t ? `<div style="font-size:13px;line-height:1.5;white-space:pre-wrap;">${esc(t)}</div>` : '';
+  document.getElementById('rv-m-body').innerHTML = audio
+    + sec('Summary', p(c.summary))
+    + sec('Moments the AI flagged — click the time to hear it', mom)
+    + sec('Rules missed', rules)
+    + sec('Coaching for the agent', p(c.coaching_notes))
+    + sec('Done well', p(c.positive_highlights))
+    + sec('Call notes' + (c.notes_score ? ` (AI rated them ${c.notes_score}%)` : ''), p(c.call_notes) + p(c.notes_feedback))
+    + (c.transcript ? `<details style="margin-top:14px;"><summary style="cursor:pointer;font-size:12.5px;color:var(--text2);">Transcript</summary>
+         <div style="font-size:12.5px;line-height:1.5;white-space:pre-wrap;margin-top:8px;max-height:320px;overflow:auto;">${esc(c.transcript)}</div></details>` : '');
+  document.getElementById('rv-m-note').value = (row && row.note) || '';
+  const done = !!(row && row.reviewed_at);
+  document.getElementById('rv-m-undo').style.display = done ? '' : 'none';
+  document.getElementById('rv-m-done').textContent = done ? 'Save notes' : 'Mark reviewed';
+}
+
+function rvSeek(sec){
+  const a = document.getElementById('rv-audio');
+  if(!a) return;
+  const go = () => { a.currentTime = Math.max(0, sec - 2); a.play().catch(()=>{}); };
+  if(a.readyState >= 1) go(); else { a.addEventListener('loadedmetadata', go, {once:true}); a.load(); }
+}
+
+function rvClose(){
+  const a = document.getElementById('rv-audio');
+  if(a){ a.pause(); a.removeAttribute('src'); a.load(); }
+  hideModal('rv-modal');
+}
+
+async function rvDone(undo){
+  if(!rvOpenCall) return;
+  const r = await API.post('/api/reviews/' + encodeURIComponent(rvOpenCall.call_id) + '/done',
+                           undo ? {undo: true} : {note: document.getElementById('rv-m-note').value});
+  if(r.error){ showToast(r.error, true); return; }
+  showToast(undo ? 'Marked as not reviewed' : 'Reviewed');
+  rvClose(); rvLoad(true);
+}
+
 async function loadMyScores(){
   const box = document.getElementById('ms-body');
   if(!box) return;
@@ -6447,6 +6730,7 @@ function portalApply(name, isManager){
     'clocker':      ['🕘', 'Employee Clocker'],
     'packages':     ['📦', 'Packages'],
     'my-scores':    ['⭐', 'My Scores'],
+    'reviews':      ['✅', 'Reviews'],
     'company-info': ['🔑', 'Info & Logins'],
     'payments':     ['💳', 'Payments'],
     'cms-settings': ['⚙️', 'CMS Tables'],
@@ -6473,7 +6757,7 @@ function portalApply(name, isManager){
     ['Work',     ['customers', ...(isManager ? [] : ['agent-list']), 'packages', 'company-info',
                   'skin-block']],
     ['Pay',      ['time-report', 'payroll', 'payments']],
-    ['Quality',  ['my-scores', 'calls', 'human-review', 'call-notes', 'notes', 'analytics']],
+    ['Quality',  ['reviews', 'my-scores', 'calls', 'human-review', 'call-notes', 'notes', 'analytics']],
     ['Admin',    [...(isManager ? ['agent-list'] : []), 'clocker', 'teams', 'cms-settings', 'qa-assign', 'sms-numbers']],
   ];
   const item = (p, active) =>
@@ -8033,6 +8317,7 @@ function showPage(id){
   if(id==='clocker') ckOpen();
   if(id==='packages') loadPackages();
   if(id==='my-scores') loadMyScores();
+  if(id==='reviews') rvLoad(); else clearTimeout(rvTimer);
   if(id==='company-info') loadCompanyInfo();
   if(id!=='live') clearInterval(lvTimer);
   if(id!=='agent-calls') clearInterval(acTimer);
@@ -17406,7 +17691,7 @@ function scoreCircle(score){
 }
 
 function statusBadge(status, errorMessage){
-  const map={Critical:'badge-red',Passed:'badge-green',Review:'badge-yellow',Processing:'badge-gray','Waiting for notes':'badge-gray',Failed:'badge-red',Paused:'badge-yellow'};
+  const map={Critical:'badge-red',Passed:'badge-green',Review:'badge-yellow',Processing:'badge-gray','Waiting for notes':'badge-gray',Failed:'badge-red',Paused:'badge-yellow','Not scored':'badge-gray'};
   const safeMsg = errorMessage ? errorMessage.replace(/"/g,'&quot;').replace(/'/g,"\\'") : '';
   const titleAttr = (status==='Failed' && safeMsg) ? ` title="${safeMsg}"` : '';
   const cursorStyle = (status==='Failed' && safeMsg) ? ' style="cursor:help;"' : '';
