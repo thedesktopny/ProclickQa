@@ -3638,10 +3638,17 @@ def sms_health():
                       FROM Account WHERE ISNULL(smsNumber,'') <> ''""")
         accounts = [{'account_id': int(r[0]), 'customer': ('%s %s' % (r[1] or '', r[2] or '')).strip(),
                      'number': (r[3] or '').strip(), 'active': bool(r[4])} for r in cu.fetchall()]
-        cu.execute("""SELECT RIGHT(AccountSMSNumber,10), MAX(smsDate), COUNT(*) FROM SMSLog
-                      WHERE InOut = 'Out' AND smsDate >= DATEADD(day, -30, GETDATE())
+        # last text each way (within a year) and how many in the last 30 days
+        cu.execute("""SELECT RIGHT(AccountSMSNumber,10),
+                             MAX(CASE WHEN InOut = 'Out' THEN smsDate END),
+                             MAX(CASE WHEN InOut = 'In'  THEN smsDate END),
+                             SUM(CASE WHEN InOut = 'Out' AND smsDate >= DATEADD(day, -30, GETDATE()) THEN 1 ELSE 0 END),
+                             SUM(CASE WHEN InOut = 'In'  AND smsDate >= DATEADD(day, -30, GETDATE()) THEN 1 ELSE 0 END)
+                      FROM SMSLog
+                      WHERE ISNULL(AccountSMSNumber, '') <> '' AND smsDate >= DATEADD(day, -365, GETDATE())
                       GROUP BY RIGHT(AccountSMSNumber,10)""")
-        sent = {r[0]: {'last_sent': cms_db._plain(r[1]), 'sent_30d': int(r[2] or 0)} for r in cu.fetchall()}
+        sent = {r[0]: {'last_sent': cms_db._plain(r[1]), 'last_received': cms_db._plain(r[2]),
+                       'sent_30d': int(r[3] or 0), 'received_30d': int(r[4] or 0)} for r in cu.fetchall()}
     finally:
         conn.close()
     by_area = Counter(_ten(p['number'])[:3] for p in pool)
@@ -3719,6 +3726,7 @@ def sms_health():
                         'lidb': _rec_lidb(r), 'webhook': _rec_webhook(r),
                         'outside_cms': _rec_external(r),
                         'customer': (acct_by.get(_rec_tn(r)) or [{}])[0].get('customer'),
+                        'account_id': (acct_by.get(_rec_tn(r)) or [{}])[0].get('account_id'),
                         **sent.get(_rec_tn(r), {})})
     rot.sort(key=lambda x: (not x['movable'], x['since'] or ''))
     out['rotating'] = rot

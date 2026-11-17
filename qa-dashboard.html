@@ -7062,31 +7062,47 @@ function snCampaignList(tcr){
   const rows = [];
   (h.static||[]).filter(x => x.bulkvs_tcr === tcr).forEach(x => rows.push({...x, kind: 'static'}));
   (h.rotating||[]).filter(x => x.tcr === tcr).forEach(x => rows.push({...x, kind: x.movable ? 'rotating' : 'set by hand'}));
-  const when = d => d ? new Date(d).toLocaleDateString() : '—';
+  const when = d => d ? new Date(d).toLocaleDateString([], {month:'short', day:'numeric', year:'2-digit'}) : '—';
+  const ago = d => {
+    if(!d) return '<span style="color:var(--text3)">—</span>';
+    const days = Math.floor((Date.now() - new Date(d).getTime()) / 86400000);
+    return `${when(d)} <span style="color:var(--text3)">${days <= 0 ? 'today' : days + 'd ago'}</span>`;
+  };
   rows.sort((a,b) => (a.kind > b.kind ? 1 : a.kind < b.kind ? -1 : 0) || String(b.since||'').localeCompare(String(a.since||'')));
   document.getElementById('ac-out-modal')?.remove();
   const m = document.createElement('div');
   m.id = 'ac-out-modal'; m.className = 'ac-out-bg';
-  m.onclick = e => { if(e.target === m) m.remove(); };
-  m.innerHTML = `<div class="ac-out-box" role="dialog" aria-label="Numbers on ${esc(tcr)}" style="max-width:820px;">
+  // stays open until Close, Esc, or a click outside the box — clicking a row no longer closes it
+  m.onclick = e => { if(e.target === m) snListClose(); };
+  m.innerHTML = `<div class="ac-out-box" role="dialog" aria-label="Numbers on ${esc(tcr)}" style="max-width:1100px;">
       <div style="display:flex;align-items:baseline;gap:10px;">
         <div style="font-size:16px;font-weight:650;">${esc(tcr)} — ${rows.length} numbers set to it</div>
-        <button class="btn btn-secondary" style="margin-left:auto;" onclick="document.getElementById('ac-out-modal').remove()">Close</button></div>
+        <button class="btn btn-secondary" style="margin-left:auto;" onclick="snListClose()">Close</button></div>
       <div style="font-size:12px;color:var(--text3);margin:6px 0 10px;line-height:1.45;">
         BulkVS counts ${c.bulkvs_count ?? '?'} as registered with the carriers${c.pending ? ` — <b style="color:var(--yellow)">${c.pending} still registering</b>` : ''}.
-        Click a number to manage or test it.</div>
-      <div style="max-height:60vh;overflow:auto;border:1px solid var(--border);border-radius:10px;">
+        Last sent / received look back a year; counts are the last 30 days.</div>
+      <div style="max-height:62vh;overflow:auto;border:1px solid var(--border);border-radius:10px;">
         <table class="data-table" style="font-size:12px;"><thead><tr>
-          <th>Number</th><th>Type</th><th>Customer</th><th>Webhook</th><th>Put on</th><th>Last sent</th></tr></thead>
-        <tbody>${rows.map(x => `<tr style="cursor:pointer;" onclick="document.getElementById('ac-out-modal').remove();document.getElementById('nm-number').value='${x.number}';nmLookup('${x.number}');window.scrollTo({top:0,behavior:'smooth'});">
+          <th>Number</th><th>Type</th><th>Customer</th><th>Last sent</th><th>Last received</th>
+          <th class="n">30 days out / in</th><th>Put on</th><th>Webhook</th><th></th></tr></thead>
+        <tbody>${rows.map(x => `<tr>
           <td style="font-variant-numeric:tabular-nums;white-space:nowrap;">${esc(x.number)}</td>
-          <td>${x.kind === 'static' ? '📌 static' : x.kind === 'rotating' ? '🔄 rotating' : '✋ set by hand'}</td>
-          <td>${esc(x.customer || '') || '<span style="color:var(--text3)">nobody</span>'}</td>
-          <td style="${x.outside_cms ? 'color:var(--accent);' : ''}">${esc(x.webhook || '—')}${x.outside_cms ? ' · outside the CMS' : ''}</td>
+          <td style="white-space:nowrap;">${x.kind === 'static' ? '📌 static' : x.kind === 'rotating' ? '🔄 rotating' : '✋ set by hand'}</td>
+          <td>${x.customer ? (x.account_id ? `<a href="#" style="color:var(--accent)" onclick="snListClose();cuOpen(${x.account_id});return false;">${esc(x.customer)}</a>` : esc(x.customer)) : '<span style="color:var(--text3)">nobody</span>'}</td>
+          <td style="white-space:nowrap;">${ago(x.last_sent)}</td>
+          <td style="white-space:nowrap;">${ago(x.last_received)}</td>
+          <td class="n" style="white-space:nowrap;">${x.sent_30d || 0} / ${x.received_30d || 0}</td>
           <td style="white-space:nowrap;">${x.since ? when(x.since) : (x.lidb && x.lidb !== 'PROCLICK' ? esc(x.lidb) : '—')}</td>
-          <td style="white-space:nowrap;">${when(x.last_sent)}</td></tr>`).join('')}</tbody></table></div>
+          <td style="${x.outside_cms ? 'color:var(--accent);' : ''}">${esc(x.webhook || '—')}${x.outside_cms ? ' · outside the CMS' : ''}</td>
+          <td style="white-space:nowrap;"><button class="cn-chip" onclick="snListClose();document.getElementById('nm-number').value='${x.number}';nmLookup('${x.number}');window.scrollTo({top:0,behavior:'smooth'});">Manage</button></td></tr>`).join('')}</tbody></table></div>
     </div>`;
   document.body.appendChild(m);
+  document.addEventListener('keydown', snListEsc);
+}
+function snListEsc(e){ if(e.key === 'Escape') snListClose(); }
+function snListClose(){
+  document.getElementById('ac-out-modal')?.remove();
+  document.removeEventListener('keydown', snListEsc);
 }
 
 async function snLoadHealth(){
