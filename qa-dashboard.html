@@ -7092,7 +7092,9 @@ function snCampaignList(tcr){
           <td style="white-space:nowrap;">${ago(x.last_sent)}</td>
           <td style="white-space:nowrap;">${ago(x.last_received)}</td>
           <td class="n" style="white-space:nowrap;">${x.sent_30d || 0} / ${x.received_30d || 0}</td>
-          <td style="white-space:nowrap;">${x.since ? when(x.since) : (x.lidb && x.lidb !== 'PROCLICK' ? esc(x.lidb) : '—')}</td>
+          <td style="white-space:nowrap;">${x.since ? when(x.since)
+              : /^\d{12}$/.test(x.lidb || '') ? when(x.lidb.slice(0,4) + '-' + x.lidb.slice(4,6) + '-' + x.lidb.slice(6,8) + 'T' + x.lidb.slice(8,10) + ':' + x.lidb.slice(10,12))
+              : (x.lidb && x.lidb !== 'PROCLICK' ? esc(x.lidb) : '<span style="color:var(--text3)" title="Set up by hand at BulkVS — no date recorded">by hand</span>')}</td>
           <td style="${x.outside_cms ? 'color:var(--accent);' : ''}">${esc(x.webhook || '—')}${x.outside_cms ? ' · outside the CMS' : ''}</td>
           <td style="white-space:nowrap;"><button class="cn-chip" onclick="snListClose();document.getElementById('nm-number').value='${x.number}';nmLookup('${x.number}');window.scrollTo({top:0,behavior:'smooth'});">Manage</button></td></tr>`).join('')}</tbody></table></div>
     </div>`;
