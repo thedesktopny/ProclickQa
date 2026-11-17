@@ -2330,7 +2330,7 @@ def waiting_now():
     out = {'waiting': [], 'count': 0, 'longest_seconds': 0}
     try:
         cu.execute("""SELECT c.Id, c.Phone, c.Started, c.CalledExtension, c.CallersName,
-                             DATEDIFF(second, c.Started, GETDATE())
+                             DATEDIFF(second, c.Started, GETDATE()), c.AstriskUniqId, c.DialStatus
                       FROM PhoneCallsLog c
                       WHERE c.Ended IS NULL
                         AND c.PickedUpTime IS NULL
@@ -2348,7 +2348,9 @@ def waiting_now():
                 continue
             out['waiting'].append({
                 'call_id': int(r[0]), 'phone': r[1], 'started': _plain(r[2]),
-                'called': r[3], 'caller_name': r[4], 'seconds': secs})
+                'called': r[3], 'caller_name': r[4], 'seconds': secs,
+                'uniq': (str(r[6]).strip() if r[6] else None),
+                'status': ((r[7] or '').strip() or None)})
         out['count'] = len(out['waiting'])
         out['longest_seconds'] = max([w['seconds'] for w in out['waiting']] or [0])
     except Exception as e:

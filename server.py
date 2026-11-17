@@ -9666,10 +9666,13 @@ def _live_calls_reader():
                               ORDER BY c.Id""")
                 by_ext = {}
                 ended_uniqs = set()
+                open_uniqs = set()
                 while True:
                     r = cu.fetchone()
                     if not r:
                         break
+                    if not r[12] and r[11]:
+                        open_uniqs.add(str(r[11]).strip())
                     if r[12]:
                         # finished in the last 15 minutes — remembered so a
                         # worker that never heard "call ended" drops it now
@@ -9726,6 +9729,19 @@ def _live_calls_reader():
                     _who_prefetch(c.get('phone'))
                     _who_prefetch(c.get('preselected'))
                 _LIVE_CALLS['by_ext'] = by_ext
+                # The calls the phone system told us about stay in memory until
+                # "call ended" arrives — but that message reaches ONE worker, so
+                # every other worker kept the call forever (up to 400 of them).
+                # They were then counted as extra callers waiting: on Nov 17 the
+                # page said 35 waiting while the phone system's queue had 7.
+                # Now the CMS table decides: a call it shows as ended goes, and
+                # one it does not show as open goes after two minutes (the
+                # table normally has a call within a second).
+                for u, c in list((_LIVE_CALLS.get('by_uniq') or {}).items()):
+                    if u in ended_uniqs:
+                        _LIVE_CALLS['by_uniq'].pop(u, None)
+                    elif u not in open_uniqs and now_t - (c.get('event_t') or 0) > 120:
+                        _LIVE_CALLS['by_uniq'].pop(u, None)
                 _LIVE_CALLS['at'] = datetime.now()
                 _LIVE_CALLS['error'] = None
             except Exception as e:
@@ -10284,12 +10300,22 @@ def waiting_route():
         out = cms_db.waiting_now()
         # anything the phone system has told us but the table has not caught up
         # with — a call that has started and not been picked up
+        # Only for the first moments of a call (the table normally catches up
+        # within a second), and matched by the call's phone-system id as well —
+        # a call the table already shows is not counted twice.
         live_extra = 0
-        for call in _LIVE_CALLS.get('by_uniq', {}).values():
-            if not call.get('picked_up') and not call.get('ended') \
-               and not call.get('outbound'):
-                if not any(w['call_id'] == call.get('call_id') for w in out['waiting']):
-                    live_extra += 1
+        now_t = time.time()
+        in_table = {str(w.get('uniq') or '') for w in out['waiting']} - {''}
+        for call in list(_LIVE_CALLS.get('by_uniq', {}).values()):
+            if call.get('picked_up') or call.get('ended') or call.get('outbound'):
+                continue
+            if now_t - (call.get('event_t') or 0) > 90:
+                continue
+            if str(call.get('uniq') or '') in in_table:
+                continue
+            if any(w['call_id'] == call.get('call_id') for w in out['waiting']):
+                continue
+            live_extra += 1
         out['also_ringing'] = live_extra
         return jsonify(out)
     except Exception as e:
@@ -14483,7 +14509,7 @@ import time as _time_at_start
 _APP_STARTED_AT = _time_at_start.time()
 _APP_STARTED = datetime.now().isoformat()
 
-SERVER_BUILD = 'no-hang-2'      # bump when you need to confirm a deploy landed
+SERVER_BUILD = 'no-hang-3'      # bump when you need to confirm a deploy landed
 
 
 # ─── Health check and a watchdog for stuck requests ─────────────────────────
