@@ -1,3 +1,4 @@
+import json
 """
 Writing back to the CMS.
 
@@ -842,6 +843,18 @@ def send_text(account_id, message, who, media_url=None, to=None):
             answer = _send_via_bulkvs(body, tries=2, wait=6)
             if not isinstance(answer, dict):
                 answer = {}
+            # BulkVS sometimes answers with no reference and no reason
+            # ({'RefId': None, ...}). The log shows the very same text or
+            # picture going through when the agent pressed Send again a minute
+            # later (Nov 16-17, eight times) — so it is a passing hiccup at
+            # BulkVS, not the picture. Try once more by ourselves first.
+            if not _send_accepted(answer):
+                import time as _t
+                _t.sleep(4)
+                again = _send_via_bulkvs(body, tries=1, wait=0)
+                if isinstance(again, dict):
+                    answer = again
+                    out['retried'] = True
         except BulkVSError as e:
             if e.code != NOT_READY_CODE:
                 raise
@@ -3190,9 +3203,16 @@ def sms_watch(force=False, every=600):
     catches up with what is set is logged as registration finishing, with how
     long each waiting number took."""
     import time as _t
+    # The last look is kept in the database, not in this process. The app runs
+    # several workers; each kept its own "last time" and logged the same
+    # outside change once per worker (the doubled lines on Nov 17), and since
+    # only one worker at a time now runs this check, a worker's own memory
+    # could be hours old — comparing against that would log stale changes.
+    _watch_load()
     if not force and _t.time() - _WATCH['at'] < every:
         return None
     _WATCH['at'] = _t.time()
+    _watch_save()                    # claim this round before the slow part
     if not bv_configured():
         return None
     try:
@@ -3263,6 +3283,7 @@ def sms_watch(force=False, every=600):
             assigned[t] = assigned.get(t, 0) + 1
     counts = {c['tcr']: {'bulkvs': c['count'], 'assigned': assigned.get(c['tcr'], 0)} for c in camps}
     _WATCH['tcr'], _WATCH['counts'] = now, counts
+    _watch_save()
     if prev is None:
         return {'first_look': True}
     # tidy up a false "freed" left by such a glitch before this check existed
@@ -3287,10 +3308,68 @@ def sms_watch(force=False, every=600):
             # BulkVS has caught up: what it counts equals what is set. Every
             # number put on and still waiting is now registered, and every
             # number taken off has now freed its place — log how long each took.
-            if v['bulkvs'] is not None and v['bulkvs'] == v['assigned']:
-                _sms_mark_registered(tcr)
-                _sms_mark_freed(tcr)
+            # Only when BulkVS's OWN count moved: on Nov 17 the two became equal
+            # because a number was taken off outside (set 48 -> 47, BulkVS stayed
+            # 47), and twelve numbers were wrongly logged as freed or registered
+            # after "656 to 7183 minutes", which also spoiled the timing figures.
+            moved = pv['bulkvs'] is not None and v['bulkvs'] is not None and pv['bulkvs'] != v['bulkvs']
+            if moved and v['bulkvs'] == v['assigned']:
+                if v['bulkvs'] > pv['bulkvs']:
+                    _sms_mark_registered(tcr)
+                else:
+                    _sms_mark_freed(tcr)
+    sms_watch_tidy()
     return {'changed': changed}
+
+
+def _watch_load():
+    try:
+        from server import _setting
+        raw = _setting('sms_watch_state', '')
+        if raw:
+            st = json.loads(raw)
+            _WATCH.update(at=float(st.get('at') or 0), tcr=st.get('tcr'),
+                          counts=st.get('counts'), held=st.get('held') or {})
+    except Exception as e:
+        print('[sms watch] could not read the last look: ' + str(e)[:120])
+
+
+def _watch_save():
+    try:
+        from server import _put_setting
+        _put_setting('sms_watch_state', json.dumps({'at': _WATCH['at'], 'tcr': _WATCH['tcr'],
+                                                    'counts': _WATCH['counts'],
+                                                    'held': _WATCH.get('held') or {}}))
+    except Exception as e:
+        print('[sms watch] could not save the last look: ' + str(e)[:120])
+
+
+def sms_watch_tidy():
+    """Removes 'freed' and 'registered' entries that were logged when
+    BulkVS's count had not actually moved (see sms_watch), so the timing
+    figures only use real measurements. Safe to run again."""
+    try:
+        from server import get_db
+        conn = get_db(); c = conn.cursor()
+        c.execute("""DELETE FROM sms_events e
+                     WHERE e.kind IN ('freed', 'registered')
+                       AND e.at > NOW() - INTERVAL '30 days'
+                       AND EXISTS (SELECT 1 FROM sms_events k
+                                   WHERE k.kind = 'campaign_count' AND k.campaign = e.campaign
+                                     AND k.at BETWEEN e.at - INTERVAL '2 minutes' AND e.at + INTERVAL '2 minutes'
+                                     AND (k.detail->>'bulkvs_count') = (k.detail->>'before_bulkvs'))
+                       AND NOT EXISTS (SELECT 1 FROM sms_events k2
+                                   WHERE k2.kind = 'campaign_count' AND k2.campaign = e.campaign
+                                     AND k2.at BETWEEN e.at - INTERVAL '2 minutes' AND e.at + INTERVAL '2 minutes'
+                                     AND (k2.detail->>'bulkvs_count') <> (k2.detail->>'before_bulkvs'))""")
+        n = c.rowcount
+        conn.commit(); conn.close()
+        if n:
+            print('[sms watch] removed %d false freed/registered entries' % n)
+        return n
+    except Exception as e:
+        print('[sms watch] tidy failed: ' + str(e)[:120])
+        return 0
 
 
 def _sms_mark_freed(tcr):
@@ -3522,6 +3601,16 @@ def _log_sent_rows(cu, account_id, our_number, their_number, message, media_urls
                    (account_id, our_number, their_number, message if i == 0 else '', u))
 
 
+def _send_accepted(answer):
+    """Did BulkVS take the message: a reference, or a good per-person status."""
+    if not isinstance(answer, dict):
+        return False
+    if answer.get('RefId') or answer.get('RefID') or answer.get('refId') or answer.get('ref_id'):
+        return True
+    return any(str(x.get('Status', '')).upper() in ('SUCCESS', 'OK', 'QUEUED', 'ACCEPTED')
+               for x in (answer.get('Results') or []) if isinstance(x, dict))
+
+
 def _send_refused_why(our_number, media_urls=None):
     """BulkVS sometimes refuses a send with no reason at all (no reference, no
     status — seen on picture messages, Nov 16). Look at the number at BulkVS
@@ -3538,11 +3627,9 @@ def _send_refused_why(our_number, media_urls=None):
         return ' \u2014 texting (SMS) is switched off for %s at BulkVS' % _ten(our_number)
     if media_urls and info.get('mms_enabled') is False:
         return ' \u2014 picture messages (MMS) are switched off for %s at BulkVS' % _ten(our_number)
-    if media_urls:
-        return (' \u2014 the number is set up fine (on %s, MMS on), so the picture itself was '
-                'most likely refused: too big, or a file type carriers do not take. '
-                'Try a smaller photo, or send the words alone' % info.get('campaign'))
-    return ''
+    return (' \u2014 BulkVS turned it down twice without saying why. The number is set up '
+            'fine (on %s%s). This is usually a passing problem at BulkVS: press Send again '
+            'in a minute' % (info.get('campaign'), ', MMS on' if media_urls else ''))
 
 
 def _send_via_bulkvs(body, tries=6, wait=10):
