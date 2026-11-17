@@ -867,11 +867,26 @@ def send_text(account_id, message, who, media_url=None, to=None):
                                    % (_send_refused_why(our_number, media_urls), str(answer)[:180]))
 
         # only now is it real, so only now is it written down
-        cu2 = conn.cursor()
-        cu2.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
-        _log_sent_rows(cu2, account_id, our_number, their_number, message, media_urls)
-        conn.commit()
-        out.update({'ok': True, 'committed': True, 'ref': ref,
+        # BulkVS has accepted it: it IS sent. If writing it into the CMS's
+        # history fails, say so — but never report the text as failed, or the
+        # agent sends it again and the customer gets it twice.
+        save_warning = None
+        try:
+            cu2 = conn.cursor()
+            cu2.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+            _log_sent_rows(cu2, account_id, our_number, their_number, message, media_urls)
+            conn.commit()
+        except Exception as save_err:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            save_warning = ('Sent — but it could not be saved in the CMS history: %s'
+                            % str(save_err)[:140])
+            print('[send] ' + save_warning)
+        if save_warning:
+            out['save_warning'] = save_warning
+        out.update({'ok': True, 'committed': not save_warning, 'ref': ref,
                     'meaning': ('Sent to %s.' % their_number) if not timed_out else
                                ('Sent to %s — the texting service was slow to confirm, '
                                 'so this is recorded but unconfirmed.' % their_number),
@@ -895,6 +910,7 @@ def send_text(account_id, message, who, media_url=None, to=None):
               to=their_number, ref=out.get('ref'), step=(out.get('campaign') or {}).get('step'),
               unconfirmed=out.get('unconfirmed'), picture=bool(media_url),
               campaign_warning=out.get('campaign_warning'),
+              save_warning=out.get('save_warning'),
               error=out.get('raw_error') or out.get('error'))
     sms_ctx(why=None, who=None)
     return out
@@ -2906,6 +2922,17 @@ def campaign_usage(max_age=60):
                 assigned[t] = assigned.get(t, 0) + 1
     except Exception:
         assigned = None
+    # numbers we took off that BulkVS still lists while it clears them
+    # (hours): they are not really on the campaign any more, so they do not
+    # count, and must never be picked to come off again
+    if assigned is not None:
+        try:
+            for r in recs:
+                g = _ten(_rec_tn(r))
+                if g in _clearing_offs() and _rec_tcr(r):
+                    assigned[_rec_tcr(r)] = max(0, assigned.get(_rec_tcr(r), 0) - 1)
+        except Exception:
+            pass
     for c in camps:
         c['bulkvs_count'] = c['count']
         c['assigned'] = (assigned or {}).get(c['tcr']) if assigned is not None else None
@@ -2913,6 +2940,39 @@ def campaign_usage(max_age=60):
             c['pending'] = max(0, c['assigned'] - c['count'])
             c['count'] = max(c['count'], c['assigned'])
     return camps
+
+
+_CLEARING = {'at': 0.0, 'nums': set()}
+
+
+def _clearing_offs(hours=6):
+    """Numbers taken off a campaign in the last few hours that have not been
+    put back on or freed since. BulkVS keeps listing them on the campaign
+    until the carriers clear them, so without this the next swap "took off"
+    the same number again and added a new one — on Nov 16, 3479809041 was
+    taken off CSMPGMO at 6:42 PM and again at 6:45 PM, leaving the campaign
+    at 48. Read from the texting log; kept 20 seconds."""
+    import time as _t
+    if _t.time() - _CLEARING['at'] < 20:
+        return _CLEARING['nums']
+    nums = set()
+    try:
+        from server import get_db
+        conn = get_db(); c = conn.cursor()
+        _sms_table(conn, c)
+        c.execute("""SELECT DISTINCT ON (number) number, kind FROM sms_events
+                     WHERE number IS NOT NULL
+                       AND kind IN ('campaign_off', 'campaign_on', 'freed', 'seen_on')
+                       AND ok IS NOT FALSE
+                       AND at > NOW() - INTERVAL '%d hours'
+                     ORDER BY number, at DESC, id DESC""" % int(hours))
+        nums = {r[0] for r in c.fetchall() if r[1] == 'campaign_off'}
+        conn.close()
+    except Exception as e:
+        print('[sms] clearing list not read: ' + str(e)[:120])
+        return _CLEARING['nums']
+    _CLEARING.update(at=_t.time(), nums=nums)
+    return nums
 
 
 def static_numbers():
@@ -2960,10 +3020,12 @@ def campaign_plan(number, statics=None):
     # both full: take off the one WE put on longest ago — never a static one,
     # never one somebody set up by hand
     movable = []
+    clearing = _clearing_offs()
     for r in bv_all_records():
         t = _lidb_time(_rec_lidb(r))
         if (_rec_tcr(r) and t is not None and _rec_tn(r) not in statics
-                and _rec_tn(r) != ten and _rec_webhook(r) in ('WebHook2', '')):
+                and _rec_tn(r) != ten and _rec_webhook(r) in ('WebHook2', '')
+                and _ten(_rec_tn(r)) not in clearing):
             movable.append((t, r))
     if not movable:
         return {'step': 'stuck', 'campaigns': camps,
@@ -3344,9 +3406,40 @@ def _old_cms_send_body(frm, to, message, media_url=None):
 MMS_MAX_PICTURES = 5
 
 
+_SMSLOG_MAX = {}
+
+
+def _smslog_message_max(cu):
+    """How many characters SMSLog.message holds (-1 = no limit). A long text
+    overflowed it ("String or binary data would be truncated", Nov 16) — the
+    text had already gone to the customer, but the agent saw a failure and
+    sent it again."""
+    if 'message' not in _SMSLOG_MAX:
+        try:
+            cu.execute("""SELECT CHARACTER_MAXIMUM_LENGTH FROM INFORMATION_SCHEMA.COLUMNS
+                          WHERE TABLE_NAME = 'SMSLog' AND COLUMN_NAME = 'message'""")
+            r = cu.fetchone()
+            _SMSLOG_MAX['message'] = int(r[0]) if r and r[0] is not None else -1
+        except Exception:
+            return -1
+    return _SMSLOG_MAX['message']
+
+
 def _log_sent_rows(cu, account_id, our_number, their_number, message, media_urls):
     """Write a sent message to SMSLog the way the old CMS records pictures:
-    the words with the first picture, then one row per further picture."""
+    the words with the first picture, then one row per further picture.
+    Words longer than the column holds are kept whole, split over rows."""
+    limit = _smslog_message_max(cu)
+    message = message or ''
+    if limit and limit > 0 and len(message) > limit:
+        parts = [message[i:i + limit] for i in range(0, len(message), limit)]
+        for part in parts[:-1]:
+            cu.execute("""INSERT INTO [SMSLog]
+                           (AccountId, AccountSMSNumber, ContactNumber, InOut,
+                            message, smsDate, smsNotRead, MediaURL)
+                           VALUES (%s, %s, %s, 'Out', %s, GETDATE(), 0, NULL)""",
+                       (account_id, our_number, their_number, part))
+        message = parts[-1]
     urls = list(media_urls or []) or [None]
     for i, u in enumerate(urls):
         cu.execute("""INSERT INTO [SMSLog]
@@ -4283,12 +4376,15 @@ def number_campaign_action(number, action, who, tcr=None, reason=None):
     return out
 
 
-def sms_log(number=None, kind=None, limit=300):
-    """The texting log, newest first, plus how long registration has taken."""
+def sms_log(number=None, kind=None, limit=300, before=None):
+    """The texting log, newest first, plus how long registration has taken.
+    `before` (an event id) gives the next, older page."""
     from server import get_db
     conn = get_db(); c = conn.cursor()
     _sms_table(conn, c)
     where, args = [], []
+    if before:
+        where.append('id < %s'); args.append(int(before))
     if number:
         where.append('number = %s'); args.append(_ten(number))
     if kind:

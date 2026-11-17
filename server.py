@@ -8832,7 +8832,8 @@ def sms_log_route():
     a = request.args
     try:
         return jsonify(cms_write.sms_log(a.get('number') or None, a.get('kind') or None,
-                                         min(1000, int(a.get('limit') or 300))))
+                                         min(1000, int(a.get('limit') or 300)),
+                                         before=(int(a['before']) if (a.get('before') or '').isdigit() else None)))
     except Exception as e:
         return jsonify({'error': str(e)[:240], 'events': []}), 400
 
