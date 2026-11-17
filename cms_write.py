@@ -772,6 +772,27 @@ def send_text(account_id, message, who, media_url=None, to=None):
         except Exception:
             pass
 
+    # The same words to the same person a few seconds ago — almost always a
+    # double click, or a retry after the screen said "failed" when it had
+    # actually gone. Refuse, so the customer does not get it twice.
+    if message and not media_urls:
+        try:
+            lim = _smslog_message_max(cu)
+            first = message[:lim] if lim and lim > 0 else message
+            cu.execute("""SELECT COUNT(*) FROM SMSLog
+                          WHERE AccountId = %s AND InOut = 'Out'
+                            AND RIGHT(ContactNumber, 10) = %s AND message = %s
+                            AND smsDate >= DATEADD(second, -30, GETDATE())""",
+                       (account_id, their_number[-10:], first))
+            if int((cu.fetchone() or [0])[0] or 0):
+                conn.close()
+                raise WriteRefused('That exact message was already sent to %s in the last 30 seconds, '
+                                   'so it was not sent again. Check the conversation.' % their_number)
+        except WriteRefused:
+            raise
+        except Exception:
+            pass
+
     # the same escaping the CMS applies before sending
     escaped = message
     for ch, code in (('@', '\\u0040'), ('?', '\\u003F'), ('$', '\\u0024'),
@@ -928,15 +949,21 @@ def _send_later(body, account_id, our_number, their_number, message, media_url, 
             sms_event('send_later', our_number, None, account_id, True, who, to=their_number,
                       waited_seconds=int(_tt.time() - started),
                       why='went out after BulkVS had said "not ready yet"')
-            c = cms_db._connect()
             try:
-                k = c.cursor()
-                k.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
-                _log_sent_rows(k, account_id, our_number, their_number, message,
-                               media_url if isinstance(media_url, (list, tuple)) else ([media_url] if media_url else []))
-                c.commit()
-            finally:
-                c.close()
+                c = cms_db._connect()
+                try:
+                    k = c.cursor()
+                    k.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+                    _log_sent_rows(k, account_id, our_number, their_number, message,
+                                   media_url if isinstance(media_url, (list, tuple)) else ([media_url] if media_url else []))
+                    c.commit()
+                finally:
+                    c.close()
+            except Exception as save_err:
+                # it WAS sent — only the CMS history copy failed
+                sms_event('send_later', our_number, None, account_id, True, who, to=their_number,
+                          save_warning='Sent — but not saved in the CMS history: ' + str(save_err)[:140])
+                return
             _log(who, {'table': 'SMSLog', 'action': 'send_text_delayed', 'account_id': account_id,
                        'committed': True, 'values': {'to': their_number, 'from': our_number,
                                                      'message': (message or '')[:120]}})
@@ -2714,6 +2741,12 @@ def _bv(method, path, body=None, timeout=25, raw=None):
                 desc = j.get('description') or j.get('Description') or desc
         except Exception:
             pass
+        # an empty answer showed as just "BulkVS refused:" (Nov 16, buying
+        # numbers) — always give at least the HTTP status
+        if not str(desc or '').strip():
+            desc = 'no reason given (HTTP %s %s)' % (e.code, getattr(e, 'reason', '') or '')
+        elif e.code and str(e.code) not in str(desc):
+            desc = '%s (HTTP %s)' % (str(desc).strip(), e.code)
         raise BulkVSError('BulkVS refused: %s' % desc, code=code, status=e.code)
     try:
         return _json.loads(text) if text.strip() else {}
@@ -3105,6 +3138,42 @@ def sms_event(kind, number=None, campaign=None, account_id=None, ok=None, who=No
         conn.commit(); conn.close()
     except Exception as e:
         print('[sms log] ' + str(e)[:160])
+
+
+def sms_sweep_lost(minutes=8):
+    """A text waiting in the background for BulkVS ("not ready yet") lives
+    only in the app's memory. If the app restarts in those few minutes, the
+    text is never sent and nothing says so — on Nov 16 the 9:18 AM text from
+    8458244414 to (718) 930-1583 has no outcome at all. This finds waits with
+    no result after `minutes` and logs them plainly as never sent, once, so
+    the agent can send again. It does not resend by itself (it could double up)."""
+    try:
+        from server import get_db
+        conn = get_db(); c = conn.cursor()
+        _sms_table(conn, c)
+        c.execute("""SELECT q.id, q.number, q.account_id, q.who, q.detail->>'to', q.at
+                     FROM sms_events q
+                     WHERE q.kind = 'send' AND q.detail->>'queued' = 'true'
+                       AND q.at < NOW() - INTERVAL '%d minutes'
+                       AND q.at > NOW() - INTERVAL '2 days'
+                       AND NOT EXISTS (SELECT 1 FROM sms_events r
+                                       WHERE r.kind = 'send_later' AND r.number = q.number
+                                         AND COALESCE(r.detail->>'to', '') = COALESCE(q.detail->>'to', '')
+                                         AND r.at >= q.at)
+                       AND NOT EXISTS (SELECT 1 FROM sms_events l
+                                       WHERE l.kind = 'send_lost' AND l.detail->>'of' = q.id::text)"""
+                  % int(minutes))
+        lost = c.fetchall()
+        conn.close()
+    except Exception as e:
+        print('[sms sweep] ' + str(e)[:140])
+        return 0
+    for qid, num, acct, who, to, at in lost:
+        sms_event('send_lost', num, None, acct, False, who, to=to, of=str(qid),
+                  error=('Never sent — the app restarted while it was waiting for BulkVS. '
+                         'Send it again.'),
+                  why='waiting text from %s had no result' % (at.strftime('%I:%M %p') if hasattr(at, 'strftime') else at))
+    return len(lost)
 
 
 _WATCH = {'at': 0, 'tcr': None, 'counts': None, 'held': {}}
@@ -4328,14 +4397,17 @@ def _logged(kind, fn, number_of):
     def run(*a, **k):
         who = k.get('who') if 'who' in k else (a[1] if len(a) > 1 else None)
         sms_ctx(who=(who or {}).get('name') if isinstance(who, dict) else who)
+        # which customer, also when it fails ("customer #null" in the log before)
+        acct = (k.get('account_id') or (a[0] if a else None)) if kind in ('texting_on', 'texting_off') else None
         try:
             out = fn(*a, **k)
         except WriteRefused as e:
-            sms_event(kind, number_of(a, k, None), ok=False, who=who, error=str(e)[:200], refused=True)
+            sms_event(kind, number_of(a, k, None), account_id=acct, ok=False, who=who,
+                      error=str(e)[:200], refused=True)
             sms_ctx(who=None, why=None)
             raise
         except Exception as e:
-            sms_event(kind, number_of(a, k, None), ok=False, who=who, error=str(e)[:200])
+            sms_event(kind, number_of(a, k, None), account_id=acct, ok=False, who=who, error=str(e)[:200])
             sms_ctx(who=None, why=None)
             raise
         if isinstance(out, dict):

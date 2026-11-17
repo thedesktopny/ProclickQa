@@ -14645,6 +14645,7 @@ def _notes_refresher():
             try:
                 import cms_write
                 cms_write.sms_watch()           # itself only runs every ten minutes
+                cms_write.sms_sweep_lost()      # waiting texts that never went out
             except Exception as e:
                 print('[sms watch] ' + str(e)[:120])
             time.sleep(90)
