@@ -8220,6 +8220,60 @@ def _who():
             'employee_id': None}
 
 
+# ===================== Return pickup (the proclick-returns app) =====================
+# The "New Return Pickup" button on a customer's page opens the returns app's
+# intake form in a popup. The app trusts who the agent and customer are because
+# the link carries a signed token built HERE, on the server, with a key shared
+# only between the two apps (Azure setting RETURNS_INTAKE_KEY) — never in the
+# browser. Token: base64url(JSON {agent, account, customer, exp}) + "." +
+# hex HMAC-SHA256(key, that text). Everything after that happens in the app.
+RETURNS_INTAKE_URL = os.getenv('RETURNS_INTAKE_URL',
+                               'https://proclick-returns.thedesktopny.workers.dev/intake')
+
+
+def _returns_token(agent, account_id, customer, hours=4):
+    import base64, hmac, hashlib
+    key = (os.getenv('RETURNS_INTAKE_KEY') or '').strip()
+    if not key:
+        raise RuntimeError('The shared key is not set: add RETURNS_INTAKE_KEY to the Azure app settings.')
+    body = json.dumps({'agent': agent, 'account': account_id, 'customer': customer,
+                       'exp': int(time.time()) + int(hours * 3600)},
+                      separators=(',', ':'), ensure_ascii=False).encode('utf-8')
+    payload = base64.urlsafe_b64encode(body).decode('ascii').rstrip('=')
+    sig = hmac.new(key.encode('utf-8'), payload.encode('ascii'), hashlib.sha256).hexdigest()
+    return payload + '.' + sig
+
+
+@app.route('/api/returns/intake-link', methods=['POST'])
+@portal_or_manager
+def returns_intake_link():
+    """A fresh signed link to the returns app's intake form for this customer."""
+    d = request.json or {}
+    try:
+        account_id = int(d.get('account_id'))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Open a customer first.'}), 400
+    customer = ''
+    try:
+        import cms_db
+        conn = cms_db._connect()
+        cu = conn.cursor()
+        cu.execute('SELECT FirstName, LastName FROM Account WHERE Id = %s', (account_id,))
+        r = cu.fetchone()
+        conn.close()
+        if not r:
+            return jsonify({'error': 'No customer with account %d.' % account_id}), 404
+        customer = ('%s %s' % (r[0] or '', r[1] or '')).strip()
+    except Exception as e:
+        return jsonify({'error': 'Could not read the customer from the CMS: ' + str(e)[:160]}), 400
+    agent = _who().get('name') or 'agent'
+    try:
+        token = _returns_token(agent, account_id, customer)
+    except RuntimeError as e:
+        return jsonify({'error': str(e)}), 400
+    return jsonify({'ok': True, 'url': RETURNS_INTAKE_URL + '?t=' + token})
+
+
 # ===================== birthdays, start dates, best of the month =====================
 # None of this exists in the CMS, so it lives in our own database, tied to the
 # CMS by the agent's Employee.Id or the customer's Account.Id — nothing in the
@@ -14863,7 +14917,7 @@ import time as _time_at_start
 _APP_STARTED_AT = _time_at_start.time()
 _APP_STARTED = datetime.now().isoformat()
 
-SERVER_BUILD = 'manual-reviews-2'      # bump when you need to confirm a deploy landed
+SERVER_BUILD = 'return-pickup-1'      # bump when you need to confirm a deploy landed
 
 
 # ─── Health check and a watchdog for stuck requests ─────────────────────────
@@ -14954,7 +15008,7 @@ def _is_portal_host():
 # the QA dashboard, the Skin Block tool and the QA APIs are simply not part of
 # this system.
 PORTAL_ALLOWED_PREFIXES = (
-    '/healthz', '/api/reviews',
+    '/healthz', '/api/reviews', '/api/returns',
     '/api/whoami', '/api/portal/', '/api/live', '/api/customers',
     '/api/agents', '/api/agent-list', '/api/packages', '/api/company-info', '/api/my-scores',
     '/api/recording-link', '/api/recordings/', '/api/payments/', '/api/cms-settings',

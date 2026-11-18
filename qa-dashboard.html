@@ -11645,6 +11645,30 @@ const cuWhen = d => d ? new Date(d).toLocaleString([], {month:'short',day:'numer
 function cuMainPhone(a){
   return [a.phone, a.mobile, a.home_phone, a.other_phone].find(Boolean) || '';
 }
+/* New Return Pickup: the form lives in the returns app. The server signs a
+   short-lived link naming the agent and this customer; it opens in a popup.
+   The popup is opened at once (before asking the server) so the browser
+   treats it as the click's own window and does not block it. */
+async function cuReturnPickup(){
+  if(!cuData || !cuData.account) return;
+  const feat = 'width=780,height=880,resizable=yes,scrollbars=yes';
+  let w = window.open('', 'returnPickup', feat);
+  try{ if(w) w.document.body.innerHTML = '<p style="font-family:sans-serif;padding:24px;color:#555">Opening the return pickup form…</p>'; }catch(e){}
+  let r;
+  try{ r = await API.post('/api/returns/intake-link', {account_id: cuData.account.id}); }
+  catch(e){ r = {error: e.message}; }
+  if(!r || r.error || !r.url){
+    try{ if(w) w.close(); }catch(e){}
+    showToast((r && r.error) || 'Could not open the return pickup form', true);
+    return;
+  }
+  if(w && !w.closed){ w.location.href = r.url; try{ w.focus(); }catch(e){} }
+  else{
+    w = window.open(r.url, 'returnPickup', feat);
+    if(!w) showToast('The popup was blocked — allow popups for this site and press the button again', true);
+  }
+}
+
 async function cuCopyNamePhone(){
   const nameEl = document.querySelector('#cu-head .cu-name');
   const text = nameEl ? nameEl.textContent.replace(/\s+/g, ' ').trim() : '';
@@ -13472,6 +13496,8 @@ async function cuOpen(id){
           <button class="btn btn-primary" style="font-size:12px;" onclick="cuBuyOpen()">💳 Sell a package</button>
           ${(portalIsManager || portalIsTL || !IS_PORTAL_EARLY) ? `<button class="btn btn-outline" style="font-size:12px;" onclick="cuMinutesOpen()" title="Add or take away minutes">Minutes</button>` : ''}
           <button class="btn btn-primary" style="font-size:12px;" onclick="cuStartWork()">Start work</button>
+          <button class="btn btn-outline" style="font-size:12px;" onclick="cuReturnPickup()"
+                  title="Book a free pickup of this customer's return packages">📦 New Return Pickup</button>
           <button class="btn btn-outline" style="font-size:12px;" onclick="cuEditOpen()">Edit</button>
         </span>
       </div>
