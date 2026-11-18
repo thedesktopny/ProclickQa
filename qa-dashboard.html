@@ -6734,6 +6734,7 @@ function portalApply(name, isManager){
     'my-scores':    ['⭐', 'My Scores'],
     'reviews':      ['✅', 'Reviews'],
     'company-info': ['🔑', 'Info & Logins'],
+    'return-pickup':['🚚', 'Return Pickup'],
     'payments':     ['💳', 'Payments'],
     'cms-settings': ['⚙️', 'CMS Tables'],
     'qa-assign':    ['🛡️', 'QA Assignments'],
@@ -6757,7 +6758,7 @@ function portalApply(name, isManager){
   const SECTIONS = [
     ['Today',    ['live', 'agent-calls', 'missed', 'staffing']],
     ['Work',     ['customers', ...(isManager ? [] : ['agent-list']), 'packages', 'company-info',
-                  'skin-block']],
+                  'return-pickup', 'skin-block']],
     ['Pay',      ['time-report', 'payroll', 'payments']],
     ['Quality',  ['reviews', 'my-scores', 'calls', 'human-review', 'call-notes', 'notes', 'analytics']],
     ['Admin',    [...(isManager ? ['agent-list'] : []), 'clocker', 'teams', 'cms-settings', 'qa-assign', 'sms-numbers']],
@@ -8254,6 +8255,8 @@ function qfPickAgent(page, name){
 }
 
 function showPage(id){
+  // Return Pickup is not a page here: it opens the returns app's form in a popup
+  if(id === 'return-pickup'){ cuReturnPickup(); return; }
   pageToAddress(id);
   // Access control: qa_users see only their own work; costs is admin-only
   const managerPages = ['analytics','billing','notes','rules','alerts','qa-users','manager-queue','time-report','payroll','skinblock'];
@@ -11650,12 +11653,16 @@ function cuMainPhone(a){
    The popup is opened at once (before asking the server) so the browser
    treats it as the click's own window and does not block it. */
 async function cuReturnPickup(){
-  if(!cuData || !cuData.account) return;
+  // a customer open on the Customers page right now → the form starts with them
+  const pg = document.getElementById('page-customers');
+  const prof = document.getElementById('cu-profile');
+  const acct = (typeof cuData !== 'undefined' && cuData && cuData.account && pg && pg.classList.contains('active')
+                && prof && prof.style.display !== 'none') ? cuData.account.id : null;
   const feat = 'width=780,height=880,resizable=yes,scrollbars=yes';
   let w = window.open('', 'returnPickup', feat);
   try{ if(w) w.document.body.innerHTML = '<p style="font-family:sans-serif;padding:24px;color:#555">Opening the return pickup form…</p>'; }catch(e){}
   let r;
-  try{ r = await API.post('/api/returns/intake-link', {account_id: cuData.account.id}); }
+  try{ r = await API.post('/api/returns/intake-link', {account_id: acct}); }
   catch(e){ r = {error: e.message}; }
   if(!r || r.error || !r.url){
     try{ if(w) w.close(); }catch(e){}
@@ -13496,8 +13503,6 @@ async function cuOpen(id){
           <button class="btn btn-primary" style="font-size:12px;" onclick="cuBuyOpen()">💳 Sell a package</button>
           ${(portalIsManager || portalIsTL || !IS_PORTAL_EARLY) ? `<button class="btn btn-outline" style="font-size:12px;" onclick="cuMinutesOpen()" title="Add or take away minutes">Minutes</button>` : ''}
           <button class="btn btn-primary" style="font-size:12px;" onclick="cuStartWork()">Start work</button>
-          <button class="btn btn-outline" style="font-size:12px;" onclick="cuReturnPickup()"
-                  title="Book a free pickup of this customer's return packages">📦 New Return Pickup</button>
           <button class="btn btn-outline" style="font-size:12px;" onclick="cuEditOpen()">Edit</button>
         </span>
       </div>

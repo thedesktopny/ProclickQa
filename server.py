@@ -6495,7 +6495,7 @@ def _setting(key, default=''):
 # their existing user name and password rather than a second set of logins.
 PORTAL_PAGES = ['live', 'missed', 'customers', 'agent-calls',
                 'agent-list', 'packages', 'company-info',
-                'skin-block', 'my-scores']   # everyone
+                'skin-block', 'my-scores', 'return-pickup']   # everyone
 PORTAL_MANAGER_PAGES = ['cms-settings', 'qa-assign', 'staffing', 'time-report', 'payroll', 'teams', 'clocker']           # managers and admins
 PORTAL_ADMIN_PAGES = ['payments', 'sms-numbers']                            # admins only — real money
 # QA reviewers additionally get the monitoring side. They are doing QA work, so
@@ -8249,10 +8249,19 @@ def _returns_token(agent, account_id, customer, hours=4):
 def returns_intake_link():
     """A fresh signed link to the returns app's intake form for this customer."""
     d = request.json or {}
+    # Opened from the menu with no customer on screen: the form starts empty
+    # and the agent fills in who it is for. With a customer open, it is theirs.
+    agent = _who().get('name') or 'agent'
+    if d.get('account_id') in (None, '', 0):
+        try:
+            token = _returns_token(agent, None, '')
+        except RuntimeError as e:
+            return jsonify({'error': str(e)}), 400
+        return jsonify({'ok': True, 'url': RETURNS_INTAKE_URL + '?t=' + token})
     try:
         account_id = int(d.get('account_id'))
     except (TypeError, ValueError):
-        return jsonify({'error': 'Open a customer first.'}), 400
+        return jsonify({'error': 'That is not an account number.'}), 400
     customer = ''
     try:
         import cms_db
@@ -8266,7 +8275,6 @@ def returns_intake_link():
         customer = ('%s %s' % (r[0] or '', r[1] or '')).strip()
     except Exception as e:
         return jsonify({'error': 'Could not read the customer from the CMS: ' + str(e)[:160]}), 400
-    agent = _who().get('name') or 'agent'
     try:
         token = _returns_token(agent, account_id, customer)
     except RuntimeError as e:
@@ -14917,7 +14925,7 @@ import time as _time_at_start
 _APP_STARTED_AT = _time_at_start.time()
 _APP_STARTED = datetime.now().isoformat()
 
-SERVER_BUILD = 'return-pickup-1'      # bump when you need to confirm a deploy landed
+SERVER_BUILD = 'return-pickup-2'      # bump when you need to confirm a deploy landed
 
 
 # ─── Health check and a watchdog for stuck requests ─────────────────────────
