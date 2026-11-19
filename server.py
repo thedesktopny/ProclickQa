@@ -1723,6 +1723,26 @@ def portal_manager_only(f):
         return jsonify({'error': 'Managers only'}), 403
     return decorated
 
+def _portal_reviewer():
+    """Someone signed in to the CMS portal who reviews calls: a QA reviewer,
+    a manager, an admin or a team leader. Nov 18 2026: they could open the
+    review tools but every save said "Unauthorized", because the review
+    endpoints only knew the separate VoiceGuard sign-in, which most of them
+    never had. They now count as signed in for those endpoints."""
+    try:
+        p = _portal_user(request.headers.get('X-Portal-Ticket', ''))
+    except Exception:
+        p = None
+    if not p:
+        return None
+    if not (p.get('q') or p.get('a') or p.get('m') or _team_leader_agents(p.get('e')) is not None):
+        return None
+    return {'role': 'admin' if p.get('a') else 'manager' if p.get('m') else 'qa',
+            'id': None, 'username': p.get('n'), 'full_name': p.get('n'),
+            'portal': True, 'employee_id': p.get('e'),
+            'is_qa': bool(p.get('q')), 'is_manager': bool(p.get('m') or p.get('a'))}
+
+
 def require_login(f):
     from functools import wraps
     @wraps(f)
@@ -1731,6 +1751,8 @@ def require_login(f):
         if not user and (session.get('user_id') or session.get('admin')):
             user = {'role': session.get('role','admin'), 'id': session.get('user_id'),
                     'username': session.get('username'), 'full_name': session.get('full_name')}
+        if not user:
+            user = _portal_reviewer()
         if not user:
             return jsonify({'error': 'Unauthorized'}), 401
         return f(*args, **kwargs)
@@ -1741,6 +1763,8 @@ def current_user():
     if not user and (session.get('user_id') or session.get('admin')):
         user = {'role': session.get('role','admin'), 'id': session.get('user_id'),
                 'username': session.get('username'), 'full_name': session.get('full_name')}
+    if not user:
+        user = _portal_reviewer()
     return user
 
 def require_api_key(f):
@@ -9967,6 +9991,21 @@ def customer_add_card(account_id):
     return jsonify(out), (200 if out.get('ok') else 400)
 
 
+@app.route('/api/customers/<int:account_id>/cards/<int:card_id>', methods=['DELETE'])
+@portal_or_manager
+def customer_remove_card(account_id, card_id):
+    """Take a saved card off the account (as the old CMS's "Delete bank card")."""
+    import cms_write
+    try:
+        out = cms_write.remove_card(account_id, card_id, _who())
+    except cms_write.WriteRefused as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'The card could not be removed.',
+                        'raw_error': str(e)[:300]}), 400
+    return jsonify(out), (200 if out.get('ok') else 400)
+
+
 @app.route('/api/customers/<int:account_id>/buy', methods=['POST'])
 @portal_or_manager
 def customer_buy_package(account_id):
@@ -14393,6 +14432,15 @@ def save_flag_reviews(call_id):
     data = request.json or {}
     reviews = data.get('reviews', [])
 
+    # a team leader who is not also QA or a manager reviews their own agents
+    if user and user.get('portal') and not user.get('is_qa') and not user.get('is_manager'):
+        try:
+            _call, mine = _review_call_allowed(_review_viewer(), call_id)
+        except Exception:
+            mine = None
+        if not mine:
+            return jsonify({'error': "This call is not one of your team's agents."}), 403
+
     # Validate: each flag needs either a note OR to be marked an AI mistake
     for r in reviews:
         note = (r.get('resolution_note') or '').strip()
@@ -14925,7 +14973,7 @@ import time as _time_at_start
 _APP_STARTED_AT = _time_at_start.time()
 _APP_STARTED = datetime.now().isoformat()
 
-SERVER_BUILD = 'return-pickup-2'      # bump when you need to confirm a deploy landed
+SERVER_BUILD = 'review-save-1'      # bump when you need to confirm a deploy landed
 
 
 # ─── Health check and a watchdog for stuck requests ─────────────────────────
@@ -15016,7 +15064,7 @@ def _is_portal_host():
 # the QA dashboard, the Skin Block tool and the QA APIs are simply not part of
 # this system.
 PORTAL_ALLOWED_PREFIXES = (
-    '/healthz', '/api/reviews', '/api/returns',
+    '/healthz', '/api/reviews', '/api/returns', '/api/flag-reviews/', '/api/resolutions/',
     '/api/whoami', '/api/portal/', '/api/live', '/api/customers',
     '/api/agents', '/api/agent-list', '/api/packages', '/api/company-info', '/api/my-scores',
     '/api/recording-link', '/api/recordings/', '/api/payments/', '/api/cms-settings',

@@ -13852,6 +13852,8 @@ function cuTab(which){
         ${r.cards.length ? r.cards.map(c=>`<div class="payrow" style="cursor:default">
             <div class="nm">${esc(c.brand)} •••• ${c.last4}
               <div class="mt">added ${cuDate(c.added)}${c.last_used?' · last used '+cuDate(c.last_used):''}</div></div>
+            <button class="cn-chip" style="color:var(--red);" onclick="cuCardRemove(${c.id}, this)"
+                    title="Take this card off the account">Remove</button>
           </div>`).join('') : '<div class="payhint">None saved.</div>'}
       </div>
       <div class="card" style="padding:16px 18px;">
@@ -13872,6 +13874,29 @@ function cuTab(which){
 /* Opening a customer's stored login is recorded before the value is shown —
    who looked, at which account, and when. An owner should be able to review
    that afterwards, which is only possible if it is written down every time. */
+/* Remove a saved card from the account — the old CMS's "Delete bank card".
+   Past payments keep their own record; the card just can't be charged again. */
+async function cuCardRemove(cardId, btn){
+  if(!cuData || !cuData.account) return;
+  const c = (cuData.cards || []).find(x => x.id === cardId) || {};
+  const label = (c.brand || 'Card') + ' ending ' + (c.last4 || '????');
+  if(!confirm('Remove ' + label + ' from ' + (cuData.account.name || 'this customer') + "'s account?\n\n"
+              + "It can't be charged again unless it is added back. Past payments are not affected.")) return;
+  if(btn){ btn.disabled = true; btn.textContent = 'Removing…'; }
+  let r;
+  try{ r = await API.del(`/api/customers/${cuData.account.id}/cards/${cardId}`); }
+  catch(e){ r = {error: e.message}; }
+  if(!r || r.error || r.ok === false){
+    showToast((r && r.error) || 'The card could not be removed', true);
+    if(btn){ btn.disabled = false; btn.textContent = 'Remove'; }
+    return;
+  }
+  showToast(r.meaning || 'Card removed');
+  cuData.cards = (cuData.cards || []).filter(x => x.id !== cardId);
+  const on = document.querySelector('[data-cutab].on');
+  if(on) cuTab(on.dataset.cutab);
+}
+
 async function cuCredOpen(id){
   const box = document.getElementById('cred-' + id);
   if(!box) return;

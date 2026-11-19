@@ -1049,6 +1049,48 @@ def saved_cards(account_id):
     return out
 
 
+def remove_card(account_id, card_id, who):
+    """Take a saved card off a customer's account.
+
+    The same as the old CMS's "Delete bank card" (DeleteStripeCustomers): the
+    row in StripeCustomers is removed, so the card no longer shows and can no
+    longer be charged from here. Past payments are not touched — they keep
+    their own record. Checked against the account so a card id from another
+    customer can never be removed by mistake.
+    """
+    account_id = int(account_id); card_id = int(card_id)
+    conn = cms_db._connect(); cu = conn.cursor()
+    out = {'table': 'StripeCustomers', 'action': 'remove_card', 'account_id': account_id,
+           'dry_run': False, 'values': {'card_id': card_id}}
+    try:
+        cu.execute("""SELECT Brand, Last4 FROM StripeCustomers WHERE Id = %s AND AccountId = %s""",
+                   (card_id, account_id))
+        r = cu.fetchone()
+        if not r:
+            raise WriteRefused('That card is not on this customer\'s account (it may already be removed).')
+        brand, last4 = (r[0] or 'Card').strip(), (r[1] or '').strip()
+        out['values'].update({'brand': brand, 'last4': last4})
+        cu.execute("DELETE FROM StripeCustomers WHERE Id = %s AND AccountId = %s", (card_id, account_id))
+        conn.commit()
+        out.update({'ok': True, 'committed': True,
+                    'meaning': '%s ending %s removed from the account.' % (brand, last4 or '????')})
+    except WriteRefused:
+        raise
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        out.update({'ok': False, 'committed': False, 'error': _explain(e), 'raw_error': str(e)[:300]})
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    _log(who, out)
+    return out
+
+
 # The gateway is told which currency an amount is in; nothing is converted.
 # The CMS has an ExchangeCurrency method that returns the amount unchanged, so
 # a package priced at 18900 in EUR is charged as €189.00, not a dollar
