@@ -7494,21 +7494,28 @@ def company_info_route():
         for i in out.get('items', []):
             if str(i['id']) in cover:
                 i['sensitive'] = cover[str(i['id'])]
-        p = _portal_user(request.headers.get('X-Portal-Ticket', ''))
-        user = None if p else get_token_user(get_request_token())
-        out['can_edit'] = bool((p and (p.get('m') or p.get('a'))) or
-                               (user and user.get('role') in ('admin', 'manager')))
+        out['can_edit'] = _ci_can_edit()
         return jsonify(out)
     except Exception as e:
         return jsonify({'error': str(e)[:240]}), 400
 
 
+def _ci_can_edit():
+    """Managers, admins and team leaders may add and change Info & Logins."""
+    p = _portal_user(request.headers.get('X-Portal-Ticket', ''))
+    if p:
+        return bool(p.get('m') or p.get('a') or _team_leader_agents(p.get('e')) is not None)
+    user = get_token_user(get_request_token())
+    return bool((user and user.get('role') in ('admin', 'manager')) or session.get('logged_in'))
+
+
 @app.route('/api/company-info', methods=['POST'])
 @app.route('/api/company-info/<int:item_id>', methods=['PUT'])
-@portal_manager_only
 def company_info_save_route(item_id=None):
-    """Add or change an entry — managers and admins only."""
+    """Add or change an entry — managers, admins and team leaders."""
     import cms_write
+    if not _ci_can_edit():
+        return jsonify({'ok': False, 'error': 'Only managers and team leaders can change this.'}), 403
     d = request.json or {}
     try:
         out = cms_write.company_info_save(item_id, d.get('key'), d.get('value'), _who())
@@ -15008,7 +15015,7 @@ import time as _time_at_start
 _APP_STARTED_AT = _time_at_start.time()
 _APP_STARTED = datetime.now().isoformat()
 
-SERVER_BUILD = 'info-edit-1'      # bump when you need to confirm a deploy landed
+SERVER_BUILD = 'info-edit-2'      # bump when you need to confirm a deploy landed
 
 
 # ─── Health check and a watchdog for stuck requests ─────────────────────────
