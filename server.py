@@ -7475,15 +7475,50 @@ def credential_access_log():
     return jsonify({'accesses': rows})
 
 
+def _ci_cover_map():
+    """Managers can force an entry covered or shown, whatever the guess says."""
+    try:
+        return {str(k): bool(v) for k, v in json.loads(_setting('company_info_cover', '') or '{}').items()}
+    except Exception:
+        return {}
+
+
 @app.route('/api/company-info', methods=['GET'])
 @portal_or_manager
 def company_info_route():
     """Shared logins and reference details."""
     import cms_db
     try:
-        return jsonify(cms_db.company_info())
+        out = cms_db.company_info()
+        cover = _ci_cover_map()
+        for i in out.get('items', []):
+            if str(i['id']) in cover:
+                i['sensitive'] = cover[str(i['id'])]
+        p = _portal_user(request.headers.get('X-Portal-Ticket', ''))
+        user = None if p else get_token_user(get_request_token())
+        out['can_edit'] = bool((p and (p.get('m') or p.get('a'))) or
+                               (user and user.get('role') in ('admin', 'manager')))
+        return jsonify(out)
     except Exception as e:
         return jsonify({'error': str(e)[:240]}), 400
+
+
+@app.route('/api/company-info', methods=['POST'])
+@app.route('/api/company-info/<int:item_id>', methods=['PUT'])
+@portal_manager_only
+def company_info_save_route(item_id=None):
+    """Add or change an entry — managers and admins only."""
+    import cms_write
+    d = request.json or {}
+    try:
+        out = cms_write.company_info_save(item_id, d.get('key'), d.get('value'), _who())
+    except cms_write.WriteRefused as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    if out.get('ok') and 'covered' in d and out.get('id'):
+        cover = _ci_cover_map()
+        cover[str(out['id'])] = bool(d.get('covered'))
+        _put_setting('company_info_cover', json.dumps(cover))
+    return jsonify(out), (200 if out.get('ok') else 400)
 
 
 @app.route('/api/packages', methods=['GET'])
@@ -14973,7 +15008,7 @@ import time as _time_at_start
 _APP_STARTED_AT = _time_at_start.time()
 _APP_STARTED = datetime.now().isoformat()
 
-SERVER_BUILD = 'review-save-1'      # bump when you need to confirm a deploy landed
+SERVER_BUILD = 'info-edit-1'      # bump when you need to confirm a deploy landed
 
 
 # ─── Health check and a watchdog for stuck requests ─────────────────────────

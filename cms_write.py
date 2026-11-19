@@ -1049,6 +1049,58 @@ def saved_cards(account_id):
     return out
 
 
+def company_info_save(item_id, key, value, who):
+    """Add (item_id None) or change an entry in Info & Logins (CMS table
+    CompanyInfo). Managers and admins only — checked by the route. Title up to
+    50 characters and value up to 500, the table's own limits. The old value is
+    not written to the change log, since it is often a password."""
+    key = (key or '').strip()
+    value = (value or '').strip()
+    if not key:
+        raise WriteRefused('Give it a title.')
+    if not value:
+        raise WriteRefused('Write the information itself.')
+    if len(key) > 50:
+        raise WriteRefused('The title is %d characters — the CMS keeps at most 50.' % len(key))
+    if len(value) > 500:
+        raise WriteRefused('The information is %d characters — the CMS keeps at most 500.' % len(value))
+    conn = cms_db._connect(); cu = conn.cursor()
+    out = {'table': 'CompanyInfo', 'action': 'add' if item_id is None else 'edit',
+           'dry_run': False, 'values': {'title': key}}
+    try:
+        if item_id is None:
+            cu.execute(_with_new_id("""INSERT INTO CompanyInfo (InfoKey, InfoValue, Created, Updated)
+                                       OUTPUT INSERTED.Id VALUES (%s, %s, GETDATE(), GETDATE())"""),
+                       (key, value))
+            r = cu.fetchone()
+            new_id = int(r[0]) if r else None
+        else:
+            cu.execute('SELECT Id FROM CompanyInfo WHERE Id = %s', (int(item_id),))
+            if not cu.fetchone():
+                raise WriteRefused('That entry no longer exists — refresh the page.')
+            cu.execute("""UPDATE CompanyInfo SET InfoKey = %s, InfoValue = %s, Updated = GETDATE()
+                          WHERE Id = %s""", (key, value, int(item_id)))
+            new_id = int(item_id)
+        conn.commit()
+        out.update({'ok': True, 'committed': True, 'id': new_id, 'values': {'id': new_id, 'title': key},
+                    'meaning': ('"%s" added.' if item_id is None else '"%s" saved.') % key})
+    except WriteRefused:
+        raise
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        out.update({'ok': False, 'committed': False, 'error': _explain(e)})
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    _log(who, out)
+    return out
+
+
 def remove_card(account_id, card_id, who):
     """Take a saved card off a customer's account.
 

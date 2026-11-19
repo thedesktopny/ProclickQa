@@ -23,6 +23,7 @@ explorer below and then stored as a mapping in app_settings, because every CMS
 names these things differently.
 """
 import os
+import re
 
 # 'auto' by default: the port and a trial connection tell us what it is, so you
 # don't have to know. Set it explicitly only if the guess is ever wrong.
@@ -3106,13 +3107,40 @@ def company_info():
             break
         key = (r[1] or '').strip()
         val = (r[2] or '').strip()
-        sensitive = any(w in key.lower() for w in
-                        ('login', 'password', 'pass', 'pin', 'code', 'key', 'account'))
+        sensitive = _looks_secret(key, val)
         out.append({'id': int(r[0]), 'key': key, 'value': val,
-                    'sensitive': sensitive,
+                    'sensitive': sensitive, 'auto_sensitive': sensitive,
                     'created': _plain(r[3]), 'updated': _plain(r[4])})
     conn.close()
     return {'items': out}
+
+
+def _looks_secret(key, val):
+    """Should this entry stay covered until someone taps Show?
+
+    By the title (login, password...) — and, since Nov 18 2026, by the value
+    too: "Chat GPT" and "DIDWW" held an email and a password but had no such
+    word in the title, so they showed in plain sight. A password-looking word
+    in the value is a mix of letters, digits and symbols, 6 or more long, and
+    not an email address, a web address or a phone number."""
+    k = (key or '').lower()
+    if any(w in k for w in ('login', 'password', 'pass', 'pin', 'code', 'key', 'account')):
+        return True
+    v = val or ''
+    if re.search(r'\b(password|passwd|pwd|pass|pw)\b', v, re.I):
+        return True
+    for tok in re.split(r'[\s,;|]+', v):
+        tok = tok.strip('()[]"\'.:')
+        if len(tok) < 6 or '@' in tok or tok.lower().startswith(('http', 'www.')):
+            continue
+        if re.fullmatch(r'[\d+\-().]+', tok):           # a phone or fax number
+            continue
+        letters, digits = re.search(r'[A-Za-z]', tok), re.search(r'\d', tok)
+        special = re.search(r'[!#$%^&*?_~]', tok)
+        mixed_case = re.search(r'[a-z]', tok) and re.search(r'[A-Z]', tok)
+        if letters and ((special and (digits or mixed_case)) or (digits and mixed_case and len(tok) >= 8)):
+            return True
+    return False
 
 
 _SYMBOL_CODES = {'$': 'USD', '£': 'GBP', '€': 'EUR', '₪': 'ILS'}

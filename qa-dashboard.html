@@ -2542,6 +2542,7 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
     <div class="topbar-right">
       <input id="ci-search" placeholder="Search…" oninput="ciRender()" style="width:200px;">
       <span id="ci-count" style="font-size:11.5px;color:var(--text3);"></span>
+      <button class="btn btn-primary" id="ci-add-btn" style="display:none;font-size:12px;" onclick="ciEdit(null)">+ Add</button>
     </div>
   </div>
   <div style="padding:18px 28px 44px;">
@@ -2551,6 +2552,7 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
         Passwords stay covered until you tap Show, so nothing is exposed on a shared screen.
       </span>
     </div>
+    <div id="ci-edit"></div>
     <div id="ci-body"></div>
   </div>
 </div>
@@ -6673,6 +6675,8 @@ async function loadCompanyInfo(){
     const r = await API.get('/api/company-info');
     if(r.error){ box.innerHTML = `<div style="color:var(--red)">${r.error}</div>`; return; }
     ciData = r; ciRender();
+    const add = document.getElementById('ci-add-btn');
+    if(add) add.style.display = r.can_edit ? '' : 'none';
   }catch(e){ box.innerHTML = `<div style="color:var(--red)">${e.message}</div>`; }
 }
 
@@ -6690,11 +6694,53 @@ function ciRender(){
         <span style="margin-left:auto;display:flex;gap:6px;">
           ${i.sensitive?`<button class="cn-chip" onclick="ciToggle(${i.id})" id="ci-btn-${i.id}">Show</button>`:''}
           <button class="cn-chip" onclick="ciCopy(${i.id})">Copy</button>
+          ${ciData.can_edit?`<button class="cn-chip" onclick="ciEdit(${i.id})">Edit</button>`:''}
         </span>
       </div>
       <div id="ci-val-${i.id}" style="font-size:13px;color:var(--text);margin-top:6px;
            word-break:break-all;${i.sensitive?'filter:blur(5px);user-select:none;':''}">${esc(i.value)}</div>
     </div>`).join('') || '<div style="color:var(--text3);font-size:13px;">Nothing matches.</div>';
+}
+
+/* Managers and admins add or change entries (e.g. after a Gmail password
+   change). The form opens above the list; "Keep covered" decides whether the
+   value stays blurred until someone taps Show. */
+function ciEdit(id){
+  const it = id == null ? {key:'', value:'', sensitive:true} : (ciData.items || []).find(x => x.id === id);
+  if(!it) return;
+  const box = document.getElementById('ci-edit');
+  box.innerHTML = `<div class="card" style="padding:14px 18px;margin-bottom:12px;border-color:var(--accent);">
+      <div style="font-size:13px;font-weight:650;margin-bottom:10px;">${id == null ? 'Add information' : 'Edit — ' + esc(it.key)}</div>
+      <div class="cn-lab">Title</div>
+      <input id="ci-e-key" class="cms-in" maxlength="50" style="width:100%;" value="${esc(it.key)}" placeholder="e.g. ProClick Gmail login">
+      <div class="cn-lab" style="margin-top:10px;">Information</div>
+      <textarea id="ci-e-val" class="cms-in" maxlength="500" rows="3" style="width:100%;resize:vertical;"
+                placeholder="e.g. email and password, a phone number, an address">${esc(it.value)}</textarea>
+      <label style="display:flex;gap:8px;align-items:center;font-size:12.5px;margin-top:8px;color:var(--text2);">
+        <input type="checkbox" id="ci-e-cov" ${it.sensitive ? 'checked' : ''}> Keep covered until someone taps Show (for passwords)</label>
+      <div style="display:flex;gap:8px;margin-top:12px;">
+        <button class="btn btn-outline" onclick="document.getElementById('ci-edit').innerHTML=''">Cancel</button>
+        <button class="btn btn-primary" id="ci-e-save" onclick="ciSave(${id == null ? 'null' : id})">Save</button>
+      </div></div>`;
+  box.scrollIntoView({behavior:'smooth', block:'start'});
+  document.getElementById('ci-e-key').focus();
+}
+
+async function ciSave(id){
+  const btn = document.getElementById('ci-e-save');
+  const body = {key: document.getElementById('ci-e-key').value, value: document.getElementById('ci-e-val').value,
+                covered: document.getElementById('ci-e-cov').checked};
+  btn.disabled = true; btn.textContent = 'Saving…';
+  let r;
+  try{ r = id == null ? await API.post('/api/company-info', body) : await API.put('/api/company-info/' + id, body); }
+  catch(e){ r = {error: e.message}; }
+  if(!r || r.error || r.ok === false){
+    showToast((r && r.error) || 'Could not save', true);
+    btn.disabled = false; btn.textContent = 'Save'; return;
+  }
+  showToast(r.meaning || 'Saved');
+  document.getElementById('ci-edit').innerHTML = '';
+  loadCompanyInfo();
 }
 
 function ciToggle(id){
