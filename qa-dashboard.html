@@ -11517,7 +11517,8 @@ function phoneNotLoggedIn(a){
    on the tile — and whether that is long enough to need a look. The old CMS
    showed "Available since about 21 hours ago"; that is what spotted people
    still clocked in from yesterday, or a phone stuck "on a call" for days. */
-const LV_ODD = {available: 12 * 3600, call: 2 * 3600, dnd: 4 * 3600, nophone: 30 * 60};
+const LV_ODD = {available: 12 * 3600,   // clocked in (or back from break) that long ago
+                call: 2 * 3600, dnd: 4 * 3600, nophone: 30 * 60};
 function lvShort(secs){
   secs = Math.max(0, Math.floor(secs || 0));
   if(secs < 60) return secs + 's';
@@ -11542,15 +11543,27 @@ function lvSecsSince(t){
 /* {line, odd, why} for one agent not on break */
 function lvSince(a, busy, dnd, nop){
   if(!a.clocked_in) return {line: '', odd: false};
-  const avail = lvSecsSince(a.clocker_since);
+  const shift = lvSecsSince(a.clocker_since);          // since clocked in / back from break
   const call = busy ? lvSecsSince(a.phone_since) : null;
   const dndS = dnd ? lvSecsSince(a.dnd_since) : null;
   const noP = nop ? lvSecsSince(a.phone_since) : null;
-  // the small line under the status: how long since they became available,
-  // or for do not disturb, how long they have been on it
-  let line = dndS != null ? 'for ' + lvShort(dndS) : (avail != null ? 'available ' + lvShort(avail) : '');
+  // "available" = free since the LATEST of: clocking in / back from break,
+  // the last work finished, the last call ending (the phone turning free).
+  // Rowena, Nov 20: a tile said "available 43m" for someone whose work had
+  // finished 2 minutes before — it was counting from clock-in.
+  const w = a.activity || {};
+  const stamps = [a.clocker_since];
+  if(w.kind === 'last_work') stamps.push(w.at);
+  if(!busy && String(a.phone||'').toUpperCase() === 'NOT_IN_USE') stamps.push(a.phone_since);
+  const ages = stamps.filter(Boolean).map(lvSecsSince).filter(x => x != null && x >= 0);
+  const free = ages.length ? Math.min(...ages) : null;
+  let line;
+  if(dndS != null) line = 'for ' + lvShort(dndS);
+  else if(busy) line = shift != null ? 'clocked in ' + lvShort(shift) : '';
+  else if(w.kind === 'working') line = 'working ' + lvShort(lvSecsSince(w.at));
+  else line = free != null ? 'available ' + lvShort(free) : '';
   let why = '';
-  if(avail != null && avail > LV_ODD.available) why = 'available ' + lvShort(avail);
+  if(shift != null && shift > LV_ODD.available) why = 'clocked in ' + lvShort(shift);
   else if(call != null && call > LV_ODD.call) why = 'on a call ' + lvShort(call);
   else if(dndS != null && dndS > LV_ODD.dnd) why = 'do not disturb ' + lvShort(dndS);
   else if(noP != null && noP > LV_ODD.nophone){ why = 'phone off ' + lvShort(noP); line = 'phone off ' + lvShort(noP); }
