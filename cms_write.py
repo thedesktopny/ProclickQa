@@ -4980,7 +4980,7 @@ def vault_counts():
     return out
 
 
-def vault_sweep(company_secret, undo=False, limit=5000):
+def vault_sweep(company_secret, undo=False, limit=1500):
     """Encrypt every plain value still in the three places (the old CMS keeps
     writing plain ones). CompanyInfo rows are only encrypted when
     company_secret(id, key, value) says they are secret. Values still on
@@ -5015,13 +5015,18 @@ def vault_sweep(company_secret, undo=False, limit=5000):
                         continue
                     todo.append((r[0], r[1], plain if undo else _vault.encrypt(plain),
                                  'decrypted' if undo else 'rekeyed'))
-            for rid, cur, new, what in todo:
+            # small batches, committed as they go, so the old CMS is never
+            # kept waiting on these tables (and SQL Server never locks the
+            # whole table, which it does past ~5000 row locks)
+            for n, (rid, cur, new, what) in enumerate(todo, 1):
                 if lim is not None and len(new) > lim:
                     done['too_long'] += 1
                     continue
                 cu.execute('UPDATE [{t}] SET [{c}] = %s WHERE [{i}] = %s AND [{c}] = %s'.format(t=table, c=col, i=idc),
                            (new, rid, cur))
                 done[what if cu.rowcount else 'skipped'] += 1
+                if n % 50 == 0:
+                    conn.commit()
             conn.commit()
     finally:
         conn.close()

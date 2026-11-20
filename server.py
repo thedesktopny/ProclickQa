@@ -6654,18 +6654,23 @@ def _send_code_email(to_address, code, name=''):
     sender = os.getenv('POSTMARK_FROM', 'david@myhellodesk.com').strip()
     # A plain-text version travels alongside the styled one, because some mail
     # clients show only that — and a code nobody can read is a locked door.
-    text = (('Hello %s,\n\n' % name) if name else '') + (
-        'Your ProClick sign-in code is:\n\n'
-        '    %s\n\n'
+    # Gmail shows its "Copy code" button when it recognises a verification
+    # code: the standard wording ("Your verification code is 123456") right
+    # at the start, the code on its own, and the code in the subject — the
+    # way Google, Microsoft and banks word theirs.
+    text = ('Your ProClick verification code is %s\n\n' % code) + (('Hello %s,\n\n' % name) if name else '') + (
+        'Your verification code is:\n\n'
+        '%s\n\n'
         'It works for the next 10 minutes and can only be used once.\n\n'
         'If you did not just try to sign in, somebody has your password — '
         'tell David straight away.\n\n'
         'ProClick\n' % code)
 
-    greeting = ('Hello %s, ' % name) if name else ''
+    greeting = ('Hello %s,' % name) if name else 'Hello,'
     html = """<!doctype html>
 <html><body style="margin:0;padding:0;background:#f4f5f9;
       font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;">
+  <div style="display:none;max-height:0;overflow:hidden;opacity:0;">Your ProClick verification code is __CODE__</div>
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
          style="background:#f4f5f9;padding:32px 16px;">
     <tr><td align="center">
@@ -6680,12 +6685,15 @@ def _send_code_email(to_address, code, name=''):
         </td></tr>
 
         <tr><td style="padding:28px;">
+          <p style="margin:0 0 6px;font-size:15px;color:#1b1f33;line-height:1.55;">__GREETING__</p>
+          <!-- the code in a plain visible sentence — what Gmail reads to offer
+               "Copy code" (a hidden preview line alone may be ignored) -->
           <p style="margin:0 0 18px;font-size:15px;color:#1b1f33;line-height:1.55;">
-            __GREETING__Here is your code to finish signing in.</p>
+            Your ProClick verification code is <strong>__CODE__</strong></p>
 
           <div style="background:#f4f5f9;border:1px solid #e4e6f0;border-radius:10px;
                       padding:18px;text-align:center;margin-bottom:18px;">
-            <div style="font-size:34px;font-weight:700;letter-spacing:.22em;color:#1b1f33;
+            <div style="font-size:34px;font-weight:700;letter-spacing:6px;color:#1b1f33;
                         font-family:'SF Mono',Menlo,Consolas,monospace;">__CODE__</div>
           </div>
 
@@ -6713,9 +6721,10 @@ def _send_code_email(to_address, code, name=''):
     body = {
         'From': sender,
         'To': to_address,
-        # the code stays OUT of the subject: it shows on a lock screen and on
-        # any shoulder near the desk, and the point is that only they see it
-        'Subject': 'Your ProClick sign-in code',
+        # the code in the subject is what lets Gmail offer "Copy code" (and
+        # the phone notification show it) — on its own it is useless without
+        # the password, and it expires in 10 minutes
+        'Subject': '%s is your ProClick verification code' % code,
         'TextBody': text,
         'HtmlBody': html,
         'MessageStream': os.getenv('POSTMARK_STREAM', 'outbound'),
@@ -15222,7 +15231,7 @@ import time as _time_at_start
 _APP_STARTED_AT = _time_at_start.time()
 _APP_STARTED = datetime.now().isoformat()
 
-SERVER_BUILD = 'vault-1'      # bump when you need to confirm a deploy landed
+SERVER_BUILD = 'vault-2'      # bump when you need to confirm a deploy landed
 
 
 # ─── Health check and a watchdog for stuck requests ─────────────────────────
