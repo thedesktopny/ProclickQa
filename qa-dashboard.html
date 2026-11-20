@@ -4240,7 +4240,7 @@ function portalTakeRenewal(r){
     const n = r.headers.get('X-Portal-Ticket-Renew');
     if(n && typeof portalTicket !== 'undefined' && portalTicket){
       portalTicket = n;
-      try{ sessionStorage.setItem('portal_ticket', n); }catch(e){}
+      try{ localStorage.setItem('portal_ticket', n); }catch(e){}
     }
   }catch(e){}
 }
@@ -4281,7 +4281,10 @@ const API={
   async del(p){
     const r=await fetch(p,{method:'DELETE',headers:authHeaders()});
     if(r.status===401){throw new Error('Unauthorized');}
-    return r.json();
+    // a page instead of an answer (e.g. a wrong address) shows as a plain message
+    const t=await r.text();
+    try{ return JSON.parse(t); }
+    catch(e){ return {ok:false, error:'The server did not accept that (' + r.status + '). Refresh the page and try again.'}; }
   }
 };
 
@@ -4382,7 +4385,7 @@ async function doLogout(){
   try{ await API.post('/api/logout',{}); }catch(e){}
   clearToken();
   // a portal ticket may also be sitting here if the person came in that way
-  try{ sessionStorage.removeItem('portal_ticket'); }catch(e){}
+  try{ localStorage.removeItem('portal_ticket'); }catch(e){}
   portalTicket = null;
   location.replace(location.pathname);
 }
@@ -5060,6 +5063,7 @@ async function saveAssignments(){
 // ─── AGENT PROFILE PAGE ───────────────────────────────────────────────────────
 async function openAgentProfile(agentName){
   showPage('agent-profile');
+  try{ history.replaceState(null, '', '#agent/' + encodeURIComponent(agentName)); }catch(e){}
   document.getElementById('agent-profile-title').textContent = agentName;
   document.getElementById('agent-profile-body').innerHTML='<div style="text-align:center;padding:48px;color:var(--text3);">Loading profile...</div>';
   try{
@@ -5591,7 +5595,7 @@ function portalFinishLogin(r){
     portalIsManager = !!(r.is_manager || r.is_admin);
     portalIsTL = !!r.is_team_leader;
     portalRemember(r);
-    try{ sessionStorage.setItem('portal_ticket', r.ticket); }catch(e){}
+    try{ localStorage.setItem('portal_ticket', r.ticket); }catch(e){}
     // a QA reviewer also gets a normal VoiceGuard session, so the review pages
     // work exactly as they do on the QA dashboard
     portalIsAdmin = !!r.is_admin;
@@ -6809,9 +6813,12 @@ function portalApply(name, isManager){
     ['Quality',  ['reviews', 'my-scores', 'calls', 'human-review', 'call-notes', 'notes', 'analytics']],
     ['Admin',    [...(isManager ? ['agent-list'] : []), 'clocker', 'teams', 'cms-settings', 'qa-assign', 'sms-numbers']],
   ];
+  // real links, so right-click → "Open in new tab" (and Ctrl/middle click)
+  // open that page in a new tab; a plain click still switches in place
   const item = (p, active) =>
-    `<div class="nav-item${active?' active':''}" data-page="${p}" onclick="showPage('${p}')">`
-    + `<span class="icon">${PAGES[p][0]}</span>${PAGES[p][1]}</div>`;
+    `<a class="nav-item${active?' active':''}" data-page="${p}" href="#${p}" style="text-decoration:none"`
+    + ` onclick="if(event.ctrlKey||event.metaKey||event.shiftKey)return;event.preventDefault();showPage('${p}')">`
+    + `<span class="icon">${PAGES[p][0]}</span>${PAGES[p][1]}</a>`;
 
   const scroll = document.querySelector('.sidebar-scroll');
   if(scroll){
@@ -7093,10 +7100,11 @@ async function portalSignOut(){
   portalTicket = null;
   portalPages = [];
   portalIsAdmin = false;
-  try{ sessionStorage.removeItem('portal_ticket');
-       sessionStorage.removeItem('portal_me'); }catch(e){}
+  try{ localStorage.removeItem('portal_ticket');
+       localStorage.removeItem('portal_me'); }catch(e){}
   try{ clearToken(); }catch(e){}      // the QA token a reviewer was given
   try{ sessionStorage.clear(); }catch(e){}
+  try{ localStorage.removeItem('portal_ticket'); localStorage.removeItem('portal_me'); }catch(e){}
 
   // the remembered device is deliberately KEPT: signing out is not the same as
   // saying "this machine is not mine", and clearing it would email a code at
@@ -7110,7 +7118,7 @@ async function portalSignOut(){
    server first — the name, which pages they may see, and their level. */
 function portalRemember(me){
   try{
-    sessionStorage.setItem('portal_me', JSON.stringify({
+    localStorage.setItem('portal_me', JSON.stringify({
       name: me.name, pages: me.pages || [],
       is_manager: !!me.is_manager, is_admin: !!me.is_admin, is_qa: !!me.is_qa,
       is_team_leader: !!me.is_team_leader,
@@ -7123,8 +7131,8 @@ async function portalBoot(){
   const screen = document.getElementById('portal-login');
   let saved = null, remembered = null;
   try{
-    saved = sessionStorage.getItem('portal_ticket');
-    remembered = JSON.parse(sessionStorage.getItem('portal_me') || 'null');
+    saved = localStorage.getItem('portal_ticket');
+    remembered = JSON.parse(localStorage.getItem('portal_me') || 'null');
   }catch(e){}
 
   // Somebody already signed in should land on their page immediately, not
@@ -7155,8 +7163,8 @@ async function portalBoot(){
       // back to Live mid-load.
       if(res.status === 401 || res.status === 403){
         portalTicket = null;
-        try{ sessionStorage.removeItem('portal_ticket');
-             sessionStorage.removeItem('portal_me'); }catch(e){}
+        try{ localStorage.removeItem('portal_ticket');
+             localStorage.removeItem('portal_me'); }catch(e){}
         location.reload();
       }
     }).catch(()=>{ /* offline or a blip — leave them working */ });
@@ -7202,7 +7210,7 @@ async function portalBoot(){
     }catch(e){}
     // the saved sign-in is no good — now the login form is the right thing
     portalTicket = null;
-    try{ sessionStorage.removeItem('portal_ticket'); }catch(e){}
+    try{ localStorage.removeItem('portal_ticket'); }catch(e){}
     const hint = document.getElementById('portal-checking');
     if(hint) hint.style.display = 'none';
     const pw = document.getElementById('portal-step-password');
@@ -7211,6 +7219,15 @@ async function portalBoot(){
   setTimeout(()=>document.getElementById('portal-user').focus(), 80);
 }
 document.addEventListener('DOMContentLoaded', portalBoot);
+/* The sign-in is kept for the whole browser, not one tab, so a link opened in
+   a new tab stays signed in (it used to open signed out). Signing out in one
+   tab signs out the others; a sign-in or renewal in one is picked up by all. */
+window.addEventListener('storage', ev => {
+  if(!IS_PORTAL || ev.key !== 'portal_ticket') return;
+  if(!ev.newValue){ if(portalTicket){ portalTicket = null; location.replace(location.pathname); } return; }
+  if(portalTicket) portalTicket = ev.newValue;           // renewed elsewhere
+  else location.reload();                                // signed in elsewhere
+});
 document.addEventListener('DOMContentLoaded', ()=>{
   wbRefresh(); setInterval(wbRefresh, 60000);
   inConnect();                                       // pushed, not polled
@@ -7330,6 +7347,20 @@ function openFromAddress(){
     addressLocked = true;
     try{ showPage('customers'); } finally { addressLocked = false; }
     setTimeout(()=>cuOpen(parseInt(cust[1], 10)), 50);
+    return true;
+  }
+  const ag = hash.match(/^agent-calls\/(\d+)$/);
+  if(ag){
+    if(typeof portalPages !== 'undefined' && portalPages.length && !portalPages.includes('agent-calls')) return false;
+    addressLocked = true;
+    try{ showPage('agent-calls'); } finally { addressLocked = false; }
+    setTimeout(()=>acOpen(parseInt(ag[1], 10)), 200);
+    return true;
+  }
+  const prof = hash.match(/^agent\/(.+)$/);
+  if(prof){
+    addressLocked = true;
+    try{ openAgentProfile(decodeURIComponent(prof[1])); } finally { addressLocked = false; }
     return true;
   }
   const run = hash.match(/^payroll\/(\d{4}-\d\d-\d\d)_(\d{4}-\d\d-\d\d)$/);
@@ -8387,9 +8418,11 @@ function showPage(id){
   }
   if(id==='call-notes'){
     const sel = document.getElementById('cn-agent');
-    if(sel && sel.options.length <= 1 && Array.isArray(agentsData)){
+    const agList = (typeof agentsData !== 'undefined' && Array.isArray(agentsData)) ? agentsData
+                 : (Array.isArray(agentStats) ? agentStats : []);
+    if(sel && sel.options.length <= 1 && agList.length){
       sel.innerHTML = '<option value="">All agents</option>' +
-        agentsData.map(a=>`<option>${a.name||a.agent_name||a}</option>`).join('');
+        agList.map(a=>`<option>${a.name||a.agent_name||a}</option>`).join('');
     }
     if(!document.getElementById('cn-from').value) cnRange(7); else loadCallNotes();
   }
@@ -11201,7 +11234,7 @@ async function wtWhyLoad(){
     // the plain-language answer first
     let why, tone = 'var(--text)';
     if(x.phone_system_still_has_it === false){
-      why = 'The phone system no longer has this caller — they most likely hung up and the old CMS never closed the call. Not a real wait; it drops off by itself after 30 minutes.';
+      why = 'The phone system already ended this call — the caller hung up and the old CMS never closed it. Not a real wait.';
       tone = 'var(--text3)';
     }else if(x.company_id && x.enrolled_total === 0){
       why = 'Nobody is set up to answer this line in the CMS, so the phone system has no one to send it to.';
@@ -11244,6 +11277,16 @@ async function wtWhyLoad(){
         : '')
       + '</div></div>';
   });
+  // callers the phone system already ended but the old CMS never closed —
+  // not counted above, listed so nobody wonders where they went
+  const gone = r.hung_up_not_closed || [];
+  if(gone.length){
+    h += '<div style="border-top:1px solid var(--border);padding:10px 0;font-size:12px;color:var(--text3);line-height:1.6;">'
+      + '<b>Not counted: ' + gone.length + ' caller' + (gone.length === 1 ? '' : 's') + ' who already hung up</b> (or were answered). '
+      + 'The phone system ended these calls, but the old CMS never closed them: '
+      + gone.map(g => esc(g.phone || '?') + (g.caller_name ? ' ' + esc(g.caller_name) : '')).join(' · ')
+      + '</div>';
+  }
   if(r.phone_feed_on === false){
     h += '<div style="font-size:11px;color:var(--text3);margin-top:6px;">The phone system is not sending live events here, so a caller who already hung up may still show until the CMS closes the call.</div>';
   }
@@ -13924,6 +13967,7 @@ function cuTab(which){
    Past payments keep their own record; the card just can't be charged again. */
 async function cuCardRemove(cardId, btn){
   if(!cuData || !cuData.account) return;
+  if(!Number.isInteger(cardId)){ showToast('Refresh the page, then try removing the card again.', true); return; }
   const c = (cuData.cards || []).find(x => x.id === cardId) || {};
   const label = (c.brand || 'Card') + ' ending ' + (c.last4 || '????');
   if(!confirm('Remove ' + label + ' from ' + (cuData.account.name || 'this customer') + "'s account?\n\n"
@@ -14195,6 +14239,7 @@ async function acLogOutDo(id){
 
 async function acOpen(id){
   acSelected = id;
+  try{ if(location.hash !== '#agent-calls/' + id) history.replaceState(null, '', '#agent-calls/' + id); }catch(e){}
   const box = document.getElementById('ac-detail');
   box.innerHTML = '<div class="card" style="padding:18px;color:var(--text3);font-size:13px;">Reading this agent…</div>';
   const iso = d => new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,10);

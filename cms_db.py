@@ -3435,9 +3435,10 @@ def customer_profile(account_id, limit=120):
         SELECT TOP 50 CreatedTime, Status, Priority, Subject, Description, ClosedTime
         FROM Ticket WHERE AccountId = %s ORDER BY CreatedTime DESC""", (aid,))]
 
-    cards = [{'brand': b, 'last4': l4, 'added': _plain(cr), 'last_used': _plain(lu)}
-             for b, l4, cr, lu in rows("""
-        SELECT TOP 20 Brand, Last4, Created, LastUsed FROM StripeCustomers
+    # the id is what the Remove button sends back
+    cards = [{'id': n(i), 'brand': b, 'last4': l4, 'added': _plain(cr), 'last_used': _plain(lu)}
+             for i, b, l4, cr, lu in rows("""
+        SELECT TOP 20 Id, Brand, Last4, Created, LastUsed FROM StripeCustomers
         WHERE AccountId = %s ORDER BY LastUsed DESC""", (aid,))]
 
     credentials = [{'id': n(i), 'title': ti, 'website': w, 'added': _plain(cr),

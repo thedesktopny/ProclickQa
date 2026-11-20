@@ -1207,6 +1207,25 @@ def init_db():
     except Exception as e:
         print('[init] review_sample: ' + str(e)[:140])
 
+    # What the phone system itself says about each call (start / answered /
+    # ended), written by whichever worker received the event so ALL workers
+    # read the same answer. Before, each worker only knew the calls whose
+    # events happened to reach it, so "the phone system no longer has this
+    # caller" was wrong for about two calls in three (Nov 19).
+    try:
+        c.execute('''CREATE TABLE IF NOT EXISTS phone_live_calls (
+            uniq TEXT PRIMARY KEY,
+            phone TEXT,
+            picked_up BOOLEAN DEFAULT FALSE,
+            ended_at TIMESTAMP,
+            first_at TIMESTAMP DEFAULT NOW(),
+            last_at TIMESTAMP DEFAULT NOW()
+        )''')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_phone_live_last ON phone_live_calls(last_at)')
+        conn.commit()
+    except Exception as e:
+        print('[init] phone_live_calls: ' + str(e)[:140])
+
     # When scoring of a call actually began. The page used to show "analysing"
     # for any call without a transcript, so a call that failed in August looked
     # identical to one being scored this minute.
@@ -10261,6 +10280,74 @@ def _live_calls_reader():
 # than instant, which is the right trade for an app that stays up.
 
 
+def _phone_live_note(uniq, event, phone=None):
+    """Write what the phone system just said about a call where every worker
+    can see it. Never allowed to slow down or break the event itself."""
+    if not uniq:
+        return
+    try:
+        conn = get_db(); cu = conn.cursor()
+        if event == 'end':
+            cu.execute("""INSERT INTO phone_live_calls (uniq, phone, ended_at, last_at)
+                          VALUES (%s, %s, NOW(), NOW())
+                          ON CONFLICT (uniq) DO UPDATE SET ended_at = NOW(), last_at = NOW()""",
+                       (uniq, phone))
+        elif event == 'pickup':
+            cu.execute("""INSERT INTO phone_live_calls (uniq, phone, picked_up, last_at)
+                          VALUES (%s, %s, TRUE, NOW())
+                          ON CONFLICT (uniq) DO UPDATE SET picked_up = TRUE, last_at = NOW()""",
+                       (uniq, phone))
+        else:
+            cu.execute("""INSERT INTO phone_live_calls (uniq, phone, last_at)
+                          VALUES (%s, %s, NOW())
+                          ON CONFLICT (uniq) DO UPDATE SET last_at = NOW(),
+                            phone = COALESCE(phone_live_calls.phone, EXCLUDED.phone)""",
+                       (uniq, phone))
+        import random
+        if random.random() < 0.01:
+            cu.execute("DELETE FROM phone_live_calls WHERE last_at < NOW() - INTERVAL '2 days'")
+        conn.commit(); conn.close()
+    except Exception as e:
+        print('[phone-event] could not record %s: %s' % (event, str(e)[:120]), flush=True)
+
+
+_PHONE_STATES = {'at': 0, 'v': (False, {})}
+
+
+def _phone_states():
+    """(feed_on, {uniq: 'open' | 'answered' | 'ended'}) for the last few hours,
+    the same for every worker. Cached for 3 seconds."""
+    if time.time() - _PHONE_STATES['at'] < 3:
+        return _PHONE_STATES['v']
+    feed_on, states = False, {}
+    try:
+        conn = get_db(); cu = conn.cursor()
+        cu.execute("""SELECT uniq, picked_up, ended_at IS NOT NULL,
+                             last_at > NOW() - INTERVAL '10 minutes'
+                      FROM phone_live_calls WHERE last_at > NOW() - INTERVAL '4 hours'""")
+        for u, picked, ended, recent in cu.fetchall():
+            states[str(u)] = 'ended' if ended else ('answered' if picked else 'open')
+            feed_on = feed_on or bool(recent)
+        conn.close()
+    except Exception as e:
+        print('[phone-states] ' + str(e)[:120], flush=True)
+    _PHONE_STATES.update(at=time.time(), v=(feed_on, states))
+    return feed_on, states
+
+
+def _split_hung_up(waiting):
+    """Callers the phone system has already said goodbye to are not waiting,
+    even if the CMS never closed their call. Only positive word from the phone
+    system takes a caller out — a call we heard nothing about stays counted."""
+    feed_on, states = _phone_states()
+    still, gone = [], []
+    for w in waiting:
+        st = states.get(str(w.get('uniq') or ''))
+        w['phone_state'] = st
+        (gone if st in ('ended', 'answered') else still).append(w)
+    return still, gone, feed_on
+
+
 @app.route('/api/phone-event', methods=['POST'])
 def phone_event():
     """Every stage of a call, as Asterisk reports it.
@@ -10327,6 +10414,8 @@ def phone_event():
     # phone system is sending some events but not others
     _seen = _LIVE_CALLS.setdefault('events_seen', {})
     _seen[event] = _seen.get(event, 0) + 1
+
+    _phone_live_note(uniq, event, pick('Phone', 'CallerID', 'caller'))
 
     if event == 'end':
         import cms_db as _c
@@ -10795,6 +10884,12 @@ def waiting_route():
     import cms_db
     try:
         out = cms_db.waiting_now()
+        if not out.get('error'):
+            still, gone, _feed = _split_hung_up(out['waiting'])
+            out['waiting'] = still
+            out['count'] = len(still)
+            out['longest_seconds'] = max([w['seconds'] for w in still] or [0])
+            out['hung_up_not_closed'] = len(gone)
         # anything the phone system has told us but the table has not caught up
         # with — a call that has started and not been picked up
         # Only for the first moments of a call (the table normally catches up
@@ -10833,17 +10928,19 @@ def waiting_why_route():
         return jsonify({'error': str(e)[:200], 'waiting': []}), 400
     # Does the phone system itself still show the caller? Only worth saying when
     # it is actually sending us events; otherwise we simply do not know.
-    seen = _LIVE_CALLS.get('events_seen', {}) or {}
-    feed_on = bool(seen.get('start') or seen.get('queue'))
-    open_on_phone = set()
-    for c in _LIVE_CALLS.get('by_uniq', {}).values():
-        if not c.get('picked_up') and not c.get('outbound'):
-            d = ''.join(ch for ch in str(c.get('phone') or '') if ch.isdigit())[-10:]
-            if d:
-                open_on_phone.add(d)
-    for x in out.get('waiting', []):
-        d = ''.join(ch for ch in str(x.get('phone') or '') if ch.isdigit())[-10:]
-        x['phone_system_still_has_it'] = (d in open_on_phone) if feed_on else None
+    # What the phone system said about each caller, from the shared record
+    # (every worker sees the same). True = still holding, False = it already
+    # ended or was answered and the CMS never closed it, None = no word.
+    out = dict(out)
+    still, gone, feed_on = _split_hung_up(list(out.get('waiting', [])))
+    for x in still:
+        x['phone_system_still_has_it'] = True if x.get('phone_state') == 'open' else None
+    for x in gone:
+        x['phone_system_still_has_it'] = False
+    out['waiting'] = still
+    out['hung_up_not_closed'] = [{'phone': x.get('phone'), 'caller_name': x.get('caller_name'),
+                                  'seconds': x.get('seconds'), 'called': x.get('called'),
+                                  'line': x.get('line'), 'phone_state': x.get('phone_state')} for x in gone]
     out['phone_feed_on'] = feed_on
     return jsonify(out)
 
@@ -15015,7 +15112,7 @@ import time as _time_at_start
 _APP_STARTED_AT = _time_at_start.time()
 _APP_STARTED = datetime.now().isoformat()
 
-SERVER_BUILD = 'info-edit-2'      # bump when you need to confirm a deploy landed
+SERVER_BUILD = 'tabs-1'      # bump when you need to confirm a deploy landed
 
 
 # ─── Health check and a watchdog for stuck requests ─────────────────────────
