@@ -6956,6 +6956,65 @@ function clockRender(){
              <span style="opacity:.7">(${bl.length} break${bl.length === 1 ? '' : 's'}: ${bl.map(b => b.ongoing ? mm((Date.now() - new Date(b.start).getTime())/1000) + '…' : mm(b.seconds)).join(' + ')})</span></div>`;
   }
   box.innerHTML = `<div class="clk-state">${state}</div>${brk}<div class="clk-btns" id="clk-btns">${buttons}</div>`;
+  breakLock(j.enabled && j.status === 'break' ? j : null);
+}
+
+/* While on break the whole page is covered, like the old CMS: nothing can be
+   clicked until "Back to work" — so nobody keeps working (or forgets) while
+   still showing as on break. */
+let brkLockTimer = null;
+function breakLock(j){
+  let el = document.getElementById('break-lock');
+  if(!j){
+    if(el) el.remove();
+    clearInterval(brkLockTimer); brkLockTimer = null;
+    return;
+  }
+  if(!el){
+    el = document.createElement('div');
+    el.id = 'break-lock';
+    el.setAttribute('role', 'dialog');
+    el.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(10,12,20,.82);backdrop-filter:blur(3px);'
+      + 'display:flex;align-items:center;justify-content:center;padding:16px;';
+    el.innerHTML = `<div style="background:var(--surface,#fff);color:var(--text,#111);border-radius:16px;padding:28px 26px;
+          max-width:380px;width:100%;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.4);">
+        <div style="font-size:44px;line-height:1;">☕</div>
+        <div style="font-size:20px;font-weight:700;margin:10px 0 4px;">You are on break</div>
+        <div id="brk-lock-time" style="font-size:30px;font-weight:700;font-variant-numeric:tabular-nums;margin:6px 0;"></div>
+        <div id="brk-lock-sub" style="font-size:13px;color:var(--text3,#666);margin-bottom:18px;"></div>
+        <button id="brk-lock-back" class="clk-btn" style="width:100%;padding:12px;font-size:15px;"
+                onclick="this.disabled=true;this.textContent='One moment…';clockDo('back')">Back to work</button>
+        <div style="margin-top:12px;font-size:12px;"><a href="#" style="color:var(--text3,#666);"
+             onclick="event.preventDefault();portalSignOut()">Sign out</a></div>
+      </div>`;
+    // swallow every key press and click that isn't on the card itself
+    el.addEventListener('keydown', e => e.stopPropagation(), true);
+    document.body.appendChild(el);
+  }
+  const btn = document.getElementById('brk-lock-back');
+  if(btn && btn.disabled){ btn.disabled = false; btn.textContent = 'Back to work'; }
+  const tick = () => {
+    const t = j.since ? new Date(j.since).getTime() : Date.now();
+    const secs = Math.max(0, Math.floor((Date.now() - t) / 1000));
+    const over = j.break_minutes && secs > j.break_minutes * 60;
+    const tEl = document.getElementById('brk-lock-time');
+    if(tEl){
+      tEl.textContent = Math.floor(secs / 60) + ':' + String(secs % 60).padStart(2, '0');
+      tEl.style.color = over ? 'var(--red,#d33)' : '';
+    }
+    const sub = document.getElementById('brk-lock-sub');
+    if(sub) sub.textContent = j.break_minutes
+      ? (over ? 'Over your ' + j.break_minutes + ' minute break' : 'of ' + j.break_minutes + ' minutes')
+      : 'Press "Back to work" to use the page again';
+  };
+  tick();
+  clearInterval(brkLockTimer);
+  let n = 0;
+  brkLockTimer = setInterval(() => {
+    tick();
+    // ended in another tab or the old CMS? notice within 15 seconds
+    if(++n % 15 === 0) clockRefresh();
+  }, 1000);
 }
 
 function clockBreakAsk(){
@@ -7082,6 +7141,7 @@ async function portalSignOut(){
   });
   pollStopAll();
   document.getElementById('clockbox')?.remove();
+  try{ clearInterval(brkLockTimer); document.getElementById('break-lock')?.remove(); }catch(e){}
   window.__saidSignedOut = true;      // and no expired-session bar on the way out
 
   // Tell the server, so the ticket stops working everywhere — not only in
