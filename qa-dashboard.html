@@ -612,6 +612,12 @@ td.agent{color:var(--text);font-weight:500;}
 .lvtile.brk{ border-left-color:#7B6CF6; }
 .lvtile.dnd{ border-left-color:#F2585F; background:linear-gradient(90deg, rgba(242,88,95,.10), var(--surface2) 60%); }
 .lvtile.off{ opacity:.45; }
+.lvtile .sn{ font-size:10px; margin-top:2px; color:var(--text3); font-variant-numeric:tabular-nums; }
+.lvtile.odd{ box-shadow:0 0 0 2px #F2585F inset; }
+.lvtile.odd .sn{ color:#F2585F; font-weight:700; }
+.lv-odd{ display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin:0 0 10px; font-size:12px; }
+.lv-odd .chip{ background:rgba(242,88,95,.12); border:1px solid rgba(242,88,95,.45); color:#F2585F;
+  border-radius:999px; padding:3px 10px; cursor:pointer; font-weight:600; }
 .cf-filters{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:2px 0 8px; }
 .cf-filters .cf-kinds{ display:flex; gap:6px; flex-wrap:wrap; }
 .cf-filters .cn-chip.on{ background:var(--accent); color:#fff; border-color:var(--accent); }
@@ -2250,6 +2256,7 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
       </div>
       <!-- Thirty agents have to fit without scrolling, so each one is a small
            tile: colour carries the status, and the detail appears on hover. -->
+      <div id="lv-odd"></div>
       <div id="lv-breaks"></div>
       <div id="lv-floor" class="lvfloor"></div>
     </div>
@@ -10422,7 +10429,7 @@ function lvFilter(){ if(lvData){ lvRenderFloor(); lvRenderFeed(); } }
 
 const lvAgo = d => {
   if(!d) return '';
-  const s = Math.round((Date.now() - new Date(d).getTime())/1000);
+  const s = Math.round(lvSecsSince(d));
   if(s < 60) return s + 's ago';
   if(s < 3600) return Math.floor(s/60) + 'm ago';
   if(s < 86400) return Math.floor(s/3600) + 'h ago';
@@ -11447,7 +11454,7 @@ async function loadLive(){
       document.getElementById('lv-today').innerHTML = `<div style="color:var(--red)">${r.error}</div>`;
       return;
     }
-    lvData = r;
+    lvData = r; lvFetchedAt = Date.now();
     document.getElementById('lv-asof').textContent = 'updated ' + new Date(r.as_of).toLocaleTimeString();
     lvRenderToday(); lvRenderFloor(); lvRenderFeed(); lvRenderInProgress();
     lvFirst = false;
@@ -11506,6 +11513,50 @@ function phoneNotLoggedIn(a){
   return !!a.clocked_in && PHONE_OFF_STATES.includes(String(a.phone||'').toUpperCase());
 }
 
+/* How long someone has been in their current state, readable at a glance
+   on the tile — and whether that is long enough to need a look. The old CMS
+   showed "Available since about 21 hours ago"; that is what spotted people
+   still clocked in from yesterday, or a phone stuck "on a call" for days. */
+const LV_ODD = {available: 12 * 3600, call: 2 * 3600, dnd: 4 * 3600, nophone: 30 * 60};
+function lvShort(secs){
+  secs = Math.max(0, Math.floor(secs || 0));
+  if(secs < 60) return secs + 's';
+  const m = Math.floor(secs / 60);
+  if(m < 60) return m + 'm';
+  const h = Math.floor(m / 60);
+  if(h < 24) return h + 'h' + (m % 60 ? ' ' + (m % 60) + 'm' : '');
+  const d = Math.floor(h / 24);
+  return d + 'd' + (h % 24 ? ' ' + (h % 24) + 'h' : '');
+}
+/* Seconds since a time. CMS times carry no zone (they are the CMS's own
+   clock), so they are measured against the CMS clock sent with the board —
+   right wherever the viewer is. Times with a zone are measured normally. */
+let lvFetchedAt = Date.now();
+function lvSecsSince(t){
+  if(!t) return null;
+  const s = String(t);
+  if(/(Z|[+-]\d\d:?\d\d)$/.test(s) || !(typeof lvData !== 'undefined' && lvData && lvData.cms_now))
+    return (Date.now() - new Date(s).getTime()) / 1000;
+  return (new Date(lvData.cms_now).getTime() - new Date(s).getTime()) / 1000 + (Date.now() - lvFetchedAt) / 1000;
+}
+/* {line, odd, why} for one agent not on break */
+function lvSince(a, busy, dnd, nop){
+  if(!a.clocked_in) return {line: '', odd: false};
+  const avail = lvSecsSince(a.clocker_since);
+  const call = busy ? lvSecsSince(a.phone_since) : null;
+  const dndS = dnd ? lvSecsSince(a.dnd_since) : null;
+  const noP = nop ? lvSecsSince(a.phone_since) : null;
+  // the small line under the status: how long since they became available,
+  // or for do not disturb, how long they have been on it
+  let line = dndS != null ? 'for ' + lvShort(dndS) : (avail != null ? 'available ' + lvShort(avail) : '');
+  let why = '';
+  if(avail != null && avail > LV_ODD.available) why = 'available ' + lvShort(avail);
+  else if(call != null && call > LV_ODD.call) why = 'on a call ' + lvShort(call);
+  else if(dndS != null && dndS > LV_ODD.dnd) why = 'do not disturb ' + lvShort(dndS);
+  else if(noP != null && noP > LV_ODD.nophone){ why = 'phone off ' + lvShort(noP); line = 'phone off ' + lvShort(noP); }
+  return {line, odd: !!why, why};
+}
+
 function lvRenderFloor(){
   const q = (document.getElementById('lv-search').value || '').toLowerCase().trim();
   const list = (lvData.agents || []).slice().sort((a,b)=>
@@ -11551,6 +11602,7 @@ function lvRenderFloor(){
       <div style="font-size:11.5px;font-weight:650;color:var(--text3);margin:0 0 6px;">Everyone else</div>`;
   }
   const breakIds = new Set(breakers.map(a => a.employee_id));
+  const odd = [];
 
   document.getElementById('lv-floor').innerHTML = list.filter(a => !breakIds.has(a.employee_id)).map(a=>{
     const busy = (a.phone||'').toUpperCase()==='IN_USE';
@@ -11566,10 +11618,14 @@ function lvRenderFloor(){
                  : dnd ? '#F2585F' : brk ? '#7B6CF6' : nop ? '#FF4D55' : 'var(--yellow)';
     const hit = !q || (a.name||'').toLowerCase().includes(q) ||
                 String(a.extension||'').includes(q) || String(a.last_call_phone||'').includes(q);
-    return `<div class="lvtile ${cls} ${q && !hit ? 'dim':''}" onclick="lvOpenAgent(${a.employee_id})">
-      <div class="nm">${esc(a.name)||'—'}${celebMark(a.employee_id)}</div>
+    const since = lvSince(a, busy, dnd, nop);
+    if(since.odd) odd.push({id: a.employee_id, name: a.name, why: since.why});
+    return `<div class="lvtile ${cls} ${since.odd ? 'odd' : ''} ${q && !hit ? 'dim':''}" onclick="lvOpenAgent(${a.employee_id})"
+                 ${since.odd ? `title="Unusual: ${esc(since.why)}"` : ''}>
+      <div class="nm">${since.odd ? '⚠ ' : ''}${esc(a.name)||'—'}${celebMark(a.employee_id)}</div>
       <div class="ex">ext ${a.extension||'—'}</div>
-      <div class="st" style="color:${colour}">${state}${busy && a.phone_since ? ' · ' + lvAgo(a.phone_since).replace(' ago','') : ''}</div>
+      <div class="st" style="color:${colour}">${state}${busy && a.phone_since ? ' · ' + lvShort(lvSecsSince(a.phone_since)) : ''}</div>
+      ${since.line ? `<div class="sn">${esc(since.line)}</div>` : ''}
       <div class="lvpop">
         <b>${esc(a.name)}</b> <span class="k">ext ${a.extension||'—'}</span>
         <div><span class="k">now:</span> ${state}${busy&&a.phone_since?' for '+lvAgo(a.phone_since).replace(' ago',''):''}</div>
@@ -11588,6 +11644,11 @@ function lvRenderFloor(){
       </div>
     </div>`;
   }).join('');
+  // everyone who looks unusual, in one line above the board
+  const ob = document.getElementById('lv-odd');
+  if(ob) ob.innerHTML = !odd.length || !lvIsStaff() ? '' :
+    `<div class="lv-odd"><span style="font-weight:650;color:#F2585F;">⚠ Needs a look (${odd.length}):</span>`
+    + odd.map(o => `<span class="chip" onclick="lvOpenAgent(${o.id})">${esc(o.name)} · ${esc(o.why)}</span>`).join('') + '</div>';
 }
 
 function lvRenderFeed(){

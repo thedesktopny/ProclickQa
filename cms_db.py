@@ -3748,8 +3748,15 @@ def _live_snapshot(feed_limit=70, hours=6):
              'minutes_billed': n(d[3]), 'collected_cents': n(d[4]), 'payments': n(d[5]),
              'accounts_touched': n(d[6])}
 
+    # the CMS clock: times in here are its local time with no zone, so the page
+    # measures "how long ago" against this instead of the viewer's computer
+    # (staff in the Philippines would otherwise be 12-13 hours off)
+    try:
+        cms_now = _plain(rows('SELECT GETDATE()')[0][0])
+    except Exception:
+        cms_now = None
     conn.close()
-    return {'agents': agents, 'in_progress': in_progress, 'today': today,
+    return {'agents': agents, 'in_progress': in_progress, 'today': today, 'cms_now': cms_now,
             'feed': recent_calls + recent_work + recent_payments}
 
 
