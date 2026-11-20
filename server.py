@@ -7536,8 +7536,17 @@ def company_info_save_route(item_id=None):
     if not _ci_can_edit():
         return jsonify({'ok': False, 'error': 'Only managers and team leaders can change this.'}), 403
     d = request.json or {}
+    # a login or password is stored encrypted: what the manager chose with
+    # "Keep covered", else what was chosen before, else the automatic guess
+    import cms_db
+    if 'covered' in d:
+        secret = bool(d.get('covered'))
+    elif item_id is not None and str(item_id) in _ci_cover_map():
+        secret = _ci_cover_map()[str(item_id)]
+    else:
+        secret = cms_db._looks_secret(d.get('key'), d.get('value'))
     try:
-        out = cms_write.company_info_save(item_id, d.get('key'), d.get('value'), _who())
+        out = cms_write.company_info_save(item_id, d.get('key'), d.get('value'), _who(), secret=secret)
     except cms_write.WriteRefused as e:
         return jsonify({'ok': False, 'error': str(e)}), 400
     if out.get('ok') and 'covered' in d and out.get('id'):
@@ -7545,6 +7554,107 @@ def company_info_save_route(item_id=None):
         cover[str(out['id'])] = bool(d.get('covered'))
         _put_setting('company_info_cover', json.dumps(cover))
     return jsonify(out), (200 if out.get('ok') else 400)
+
+
+def _ci_secret(item_id, key, value):
+    """Is this Info & Logins entry a login/password (so stored encrypted)?"""
+    import cms_db
+    cover = _ci_cover_map()
+    if str(item_id) in cover:
+        return cover[str(item_id)]
+    return cms_db._looks_secret(key, value)
+
+
+# ─── encrypted logins (vault.py) ───────────────────────────────────────────
+@app.route('/api/vault/status', methods=['GET'])
+@portal_admin_only
+def vault_status():
+    """Is the key set, and how much is encrypted in each place."""
+    import vault, cms_write
+    out = {'key_ok': vault.enabled(), 'problem': vault.key_problem(),
+           'old_key_set': bool(vault._old_key()), 'last_sweep': _VAULT_LAST.get('v')}
+    try:
+        out['places'] = cms_write.vault_counts()
+    except Exception as e:
+        out['error'] = str(e)[:200]
+    return jsonify(out)
+
+
+@app.route('/api/vault/encrypt-now', methods=['POST'])
+@portal_admin_only
+def vault_encrypt_now():
+    """Encrypt everything still plain, right now (the sweep also runs by
+    itself every 10 minutes)."""
+    import cms_write
+    try:
+        out = cms_write.vault_sweep(_ci_secret)
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)[:240]}), 500
+    _VAULT_LAST['v'] = dict(out, at=datetime.utcnow().isoformat() + 'Z')
+    _vault_audit('vault_encrypt_now', out)
+    return jsonify(out), (200 if out.get('ok') else 400)
+
+
+@app.route('/api/vault/undo', methods=['POST'])
+@portal_admin_only
+def vault_undo():
+    """Emergency only: put every value back to plain text. Needs the word
+    DECRYPT, and stops the automatic sweep until the server restarts."""
+    import cms_write
+    if (request.json or {}).get('confirm') != 'DECRYPT':
+        return jsonify({'ok': False, 'error': 'Send {"confirm": "DECRYPT"} to really do this.'}), 400
+    _VAULT_LAST['paused'] = True
+    try:
+        out = cms_write.vault_sweep(_ci_secret, undo=True)
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)[:240]}), 500
+    _vault_audit('vault_undo', out)
+    return jsonify(out), (200 if out.get('ok') else 400)
+
+
+_VAULT_LAST = {}
+_VAULT_LOCK_KEY = 7461003
+
+
+def _vault_audit(action, result):
+    try:
+        conn = get_db(); c = conn.cursor()
+        c.execute("""INSERT INTO cms_audit (who, employee_id, action, table_name, row_id, before_json,
+                                            after_json, committed)
+                     VALUES (%s, %s, %s, 'vault', NULL, NULL, %s, TRUE)""",
+                  ((_who() or {}).get('name'), (_who() or {}).get('employee_id'), action, json.dumps(result)))
+        conn.commit(); conn.close()
+    except Exception as e:
+        print('[vault] audit: ' + str(e)[:120])
+
+
+def _vault_sweeper():
+    """Every 10 minutes one worker encrypts whatever is still plain — the old
+    CMS keeps saving new logins in plain text, so this catches them."""
+    import threading
+
+    def loop():
+        time.sleep(120)
+        while True:
+            try:
+                import vault, cms_write
+                if vault.enabled() and not _VAULT_LAST.get('paused'):
+                    lk = _pg_connect(); lk.autocommit = True; lc = lk.cursor()
+                    lc.execute('SELECT pg_try_advisory_lock(%s)', (_VAULT_LOCK_KEY,))
+                    if lc.fetchone()[0]:
+                        try:
+                            out = cms_write.vault_sweep(_ci_secret)
+                            _VAULT_LAST['v'] = dict(out, at=datetime.utcnow().isoformat() + 'Z')
+                            if out.get('encrypted') or out.get('rekeyed') or out.get('too_long'):
+                                print('[vault] sweep: %s' % out, flush=True)
+                        finally:
+                            lc.execute('SELECT pg_advisory_unlock(%s)', (_VAULT_LOCK_KEY,))
+                    lk.close()
+            except Exception as e:
+                print('[vault] sweep failed: ' + str(e)[:160], flush=True)
+            time.sleep(600)
+
+    threading.Thread(target=loop, daemon=True, name='vault-sweep').start()
 
 
 @app.route('/api/packages', methods=['GET'])
@@ -15112,7 +15222,7 @@ import time as _time_at_start
 _APP_STARTED_AT = _time_at_start.time()
 _APP_STARTED = datetime.now().isoformat()
 
-SERVER_BUILD = 'break-lock-1'      # bump when you need to confirm a deploy landed
+SERVER_BUILD = 'vault-1'      # bump when you need to confirm a deploy landed
 
 
 # ─── Health check and a watchdog for stuck requests ─────────────────────────
@@ -16188,6 +16298,11 @@ try:
     _notes_refresher()
 except Exception as e:
     print('[notes] could not start the notes refresher: ' + str(e)[:140])
+
+try:
+    _vault_sweeper()
+except Exception as e:
+    print('[vault] could not start the sweep: ' + str(e)[:140])
 
 try:
     _live_calls_reader()

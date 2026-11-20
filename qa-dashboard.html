@@ -1937,6 +1937,7 @@ input[type="checkbox"]:focus-visible{ box-shadow:0 0 0 3px rgba(123,108,246,.2);
     </div>
   </div>
   <div style="padding:18px 28px 44px;">
+    <div class="card" id="vault-card" style="padding:16px 18px;margin-bottom:18px;display:none;"></div>
     <div class="alert-bar" style="background:rgba(242,88,95,.08);border-color:rgba(242,88,95,.28);margin-bottom:18px;">
       <span style="font-size:16px;">🔒</span>
       <span style="font-size:12px;color:var(--text2);flex:1;">
@@ -8391,6 +8392,43 @@ function qfPickAgent(page, name){
   bar.scrollIntoView({behavior:'smooth', block:'start'});
 }
 
+/* Encrypted logins — admins only (the server refuses anyone else, and then
+   the card just stays hidden). */
+const VAULT_NAMES = {AccountPersonalInfo: "Customers' Personal Info", CustomerCredentialData: "Customers' stored logins",
+                     CompanyInfo: 'Info & Logins (logins and passwords only)'};
+async function vaultLoad(){
+  const box = document.getElementById('vault-card'); if(!box) return;
+  let r;
+  try{ r = await API.get('/api/vault/status'); }catch(e){ return; }
+  if(!r || r.error === 'Administrators only' || (r.error && !r.places)){ box.style.display = 'none'; return; }
+  box.style.display = '';
+  const rows = Object.entries(r.places || {}).map(([t, c]) => `<tr>
+      <td style="padding:4px 12px 4px 0;">${esc(VAULT_NAMES[t] || t)}</td>
+      <td style="padding:4px 12px;color:var(--green);">🔒 ${c.encrypted.toLocaleString()} encrypted</td>
+      <td style="padding:4px 12px;color:${c.plain ? 'var(--yellow)' : 'var(--text3)'};">${c.plain.toLocaleString()} plain${t === 'CompanyInfo' && c.plain ? ' (not logins)' : ''}</td></tr>`).join('');
+  const last = r.last_sweep ? `Last check ${new Date(r.last_sweep.at).toLocaleString()}: ${r.last_sweep.encrypted || 0} encrypted`
+       + (r.last_sweep.too_long ? `, <b style="color:var(--red)">${r.last_sweep.too_long} too long to encrypt</b>` : '') : '';
+  box.innerHTML = `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+      <b style="font-size:14px;">🔐 Encrypted logins</b>
+      ${r.key_ok ? '<span class="pill" style="color:var(--green)">key is set</span>'
+                 : `<span class="pill" style="color:var(--red)">${esc(r.problem || 'key missing')}</span>`}
+      ${r.old_key_set ? '<span class="pill">changing to a new key</span>' : ''}
+      <button class="btn btn-outline" style="margin-left:auto;" ${r.key_ok ? '' : 'disabled'} onclick="vaultRun(this)">Encrypt now</button>
+    </div>
+    <div style="font-size:12px;color:var(--text3);margin:6px 0 8px;">Stored scrambled in the database — only this system, signed in, can read them. New ones the old CMS saves are encrypted within 10 minutes. The old CMS can no longer show encrypted ones.</div>
+    <table style="font-size:12.5px;">${rows}</table>
+    <div style="font-size:11.5px;color:var(--text3);margin-top:6px;">${last}</div>`;
+}
+async function vaultRun(btn){
+  btn.disabled = true; btn.textContent = 'Encrypting…';
+  try{
+    const r = await API.post('/api/vault/encrypt-now', {});
+    if(r.ok) showToast(`🔒 ${r.encrypted || 0} encrypted` + (r.too_long ? `, ${r.too_long} too long` : ''));
+    else showToast(r.error || 'Could not encrypt', true);
+  }catch(e){ showToast(e.message, true); }
+  vaultLoad();
+}
+
 function showPage(id){
   // Return Pickup is not a page here: it opens the returns app's form in a popup
   if(id === 'return-pickup'){ cuReturnPickup(); return; }
@@ -8458,7 +8496,7 @@ function showPage(id){
   if(id==='skin-block') sbOpen();
   if(id==='staffing') loadStaffing();
   if(id==='qa-assign') loadQaAssign();
-  if(id==='cms-settings'){ csLoadEditable().then(loadCmsSettings); }
+  if(id==='cms-settings'){ csLoadEditable().then(loadCmsSettings); vaultLoad(); }
   if(id==='connections') loadConnections();
   if(id==='customers') cuLoadRecent();
   wbRefresh();

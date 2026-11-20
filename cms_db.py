@@ -24,6 +24,7 @@ names these things differently.
 """
 import os
 import re
+import vault
 
 # 'auto' by default: the port and a trial connection tell us what it is, so you
 # don't have to know. Set it explicitly only if the guess is ever wrong.
@@ -3081,7 +3082,7 @@ def credential_fields(credential_id):
             break
         meta = {'title': r[5], 'website': r[6], 'account_id': int(r[7] or 0)}
         fields.append({'id': int(r[0]), 'name': r[1], 'type': r[2],
-                       'value': r[3], 'updated': _plain(r[4]),
+                       'value': vault.decrypt(r[3]), 'updated': _plain(r[4]),
                        'secret': str(r[2] or r[1] or '').lower().find('pass') >= 0})
     conn.close()
     if not fields:
@@ -3106,9 +3107,10 @@ def company_info():
         if not r:
             break
         key = (r[1] or '').strip()
-        val = (r[2] or '').strip()
-        sensitive = _looks_secret(key, val)
-        out.append({'id': int(r[0]), 'key': key, 'value': val,
+        enc = vault.is_encrypted((r[2] or '').strip())
+        val = (vault.decrypt((r[2] or '').strip()) or '').strip()
+        sensitive = enc or _looks_secret(key, val)
+        out.append({'id': int(r[0]), 'key': key, 'value': val, 'encrypted': enc,
                     'sensitive': sensitive, 'auto_sensitive': sensitive,
                     'created': _plain(r[3]), 'updated': _plain(r[4])})
     conn.close()
@@ -3480,7 +3482,7 @@ def personal_info(info_id):
         conn.close()
     if not r:
         raise RuntimeError('That saved info no longer exists.')
-    return {'id': int(r[0]), 'account_id': int(r[1]), 'title': r[2], 'value': r[3] or '',
+    return {'id': int(r[0]), 'account_id': int(r[1]), 'title': r[2], 'value': vault.decrypt(r[3] or ''),
             'added': _plain(r[4]), 'changed': _plain(r[5])}
 
 

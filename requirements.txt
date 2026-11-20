@@ -12,3 +12,4 @@ numpy>=1.26
 onnxruntime==1.19.2
 pymysql==1.1.1
 pymssql==2.3.2
+cryptography==43.0.3

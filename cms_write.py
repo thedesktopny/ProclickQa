@@ -1049,7 +1049,7 @@ def saved_cards(account_id):
     return out
 
 
-def company_info_save(item_id, key, value, who):
+def company_info_save(item_id, key, value, who, secret=False):
     """Add (item_id None) or change an entry in Info & Logins (CMS table
     CompanyInfo). Managers and admins only — checked by the route. Title up to
     50 characters and value up to 500, the table's own limits. The old value is
@@ -1068,6 +1068,9 @@ def company_info_save(item_id, key, value, who):
     out = {'table': 'CompanyInfo', 'action': 'add' if item_id is None else 'edit',
            'dry_run': False, 'values': {'title': key}}
     try:
+        # passwords and logins are stored encrypted; plain reference details are not
+        if secret:
+            value = _vault_fit(cu, 'CompanyInfo', 'InfoValue', value)
         if item_id is None:
             cu.execute(_with_new_id("""INSERT INTO CompanyInfo (InfoKey, InfoValue, Created, Updated)
                                        OUTPUT INSERTED.Id VALUES (%s, %s, GETDATE(), GETDATE())"""),
@@ -4549,9 +4552,10 @@ def add_personal_info(account_id, title, value, who):
     try:
         cu = conn.cursor()
         cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        stored = _vault_fit(cu, 'AccountPersonalInfo', 'Description', value)
         cu.execute(_with_new_id("""INSERT INTO AccountPersonalInfo (AccountId, CreatedBy, Title, Description, Created)
                       OUTPUT INSERTED.Id VALUES (%s, %s, %s, %s, GETDATE())"""),
-                   (int(account_id), int((who or {}).get('employee_id') or 0) or None, title, value))
+                   (int(account_id), int((who or {}).get('employee_id') or 0) or None, title, stored))
         new_id = int(cu.fetchone()[0])
         _touch_account(cu, account_id)
         conn.commit()
@@ -4576,8 +4580,9 @@ def edit_personal_info(info_id, title, value, who):
     try:
         cu = conn.cursor()
         cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        stored = _vault_fit(cu, 'AccountPersonalInfo', 'Description', value)
         cu.execute("""UPDATE AccountPersonalInfo SET Title = %s, Description = %s, Modified = GETDATE()
-                      WHERE Id = %s""", (title, value, int(info_id)))
+                      WHERE Id = %s""", (title, stored, int(info_id)))
         _touch_account(cu, before['account_id'])
         conn.commit()
     finally:
@@ -4918,3 +4923,107 @@ def remove_from_pool(number, who, reason=None):
     finally:
         sms_ctx(why=None)
     return out
+
+
+# ─── encrypted logins (see vault.py) ───────────────────────────────────────
+import vault as _vault
+
+# table -> (id column, value column)
+VAULT_TABLES = {
+    'AccountPersonalInfo': ('Id', 'Description'),      # customers' Personal Info
+    'CustomerCredentialData': ('Id', 'Value'),         # customers' stored logins
+    'CompanyInfo': ('Id', 'InfoValue'),                # Info & Logins (only the secret ones)
+}
+_COL_MAX = {}
+
+
+def _col_max(cu, table, column):
+    """The column's size in characters (None = unlimited)."""
+    k = (table, column)
+    if k not in _COL_MAX:
+        cu.execute("""SELECT CHARACTER_MAXIMUM_LENGTH FROM INFORMATION_SCHEMA.COLUMNS
+                      WHERE TABLE_NAME = %s AND COLUMN_NAME = %s""", (table, column))
+        r = cu.fetchone()
+        n = int(r[0]) if r and r[0] is not None else None
+        _COL_MAX[k] = None if (n is None or n < 0) else n
+    return _COL_MAX[k]
+
+
+def _vault_fit(cu, table, column, value):
+    """The encrypted form of value, refusing it if that will not fit the
+    column (the encrypted form is about a third longer, plus 33 characters)."""
+    if not _vault.enabled():
+        return value
+    stored = _vault.encrypt(value)
+    lim = _col_max(cu, table, column)
+    if lim is not None and len(stored) > lim:
+        most = max(0, (lim - len(_vault.PREFIX)) * 3 // 4 - 28)
+        raise WriteRefused('Too long to store safely — keep it under %d characters.' % most)
+    return stored
+
+
+def vault_counts():
+    """How many values in each place are encrypted, still plain, or too long."""
+    conn = cms_db._connect(); cu = conn.cursor()
+    out = {}
+    try:
+        for table, (idc, col) in VAULT_TABLES.items():
+            cu.execute("""SELECT COUNT(*),
+                                 SUM(CASE WHEN [{c}] LIKE %s THEN 1 ELSE 0 END),
+                                 SUM(CASE WHEN [{c}] IS NULL OR [{c}] = '' THEN 1 ELSE 0 END)
+                          FROM [{t}]""".format(t=table, c=col), ('enc1:%',))
+            total, enc, empty = [int(x or 0) for x in cu.fetchone()]
+            out[table] = {'total': total, 'encrypted': enc, 'empty': empty,
+                          'plain': total - enc - empty, 'column_size': _col_max(cu, table, col)}
+    finally:
+        conn.close()
+    return out
+
+
+def vault_sweep(company_secret, undo=False, limit=5000):
+    """Encrypt every plain value still in the three places (the old CMS keeps
+    writing plain ones). CompanyInfo rows are only encrypted when
+    company_secret(id, key, value) says they are secret. Values still on
+    CMS_VAULT_KEY_OLD are re-encrypted with the new key. undo=True does the
+    opposite — puts everything back to plain (emergency only). Timestamps are
+    left alone, and a row someone changed meanwhile is skipped."""
+    if not _vault.enabled():
+        return {'ok': False, 'error': _vault.key_problem()}
+    done = {'encrypted': 0, 'decrypted': 0, 'rekeyed': 0, 'too_long': 0, 'unreadable': 0, 'skipped': 0}
+    conn = cms_db._connect(); cu = conn.cursor()
+    try:
+        cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        for table, (idc, col) in VAULT_TABLES.items():
+            lim = _col_max(cu, table, col)
+            extra = ', [InfoKey]' if table == 'CompanyInfo' else ''
+            sel = 'SELECT TOP {n} [{i}], [{c}]{x} FROM [{t}] WHERE '.format(n=int(limit), i=idc, c=col, x=extra, t=table)
+            todo = []
+            if not undo:                       # plain values -> encrypted
+                cu.execute(sel + "[{c}] IS NOT NULL AND [{c}] <> '' AND [{c}] NOT LIKE %s".format(c=col), ('enc1:%',))
+                for r in cu.fetchall():
+                    if table == 'CompanyInfo' and not company_secret(r[0], r[2], r[1]):
+                        continue
+                    todo.append((r[0], r[1], _vault.encrypt(r[1]), 'encrypted'))
+            if undo or _vault._old_key():      # encrypted values -> plain, or onto the new key
+                cu.execute(sel + "[{c}] LIKE %s".format(c=col), ('enc1:%',))
+                for r in cu.fetchall():
+                    if not undo and not _vault.needs_new_key(r[1]):
+                        continue
+                    plain = _vault.decrypt(r[1])
+                    if plain in (_vault.LOCKED_BAD, _vault.LOCKED_NO_KEY):
+                        done['unreadable'] += 1
+                        continue
+                    todo.append((r[0], r[1], plain if undo else _vault.encrypt(plain),
+                                 'decrypted' if undo else 'rekeyed'))
+            for rid, cur, new, what in todo:
+                if lim is not None and len(new) > lim:
+                    done['too_long'] += 1
+                    continue
+                cu.execute('UPDATE [{t}] SET [{c}] = %s WHERE [{i}] = %s AND [{c}] = %s'.format(t=table, c=col, i=idc),
+                           (new, rid, cur))
+                done[what if cu.rowcount else 'skipped'] += 1
+            conn.commit()
+    finally:
+        conn.close()
+    done['ok'] = True
+    return done
