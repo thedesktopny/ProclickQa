@@ -12202,6 +12202,21 @@ def _overlay_calls(agents):
                 a['phone_since'] = None      # the table's time belonged to its wrong state
         a['phone'] = st
         a['phone_source'] = 'phone system'
+    # On a call "since" can never be older than the start of their latest
+    # call. The CMS table's phone time sometimes stays put for days while the
+    # phone keeps going busy and free (Nov 20: Eric showed "on a call 4d"
+    # 18 minutes after clocking in, in the middle of a normal call).
+    def _t(v):
+        try:
+            return datetime.fromisoformat(str(v)[:19]) if v else None
+        except Exception:
+            return None
+    for a in agents or []:
+        if str(a.get('phone') or '').upper() != 'IN_USE':
+            continue
+        ps, lc = _t(a.get('phone_since')), _t(a.get('last_call_at'))
+        if lc and (ps is None or lc > ps):
+            a['phone_since'] = a.get('last_call_at')
     return agents
 
 
@@ -15231,7 +15246,7 @@ import time as _time_at_start
 _APP_STARTED_AT = _time_at_start.time()
 _APP_STARTED = datetime.now().isoformat()
 
-SERVER_BUILD = 'floor-2'      # bump when you need to confirm a deploy landed
+SERVER_BUILD = 'missed-reached-1'      # bump when you need to confirm a deploy landed
 
 
 # ─── Health check and a watchdog for stuck requests ─────────────────────────

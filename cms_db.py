@@ -2024,7 +2024,15 @@ def companies_full():
         rows, m = [], {}
         for cid, name, nums, cid_name, disabled, business in cu.fetchall():
             numbers = []
-            for tok in str(nums or '').replace(';', ',').replace(' ', ',').split(','):
+            # Numbers are typed in by hand: commas, semicolons, slashes, new
+            # lines, "(929) 853-1558", "+1 929.853.1558"... Take each phone
+            # number as a whole, so separators and formatting never glue two
+            # numbers together or split one in half.
+            text = str(nums or '')
+            found = re.findall(r'(?:\+?1[\s\-.]?)?\(?\d{3}\)?[\s\-.]?\d{3}[\s\-.]?\d{4}', text)
+            rest = re.sub(r'(?:\+?1[\s\-.]?)?\(?\d{3}\)?[\s\-.]?\d{3}[\s\-.]?\d{4}', ' ', text)
+            found += re.findall(r'\d{7,}', rest)          # anything else long enough to be a number
+            for tok in found:
                 d = ''.join(ch for ch in tok if ch.isdigit())
                 if len(d) >= 7:
                     numbers.append(d)
@@ -2551,7 +2559,7 @@ def call_flow(minutes=180, limit=40, phone=None, ext=None, kind=None, name=None)
     cu.execute("""SELECT TOP %d c.Id, c.Phone, c.CallersName, c.Started, c.Ended,
                          c.PickedUpTime, c.PickedUpBy, c.Agent, c.DialStatus,
                          c.IsOutbound, c.CalledExtension, c.RecordingFileUrl,
-                         ISNULL(c.IsMissed, 0), c.AstriskUniqId, c.Note
+                         ISNULL(c.IsMissed, 0), c.AstriskUniqId, c.Note, c.MissedResolvedId
                   FROM PhoneCallsLog c
                   WHERE """ % int(limit) + ' AND '.join(where) + """
                   ORDER BY c.Started DESC""", tuple(args) if args else None)
@@ -2576,7 +2584,7 @@ def call_flow(minutes=180, limit=40, phone=None, ext=None, kind=None, name=None)
             'agent': (r[7] or '').strip() or None,
             'status': (r[8] or '').strip(), 'outbound': bool(r[9]),
             'called': r[10], 'recording': r[11], 'missed': bool(r[12]),
-            'uniq': r[13], 'note': r[14],
+            'uniq': r[13], 'note': r[14], 'resolved_id': int(r[15] or 0) or None,
             'seconds': secs, 'live': ended is None,
             'tried': [],
         })
@@ -2617,6 +2625,61 @@ def call_flow(minutes=180, limit=40, phone=None, ext=None, kind=None, name=None)
         except Exception as e:
             print('[cms] queue history: ' + str(e)[:120])
 
+    # Missed calls: was the caller reached afterwards, and by whom? Like the
+    # old CMS's "picked by 141 at 1:00pm" (Rowena, Nov 22). First the call the
+    # CMS itself linked (MissedResolvedId); failing that, a later call with the
+    # same number that someone answered or that an agent made and the customer
+    # picked up.
+    missed = [c for c in calls if c['missed'] and not c['live']]
+    if missed:
+        try:
+            linked = sorted({c['resolved_id'] for c in missed if c['resolved_id']})[:100]
+            later = {}
+            if linked:
+                marks = ', '.join(['%s'] * len(linked))
+                cu.execute("""SELECT Id, Started, PickedUpTime, PickedUpBy, Agent, ISNULL(IsOutbound, 0)
+                              FROM PhoneCallsLog WHERE Id IN (%s)""" % marks, tuple(linked))
+                for rid, st, pt, pb, ag, ob in cu.fetchall():
+                    later[int(rid)] = (st, pt, (pb or '').strip(), (ag or '').strip(), bool(ob))
+            phones = {}
+            for c in missed:
+                d = ''.join(ch for ch in str(c['phone'] or '') if ch.isdigit())[-10:]
+                if len(d) == 10 and not (c['resolved_id'] and c['resolved_id'] in later):
+                    phones.setdefault(d, []).append(c)
+            follow = {}
+            if phones:
+                keys = list(phones)[:150]
+                marks = ', '.join(['%s'] * len(keys))
+                cu.execute("""SELECT RIGHT(Phone, 10), Id, Started, PickedUpTime, PickedUpBy, Agent,
+                                     ISNULL(IsOutbound, 0)
+                              FROM PhoneCallsLog
+                              WHERE Started >= DATEADD(minute, -%d, GETDATE())
+                                AND RIGHT(Phone, 10) IN (%s)
+                                AND (ISNULL(PickedUpBy, '') <> ''
+                                     OR (ISNULL(IsOutbound, 0) = 1 AND DialStatus LIKE %%s))
+                              ORDER BY Started""" % (int(minutes) + 2880, marks), tuple(keys) + ('ANSWER%',))
+                for d, rid, st, pt, pb, ag, ob in cu.fetchall():
+                    follow.setdefault(str(d), []).append((st, pt, (pb or '').strip(), (ag or '').strip(), bool(ob)))
+            for c in missed:
+                hit = later.get(c['resolved_id']) if c['resolved_id'] else None
+                if not hit:
+                    d = ''.join(ch for ch in str(c['phone'] or '') if ch.isdigit())[-10:]
+                    try:
+                        import datetime as _dt
+                        mine = _dt.datetime.fromisoformat(str(c["started"])[:19])
+                    except Exception:
+                        mine = None
+                    for f in follow.get(d, []):
+                        if mine and f[0] and f[0] > mine:
+                            hit = f
+                            break
+                if hit:
+                    st, pt, pb, ag, ob = hit
+                    who = pb or ag
+                    c['reached'] = {'by': who or None, 'at': _plain(pt or st), 'outbound': ob}
+        except Exception as e:
+            print('[cms] missed-call follow-up: ' + str(e)[:120])
+
     # Extension to name. Read once and kept for ten minutes: this refreshes
     # every couple of seconds for every person watching, and 260 employees do
     # not change between one refresh and the next.
@@ -2625,6 +2688,8 @@ def call_flow(minutes=180, limit=40, phone=None, ext=None, kind=None, name=None)
     for call in calls:
         call['answered_by_name'] = names.get(call['answered_by'] or '')
         call['agent_name'] = names.get(call['agent'] or '')
+        if call.get('reached') and call['reached'].get('by'):
+            call['reached']['name'] = names.get(call['reached']['by'])
         for t in call['tried']:
             t['name'] = names.get(t['extension'])
 

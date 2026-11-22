@@ -10573,6 +10573,15 @@ function cfRender(){
       who = c.answered_by
         ? `Picked up by <b>${esc(c.answered_by)}</b>` + (c.answered_by_name ? ` · ${esc(c.answered_by_name)}` : '')
         : (c.live ? 'ringing the floor' : 'nobody answered');
+      // a missed caller who was reached afterwards — like the old CMS's
+      // "picked by 141 at 1:00pm"
+      if(c.missed && c.reached){
+        const r = c.reached;
+        const t = r.at ? new Date(r.at).toLocaleTimeString([], {hour:'numeric', minute:'2-digit'}) : '';
+        who += ` · <span style="color:var(--green);font-weight:600;">✓ ${r.outbound ? 'called back' : 'picked up'}`
+             + (r.by ? ` by ${esc(r.by)}` + (r.name ? ` · ${esc(r.name)}` : '') : '')
+             + (t ? ` at ${esc(t)}` : '') + '</span>';
+      }
     }
 
     // the walk: each extension it tried, in order
@@ -11352,13 +11361,19 @@ async function wtWhyLoad(){
     }else if(free.length && noAns.length){
       why = 'It is ringing people who are free, and they are not picking up.';
       tone = 'var(--red)';
+    }else if(free.length && !tried.length && (x.seconds || 0) < 45){
+      // the first seconds of every call look like this — not a problem yet
+      why = 'Just came in — the phone system normally starts ringing a free person within a few seconds.';
+      tone = 'var(--text3)';
     }else if(free.length && !tried.length){
       why = 'People who answer this line are free, but the phone system has not rung anyone yet'
           + (lastAgo != null && lastAgo > 90 ? ' — nothing has happened on this call for ' + wtClock(lastAgo) + ', it may be stuck.' : '.');
       tone = 'var(--red)';
     }else if(!x.company_id){
-      why = 'This number is not listed under any business in the CMS, so it is not clear who should answer it.';
-      tone = 'var(--yellow)';
+      why = 'This number is not listed under any business in the CMS, so the phone system has nobody to ring — '
+          + 'this caller will not be answered. Call them back, and ask David to add ' + esc(x.called || 'this number')
+          + ' to its business in the CMS.';
+      tone = (x.seconds || 0) > 60 ? 'var(--red)' : 'var(--yellow)';
     }else{
       why = 'It is being offered to free people right now.';
     }
