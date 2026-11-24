@@ -8425,6 +8425,75 @@ def _who():
 
 
 # ===================== Return pickup (the proclick-returns app) =====================
+# ── Minutes balance for the phone system's low-balance whisper ───────────
+# The phone server asks: which account is agent <ext> working on right now, and
+# how many minutes does it have? (The customer may ask the agent to use another
+# account than the one they called from, so the CMS's open job decides.)
+# Returns ONLY account number + minutes — no names, no logins.
+# Own key (Azure PHONE_BALANCE_KEY, header X-Api-Key) — NOT PHONE_API_KEY, which
+# holds Igor's token for the phone API. PHONE_BALANCE_IPS: comma-separated
+# addresses allowed to call (the phone servers). Change the key to cut it off.
+#   GET /api/ext/minutes?extension=342
+#   GET /api/ext/minutes?account=15367
+def _balance_key_ok():
+    import hmac
+    key = (os.getenv('PHONE_BALANCE_KEY') or '').strip()
+    if not key:
+        return 'PHONE_BALANCE_KEY is not set', 503
+    got = (request.headers.get('X-Api-Key') or '').strip()
+    if not got or not hmac.compare_digest(got, key):
+        return 'bad key', 401
+    allowed = [x.strip() for x in (os.getenv('PHONE_BALANCE_IPS') or '').split(',') if x.strip()]
+    if allowed:
+        ip = (request.headers.get('X-Forwarded-For') or request.remote_addr or '').split(',')[0].strip()
+        if ip.count(':') == 1:
+            ip = ip.rsplit(':', 1)[0]          # Azure adds :port
+        if ip not in allowed:
+            return 'address not allowed', 403
+    return None
+
+
+@app.route('/api/ext/minutes', methods=['GET'])
+def ext_minutes():
+    bad = _balance_key_ok()
+    if bad:
+        return jsonify({'error': bad[0]}), bad[1]
+    import cms_db
+    ext = (request.args.get('extension') or '').strip()
+    acct = (request.args.get('account') or '').strip()
+    if not ext and not acct:
+        return jsonify({'error': 'give extension=<agent> or account=<number>'}), 400
+    conn = cms_db._connect()
+    try:
+        cu = conn.cursor()
+        if ext:
+            cu.execute("""SELECT TOP 1 w.AccountId, ISNULL(a.MinutesLeft,0), w.StartTime
+                          FROM AccountWork w
+                          JOIN Employee e ON e.Id = w.EmployeeId
+                          JOIN [Account] a ON a.Id = w.AccountId
+                          WHERE LTRIM(RTRIM(e.Extension)) = %s AND w.EndTime IS NULL
+                            AND ISNULL(e.LeftFirm,0) = 0
+                          ORDER BY w.StartTime DESC""", (ext,))
+            r = cu.fetchone()
+            if not r:
+                return jsonify({'extension': ext, 'account': None,
+                                'error': 'agent has no open job'}), 404
+            return jsonify({'extension': ext, 'account': int(r[0]), 'minutes': float(r[1]),
+                            'job_started': r[2].isoformat() if r[2] else None})
+        try:
+            aid = int(acct)
+        except ValueError:
+            return jsonify({'error': 'account must be a number'}), 400
+        cu.execute("""SELECT Id, ISNULL(MinutesLeft,0) FROM [Account]
+                      WHERE Id = %s AND ISNULL(Deleted,0) = 0""", (aid,))
+        r = cu.fetchone()
+        if not r:
+            return jsonify({'error': 'account not found'}), 404
+        return jsonify({'account': int(r[0]), 'minutes': float(r[1])})
+    finally:
+        conn.close()
+
+
 # The "New Return Pickup" button on a customer's page opens the returns app's
 # intake form in a popup. The app trusts who the agent and customer are because
 # the link carries a signed token built HERE, on the server, with a key shared
@@ -15246,7 +15315,7 @@ import time as _time_at_start
 _APP_STARTED_AT = _time_at_start.time()
 _APP_STARTED = datetime.now().isoformat()
 
-SERVER_BUILD = 'missed-reached-1'      # bump when you need to confirm a deploy landed
+SERVER_BUILD = 'balance-api-1'      # bump when you need to confirm a deploy landed
 
 
 # ─── Health check and a watchdog for stuck requests ─────────────────────────
