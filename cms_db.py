@@ -3713,10 +3713,13 @@ def _live_snapshot(feed_limit=70, hours=6):
         'calls_in': n(r[9]), 'calls_out': n(r[10]),
         'last_call_phone': r[11], 'last_call_at': _plain(r[12]),
         'last_call_secs': (int(r[13]) if r[13] is not None else None),
+        'last_call_end': _plain(r[14]),
+        'last_call_end_secs': (int(r[15]) if r[15] is not None else None),
     } for r in rows("""SELECT EmployeeId, EmployeeName, Extension, ClockerStatus, ClockerTime,
                               BreakMinutes, SipPhoneStatus, SipPhoneTime, MinutesOnCall,
                               NumCallsIn, NumCallsOut, LastCallPhone, LastCallStartAt,
-                              DATEDIFF(second, LastCallStartAt, GETDATE())
+                              DATEDIFF(second, LastCallStartAt, GETDATE()),
+                              LastCallEndAt, DATEDIFF(second, LastCallEndAt, GETDATE())
                        FROM Tmp_LiveEmployeesStatusFinal""")]
 
     # Tmp_LiveEmployeesStatusFinal is a summary the OLD CMS kept current; with

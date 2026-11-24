@@ -12403,6 +12403,25 @@ def _overlay_calls(agents):
         ps, lc = _t(a.get('phone_since')), _t(a.get('last_call_at'))
         if lc and (ps is None or lc > ps):
             a['phone_since'] = a.get('last_call_at')
+        # "On a call" with no open call in the call records, and their last
+        # call finished minutes ago: the phone state is a leftover (since the
+        # old CMS went off, Nov 24, the state log only catches changes every
+        # 20 s, so back-to-back calls can leave an old "in use"). Show them by
+        # their last call instead of "on a call for 3 hours". The phone
+        # system's own live answer, when we have it, is left alone.
+        if a.get('phone_source') in ('phone system', 'call records'):
+            continue
+        ended_ago = a.get('last_call_end_secs')
+        lc_end = _t(a.get('last_call_end'))
+        if lc_end and (lc is None or lc_end >= lc) and ended_ago is not None and ended_ago > 120:
+            a['phone'] = 'NOT_IN_USE'
+            a['phone_since'] = a.get('last_call_end')
+            a['phone_source'] = 'call records (last call ended)'
+        elif ps and lc is None and ended_ago is None:
+            # no call at all in the last 12 hours: an "in use" can't be right
+            a['phone'] = 'NOT_IN_USE'
+            a['phone_since'] = None
+            a['phone_source'] = 'call records (no calls today)'
     return agents
 
 
@@ -15432,7 +15451,7 @@ import time as _time_at_start
 _APP_STARTED_AT = _time_at_start.time()
 _APP_STARTED = datetime.now().isoformat()
 
-SERVER_BUILD = 'live-phones-1'      # bump when you need to confirm a deploy landed
+SERVER_BUILD = 'live-phones-2'      # bump when you need to confirm a deploy landed
 
 
 # ─── Health check and a watchdog for stuck requests ─────────────────────────
