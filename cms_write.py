@@ -2422,16 +2422,19 @@ def phone_status_sync(apply=True):
     # Keep the old CMS's summary table current too: the phone side copies
     # agent status from Tmp_LiveEmployeesStatusFinal, and with the old CMS off
     # it froze, so the old values kept being written back (Nov 24 2026).
-    summary = _refresh_live_summary()
     if not want:
-        return {'ok': True, 'agents': 0, 'changed': [], 'summary': summary}
+        return {'ok': True, 'agents': 0, 'changed': [], 'summary': _refresh_live_summary()}
     ac = _asterisk_connect()
     changed, errors = [], []
+    ast = {}
     try:
         cu = ac.cursor()
         exts = list(want)
-        cu.execute('SELECT id, cms_status FROM ps_auths WHERE id IN (%s)' % ','.join(['%s'] * len(exts)), exts)
-        have = {str(r[0]).strip(): (int(r[1]) if r[1] is not None else None) for r in cu.fetchall()}
+        cu.execute('SELECT id, cms_status, ast_status FROM ps_auths WHERE id IN (%s)' % ','.join(['%s'] * len(exts)), exts)
+        have = {}
+        for r in cu.fetchall():
+            have[str(r[0]).strip()] = (int(r[1]) if r[1] is not None else None)
+            ast[str(r[0]).strip()] = str(r[2] or '').strip().upper()
         for ext, st in want.items():
             if ext in have and have[ext] != st:
                 if apply:
@@ -2444,8 +2447,50 @@ def phone_status_sync(apply=True):
                 changed.append({'ext': ext, 'was': have[ext], 'now': st})
     finally:
         ac.close()
+    # The phone's own state (on a call / free / not logged in): the old CMS
+    # polled ps_auths.ast_status and logged every change in
+    # AsteriskEndPointChangeLog, which the live summary reads as SipPhoneStatus.
+    # Without it everyone looked "unavailable" on the floor (Nov 24 2026).
+    phones = _log_phone_states(ast)
+    summary = _refresh_live_summary()
     return {'ok': not errors, 'agents': len(want), 'on_phone': len(have),
-            'changed': changed, 'errors': errors[:5], 'summary': summary}
+            'changed': changed, 'errors': errors[:5], 'summary': summary, 'phones': phones}
+
+
+def _log_phone_states(ast):
+    """Add an AsteriskEndPointChangeLog row for every extension whose phone
+    state differs from its latest row there."""
+    ast = {k: v for k, v in (ast or {}).items() if k and v}
+    if not ast:
+        return {'logged': 0}
+    conn = cms_db._connect()
+    try:
+        cu = conn.cursor()
+        exts = list(ast)
+        cu.execute("""SELECT x.Extension, x.Status FROM (
+                          SELECT LTRIM(RTRIM(Extension)) Extension, Status,
+                                 ROW_NUMBER() OVER (PARTITION BY Extension ORDER BY Id DESC) n
+                          FROM AsteriskEndPointChangeLog
+                          WHERE Created > DATEADD(day, -15, GETDATE())
+                            AND LTRIM(RTRIM(Extension)) IN (%s)) x WHERE x.n = 1"""
+                   % ','.join(['%s'] * len(exts)), tuple(exts))
+        last = {str(r[0]).strip(): str(r[1] or '').strip().upper() for r in cu.fetchall()}
+        todo = [(e, st) for e, st in ast.items() if last.get(e) != st]
+        if todo:
+            cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+            for e, st in todo:
+                cu.execute("INSERT INTO AsteriskEndPointChangeLog (Extension, Status, Created) VALUES (%s, %s, GETDATE())",
+                           (e, st))
+            conn.commit()
+        return {'logged': len(todo)}
+    except Exception as ex:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return {'error': str(ex)[:160]}
+    finally:
+        conn.close()
 
 
 def _refresh_live_summary():
