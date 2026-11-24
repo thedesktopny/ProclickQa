@@ -2449,32 +2449,36 @@ def phone_status_sync(apply=True):
 
 
 def _refresh_live_summary():
-    """Bring ClockerStatus / ClockerTime / BreakMinutes in
-    Tmp_LiveEmployeesStatusFinal up to date from each agent's latest
-    EmployeeClocker row — only rows that differ are written."""
+    """Rebuild the CMS's live agent-status tables exactly as the old CMS did,
+    by running its own two procedures: Proc_LiveEmployeeStatus1 fills
+    Tmp_LiveEmployeesStatus from the clock, DND, call and work records (only
+    agents not clocked out), then Proc_CopyLiveEmployeeFinal copies it to
+    Tmp_LiveEmployeesStatusFinal — which the phone panel reads every 15 s.
+    With the old CMS off (Nov 24 2026) nothing ran them, so agents who clocked
+    in afterwards were missing and treated as out."""
     conn = cms_db._connect()
+    out = {}
     try:
         cu = conn.cursor()
-        cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
-        cu.execute("""UPDATE t SET t.ClockerStatus = c.Status, t.ClockerTime = c.Created,
-                                    t.BreakMinutes = c.BreakMinutes
-                      FROM Tmp_LiveEmployeesStatusFinal t
-                      CROSS APPLY (SELECT TOP 1 Status, Created, BreakMinutes FROM EmployeeClocker
-                                   WHERE EmployeeId = t.EmployeeId AND Status IS NOT NULL
-                                   ORDER BY Created DESC, Id DESC) c
-                      WHERE ISNULL(t.ClockerStatus, -1) <> ISNULL(c.Status, -1)
-                         OR ISNULL(t.ClockerTime, '19000101') <> ISNULL(c.Created, '19000101')""")
-        n = cu.rowcount
-        conn.commit()
-        return {'updated': n}
-    except Exception as ex:
+        for proc in ('Proc_LiveEmployeeStatus1', 'Proc_CopyLiveEmployeeFinal'):
+            try:
+                cu.execute('EXEC dbo.%s' % proc)
+                conn.commit()
+            except Exception as ex:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                out['error'] = '%s: %s' % (proc, str(ex)[:140])
+                return out
+        cu.execute('SELECT COUNT(*) FROM Tmp_LiveEmployeesStatusFinal')
+        out['agents_live'] = int(cu.fetchone()[0])
+        return out
+    finally:
         try:
-            conn.rollback()
+            conn.close()
         except Exception:
             pass
-        return {'error': str(ex)[:160]}
-    finally:
-        conn.close()
 
 
 # what ast_status holds when an extension is in use, and when it is free
