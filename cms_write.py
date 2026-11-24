@@ -2419,8 +2419,12 @@ def phone_status_sync(apply=True):
             want[ext] = st
     finally:
         conn.close()
+    # Keep the old CMS's summary table current too: the phone side copies
+    # agent status from Tmp_LiveEmployeesStatusFinal, and with the old CMS off
+    # it froze, so the old values kept being written back (Nov 24 2026).
+    summary = _refresh_live_summary()
     if not want:
-        return {'ok': True, 'agents': 0, 'changed': []}
+        return {'ok': True, 'agents': 0, 'changed': [], 'summary': summary}
     ac = _asterisk_connect()
     changed, errors = [], []
     try:
@@ -2441,7 +2445,36 @@ def phone_status_sync(apply=True):
     finally:
         ac.close()
     return {'ok': not errors, 'agents': len(want), 'on_phone': len(have),
-            'changed': changed, 'errors': errors[:5]}
+            'changed': changed, 'errors': errors[:5], 'summary': summary}
+
+
+def _refresh_live_summary():
+    """Bring ClockerStatus / ClockerTime / BreakMinutes in
+    Tmp_LiveEmployeesStatusFinal up to date from each agent's latest
+    EmployeeClocker row — only rows that differ are written."""
+    conn = cms_db._connect()
+    try:
+        cu = conn.cursor()
+        cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        cu.execute("""UPDATE t SET t.ClockerStatus = c.Status, t.ClockerTime = c.Created,
+                                    t.BreakMinutes = c.BreakMinutes
+                      FROM Tmp_LiveEmployeesStatusFinal t
+                      CROSS APPLY (SELECT TOP 1 Status, Created, BreakMinutes FROM EmployeeClocker
+                                   WHERE EmployeeId = t.EmployeeId AND Status IS NOT NULL
+                                   ORDER BY Created DESC, Id DESC) c
+                      WHERE ISNULL(t.ClockerStatus, -1) <> ISNULL(c.Status, -1)
+                         OR ISNULL(t.ClockerTime, '19000101') <> ISNULL(c.Created, '19000101')""")
+        n = cu.rowcount
+        conn.commit()
+        return {'updated': n}
+    except Exception as ex:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return {'error': str(ex)[:160]}
+    finally:
+        conn.close()
 
 
 # what ast_status holds when an extension is in use, and when it is free
