@@ -3719,6 +3719,30 @@ def _live_snapshot(feed_limit=70, hours=6):
                               DATEDIFF(second, LastCallStartAt, GETDATE())
                        FROM Tmp_LiveEmployeesStatusFinal""")]
 
+    # Tmp_LiveEmployeesStatusFinal is a summary the OLD CMS kept current; with
+    # the old CMS off (Nov 24 2026) its clock columns froze. The clock state is
+    # therefore taken from each agent's latest EmployeeClocker row instead.
+    try:
+        latest = {}
+        for eid, st, at, mins in rows("""
+                SELECT c.EmployeeId, c.Status, c.Created, c.BreakMinutes
+                FROM EmployeeClocker c
+                JOIN (SELECT EmployeeId, MAX(Id) AS mid FROM EmployeeClocker
+                      WHERE Status IS NOT NULL AND Created >= DATEADD(day, -3, GETDATE())
+                      GROUP BY EmployeeId) m ON m.mid = c.Id"""):
+            latest[int(eid)] = (n(st), at, mins)
+        for a in agents:
+            x = latest.get(int(a['employee_id'] or 0))
+            st = x[0] if x else 0
+            a['clocker_status'] = st
+            a['clocked_in'] = st in (1, 2)
+            a['on_break'] = st == 2
+            a['cms_dnd'] = False
+            a['clocker_since'] = _plain(x[1]) if x else None
+            a['break_minutes'] = n(x[2]) if x else 0
+    except Exception as e:
+        print('[live] live clock state not read, using summary table: ' + str(e)[:120])
+
     # Everyone on a break: how long they said it would be and how long it has
     # been, straight from their own clock rows and the CMS's clock — so the
     # floor can line them up by who is back soonest, whatever time zone the
