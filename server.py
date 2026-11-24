@@ -7637,6 +7637,48 @@ def _vault_audit(action, result):
         print('[vault] audit: ' + str(e)[:120])
 
 
+_PHONE_SYNC_LOCK_KEY = 7461011
+
+
+def _phone_status_syncer():
+    """Every 20 seconds one worker makes the phone system's agent status match
+    the CMS (clock in/out, break, DND). Last result is kept in app_settings
+    'phone_sync_last' and shown on /healthz."""
+    import threading
+
+    def loop():
+        time.sleep(15)
+        while True:
+            try:
+                lk = _pg_connect(); lk.autocommit = True; lc = lk.cursor()
+                lc.execute('SELECT pg_try_advisory_lock(%s)', (_PHONE_SYNC_LOCK_KEY,))
+                if lc.fetchone()[0]:
+                    try:
+                        import cms_write
+                        try:
+                            out = cms_write.phone_status_sync()
+                        except Exception as ex:
+                            out = {'ok': False, 'error': str(ex)[:200]}
+                        out['at'] = datetime.utcnow().isoformat() + 'Z'
+                        if out.get('changed') or not out.get('ok'):
+                            print('[phone-sync] %s' % json.dumps(out)[:600], flush=True)
+                        lc.execute("""INSERT INTO app_settings (key, value, updated_at)
+                                      VALUES ('phone_sync_last', %s, NOW())
+                                      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value,
+                                                                      updated_at = NOW()""",
+                                   (json.dumps({k: out.get(k) for k in
+                                                ('ok', 'at', 'agents', 'on_phone', 'error', 'errors')}
+                                               | {'changed': len(out.get('changed') or [])}),))
+                    finally:
+                        lc.execute('SELECT pg_advisory_unlock(%s)', (_PHONE_SYNC_LOCK_KEY,))
+                lk.close()
+            except Exception as e:
+                print('[phone-sync] failed: ' + str(e)[:160], flush=True)
+            time.sleep(20)
+
+    threading.Thread(target=loop, daemon=True, name='phone-sync').start()
+
+
 def _vault_sweeper():
     """Every 10 minutes one worker encrypts whatever is still plain — the old
     CMS keeps saving new logins in plain text, so this catches them."""
@@ -15315,7 +15357,7 @@ import time as _time_at_start
 _APP_STARTED_AT = _time_at_start.time()
 _APP_STARTED = datetime.now().isoformat()
 
-SERVER_BUILD = 'balance-api-2'      # bump when you need to confirm a deploy landed
+SERVER_BUILD = 'phone-sync-1'      # bump when you need to confirm a deploy landed
 
 
 # ─── Health check and a watchdog for stuck requests ─────────────────────────
@@ -15386,6 +15428,13 @@ def healthz():
     jammed = len(stuck) >= _JAMMED_AT
     body = {'ok': not jammed, 'pid': os.getpid(), 'up_s': round(time.time() - _APP_STARTED_AT),
             'busy': len(_INFLIGHT) - 1, 'stuck': len(stuck), 'build': SERVER_BUILD}
+    try:
+        c0 = _pg_connect(); cc = c0.cursor()
+        cc.execute("SELECT value FROM app_settings WHERE key = 'phone_sync_last'")
+        r0 = cc.fetchone(); c0.close()
+        body['phone_sync'] = json.loads(r0[0]) if r0 else None
+    except Exception:
+        pass
     resp = jsonify(body)
     resp.status_code = 503 if jammed else 200
     resp.headers['Cache-Control'] = 'no-store'
@@ -16398,6 +16447,11 @@ try:
     _vault_sweeper()
 except Exception as e:
     print('[vault] could not start the sweep: ' + str(e)[:140])
+
+try:
+    _phone_status_syncer()
+except Exception as e:
+    print('[phone-sync] could not start: ' + str(e)[:140])
 
 try:
     _live_calls_reader()

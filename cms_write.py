@@ -2378,6 +2378,72 @@ def asterisk_set_status(extension, cms_status):
         conn.close()
 
 
+def phone_status_sync(apply=True):
+    """Make the phone system's cms_status match the CMS for every agent.
+
+    What each agent should be, from the CMS: latest EmployeeClocker row
+    (0 out, 1 in, 2 break) and, while clocked in, the latest NotDistrubStatus
+    row (on DND -> 3). Compared with ps_auths.cms_status on the phone server;
+    only rows that differ are written, with the old CMS's own statement.
+    Returns what it found and changed."""
+    if not asterisk_configured():
+        return {'ok': False, 'error': 'ASTERISK_DB_HOST / USER not set'}
+    conn = cms_db._connect()
+    try:
+        cu = conn.cursor()
+        # DND counts only if it was turned on during the current clocked-in
+        # stretch, so a DND left over from an old shift can never block calls
+        cu.execute("""SELECT LTRIM(RTRIM(e.Extension)), ck.Status, dn.Status,
+                             CASE WHEN dn.Created >= ck.Created THEN 1 ELSE 0 END
+                      FROM Employee e
+                      OUTER APPLY (SELECT TOP 1 c.Status, c.Created FROM EmployeeClocker c
+                                   WHERE c.EmployeeId = e.Id AND c.Status IS NOT NULL
+                                   ORDER BY c.Created DESC, c.Id DESC) ck
+                      OUTER APPLY (SELECT TOP 1 d.Status, d.Created FROM NotDistrubStatus d
+                                   WHERE d.EmployeeID = e.Id ORDER BY d.Id DESC) dn
+                      WHERE ISNULL(e.LeftFirm,0) = 0 AND ISNULL(LTRIM(RTRIM(e.Extension)),'') <> ''""")
+        want = {}
+        while True:
+            r = cu.fetchone()
+            if not r:
+                break
+            ext = str(r[0]).strip()
+            if not ext.isdigit():
+                continue
+            st = int(r[1]) if r[1] is not None else 0
+            if st not in (0, 1, 2):
+                st = 0
+            dst = str(r[2] or '').strip().upper()
+            if st == 1 and dst and not dst.startswith('END') and r[3] == 1:
+                st = 3
+            want[ext] = st
+    finally:
+        conn.close()
+    if not want:
+        return {'ok': True, 'agents': 0, 'changed': []}
+    ac = _asterisk_connect()
+    changed, errors = [], []
+    try:
+        cu = ac.cursor()
+        exts = list(want)
+        cu.execute('SELECT id, cms_status FROM ps_auths WHERE id IN (%s)' % ','.join(['%s'] * len(exts)), exts)
+        have = {str(r[0]).strip(): (int(r[1]) if r[1] is not None else None) for r in cu.fetchall()}
+        for ext, st in want.items():
+            if ext in have and have[ext] != st:
+                if apply:
+                    try:
+                        cu.execute("UPDATE ps_auths SET cms_status = %s, business_number = '' WHERE id = %s",
+                                   (st, ext))
+                    except Exception as ex:
+                        errors.append('%s: %s' % (ext, str(ex)[:80]))
+                        continue
+                changed.append({'ext': ext, 'was': have[ext], 'now': st})
+    finally:
+        ac.close()
+    return {'ok': not errors, 'agents': len(want), 'on_phone': len(have),
+            'changed': changed, 'errors': errors[:5]}
+
+
 # what ast_status holds when an extension is in use, and when it is free
 _AST_BUSY = {'IN_USE', 'INUSE', 'BUSY', 'RINGINUSE', 'ONHOLD', 'IN USE'}
 _AST_FREE = ('NOT_INUSE', 'NOTINUSE', 'NOT INUSE', 'IDLE', 'NOT_IN_USE')
@@ -2642,10 +2708,14 @@ def clock(employee_id, action, who, minutes=None, reason=None, logged_out_by=Non
     except Exception as ex:
         out['dnd_note'] = 'Could not check Do Not Disturb: ' + str(ex)[:120]
 
-    # The clock row in the CMS is the record, and it is all the phone system
-    # needs: the voice server reads agent status straight from the CMS's live
-    # status table (Igor, Nov 15). We no longer write ps_auths on the phone
-    # server — he asked us not to touch it at all.
+    # Tell the phone system right away (what the old CMS did on every change).
+    # Nov 24 2026: nothing on the phone server reads the CMS's status, so once
+    # the old CMS was off agents stayed frozen (DND/break). The 20-second
+    # phone_status_sync below also corrects anything this misses.
+    try:
+        out['phone_rows'] = asterisk_set_status(now['extension'], phone_status)
+    except Exception as ex:
+        out['phone_note'] = 'Phone system not told now (the sync retries): ' + str(ex)[:120]
     out['ok'] = True
     out['status'] = CLOCK_NAMES[status]
     out['since'] = _ny_iso(when)
@@ -2763,8 +2833,11 @@ def dnd(employee_id, turn_on, who, reason=None, kind=None):
         except Exception:
             pass
 
-    # the NotDistrubStatus row in the CMS is what the phone system reads; no
-    # write to ps_auths on the phone server any more (Igor, Nov 15)
+    # tell the phone system: 3 = on DND (no calls), 1 = back to taking calls
+    try:
+        out['phone_rows'] = asterisk_set_status(clock_now['extension'], 3 if turn_on else 1)
+    except Exception as ex:
+        out['phone_note'] = 'Phone system not told now (the sync retries): ' + str(ex)[:120]
     out['ok'] = True
     out['dnd'] = bool(turn_on)
     _log(who, out)
