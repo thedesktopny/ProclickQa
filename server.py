@@ -15315,7 +15315,7 @@ import time as _time_at_start
 _APP_STARTED_AT = _time_at_start.time()
 _APP_STARTED = datetime.now().isoformat()
 
-SERVER_BUILD = 'balance-api-1'      # bump when you need to confirm a deploy landed
+SERVER_BUILD = 'balance-api-2'      # bump when you need to confirm a deploy landed
 
 
 # ─── Health check and a watchdog for stuck requests ─────────────────────────
@@ -15427,6 +15427,8 @@ PORTAL_ALLOWED_PREFIXES = (
     # here means the poller uses the same address people do, instead of needing
     # to know about the Azure hostname underneath.
     '/api/agent-calls',
+    # the phone system's low-balance whisper (own key + address list)
+    '/api/ext/minutes',
     # Skin Block is now a portal page for every agent, so its page, its model
     # files and its endpoints have to be reachable on the CMS hostname too
     '/skinblock', '/skinblock2', '/skinblock3', '/models/', '/sbassets', '/api/skinblock', '/api/texts/',
