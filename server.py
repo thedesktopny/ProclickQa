@@ -7679,6 +7679,81 @@ def _phone_status_syncer():
     threading.Thread(target=loop, daemon=True, name='phone-sync').start()
 
 
+# ── Incoming texts from BulkVS (replaces the old CMS's ReceiveSMS) ───────
+# BulkVS posts every incoming text to the URL of a webhook profile (WebHook1,
+# WebHook2). Point those profiles at
+#     https://cms.myhellodesk.com/api/bulkvs/inbound/<BULKVS_INBOUND_SECRET>
+# Same rows the old CMS wrote in SMSLog: matched to the account whose smsNumber
+# is the number texted (last 10 digits), InOut 'In', unread. A picture message
+# gets one row per picture (as before) — but the text is kept on the first row
+# instead of being thrown away. A repeat of the same text within 2 minutes
+# (BulkVS retrying) is not saved twice.
+@app.route('/api/bulkvs/inbound/<secret>', methods=['POST'])
+def bulkvs_inbound(secret):
+    import hmac, cms_db
+    from urllib.parse import unquote_plus
+    want = (os.getenv('BULKVS_INBOUND_SECRET') or '').strip()
+    if not want or not hmac.compare_digest(secret, want):
+        return jsonify({'error': 'not found'}), 404
+    d = request.get_json(silent=True) or request.form.to_dict() or {}
+    to = d.get('To') or d.get('to') or ''
+    if isinstance(to, list):
+        to = to[0] if to else ''
+    to10 = ''.join(ch for ch in str(to) if ch.isdigit())[-10:]
+    frm10 = ''.join(ch for ch in str(d.get('From') or d.get('from') or '') if ch.isdigit())[-10:]
+    msg = d.get('Message') or d.get('message') or ''
+    try:
+        msg = unquote_plus(str(msg))
+    except Exception:
+        msg = str(msg)
+    media = d.get('MediaURLs') or d.get('MediaUrls') or []
+    if isinstance(media, str):
+        media = [media] if media else []
+    media = [str(u) for u in media if u][:10]
+    if len(to10) < 10 or len(frm10) < 10:
+        print('[sms-in] ignored, missing numbers: %s' % json.dumps(d)[:300], flush=True)
+        return jsonify({'ok': True, 'ignored': True})
+    conn = cms_db._connect()
+    try:
+        cu = conn.cursor()
+        cu.execute("""SELECT TOP 1 Id FROM [Account]
+                      WHERE ISNULL(Deleted,0) = 0 AND smsNumber IS NOT NULL
+                        AND RIGHT(REPLACE(REPLACE(REPLACE(REPLACE(smsNumber,'-',''),' ',''),'(',''),')',''),10) = %s
+                      ORDER BY Id DESC""", (to10,))
+        r = cu.fetchone()
+        account_id = int(r[0]) if r else None
+        cu.execute("""SELECT COUNT(*) FROM [SMSLog]
+                      WHERE InOut = 'In' AND AccountSMSNumber = %s AND ContactNumber = %s
+                        AND ISNULL(message,'') = %s AND smsDate >= DATEADD(minute, -2, GETDATE())""",
+                   (to10, frm10, msg if not media else (msg or '')))
+        if cu.fetchone()[0]:
+            conn.close()
+            return jsonify({'ok': True, 'duplicate': True})
+        cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        rows = media or [None]
+        for i, u in enumerate(rows):
+            cu.execute("""INSERT INTO [SMSLog]
+                           (AccountId, AccountSMSNumber, ContactNumber, InOut,
+                            message, smsDate, smsNotRead, MediaURL)
+                           VALUES (%s, %s, %s, 'In', %s, GETDATE(), 1, %s)""",
+                       (account_id, to10, frm10, msg if i == 0 else '', u))
+        conn.commit()
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        print('[sms-in] save failed: ' + str(e)[:200], flush=True)
+        return jsonify({'error': 'save failed'}), 500   # BulkVS will retry
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    print('[sms-in] %s -> %s account=%s media=%d' % (frm10[-4:], to10, account_id, len(media)), flush=True)
+    return jsonify({'ok': True, 'account': account_id})
+
+
 def _vault_sweeper():
     """Every 10 minutes one worker encrypts whatever is still plain — the old
     CMS keeps saving new logins in plain text, so this catches them."""
@@ -15357,7 +15432,7 @@ import time as _time_at_start
 _APP_STARTED_AT = _time_at_start.time()
 _APP_STARTED = datetime.now().isoformat()
 
-SERVER_BUILD = 'phone-sync-1'      # bump when you need to confirm a deploy landed
+SERVER_BUILD = 'sms-in-1'      # bump when you need to confirm a deploy landed
 
 
 # ─── Health check and a watchdog for stuck requests ─────────────────────────
@@ -15478,6 +15553,8 @@ PORTAL_ALLOWED_PREFIXES = (
     '/api/agent-calls',
     # the phone system's low-balance whisper (own key + address list)
     '/api/ext/minutes',
+    # BulkVS incoming texts (secret in the address)
+    '/api/bulkvs/inbound/',
     # Skin Block is now a portal page for every agent, so its page, its model
     # files and its endpoints have to be reachable on the CMS hostname too
     '/skinblock', '/skinblock2', '/skinblock3', '/models/', '/sbassets', '/api/skinblock', '/api/texts/',
