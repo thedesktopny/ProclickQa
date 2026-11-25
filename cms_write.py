@@ -2452,9 +2452,49 @@ def phone_status_sync(apply=True):
     # AsteriskEndPointChangeLog, which the live summary reads as SipPhoneStatus.
     # Without it everyone looked "unavailable" on the floor (Nov 24 2026).
     phones = _log_phone_states(ast)
+    orphans = _close_orphan_calls()
     summary = _refresh_live_summary()
     return {'ok': not errors, 'agents': len(want), 'on_phone': len(have),
-            'changed': changed, 'errors': errors[:5], 'summary': summary, 'phones': phones}
+            'changed': changed, 'errors': errors[:5], 'summary': summary, 'phones': phones,
+            'orphans': orphans}
+
+
+def _close_orphan_calls():
+    """Close calls whose end was never reported (e.g. while the old CMS was off,
+    Nov 24 2026), so agents don't show "on a call for 3 hours":
+      - an open call when the same extension has since started a newer call
+        (an agent can't be on two calls), once it is 10+ minutes old;
+      - any call still open after 3 hours.
+    Ended = the row's last update (or its start), with a note saying so."""
+    conn = cms_db._connect()
+    try:
+        cu = conn.cursor()
+        cu.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        cu.execute("""UPDATE c SET
+                          Ended = CASE WHEN c.Modified > c.Started THEN c.Modified ELSE c.Started END,
+                          Note = LEFT(ISNULL(c.Note, '') + ' - set as ended by the CMS: no end was reported', 4000),
+                          Modified = GETDATE()
+                      FROM PhoneCallsLog c
+                      WHERE c.Ended IS NULL
+                        AND c.Started > DATEADD(day, -2, GETDATE())
+                        AND ( c.Started < DATEADD(hour, -3, GETDATE())
+                              OR ( c.Started < DATEADD(minute, -10, GETDATE())
+                                   AND EXISTS (SELECT 1 FROM PhoneCallsLog n
+                                               WHERE n.Id > c.Id AND n.Started > c.Started
+                                                 AND ISNULL(NULLIF(LTRIM(RTRIM(n.PickedUpBy)), ''), LTRIM(RTRIM(n.Agent)))
+                                                   = ISNULL(NULLIF(LTRIM(RTRIM(c.PickedUpBy)), ''), LTRIM(RTRIM(c.Agent)))
+                                                 AND ISNULL(NULLIF(LTRIM(RTRIM(c.PickedUpBy)), ''), LTRIM(RTRIM(c.Agent))) <> '') ) )""")
+        n = cu.rowcount
+        conn.commit()
+        return {'closed': n}
+    except Exception as ex:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return {'error': str(ex)[:160]}
+    finally:
+        conn.close()
 
 
 def _log_phone_states(ast):

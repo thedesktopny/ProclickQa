@@ -7667,7 +7667,7 @@ def _phone_status_syncer():
                                       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value,
                                                                       updated_at = NOW()""",
                                    (json.dumps({k: out.get(k) for k in
-                                                ('ok', 'at', 'agents', 'on_phone', 'error', 'errors', 'summary', 'phones')}
+                                                ('ok', 'at', 'agents', 'on_phone', 'error', 'errors', 'summary', 'phones', 'orphans')}
                                                | {'changed': len(out.get('changed') or [])}),))
                     finally:
                         lc.execute('SELECT pg_advisory_unlock(%s)', (_PHONE_SYNC_LOCK_KEY,))
@@ -15492,7 +15492,7 @@ import time as _time_at_start
 _APP_STARTED_AT = _time_at_start.time()
 _APP_STARTED = datetime.now().isoformat()
 
-SERVER_BUILD = 'sms-in-3'      # bump when you need to confirm a deploy landed
+SERVER_BUILD = 'orphan-calls-1'      # bump when you need to confirm a deploy landed
 
 
 # ─── Health check and a watchdog for stuck requests ─────────────────────────
