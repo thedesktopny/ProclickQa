@@ -7795,6 +7795,55 @@ def bulkvs_inbound(secret):
     return jsonify({'ok': True, 'account': account_id})
 
 
+# ── The phone system's call reports (replaces the old CMS's PhoneSystem API) ─
+# The phone server's cms_lib.php CMSAPI() POSTs to <apiUrl>PhoneSystem/<Action>
+# with the fields both in the query string and form-encoded, and only looks at
+# the HTTP status. apiUrl lives in /etc/asterisk/proclick/agi/config.json.new
+# (was https://proclick.azurewebsites.net/api/). Only these five are used
+# (cms_api_log, Nov 24 2026): StartCall, PickedUpCall, UpdateCall,
+# UpdateQueueCall, EndCall. Allowed callers: PHONE_REPORT_IPS (comma list;
+# defaults to the phone servers and the panel).
+_PHONE_REPORT_IPS_DEFAULT = '51.222.139.149,165.22.150.97,51.222.84.115'
+
+
+@app.route('/api/PhoneSystem/<action>', methods=['POST', 'GET'])
+def phone_system_report(action):
+    import phone_api
+    allowed = [x.strip() for x in (os.getenv('PHONE_REPORT_IPS') or _PHONE_REPORT_IPS_DEFAULT).split(',') if x.strip()]
+    ip = (request.headers.get('X-Forwarded-For') or request.remote_addr or '').split(',')[0].strip()
+    if ip.count(':') == 1:
+        ip = ip.rsplit(':', 1)[0]
+    if allowed != ['*'] and ip not in allowed:
+        return jsonify({'error': 'not allowed'}), 403
+    fn = phone_api.ACTIONS.get((action or '').lower())
+    if not fn:
+        return jsonify({'error': 'unknown action'}), 404
+    d = {}
+    d.update(request.args.to_dict())
+    d.update(request.form.to_dict())
+    js = request.get_json(silent=True)
+    if isinstance(js, dict):
+        d.update({k: v for k, v in js.items() if not isinstance(v, (dict, list))})
+    try:
+        body, code = fn(d)
+    except Exception as e:
+        print('[phone-api] %s failed: %s' % (action, str(e)[:200]), flush=True)
+        body, code = None, 500
+    try:
+        _PHONE_REPORTS[action.lower()] = _PHONE_REPORTS.get(action.lower(), 0) + 1
+        _PHONE_REPORTS['last_at'] = datetime.utcnow().isoformat() + 'Z'
+        if code >= 400:
+            _PHONE_REPORTS['errors'] = _PHONE_REPORTS.get('errors', 0) + 1
+    except Exception:
+        pass
+    if body is None:
+        return ('', code) if code != 200 else ('', 200)
+    return jsonify(body), code
+
+
+_PHONE_REPORTS = {}
+
+
 def _vault_sweeper():
     """Every 10 minutes one worker encrypts whatever is still plain — the old
     CMS keeps saving new logins in plain text, so this catches them."""
@@ -15492,7 +15541,7 @@ import time as _time_at_start
 _APP_STARTED_AT = _time_at_start.time()
 _APP_STARTED = datetime.now().isoformat()
 
-SERVER_BUILD = 'orphan-calls-1'      # bump when you need to confirm a deploy landed
+SERVER_BUILD = 'call-reports-1'      # bump when you need to confirm a deploy landed
 
 
 # ─── Health check and a watchdog for stuck requests ─────────────────────────
@@ -15568,6 +15617,7 @@ def healthz():
         cc.execute("SELECT value FROM app_settings WHERE key = 'phone_sync_last'")
         r0 = cc.fetchone(); c0.close()
         body['phone_sync'] = json.loads(r0[0]) if r0 else None
+        body['phone_reports_this_worker'] = dict(_PHONE_REPORTS)
     except Exception:
         pass
     resp = jsonify(body)
@@ -15615,6 +15665,8 @@ PORTAL_ALLOWED_PREFIXES = (
     '/api/ext/minutes',
     # BulkVS incoming texts (secret in the address)
     '/api/bulkvs/inbound/',
+    # the phone system's call reports (IP-limited)
+    '/api/PhoneSystem/',
     # Skin Block is now a portal page for every agent, so its page, its model
     # files and its endpoints have to be reachable on the CMS hostname too
     '/skinblock', '/skinblock2', '/skinblock3', '/models/', '/sbassets', '/api/skinblock', '/api/texts/',
