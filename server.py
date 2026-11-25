@@ -7746,7 +7746,12 @@ def bulkvs_inbound(secret):
     # don't open in a browser for long. Keep our own copy, like outgoing
     # pictures, and store that link (the original if copying fails).
     media = [_keep_inbound_media(u) for u in media]
-    if len(to10) < 10 or len(frm10) < 10:
+    # Codes from Amazon, Microsoft, Walmart… come from SHORT codes (5-6 digits),
+    # not 10-digit numbers — they must be kept too (Nov 24 2026: OTPs were
+    # being dropped). Only the number texted (To) has to be a full number.
+    if not frm10:
+        frm10 = str(d.get('From') or d.get('from') or '').strip()[:20]
+    if len(to10) < 10 or len(frm10) < 3:
         print('[sms-in] ignored, missing numbers: %s' % json.dumps(d)[:300], flush=True)
         return jsonify({'ok': True, 'ignored': True})
     conn = cms_db._connect()
@@ -15487,7 +15492,7 @@ import time as _time_at_start
 _APP_STARTED_AT = _time_at_start.time()
 _APP_STARTED = datetime.now().isoformat()
 
-SERVER_BUILD = 'sms-in-2'      # bump when you need to confirm a deploy landed
+SERVER_BUILD = 'sms-in-3'      # bump when you need to confirm a deploy landed
 
 
 # ─── Health check and a watchdog for stuck requests ─────────────────────────
