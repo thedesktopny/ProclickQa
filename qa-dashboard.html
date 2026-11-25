@@ -4150,21 +4150,26 @@ function handleSignedOut(why){
   }
 
   authFailures++;
-  if(authFailures < 3) return;
+  // a clear reason from the server (expired, 16-hour limit, signed out
+  // elsewhere…) is final at once; a bare refusal is retried twice first
+  if(authFailures < 3 && !window.__signedOutWhy) return;
   [inTimer, cfTimer, lvTimer, acTimer, smsTimer, clkTimer].forEach(t => { try{ clearInterval(t); }catch(e){} });
   if(!window.__saidSignedOut){
     window.__saidSignedOut = true;
     const box = document.getElementById('incoming');
     if(box) box.style.display = 'none';
     if(typeof IS_PORTAL !== 'undefined' && IS_PORTAL){
-      showToast('Your sign-in has expired — reload the page and sign in again', true);
-      const bar = document.createElement('div');
-      bar.className = 'signed-out-bar';
-      bar.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:400;padding:12px 20px;'
-        + 'background:var(--red);color:#fff;font-size:13px;font-weight:600;text-align:center;cursor:pointer;';
-      bar.textContent = (SIGNED_OUT_WHY[window.__signedOutWhy] || 'Your sign-in has expired.') + ' Click here to sign in again.';
-      bar.onclick = () => location.reload();
-      document.body.appendChild(bar);
+      // Signed out = the page must not keep showing customers' data (logins,
+      // cards, notes) to whoever walks up to the screen. Hide everything now,
+      // forget the ticket in this browser, and go back to the sign-in screen,
+      // which then says why.
+      try{ document.body.style.visibility = 'hidden'; }catch(e){}
+      try{ pollStopAll(); }catch(e){}
+      try{ sessionStorage.setItem('signed_out_msg',
+             (SIGNED_OUT_WHY[window.__signedOutWhy] || 'Your sign-in has expired.') + ' Please sign in again.'); }catch(e){}
+      try{ localStorage.removeItem('portal_ticket'); localStorage.removeItem('portal_me'); }catch(e){}
+      portalTicket = null;
+      location.replace(location.pathname);
     }else{
       clearToken(); showModal('login-modal');
     }
@@ -7196,6 +7201,11 @@ function portalRemember(me){
 
 async function portalBoot(){
   if(!IS_PORTAL) return;
+  // why the last session ended (set when the page signed itself out)
+  try{
+    const m = sessionStorage.getItem('signed_out_msg');
+    if(m){ sessionStorage.removeItem('signed_out_msg'); setTimeout(()=>{ try{ showToast(m, true); }catch(e){} }, 400); }
+  }catch(e){}
   const screen = document.getElementById('portal-login');
   let saved = null, remembered = null;
   try{

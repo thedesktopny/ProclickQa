@@ -2456,7 +2456,7 @@ def phone_status_sync(apply=True):
     summary = _refresh_live_summary()
     return {'ok': not errors, 'agents': len(want), 'on_phone': len(have),
             'changed': changed, 'errors': errors[:5], 'summary': summary, 'phones': phones,
-            'orphans': orphans}
+            'orphans': orphans, 'ast': ast}
 
 
 def _close_orphan_calls():
