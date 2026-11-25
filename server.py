@@ -7688,6 +7688,38 @@ def _phone_status_syncer():
 # gets one row per picture (as before) — but the text is kept on the first row
 # instead of being thrown away. A repeat of the same text within 2 minutes
 # (BulkVS retrying) is not saved twice.
+def _keep_inbound_media(url):
+    """Download a picture BulkVS sent and serve it from /media/ ourselves."""
+    import urllib.request, mimetypes
+    try:
+        hdrs = {'User-Agent': 'ProClick-CMS'}
+        data, ctype = None, ''
+        for auth in (None, (os.getenv('BULKVS_AUTH') or '').strip()):
+            h = dict(hdrs)
+            if auth:
+                h['Authorization'] = auth if auth.startswith('Basic ') else 'Basic ' + auth
+            try:
+                with urllib.request.urlopen(urllib.request.Request(url, headers=h), timeout=10) as r:
+                    data = r.read(5 * 1048576)
+                    ctype = (r.headers.get('Content-Type') or '').split(';')[0].strip().lower()
+                if data:
+                    break
+            except Exception:
+                data = None
+        if not data:
+            return url
+        ext = MEDIA_TYPES.get(ctype) or mimetypes.guess_extension(ctype or '') or \
+            os.path.splitext(url.split('?')[0])[1][:6] or '.bin'
+        name = secrets.token_urlsafe(16) + ext
+        with open(os.path.join(MEDIA_DIR, name), 'wb') as fh:
+            fh.write(data)
+        base = (os.getenv('PUBLIC_BASE_URL') or 'https://cms.myhellodesk.com').rstrip('/')
+        return base + '/media/' + name
+    except Exception as e:
+        print('[sms-in] picture not copied: ' + str(e)[:120], flush=True)
+        return url
+
+
 @app.route('/api/bulkvs/inbound/<secret>', methods=['POST'])
 def bulkvs_inbound(secret):
     import hmac, cms_db
@@ -7710,6 +7742,10 @@ def bulkvs_inbound(secret):
     if isinstance(media, str):
         media = [media] if media else []
     media = [str(u) for u in media if u][:10]
+    # The old CMS showed customers' pictures as thumbnails; BulkVS's own links
+    # don't open in a browser for long. Keep our own copy, like outgoing
+    # pictures, and store that link (the original if copying fails).
+    media = [_keep_inbound_media(u) for u in media]
     if len(to10) < 10 or len(frm10) < 10:
         print('[sms-in] ignored, missing numbers: %s' % json.dumps(d)[:300], flush=True)
         return jsonify({'ok': True, 'ignored': True})
@@ -15451,7 +15487,7 @@ import time as _time_at_start
 _APP_STARTED_AT = _time_at_start.time()
 _APP_STARTED = datetime.now().isoformat()
 
-SERVER_BUILD = 'live-phones-2'      # bump when you need to confirm a deploy landed
+SERVER_BUILD = 'sms-in-2'      # bump when you need to confirm a deploy landed
 
 
 # ─── Health check and a watchdog for stuck requests ─────────────────────────
