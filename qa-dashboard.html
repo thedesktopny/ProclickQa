@@ -622,7 +622,9 @@ td.agent{color:var(--text);font-weight:500;}
 .cf-filters .cf-kinds{ display:flex; gap:6px; flex-wrap:wrap; }
 .cf-filters .cn-chip.on{ background:var(--accent); color:#fff; border-color:var(--accent); }
 .cf-filters select{ font-size:12px; padding:6px 8px; min-width:0; flex:1 1 140px; max-width:220px; }
-.lvtile.nophone{ border-left-color:#E5343D; border-color:rgba(229,52,61,.55); background:linear-gradient(90deg, rgba(229,52,61,.18), var(--surface2) 70%); }
+.lvtile.nophone{ border:2px solid #E5343D; border-left:4px solid #E5343D; background:rgba(229,52,61,.22); }
+.lvtile.nophone .nm, .lvtile.nophone .ex, .lvtile.nophone .sn{ color:#fff; }
+html[data-theme="light"] .lvtile.nophone .nm, html[data-theme="light"] .lvtile.nophone .ex, html[data-theme="light"] .lvtile.nophone .sn{ color:#7A0E14; }
 .lvtile.dim{ opacity:.2; }
 /* the detail on hover — status alone never says enough */
 .lvpop{
@@ -11597,10 +11599,23 @@ function lvSince(a, busy, dnd, nop){
 
 function lvRenderFloor(){
   const q = (document.getElementById('lv-search').value || '').toLowerCase().trim();
+  // Floor order (Rowena, Nov 25): free first (longest waiting first), then on
+  // a call, then do not disturb, then on break, then UNAVAILABLE (phone not
+  // logged in — whole tile red), then everyone off shift.
+  const lvRank = a => {
+    if(!a.clocked_in) return 9;
+    const busy = (a.phone||'').toUpperCase()==='IN_USE';
+    if(busy) return 2;
+    if(a.dnd) return 3;
+    if(a.on_break) return 4;
+    if(phoneNotLoggedIn(a)) return 5;
+    return 1;
+  };
+  const lvFreeSecs = a => { const t = a.phone_since ? lvSecsSince(a.phone_since) : null; return t == null ? -1 : t; };
   const list = (lvData.agents || []).slice().sort((a,b)=>
-    (b.clocked_in - a.clocked_in) ||
-    (((b.phone||'').toUpperCase()==='IN_USE') - ((a.phone||'').toUpperCase()==='IN_USE')) ||
-    a.name.localeCompare(b.name));
+    (lvRank(a) - lvRank(b)) ||
+    (lvRank(a) === 1 ? lvFreeSecs(b) - lvFreeSecs(a) : 0) ||
+    (a.name||'').localeCompare(b.name||''));
   const onCall = list.filter(a=>(a.phone||'').toUpperCase()==='IN_USE').length;
   const onShift = list.filter(a=>a.clocked_in).length;
   const onBreak = list.filter(a=>a.clocked_in && a.on_break).length;
