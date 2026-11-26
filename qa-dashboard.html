@@ -11585,7 +11585,8 @@ function lvSince(a, busy, dnd, nop){
   const ages = stamps.filter(Boolean).map(lvSecsSince).filter(x => x != null && x >= 0);
   const free = ages.length ? Math.min(...ages) : null;
   let line;
-  if(dndS != null) line = 'for ' + lvShort(dndS);
+  if(noP != null || nop) line = 'phone off' + (noP != null ? ' ' + lvShort(noP) : '') + (a.dnd ? ' · also on DND' : '');
+  else if(dndS != null) line = 'for ' + lvShort(dndS);
   else if(busy) line = shift != null ? 'clocked in ' + lvShort(shift) : '';
   else if(w.kind === 'working') line = 'working ' + lvShort(lvSecsSince(w.at));
   else line = free != null ? 'available ' + lvShort(free) : '';
@@ -11606,9 +11607,9 @@ function lvRenderFloor(){
     if(!a.clocked_in) return 9;
     const busy = (a.phone||'').toUpperCase()==='IN_USE';
     if(busy) return 2;
+    if(phoneNotLoggedIn(a)) return 5;
     if(a.dnd) return 3;
     if(a.on_break) return 4;
-    if(phoneNotLoggedIn(a)) return 5;
     return 1;
   };
   const lvFreeSecs = a => { const t = a.phone_since ? lvSecsSince(a.phone_since) : null; return t == null ? -1 : t; };
@@ -11619,8 +11620,8 @@ function lvRenderFloor(){
   const onCall = list.filter(a=>(a.phone||'').toUpperCase()==='IN_USE').length;
   const onShift = list.filter(a=>a.clocked_in).length;
   const onBreak = list.filter(a=>a.clocked_in && a.on_break).length;
-  const onDnd = list.filter(a=>a.clocked_in && a.dnd && (a.phone||'').toUpperCase()!=='IN_USE').length;
-  const noPhone = list.filter(a=>phoneNotLoggedIn(a) && !a.dnd && !a.on_break).length;
+  const noPhone = list.filter(a=>a.clocked_in && (a.phone||'').toUpperCase()!=='IN_USE' && phoneNotLoggedIn(a) && !a.on_break).length;
+  const onDnd = list.filter(a=>a.clocked_in && a.dnd && (a.phone||'').toUpperCase()!=='IN_USE' && !phoneNotLoggedIn(a)).length;
   document.getElementById('lv-floor-counts').textContent =
     `${onShift} on shift · ${onCall} on a call · ${onShift-onCall-onDnd-onBreak-noPhone} free`
     + `${noPhone?` · ${noPhone} unavailable (phone not logged in)`:''}`
@@ -11659,11 +11660,14 @@ function lvRenderFloor(){
 
   document.getElementById('lv-floor').innerHTML = list.filter(a => !breakIds.has(a.employee_id)).map(a=>{
     const busy = (a.phone||'').toUpperCase()==='IN_USE';
-    const dnd = !!a.dnd && !busy;                 // a call in progress outranks DND
+    // Phone not logged in outranks DND (Rowena, Nov 25: an agent on DND who
+    // logged off their phone still looked like plain DND) — calls can't reach
+    // them either way, and a logged-off phone is the thing to fix.
+    const nop = a.clocked_in && !busy && phoneNotLoggedIn(a);
+    const dnd = !!a.dnd && !busy && !nop;         // a call in progress outranks DND
     // on_break comes from the clocker status, so it means "on a break now"
     // rather than "took one earlier today", which break_minutes counts
-    const brk = a.clocked_in && !!a.on_break && !busy && !dnd;
-    const nop = !busy && !dnd && !brk && phoneNotLoggedIn(a);
+    const brk = a.clocked_in && !!a.on_break && !busy && !dnd && !nop;
     const cls = !a.clocked_in ? 'off' : busy ? 'on-call' : dnd ? 'dnd' : brk ? 'brk' : nop ? 'nophone' : 'free';
     const state = !a.clocked_in ? 'off shift' : busy ? 'on a call'
                 : dnd ? 'do not disturb' : brk ? 'on break' : nop ? '📵 unavailable' : 'free';
