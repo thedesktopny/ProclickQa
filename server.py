@@ -15580,7 +15580,7 @@ import time as _time_at_start
 _APP_STARTED_AT = _time_at_start.time()
 _APP_STARTED = datetime.now().isoformat()
 
-SERVER_BUILD = 'floor-order-2'      # bump when you need to confirm a deploy landed
+SERVER_BUILD = 'signin-loop-fix'      # bump when you need to confirm a deploy landed
 
 
 # ─── Health check and a watchdog for stuck requests ─────────────────────────

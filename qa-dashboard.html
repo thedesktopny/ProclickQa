@@ -4141,7 +4141,12 @@ function handleSignedOut(why){
   // "your sign-in has expired" to somebody who had not signed in at all.
   const haveTicket = (typeof portalTicket !== 'undefined' && portalTicket);
   let haveToken = false;
-  try{ haveToken = !!getToken(); }catch(e){}
+  // On the CMS (portal) only a CMS sign-in counts. An old QA/VoiceGuard login
+  // left in the browser made the sign-in screen think a session had expired
+  // and reload itself over and over (Nov 26: two agents couldn't sign in; a
+  // different browser worked).
+  const portal = (typeof IS_PORTAL !== 'undefined' && IS_PORTAL);
+  if(!portal){ try{ haveToken = !!getToken(); }catch(e){} }
   if(!haveTicket && !haveToken){
     // just stop the pollers quietly — there is nothing to tell them
     [inTimer, cfTimer, lvTimer, acTimer, smsTimer, clkTimer].forEach(t => {
@@ -4170,8 +4175,18 @@ function handleSignedOut(why){
       try{ sessionStorage.setItem('signed_out_msg',
              (SIGNED_OUT_WHY[window.__signedOutWhy] || 'Your sign-in has expired.') + ' Please sign in again.'); }catch(e){}
       try{ localStorage.removeItem('portal_ticket'); localStorage.removeItem('portal_me'); }catch(e){}
+      try{ clearToken(); }catch(e){}
       portalTicket = null;
-      location.replace(location.pathname);
+      // never reload in a loop: at most once every 30 seconds
+      let last = 0;
+      try{ last = +sessionStorage.getItem('signed_out_reload_at') || 0; }catch(e){}
+      if(Date.now() - last > 30000){
+        try{ sessionStorage.setItem('signed_out_reload_at', String(Date.now())); }catch(e){}
+        location.replace(location.pathname);
+      }else{
+        try{ document.body.style.visibility = ''; }catch(e){}
+        try{ document.getElementById('portal-login').style.display = 'grid'; }catch(e){}
+      }
     }else{
       clearToken(); showModal('login-modal');
     }
