@@ -2273,67 +2273,6 @@ def calls_since(since, limit=500):
     return out
 
 
-def presence_between(frm, to):
-    """Who was logged in to the CMS, for AgentMonitor's Coverage page.
-
-    Returns the raw events between frm and to from EmployeeClocker (Status
-    0 out / 1 in / 2 on break) and NotDistrubStatus (DND start/end), plus each
-    person's LAST event before frm, so someone who clocked in yesterday and is
-    still on counts from the first minute. The lookback is two days: an In with
-    nothing after it for longer than that is a forgotten session, not a shift.
-    Times are the database's own clock; db_now and db_utc_now are returned so the
-    caller can line them up with UTC.
-    """
-    conn = _connect(); cu = conn.cursor()
-    out = {'employees': [], 'clocker': [], 'dnd': []}
-    try:
-        cu.execute("SELECT GETDATE(), GETUTCDATE()")
-        r = cu.fetchone()
-        out['db_now'] = _plain(r[0]); out['db_utc_now'] = _plain(r[1])
-
-        cu.execute("""SELECT Id, Extension, FirstName, LastName, ISNULL(LeftFirm, 0)
-                      FROM Employee WHERE Extension IS NOT NULL AND Extension <> ''""")
-        for r in cu.fetchall():
-            out['employees'].append({'employee_id': int(r[0]), 'extension': str(r[1]).strip(),
-                                     'name': ('%s %s' % (r[2] or '', r[3] or '')).strip() or None,
-                                     'left_firm': bool(r[4])})
-
-        cu.execute("""SELECT c.EmployeeId, c.Created, c.Status
-                      FROM EmployeeClocker c
-                      JOIN (SELECT EmployeeId, MAX(Id) AS Id FROM EmployeeClocker
-                            WHERE Created < %s AND Created >= DATEADD(day, -2, %s)
-                            GROUP BY EmployeeId) l ON l.Id = c.Id""", (frm, frm))
-        rows = cu.fetchall()
-        cu.execute("""SELECT EmployeeId, Created, Status FROM EmployeeClocker
-                      WHERE Created >= %s AND Created < %s ORDER BY Created, Id""", (frm, to))
-        rows += cu.fetchall()
-        for r in rows:
-            if r[0] is None or r[1] is None:
-                continue
-            out['clocker'].append({'employee_id': int(r[0]), 'at': _plain(r[1]),
-                                   'status': int(r[2]) if r[2] is not None else None})
-
-        cu.execute("""SELECT n.EmployeeID, n.Created, n.Status
-                      FROM NotDistrubStatus n
-                      JOIN (SELECT EmployeeID, MAX(Id) AS Id FROM NotDistrubStatus
-                            WHERE Created < %s AND Created >= DATEADD(day, -2, %s)
-                            GROUP BY EmployeeID) l ON l.Id = n.Id""", (frm, frm))
-        rows = cu.fetchall()
-        cu.execute("""SELECT EmployeeID, Created, Status FROM NotDistrubStatus
-                      WHERE Created >= %s AND Created < %s ORDER BY Created, Id""", (frm, to))
-        rows += cu.fetchall()
-        for r in rows:
-            if r[0] is None or r[1] is None:
-                continue
-            st = str(r[2] or '').upper().strip()
-            # same rule as _dnd_now: anything that is not an explicit end is on
-            out['dnd'].append({'employee_id': int(r[0]), 'at': _plain(r[1]),
-                               'on': bool(st) and not st.startswith('END')})
-    finally:
-        conn.close()
-    return out
-
-
 def call_search(phone=None, extension=None, days=90, limit=60):
     """Find old calls by the number that rang, or by who took them.
 

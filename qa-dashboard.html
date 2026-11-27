@@ -4134,7 +4134,16 @@ const SIGNED_OUT_WHY = {
   locked: 'This login was locked.',
   disabled: 'This login was turned off.',
 };
+const FINAL_SIGNOUT = ['signed_out_elsewhere','max_session','expired','locked','disabled','invalid'];
 function handleSignedOut(why){
+  // Nov 26 (Jeff): an agent was thrown to the sign-in page mid-work. On the
+  // CMS a refusal WITHOUT a reason means the sign-in is fine and only that one
+  // request wasn't allowed (e.g. a manager-only screen) — that must never sign
+  // anybody out. Only the server saying the sign-in itself ended does.
+  if(typeof IS_PORTAL !== 'undefined' && IS_PORTAL){
+    if(!why) return;
+    if(FINAL_SIGNOUT.indexOf(why) < 0){ authFailures++; if(authFailures < 3) return; }
+  }
   if(why) window.__signedOutWhy = why;
   // Not signed in yet is NOT the same as signed out. On the sign-in screen the
   // pollers are still running and every request is refused, which used to show
@@ -4159,7 +4168,8 @@ function handleSignedOut(why){
   authFailures++;
   // a clear reason from the server (expired, 16-hour limit, signed out
   // elsewhere…) is final at once; a bare refusal is retried twice first
-  if(authFailures < 3 && !window.__signedOutWhy) return;
+  const finalWhy = FINAL_SIGNOUT.indexOf(window.__signedOutWhy || '') >= 0;
+  if(authFailures < 3 && !finalWhy) return;
   [inTimer, cfTimer, lvTimer, acTimer, smsTimer, clkTimer].forEach(t => { try{ clearInterval(t); }catch(e){} });
   if(!window.__saidSignedOut){
     window.__saidSignedOut = true;

@@ -11209,35 +11209,6 @@ def callback_done(call_id):
     return jsonify(out), (200 if out.get('ok') else 400)
 
 
-@app.route('/api/agent-presence', methods=['GET'])
-def agent_presence_feed():
-    """Who was logged in to the CMS between two moments — for AgentMonitor's
-    Coverage page, which checks every logged-in minute was screen-recorded.
-
-    GET /api/agent-presence?from=2026-11-26T05:00:00&to=2026-11-27T05:00:00&key=...
-    Same key as /api/agent-calls. At most 2 days per request.
-    """
-    import cms_db
-    key = request.args.get('key', '')
-    expected = (os.getenv('AGENT_MONITOR_KEY', '').strip()
-                or os.getenv('PHONE_EVENT_KEY', '').strip())
-    if not expected or key != expected:
-        return jsonify({'error': 'wrong or missing key'}), 403
-    try:
-        frm = datetime.strptime((request.args.get('from') or '').replace('Z', '').replace('T', ' ')[:19], '%Y-%m-%d %H:%M:%S')
-        to = datetime.strptime((request.args.get('to') or '').replace('Z', '').replace('T', ' ')[:19], '%Y-%m-%d %H:%M:%S')
-    except Exception:
-        return jsonify({'error': 'from and to must look like 2026-11-26T05:00:00'}), 400
-    if to <= frm or (to - frm) > timedelta(days=2):
-        return jsonify({'error': 'to must be after from, at most 2 days apart'}), 400
-    try:
-        out = cms_db._retrying(lambda: cms_db.presence_between(frm.strftime('%Y-%m-%d %H:%M:%S'),
-                                                              to.strftime('%Y-%m-%d %H:%M:%S')))
-    except Exception as e:
-        return jsonify({'error': str(e)[:200]}), 400
-    return jsonify(out)
-
-
 @app.route('/api/agent-calls', methods=['GET'])
 def agent_calls_feed():
     """Every call across every extension since a moment in time.
@@ -15609,7 +15580,7 @@ import time as _time_at_start
 _APP_STARTED_AT = _time_at_start.time()
 _APP_STARTED = datetime.now().isoformat()
 
-SERVER_BUILD = 'signin-loop-fix'      # bump when you need to confirm a deploy landed
+SERVER_BUILD = 'signout-only-real'      # bump when you need to confirm a deploy landed
 
 
 # ─── Health check and a watchdog for stuck requests ─────────────────────────
@@ -15728,7 +15699,7 @@ PORTAL_ALLOWED_PREFIXES = (
     # a portal sign-in, so it is safe on this hostname — and being reachable
     # here means the poller uses the same address people do, instead of needing
     # to know about the Azure hostname underneath.
-    '/api/agent-calls', '/api/agent-presence',
+    '/api/agent-calls',
     # the phone system's low-balance whisper (own key + address list)
     '/api/ext/minutes',
     # BulkVS incoming texts (secret in the address)
